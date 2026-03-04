@@ -4,7 +4,6 @@
 //! - StringTree: Character-based tree for HTTP router (text input)
 //! - TokenTree: Token-based tree for gRPC router (pre-tokenized input)
 //! - PositionalIndexer: Event-driven indexer for gRPC router (KV cache events)
-//! - ShardedIndexer: N-shard PositionalIndexer for reduced contention
 //!
 //! Run with: cargo bench --bench radix_tree_benchmark
 //!
@@ -29,7 +28,7 @@ use std::{
 use criterion::{criterion_group, criterion_main, Criterion};
 use kv_index::{
     compute_content_hash, compute_request_content_hashes, ContentHash, PositionalIndexer,
-    SequenceHash, ShardedIndexer, StoredBlock, StringTree, TokenTree, WorkerBlockMap,
+    SequenceHash, StoredBlock, StringTree, TokenTree, WorkerBlockMap,
 };
 use rand::{
     distr::{Alphanumeric, SampleString},
@@ -478,54 +477,6 @@ fn build_populated_indexer(
     (indexer, all_worker_chunks)
 }
 
-/// Build a populated ShardedIndexer (same as `build_populated_indexer` but sharded).
-fn build_populated_sharded_indexer(
-    workers: &[String],
-    blocks_per_worker: usize,
-    block_size: usize,
-    shared_prefix_blocks: usize,
-    jump_size: usize,
-    num_shards: usize,
-) -> (Arc<ShardedIndexer>, Vec<Vec<Vec<TokenId>>>) {
-    let indexer = Arc::new(ShardedIndexer::new(jump_size, num_shards));
-
-    let shared_chunks = generate_token_chunks(shared_prefix_blocks, block_size);
-    let shared_blocks = chunks_to_stored_blocks(&shared_chunks);
-
-    let mut all_worker_chunks = Vec::with_capacity(workers.len());
-
-    for worker in workers {
-        let worker_id = indexer.intern_worker(worker);
-        indexer
-            .apply_stored(worker_id, &shared_blocks, None)
-            .unwrap();
-
-        let unique_count = blocks_per_worker.saturating_sub(shared_prefix_blocks);
-        let unique_chunks = generate_token_chunks(unique_count, block_size);
-        let unique_blocks: Vec<StoredBlock> = unique_chunks
-            .iter()
-            .enumerate()
-            .map(|(i, tokens)| StoredBlock {
-                seq_hash: SequenceHash((shared_prefix_blocks + i) as u64 + 1),
-                content_hash: compute_content_hash(tokens),
-            })
-            .collect();
-
-        if !unique_blocks.is_empty() {
-            let parent = SequenceHash(shared_prefix_blocks as u64);
-            indexer
-                .apply_stored(worker_id, &unique_blocks, Some(parent))
-                .unwrap();
-        }
-
-        let mut worker_chunks = shared_chunks.clone();
-        worker_chunks.extend(unique_chunks);
-        all_worker_chunks.push(worker_chunks);
-    }
-
-    (indexer, all_worker_chunks)
-}
-
 // ============================================================================
 // PositionalIndexer Benchmark Macros
 // ============================================================================
@@ -704,187 +655,10 @@ macro_rules! bench_indexer_concurrent {
 }
 
 // ============================================================================
-// ShardedIndexer Benchmark Macros
-// ============================================================================
-
-/// Macro for STORE benchmarks with ShardedIndexer
-macro_rules! bench_sharded_store {
-    ($group:expr, $num_workers:expr, $blocks_per_worker:expr, $block_size:expr, $workers:expr, $num_shards:expr) => {{
-        let printed = Arc::new(AtomicBool::new(false));
-        let bench_name = format!(
-            "sharded_store_{}w_{}blk_{}bs_{}sh",
-            $num_workers, $blocks_per_worker, $block_size, $num_shards
-        );
-        let workers_clone = $workers.clone();
-
-        $group.bench_function(&bench_name, |b| {
-            let workers = workers_clone.clone();
-            let printed = printed.clone();
-
-            b.iter_custom(|iters| {
-                let start = Instant::now();
-                for _ in 0..iters {
-                    let indexer = ShardedIndexer::new(32, $num_shards);
-                    for worker in &workers {
-                        let worker_id = indexer.intern_worker(worker);
-                        let chunks = generate_token_chunks($blocks_per_worker, $block_size);
-                        let blocks = chunks_to_stored_blocks(&chunks);
-                        let _ = indexer.apply_stored(black_box(worker_id), black_box(&blocks), None);
-                    }
-                }
-                let duration = start.elapsed();
-
-                if !printed.swap(true, Ordering::Relaxed) {
-                    let total_blocks =
-                        iters as f64 * $num_workers as f64 * $blocks_per_worker as f64;
-                    let ops_per_sec = iters as f64 / duration.as_secs_f64();
-                    let latency_us = duration.as_nanos() as f64 / iters as f64 / 1000.0;
-                    let blocks_per_sec = total_blocks / duration.as_secs_f64();
-                    add_result(
-                        "sharded",
-                        format!(
-                            "{:>3}w | {:>4}blk x {:>2}tok | STORE  | {:>8.0} ops/s | {:>7.1} µs | {:>8.0} blk/s | {}sh",
-                            $num_workers, $blocks_per_worker, $block_size, ops_per_sec, latency_us, blocks_per_sec, $num_shards
-                        ),
-                    );
-                }
-
-                duration
-            });
-        });
-    }};
-}
-
-/// Macro for MATCH benchmarks with ShardedIndexer (find_matches — scatter-gather)
-macro_rules! bench_sharded_match {
-    ($group:expr, $num_workers:expr, $query_blocks:expr, $block_size:expr,
-     $indexer:expr, $query_hashes:expr, $num_shards:expr) => {{
-        let printed = Arc::new(AtomicBool::new(false));
-        let bench_name = format!(
-            "sharded_match_{}w_{}qblk_{}bs_{}sh",
-            $num_workers, $query_blocks, $block_size, $num_shards
-        );
-        let indexer_clone = $indexer.clone();
-        let hashes_clone = $query_hashes.clone();
-
-        $group.bench_function(&bench_name, |b| {
-            let indexer = indexer_clone.clone();
-            let hashes = hashes_clone.clone();
-            let mut idx = 0;
-            let printed = printed.clone();
-
-            b.iter_custom(|iters| {
-                let start = Instant::now();
-                for _ in 0..iters {
-                    let result = indexer.find_matches(black_box(&hashes[idx % hashes.len()]), false);
-                    black_box(result);
-                    idx += 1;
-                }
-                let duration = start.elapsed();
-
-                if !printed.swap(true, Ordering::Relaxed) {
-                    let ops_per_sec = iters as f64 / duration.as_secs_f64();
-                    let latency_us = duration.as_nanos() as f64 / iters as f64 / 1000.0;
-                    let throughput_mblk =
-                        (ops_per_sec * $query_blocks as f64) / 1_000_000.0;
-                    add_result(
-                        "sharded",
-                        format!(
-                            "{:>3}w | {:>4}blk x {:>2}tok | MATCH  | {:>8.0} ops/s | {:>7.1} µs | {:>5.2} Mblk/s | {}sh",
-                            $num_workers, $query_blocks, $block_size, ops_per_sec, latency_us, throughput_mblk, $num_shards
-                        ),
-                    );
-                }
-
-                duration
-            });
-        });
-    }};
-}
-
-/// Macro for CONCURRENT benchmarks with ShardedIndexer
-macro_rules! bench_sharded_concurrent {
-    ($group:expr, $num_workers:expr, $block_size:expr, $num_threads:expr, $ops_per_thread:expr, $num_shards:expr) => {{
-        let printed = Arc::new(AtomicBool::new(false));
-        let bench_name = format!("sharded_concurrent_{}w_{}sh", $num_workers, $num_shards);
-
-        $group.bench_function(&bench_name, |b| {
-            let printed = printed.clone();
-
-            b.iter_custom(|iters| {
-                let start = Instant::now();
-                for _ in 0..iters {
-                    let workers = generate_worker_endpoints($num_workers);
-                    let (indexer, worker_chunks) = build_populated_sharded_indexer(
-                        &workers,
-                        64,
-                        $block_size,
-                        8,
-                        64,
-                        $num_shards,
-                    );
-
-                    let handles: Vec<_> = (0..$num_threads)
-                        .map(|t| {
-                            let indexer = Arc::clone(&indexer);
-                            let worker = workers[t % workers.len()].clone();
-                            let chunks = worker_chunks[t % workers.len()].clone();
-                            let block_size = $block_size;
-
-                            thread::spawn(move || {
-                                let mut rng = thread_rng();
-                                let worker_id = indexer.intern_worker(&worker);
-                                for i in 0..$ops_per_thread {
-                                    if i % 3 == 0 {
-                                        // Read: find_matches (scatter-gather)
-                                        let query_tokens = flatten_tokens(&chunks);
-                                        let content_hashes = compute_request_content_hashes(
-                                            &query_tokens,
-                                            block_size,
-                                        );
-                                        black_box(indexer.find_matches(&content_hashes, false));
-                                    } else {
-                                        // Write: apply_stored (via channel)
-                                        let new_chunks = generate_token_chunks(4, block_size);
-                                        let blocks = chunks_to_stored_blocks(&new_chunks);
-                                        let parent = SequenceHash(rng.random_range(1u64..65));
-                                        let _ =
-                                            indexer.apply_stored(worker_id, &blocks, Some(parent));
-                                    }
-                                }
-                            })
-                        })
-                        .collect();
-
-                    for h in handles {
-                        h.join().unwrap();
-                    }
-                }
-                let duration = start.elapsed();
-
-                if !printed.swap(true, Ordering::Relaxed) {
-                    let total_ops = iters * $num_threads as u64 * $ops_per_thread as u64;
-                    let ops_per_sec = total_ops as f64 / duration.as_secs_f64();
-                    add_result(
-                        "sharded",
-                        format!(
-                            "{:>3}w | CONCURRENT | {:>7.0} ops/s | {} threads x {} ops | {}sh",
-                            $num_workers, ops_per_sec, $num_threads, $ops_per_thread, $num_shards
-                        ),
-                    );
-                }
-
-                duration
-            });
-        });
-    }};
-}
-
-// ============================================================================
 // Main Benchmark
 // ============================================================================
 
-/// Main benchmark for StringTree, TokenTree, PositionalIndexer, and ShardedIndexer
+/// Main benchmark for StringTree, TokenTree, and PositionalIndexer
 fn bench_summary(c: &mut Criterion) {
     let mut group = c.benchmark_group("benchmark_summary");
 
@@ -1034,71 +808,6 @@ fn bench_summary(c: &mut Criterion) {
         bench_indexer_concurrent!(group, num_workers, 16, NUM_THREADS, OPS_PER_THREAD);
     }
 
-    // ========================================================================
-    // ShardedIndexer Benchmark
-    // ========================================================================
-    const NUM_SHARDS: usize = 4;
-
-    for &num_workers in &WORKER_COUNTS {
-        let workers = generate_worker_endpoints(num_workers);
-
-        for &block_size in &BLOCK_SIZES {
-            // STORE benchmarks
-            for &blocks_per_worker in &BLOCKS_PER_WORKER {
-                bench_sharded_store!(
-                    group,
-                    num_workers,
-                    blocks_per_worker,
-                    block_size,
-                    workers,
-                    NUM_SHARDS
-                );
-            }
-
-            // MATCH benchmarks: build a populated sharded indexer, then query it
-            let max_blocks = *BLOCKS_PER_WORKER.last().unwrap();
-            let (indexer, worker_chunks) = build_populated_sharded_indexer(
-                &workers,
-                max_blocks,
-                block_size,
-                SHARED_PREFIX_BLOCKS,
-                JUMP_SIZE,
-                NUM_SHARDS,
-            );
-
-            for &query_blocks in &QUERY_BLOCK_COUNTS {
-                let num_queries = 100;
-                let query_hashes: Vec<Vec<ContentHash>> = (0..num_queries)
-                    .map(|i| {
-                        let chunks = &worker_chunks[i % worker_chunks.len()];
-                        let take = query_blocks.min(chunks.len());
-                        let tokens = flatten_tokens(&chunks[..take]);
-                        compute_request_content_hashes(&tokens, block_size)
-                    })
-                    .collect();
-
-                bench_sharded_match!(
-                    group,
-                    num_workers,
-                    query_blocks,
-                    block_size,
-                    indexer,
-                    query_hashes,
-                    NUM_SHARDS
-                );
-            }
-        }
-
-        bench_sharded_concurrent!(
-            group,
-            num_workers,
-            16,
-            NUM_THREADS,
-            OPS_PER_THREAD,
-            NUM_SHARDS
-        );
-    }
-
     group.finish();
 }
 
@@ -1114,7 +823,6 @@ fn print_summary() {
     let mut string_results = Vec::new();
     let mut token_results = Vec::new();
     let mut indexer_results = Vec::new();
-    let mut sharded_results = Vec::new();
 
     for (key, value) in results.iter() {
         let category = key.split('_').skip(1).collect::<Vec<_>>().join("_");
@@ -1122,7 +830,6 @@ fn print_summary() {
             "string" => string_results.push(value.clone()),
             "token" => token_results.push(value.clone()),
             "indexer" => indexer_results.push(value.clone()),
-            "sharded" => sharded_results.push(value.clone()),
             _ => {}
         }
     }
@@ -1163,19 +870,7 @@ fn print_summary() {
         eprintln!("{v}");
     }
 
-    eprintln!("\n{}", "=".repeat(105));
-    eprintln!("SHARDEDINDEXER (kv_index::ShardedIndexer) — N-shard event-driven KV cache routing");
-    eprintln!("{}", "=".repeat(105));
-    eprintln!(
-        "{:>4} | {:>15} | {:>6} | {:>10} | {:>9} | {:>12} | {:>4}",
-        "Work", "Size", "Op", "Throughput", "Latency", "Bandwidth", "Shrd"
-    );
-    eprintln!("{}", "-".repeat(105));
-    for v in &sharded_results {
-        eprintln!("{v}");
-    }
-
-    eprintln!("\n{}", "=".repeat(105));
+    eprintln!("\n{}", "=".repeat(95));
 }
 
 fn run_benchmarks(c: &mut Criterion) {

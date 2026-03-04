@@ -434,11 +434,6 @@ impl PositionalIndexer {
             .sum()
     }
 
-    /// Get the block count for a single worker (by internal ID).
-    pub fn worker_tree_size(&self, worker_id: u32) -> usize {
-        self.tree_sizes[worker_id as usize].load(Ordering::Relaxed)
-    }
-
     /// Find overlap scores for a request's content hash sequence.
     ///
     /// Uses jump search: strides by `jump_size` positions, only scanning

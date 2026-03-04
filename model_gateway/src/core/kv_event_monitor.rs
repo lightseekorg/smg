@@ -1,7 +1,7 @@
 //! Per-worker KV cache event subscription manager.
 //!
 //! `KvEventMonitor` spawns a background tokio task per gRPC worker that subscribes
-//! to KV cache events and feeds them into a shared [`ShardedIndexer`] (one per model).
+//! to KV cache events and feeds them into a shared `PositionalIndexer` (one per model).
 //! This enables event-driven cache-aware routing as an alternative to the approximate
 //! radix tree approach.
 //!
@@ -13,7 +13,9 @@
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
-use kv_index::{compute_content_hash, ApplyError, SequenceHash, ShardedIndexer, StoredBlock};
+use kv_index::{
+    compute_content_hash, ApplyError, PositionalIndexer, SequenceHash, StoredBlock, WorkerBlockMap,
+};
 use smg_grpc_client::common_proto::{
     kv_cache_event, KvBlock, KvBlocksRemoved, KvBlocksStored, KvCacheEvent, KvEventBatch,
 };
@@ -25,11 +27,8 @@ use tracing::{debug, info, warn};
 
 use crate::core::{ConnectionMode, Worker, UNKNOWN_MODEL_ID};
 
-/// Default jump size for new `ShardedIndexer` instances.
+/// Default jump size for new `PositionalIndexer` instances.
 const DEFAULT_JUMP_SIZE: usize = 64;
-
-/// Default number of shards for new `ShardedIndexer` instances.
-const DEFAULT_NUM_SHARDS: usize = 4;
 
 /// Initial reconnection delay after stream failure.
 const INITIAL_RECONNECT_DELAY_MS: u64 = 100;
@@ -40,24 +39,19 @@ const MAX_RECONNECT_DELAY_MS: u64 = 30_000;
 /// Manages per-worker KV cache event subscriptions.
 ///
 /// Each gRPC worker gets a dedicated tokio task that subscribes to the backend's
-/// KV cache event stream and feeds events into a shared [`ShardedIndexer`]
+/// KV cache event stream and feeds events into a shared `PositionalIndexer`
 /// (one per `model_id`). Workers serving the same model share the same indexer.
-///
-/// The `ShardedIndexer` owns per-worker `WorkerBlockMap` internally (inside shard
-/// threads), so subscription tasks only need the worker_id to send events.
 pub struct KvEventMonitor {
-    /// Per-model sharded indexers: model_id → shared indexer.
-    pub(crate) indexers: DashMap<String, Arc<ShardedIndexer>>,
+    /// Per-model positional indexers: model_id → shared indexer.
+    pub(crate) indexers: DashMap<String, Arc<PositionalIndexer>>,
     /// Per-model block sizes learned from KV events or set via WorkerSpec.
     /// Used by CacheAwarePolicy to chunk request tokens at query time.
     block_sizes: DashMap<String, usize>,
     /// Per-worker subscription handles: worker_url → subscription info.
     /// Mutex matches LoadMonitor pattern for atomic abort + remove.
     worker_handles: Mutex<HashMap<String, WorkerSubscription>>,
-    /// Jump size for new ShardedIndexer instances.
+    /// Jump size for new PositionalIndexer instances.
     jump_size: usize,
-    /// Number of shards for new ShardedIndexer instances.
-    num_shards: usize,
 }
 
 /// Tracks a single worker's subscription state.
@@ -65,6 +59,7 @@ struct WorkerSubscription {
     handle: JoinHandle<()>,
     model_id: String,
     /// Signals the subscription task to shut down gracefully.
+    /// The task owns its `WorkerBlockMap` and cleans up the indexer on exit.
     shutdown_tx: oneshot::Sender<()>,
 }
 
@@ -81,7 +76,7 @@ enum StreamResult {
 impl KvEventMonitor {
     /// Create a new `KvEventMonitor`.
     ///
-    /// `jump_size` controls the `ShardedIndexer` jump search stride.
+    /// `jump_size` controls the `PositionalIndexer` jump search stride.
     /// Pass `None` for the default (64).
     pub fn new(jump_size: Option<usize>) -> Self {
         let jump_size = jump_size.unwrap_or(DEFAULT_JUMP_SIZE).max(1);
@@ -90,14 +85,13 @@ impl KvEventMonitor {
             block_sizes: DashMap::new(),
             worker_handles: Mutex::new(HashMap::new()),
             jump_size,
-            num_shards: DEFAULT_NUM_SHARDS,
         }
     }
 
     /// Start a KV event subscription for a worker.
     ///
     /// Spawns a background tokio task that subscribes to KV cache events via
-    /// server-streaming gRPC and applies them to the model's `ShardedIndexer`.
+    /// server-streaming gRPC and applies them to the model's `PositionalIndexer`.
     /// Duplicate calls for the same worker URL are no-ops.
     pub async fn on_worker_added(&self, worker: &Arc<dyn Worker>) {
         let url = worker.url().to_string();
@@ -115,11 +109,10 @@ impl KvEventMonitor {
             return;
         }
 
-        let num_shards = self.num_shards;
         let indexer = self
             .indexers
             .entry(model_id.clone())
-            .or_insert_with(|| Arc::new(ShardedIndexer::new(self.jump_size, num_shards)))
+            .or_insert_with(|| Arc::new(PositionalIndexer::new(self.jump_size)))
             .clone();
 
         // Seed block_size from WorkerSpec if set, valid, and not already known.
@@ -163,8 +156,8 @@ impl KvEventMonitor {
 
     /// Stop the KV event subscription for a worker.
     ///
-    /// Sends a graceful shutdown signal — the task tells the indexer to
-    /// remove the worker (shard thread handles cleanup) before exiting.
+    /// Sends a graceful shutdown signal — the task cleans up its own
+    /// `WorkerBlockMap` in the indexer before exiting.
     pub async fn on_worker_removed(&self, worker_url: &str) {
         // Remove subscription from handles under lock.
         let subscription = {
@@ -220,7 +213,7 @@ impl KvEventMonitor {
     }
 
     /// Get the indexer for a model (used by `CacheAwarePolicy` for queries).
-    pub fn get_indexer(&self, model_id: &str) -> Option<Arc<ShardedIndexer>> {
+    pub fn get_indexer(&self, model_id: &str) -> Option<Arc<PositionalIndexer>> {
         self.indexers.get(model_id).map(|r| Arc::clone(&r))
     }
 
@@ -258,15 +251,16 @@ impl KvEventMonitor {
 
     /// Main subscription loop for a single worker.
     ///
-    /// The `ShardedIndexer` owns the `WorkerBlockMap` internally (inside shard threads).
+    /// Owns the `WorkerBlockMap` for this worker and cleans it up on exit.
     /// Exits when `shutdown_rx` fires or the backend returns `Unimplemented`.
     async fn subscription_loop(
         worker: Arc<dyn Worker>,
         worker_url: String,
-        indexer: Arc<ShardedIndexer>,
+        indexer: Arc<PositionalIndexer>,
         mut shutdown_rx: oneshot::Receiver<()>,
     ) {
         let worker_id = indexer.intern_worker(&worker_url);
+        let mut worker_blocks = WorkerBlockMap::default();
         let mut last_seq: u64 = 0;
         let mut reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
@@ -296,7 +290,7 @@ impl KvEventMonitor {
                         Duration::from_millis(reconnect_delay_ms),
                         &mut shutdown_rx
                     ) {
-                        indexer.remove_worker(worker_id);
+                        indexer.remove_worker(worker_id, worker_blocks);
                         return;
                     }
                     reconnect_delay_ms = (reconnect_delay_ms * 2).min(MAX_RECONNECT_DELAY_MS);
@@ -313,7 +307,7 @@ impl KvEventMonitor {
                         Duration::from_millis(reconnect_delay_ms),
                         &mut shutdown_rx
                     ) {
-                        indexer.remove_worker(worker_id);
+                        indexer.remove_worker(worker_id, worker_blocks);
                         return;
                     }
                     reconnect_delay_ms = (reconnect_delay_ms * 2).min(MAX_RECONNECT_DELAY_MS);
@@ -341,7 +335,7 @@ impl KvEventMonitor {
                                 "Backend does not implement SubscribeKvEvents, \
                                  disabling KV event subscription for this worker"
                             );
-                            indexer.remove_worker(worker_id);
+                            indexer.remove_worker(worker_id, worker_blocks);
                             return;
                         }
                     }
@@ -355,7 +349,7 @@ impl KvEventMonitor {
                         Duration::from_millis(reconnect_delay_ms),
                         &mut shutdown_rx
                     ) {
-                        indexer.remove_worker(worker_id);
+                        indexer.remove_worker(worker_id, worker_blocks);
                         return;
                     }
                     reconnect_delay_ms = (reconnect_delay_ms * 2).min(MAX_RECONNECT_DELAY_MS);
@@ -365,10 +359,11 @@ impl KvEventMonitor {
 
             let stream_result = tokio::select! {
                 result = Self::process_stream(
-                    stream, &worker_url, worker_id, &indexer, &mut last_seq,
+                    stream, &worker_url, worker_id, &indexer,
+                    &mut worker_blocks, &mut last_seq,
                 ) => result,
                 _ = &mut shutdown_rx => {
-                    indexer.remove_worker(worker_id);
+                    indexer.remove_worker(worker_id, worker_blocks);
                     return;
                 }
             };
@@ -387,7 +382,7 @@ impl KvEventMonitor {
                         Duration::from_millis(reconnect_delay_ms),
                         &mut shutdown_rx
                     ) {
-                        indexer.remove_worker(worker_id);
+                        indexer.remove_worker(worker_id, worker_blocks);
                         return;
                     }
                     reconnect_delay_ms = (reconnect_delay_ms * 2).min(MAX_RECONNECT_DELAY_MS);
@@ -404,7 +399,7 @@ impl KvEventMonitor {
                         Duration::from_millis(reconnect_delay_ms),
                         &mut shutdown_rx
                     ) {
-                        indexer.remove_worker(worker_id);
+                        indexer.remove_worker(worker_id, worker_blocks);
                         return;
                     }
                     reconnect_delay_ms = (reconnect_delay_ms * 2).min(MAX_RECONNECT_DELAY_MS);
@@ -431,7 +426,8 @@ impl KvEventMonitor {
         mut stream: tonic::Streaming<KvEventBatch>,
         worker_url: &str,
         worker_id: u32,
-        indexer: &ShardedIndexer,
+        indexer: &PositionalIndexer,
+        worker_blocks: &mut WorkerBlockMap,
         last_seq: &mut u64,
     ) -> StreamResult {
         use tokio_stream::StreamExt;
@@ -462,7 +458,7 @@ impl KvEventMonitor {
             }
 
             for event in &batch.events {
-                Self::apply_event(event, worker_id, indexer);
+                Self::apply_event(event, worker_id, indexer, worker_blocks);
             }
 
             *last_seq = batch.sequence_number;
@@ -472,35 +468,45 @@ impl KvEventMonitor {
     }
 
     /// Apply a single KV cache event to the indexer.
-    fn apply_event(event: &KvCacheEvent, worker_id: u32, indexer: &ShardedIndexer) {
+    fn apply_event(
+        event: &KvCacheEvent,
+        worker_id: u32,
+        indexer: &PositionalIndexer,
+        worker_blocks: &mut WorkerBlockMap,
+    ) {
         let Some(ref data) = event.data else {
             return;
         };
 
         match data {
             kv_cache_event::Data::Stored(stored) => {
-                Self::apply_stored(stored, worker_id, indexer);
+                Self::apply_stored(stored, worker_id, indexer, worker_blocks);
             }
             kv_cache_event::Data::Removed(removed) => {
-                Self::apply_removed(removed, worker_id, indexer);
+                Self::apply_removed(removed, worker_id, indexer, worker_blocks);
             }
             kv_cache_event::Data::Cleared(_) => {
-                indexer.apply_cleared(worker_id);
+                indexer.apply_cleared(worker_id, worker_blocks);
             }
         }
     }
 
     /// Convert proto `KvBlocksStored` and apply to the indexer.
-    fn apply_stored(stored: &KvBlocksStored, worker_id: u32, indexer: &ShardedIndexer) {
+    fn apply_stored(
+        stored: &KvBlocksStored,
+        worker_id: u32,
+        indexer: &PositionalIndexer,
+        worker_blocks: &mut WorkerBlockMap,
+    ) {
         let blocks: Vec<StoredBlock> = stored.blocks.iter().map(convert_kv_block).collect();
 
         let parent_seq_hash = stored.parent_block_hash.map(SequenceHash::from);
 
-        match indexer.apply_stored(worker_id, &blocks, parent_seq_hash) {
+        match indexer.apply_stored(worker_id, &blocks, parent_seq_hash, worker_blocks) {
             Ok(()) => {}
             Err(ApplyError::WorkerNotTracked | ApplyError::ParentBlockNotFound) => {
                 // Cold start or parent evicted — retry without parent to start a new chain.
-                if let Err(e) = indexer.apply_stored(worker_id, &blocks, None) {
+                if let Err(e) = indexer.apply_stored(worker_id, &blocks, None, worker_blocks) {
                     warn!(
                         worker_id = worker_id,
                         error = %e,
@@ -512,14 +518,19 @@ impl KvEventMonitor {
     }
 
     /// Convert proto `KvBlocksRemoved` and apply to the indexer.
-    fn apply_removed(removed: &KvBlocksRemoved, worker_id: u32, indexer: &ShardedIndexer) {
+    fn apply_removed(
+        removed: &KvBlocksRemoved,
+        worker_id: u32,
+        indexer: &PositionalIndexer,
+        worker_blocks: &mut WorkerBlockMap,
+    ) {
         let seq_hashes: Vec<SequenceHash> = removed
             .block_hashes
             .iter()
             .map(|&h| SequenceHash::from(h))
             .collect();
 
-        indexer.apply_removed(worker_id, &seq_hashes);
+        indexer.apply_removed(worker_id, &seq_hashes, worker_blocks);
     }
 }
 
@@ -554,8 +565,6 @@ impl fmt::Debug for KvEventMonitor {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     // -----------------------------------------------------------------------
@@ -604,13 +613,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // apply_event integration with ShardedIndexer
+    // apply_event integration with PositionalIndexer
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_apply_stored_no_parent() {
-        let indexer = ShardedIndexer::new(64, 1);
+        let indexer = PositionalIndexer::new(64);
         let w1 = indexer.intern_worker("http://w1:8000");
+        let mut wb = WorkerBlockMap::default();
         let stored = KvBlocksStored {
             blocks: vec![
                 KvBlock {
@@ -631,14 +641,15 @@ mod tests {
             parent_block_hash: None,
         };
 
-        KvEventMonitor::apply_stored(&stored, w1, &indexer);
+        KvEventMonitor::apply_stored(&stored, w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 2);
     }
 
     #[test]
     fn test_apply_stored_with_parent() {
-        let indexer = ShardedIndexer::new(64, 1);
+        let indexer = PositionalIndexer::new(64);
         let w1 = indexer.intern_worker("http://w1:8000");
+        let mut wb = WorkerBlockMap::default();
 
         let stored1 = KvBlocksStored {
             blocks: vec![KvBlock {
@@ -650,7 +661,7 @@ mod tests {
             }],
             parent_block_hash: None,
         };
-        KvEventMonitor::apply_stored(&stored1, w1, &indexer);
+        KvEventMonitor::apply_stored(&stored1, w1, &indexer, &mut wb);
 
         let stored2 = KvBlocksStored {
             blocks: vec![KvBlock {
@@ -662,14 +673,15 @@ mod tests {
             }],
             parent_block_hash: Some(1),
         };
-        KvEventMonitor::apply_stored(&stored2, w1, &indexer);
+        KvEventMonitor::apply_stored(&stored2, w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 2);
     }
 
     #[test]
     fn test_apply_stored_fallback_on_worker_not_tracked() {
-        let indexer = ShardedIndexer::new(64, 1);
+        let indexer = PositionalIndexer::new(64);
         let w1 = indexer.intern_worker("http://new-worker:8000");
+        let mut wb = WorkerBlockMap::default();
 
         // Pass parent_block_hash for an untracked worker — should fallback to no parent.
         let stored = KvBlocksStored {
@@ -682,14 +694,15 @@ mod tests {
             }],
             parent_block_hash: Some(999),
         };
-        KvEventMonitor::apply_stored(&stored, w1, &indexer);
+        KvEventMonitor::apply_stored(&stored, w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 1);
     }
 
     #[test]
     fn test_apply_removed() {
-        let indexer = ShardedIndexer::new(64, 1);
+        let indexer = PositionalIndexer::new(64);
         let w1 = indexer.intern_worker("http://w1:8000");
+        let mut wb = WorkerBlockMap::default();
 
         let stored = KvBlocksStored {
             blocks: vec![
@@ -710,22 +723,21 @@ mod tests {
             ],
             parent_block_hash: None,
         };
-        KvEventMonitor::apply_stored(&stored, w1, &indexer);
+        KvEventMonitor::apply_stored(&stored, w1, &indexer, &mut wb);
 
         let removed = KvBlocksRemoved {
             block_hashes: vec![2],
             cache_level: None,
         };
-        KvEventMonitor::apply_removed(&removed, w1, &indexer);
-        // apply_removed is fire-and-forget — wait briefly for shard processing.
-        std::thread::sleep(Duration::from_millis(10));
+        KvEventMonitor::apply_removed(&removed, w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 1);
     }
 
     #[test]
     fn test_apply_cleared_event() {
-        let indexer = ShardedIndexer::new(64, 1);
+        let indexer = PositionalIndexer::new(64);
         let w1 = indexer.intern_worker("http://w1:8000");
+        let mut wb = WorkerBlockMap::default();
 
         let stored = KvBlocksStored {
             blocks: vec![KvBlock {
@@ -737,19 +749,18 @@ mod tests {
             }],
             parent_block_hash: None,
         };
-        KvEventMonitor::apply_stored(&stored, w1, &indexer);
+        KvEventMonitor::apply_stored(&stored, w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 1);
 
-        indexer.apply_cleared(w1);
-        // apply_cleared is fire-and-forget — wait briefly for shard processing.
-        std::thread::sleep(Duration::from_millis(10));
+        indexer.apply_cleared(w1, &mut wb);
         assert_eq!(indexer.current_size(), 0);
     }
 
     #[test]
     fn test_apply_event_dispatch_stored() {
-        let indexer = ShardedIndexer::new(64, 1);
+        let indexer = PositionalIndexer::new(64);
         let w1 = indexer.intern_worker("http://w1:8000");
+        let mut wb = WorkerBlockMap::default();
         let event = KvCacheEvent {
             event_id: 1,
             data: Some(kv_cache_event::Data::Stored(KvBlocksStored {
@@ -764,14 +775,15 @@ mod tests {
             })),
         };
 
-        KvEventMonitor::apply_event(&event, w1, &indexer);
+        KvEventMonitor::apply_event(&event, w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 1);
     }
 
     #[test]
     fn test_apply_event_dispatch_removed() {
-        let indexer = ShardedIndexer::new(64, 1);
+        let indexer = PositionalIndexer::new(64);
         let w1 = indexer.intern_worker("http://w1:8000");
+        let mut wb = WorkerBlockMap::default();
 
         // Store first
         let stored_event = KvCacheEvent {
@@ -787,7 +799,7 @@ mod tests {
                 parent_block_hash: None,
             })),
         };
-        KvEventMonitor::apply_event(&stored_event, w1, &indexer);
+        KvEventMonitor::apply_event(&stored_event, w1, &indexer, &mut wb);
 
         // Remove
         let removed_event = KvCacheEvent {
@@ -797,16 +809,15 @@ mod tests {
                 cache_level: None,
             })),
         };
-        KvEventMonitor::apply_event(&removed_event, w1, &indexer);
-        // apply_removed is fire-and-forget — wait briefly for shard processing.
-        std::thread::sleep(Duration::from_millis(10));
+        KvEventMonitor::apply_event(&removed_event, w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 0);
     }
 
     #[test]
     fn test_apply_event_dispatch_cleared() {
-        let indexer = ShardedIndexer::new(64, 1);
+        let indexer = PositionalIndexer::new(64);
         let w1 = indexer.intern_worker("http://w1:8000");
+        let mut wb = WorkerBlockMap::default();
 
         // Store first
         KvEventMonitor::apply_event(
@@ -825,6 +836,7 @@ mod tests {
             },
             w1,
             &indexer,
+            &mut wb,
         );
 
         // Clear
@@ -837,21 +849,21 @@ mod tests {
             },
             w1,
             &indexer,
+            &mut wb,
         );
-        // apply_cleared is fire-and-forget — wait briefly for shard processing.
-        std::thread::sleep(Duration::from_millis(10));
         assert_eq!(indexer.current_size(), 0);
     }
 
     #[test]
     fn test_apply_event_no_data() {
-        let indexer = ShardedIndexer::new(64, 1);
+        let indexer = PositionalIndexer::new(64);
         let w1 = indexer.intern_worker("http://w1:8000");
+        let mut wb = WorkerBlockMap::default();
         let event = KvCacheEvent {
             event_id: 1,
             data: None,
         };
-        KvEventMonitor::apply_event(&event, w1, &indexer);
+        KvEventMonitor::apply_event(&event, w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 0);
     }
 

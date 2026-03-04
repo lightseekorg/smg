@@ -10,7 +10,7 @@
 
     1. Event-Driven (gRPC + KV events)
     -------------------------------------------
-    Uses ShardedIndexer overlap scoring from KvEventMonitor. Routes based
+    Uses PositionalIndexer overlap scoring from KvEventMonitor. Routes based
     on actual backend KV cache state. Selects the worker with the highest
     overlap count; tie-breaks by load (lower) then tree size (smaller).
     Falls back to min-load when no cache overlap exists.
@@ -44,7 +44,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use kv_index::{compute_request_content_hashes, ShardedIndexer, TokenTree, Tree};
+use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
 use parking_lot::RwLock;
 use rand::Rng;
 use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeOperation};
@@ -448,7 +448,7 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
         }
 
         // Cache-aware routing when balanced — three types (mutually exclusive):
-        //   1. Event-driven: ShardedIndexer overlap scoring (gRPC + KV events)
+        //   1. Event-driven: PositionalIndexer overlap scoring (gRPC + KV events)
         //   2. Approximate token tree: TokenTree prefix matching (gRPC, no events)
         //   3. Approximate string tree: Tree prefix matching (HTTP)
         if let Some(tokens) = request_tokens {
@@ -502,7 +502,7 @@ impl CacheAwarePolicy {
             .is_some_and(|indexer| indexer.current_size() > 0)
     }
 
-    /// Event-driven routing: ShardedIndexer overlap scoring (Type 1).
+    /// Event-driven routing: PositionalIndexer overlap scoring (Type 1).
     ///
     /// Self-contained — when overlap is found, selects the worker with the best
     /// cache match. When no overlap (cold start, novel tokens, short request),
@@ -542,7 +542,7 @@ impl CacheAwarePolicy {
         Some(min_idx)
     }
 
-    /// Score healthy workers by ShardedIndexer overlap and select the best.
+    /// Score healthy workers by PositionalIndexer overlap and select the best.
     ///
     /// Returns `Some(idx)` if at least one worker has cached blocks matching the
     /// request. Returns `None` if the request is too short for a full block or
@@ -551,7 +551,7 @@ impl CacheAwarePolicy {
         workers: &[Arc<dyn Worker>],
         tokens: &[u32],
         healthy_indices: &[usize],
-        indexer: &ShardedIndexer,
+        indexer: &PositionalIndexer,
         block_size: usize,
     ) -> Option<usize> {
         let content_hashes = compute_request_content_hashes(tokens, block_size);
@@ -734,7 +734,7 @@ impl Default for CacheAwarePolicy {
 
 #[cfg(test)]
 mod tests {
-    use kv_index::{compute_content_hash, SequenceHash, StoredBlock};
+    use kv_index::{compute_content_hash, SequenceHash, StoredBlock, WorkerBlockMap};
 
     use super::*;
     use crate::core::{BasicWorkerBuilder, WorkerType};
@@ -1092,18 +1092,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Event-driven routing tests (Type 1: ShardedIndexer overlap scoring)
+    // Event-driven routing tests (Type 1: PositionalIndexer overlap scoring)
     // -----------------------------------------------------------------------
 
-    /// Helper: create a ShardedIndexer and store blocks for a worker.
+    /// Helper: create a PositionalIndexer and store blocks for a worker.
     /// `token_chunks` is a list of token-id slices — each becomes one block.
     fn setup_indexer_with_blocks(
         worker_url: &str,
         token_chunks: &[&[u32]],
         jump_size: usize,
-    ) -> Arc<ShardedIndexer> {
-        let indexer = Arc::new(ShardedIndexer::new(jump_size, 1));
+    ) -> Arc<PositionalIndexer> {
+        let indexer = Arc::new(PositionalIndexer::new(jump_size));
         let worker_id = indexer.intern_worker(worker_url);
+        let mut wb = WorkerBlockMap::default();
         let blocks: Vec<StoredBlock> = token_chunks
             .iter()
             .enumerate()
@@ -1112,7 +1113,9 @@ mod tests {
                 content_hash: compute_content_hash(tokens),
             })
             .collect();
-        indexer.apply_stored(worker_id, &blocks, None).unwrap();
+        indexer
+            .apply_stored(worker_id, &blocks, None, &mut wb)
+            .unwrap();
         indexer
     }
 
@@ -1210,20 +1213,25 @@ mod tests {
         policy.init_workers(&workers);
 
         // Store same blocks for both workers (equal overlap)
-        let indexer = Arc::new(ShardedIndexer::new(4, 1));
+        let indexer = Arc::new(PositionalIndexer::new(4));
         let w1_id = indexer.intern_worker("http://w1:8000");
         let w2_id = indexer.intern_worker("http://w2:8000");
-
+        let mut wb1 = WorkerBlockMap::default();
+        let mut wb2 = WorkerBlockMap::default();
         let blocks = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
         }];
-        indexer.apply_stored(w1_id, &blocks, None).unwrap();
+        indexer
+            .apply_stored(w1_id, &blocks, None, &mut wb1)
+            .unwrap();
         let blocks2 = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
         }];
-        indexer.apply_stored(w2_id, &blocks2, None).unwrap();
+        indexer
+            .apply_stored(w2_id, &blocks2, None, &mut wb2)
+            .unwrap();
 
         // Equal overlap → tie-break by load → w2 wins (lower load)
         let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4);
@@ -1247,29 +1255,33 @@ mod tests {
         ];
         policy.init_workers(&workers);
 
-        let indexer = Arc::new(ShardedIndexer::new(4, 1));
+        let indexer = Arc::new(PositionalIndexer::new(4));
         let w1_id = indexer.intern_worker("http://w1:8000");
         let w2_id = indexer.intern_worker("http://w2:8000");
+        let mut wb1 = WorkerBlockMap::default();
+        let mut wb2 = WorkerBlockMap::default();
 
         // Both workers have block [1,2,3,4] (equal overlap, equal load)
         let block = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
         }];
-        indexer.apply_stored(w1_id, &block, None).unwrap();
+        indexer.apply_stored(w1_id, &block, None, &mut wb1).unwrap();
 
         // w2 has the same block plus extra blocks → larger tree
         let block2 = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
         }];
-        indexer.apply_stored(w2_id, &block2, None).unwrap();
+        indexer
+            .apply_stored(w2_id, &block2, None, &mut wb2)
+            .unwrap();
         let extra = vec![StoredBlock {
             seq_hash: SequenceHash(2),
             content_hash: compute_content_hash(&[5, 6, 7, 8]),
         }];
         indexer
-            .apply_stored(w2_id, &extra, Some(SequenceHash(1)))
+            .apply_stored(w2_id, &extra, Some(SequenceHash(1)), &mut wb2)
             .unwrap();
 
         // Equal overlap, equal load → tie-break by tree size → w1 wins (smaller)
@@ -1309,9 +1321,11 @@ mod tests {
         ];
         policy.init_workers(&workers);
 
-        let indexer = Arc::new(ShardedIndexer::new(4, 1));
+        let indexer = Arc::new(PositionalIndexer::new(4));
         let w1_id = indexer.intern_worker("http://w1:8000");
         let w2_id = indexer.intern_worker("http://w2:8000");
+        let mut wb1 = WorkerBlockMap::default();
+        let mut wb2 = WorkerBlockMap::default();
 
         // w1 has 4 blocks cached
         let blocks_w1: Vec<StoredBlock> = (0..4)
@@ -1325,7 +1339,9 @@ mod tests {
                 ]),
             })
             .collect();
-        indexer.apply_stored(w1_id, &blocks_w1, None).unwrap();
+        indexer
+            .apply_stored(w1_id, &blocks_w1, None, &mut wb1)
+            .unwrap();
 
         // w2 has only the first 2 blocks (partial overlap with same request)
         let blocks_w2: Vec<StoredBlock> = (0..2)
@@ -1339,7 +1355,9 @@ mod tests {
                 ]),
             })
             .collect();
-        indexer.apply_stored(w2_id, &blocks_w2, None).unwrap();
+        indexer
+            .apply_stored(w2_id, &blocks_w2, None, &mut wb2)
+            .unwrap();
 
         // Query with all 4 blocks worth of tokens → w1 wins (higher overlap: 4 vs 2)
         let result = CacheAwarePolicy::score_overlap(
@@ -1543,14 +1561,14 @@ mod tests {
         let monitor = Arc::new(KvEventMonitor::new(Some(4)));
 
         // Store blocks using block_size=8 (tokens chunked in groups of 8)
-        let indexer = Arc::new(ShardedIndexer::new(4, 1));
+        let indexer = Arc::new(PositionalIndexer::new(4));
         let w1_id = indexer.intern_worker("http://w1:8000");
-
+        let mut wb = WorkerBlockMap::default();
         let block = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4, 5, 6, 7, 8]),
         }];
-        indexer.apply_stored(w1_id, &block, None).unwrap();
+        indexer.apply_stored(w1_id, &block, None, &mut wb).unwrap();
         monitor
             .indexers
             .insert("unknown".to_string(), indexer.clone());
@@ -1638,7 +1656,7 @@ mod tests {
 
         // Set up monitor with an empty indexer
         let monitor = Arc::new(KvEventMonitor::new(Some(4)));
-        let empty_indexer = Arc::new(ShardedIndexer::new(4, 1));
+        let empty_indexer = Arc::new(PositionalIndexer::new(4));
         monitor
             .indexers
             .insert("unknown".to_string(), empty_indexer);

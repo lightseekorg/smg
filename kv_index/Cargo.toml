@@ -15,7 +15,6 @@ categories = ["data-structures", "caching"]
 
 [dependencies]
 dashmap = { workspace = true }
-flume = "0.11"
 once_cell = "1.21.3"
 parking_lot = { workspace = true }
 rustc-hash = "2.1.1"
