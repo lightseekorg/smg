@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use futures::stream::{self, StreamExt};
 use openai_protocol::responses::ResponseTool;
 
 use super::orchestrator::{
@@ -170,10 +171,14 @@ impl<'a> McpToolSession<'a> {
 
     /// Execute multiple tools concurrently using this session's exposed-name mapping.
     ///
-    /// All tools are dispatched at once via `futures::future::join_all`,
-    /// which preserves the original input ordering in the returned `Vec`.
+    /// Uses `buffered()` to cap in-flight requests while preserving input ordering.
     pub async fn execute_tools(&self, inputs: Vec<ToolExecutionInput>) -> Vec<ToolExecutionOutput> {
-        futures::future::join_all(inputs.into_iter().map(|input| self.execute_tool(input))).await
+        const MAX_IN_FLIGHT_TOOL_CALLS: usize = 8;
+        stream::iter(inputs)
+            .map(|input| self.execute_tool(input))
+            .buffered(MAX_IN_FLIGHT_TOOL_CALLS)
+            .collect()
+            .await
     }
 
     /// Execute a single tool using this session's exposed-name mapping.
