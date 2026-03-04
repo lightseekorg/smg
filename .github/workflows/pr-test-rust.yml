@@ -618,7 +618,7 @@ jobs:
           BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv
 
       - name: Cleanup Oracle test users
         if: always() && matrix.setup_agentic_deps
@@ -723,7 +723,7 @@ jobs:
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
           export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
-            pytest --reruns 2 --reruns-delay 5 e2e_test/bindings_go -s -vv -o log_cli=true --log-cli-level=INFO
+            pytest --reruns 2 --reruns-delay 5 e2e_test/bindings_go -s -vv
 
   go-bindings-benchmark:
     name: go-bindings-benchmark
@@ -780,7 +780,7 @@ jobs:
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
           export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
-            pytest e2e_test/benchmarks/test_go_bindings_perf.py -s -vv -o log_cli=true --log-cli-level=INFO
+            pytest e2e_test/benchmarks/test_go_bindings_perf.py -s -vv
 
       - name: Upload benchmark results
         if: success()
