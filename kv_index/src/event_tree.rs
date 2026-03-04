@@ -21,6 +21,7 @@
 //! synchronization is needed on the write path.
 
 use std::{
+    cell::RefCell,
     fmt,
     sync::{
         atomic::{AtomicU32, AtomicUsize, Ordering},
@@ -29,7 +30,7 @@ use std::{
 };
 
 use dashmap::{mapref::entry::Entry, DashMap};
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
 /// Seed for XXH3 hashing.
 pub const XXH3_SEED: u64 = 1337;
@@ -151,6 +152,168 @@ pub fn compute_request_content_hashes(tokens: &[u32], block_size: usize) -> Vec<
 }
 
 // ---------------------------------------------------------------------------
+// WorkerBitset: compact worker ID tracking (replaces FxHashSet<u32>)
+// ---------------------------------------------------------------------------
+
+/// Compact bitset for tracking worker IDs in [`SeqEntry`].
+///
+/// For ≤63 workers (common case): inline `u64`, all operations are single CPU
+/// instructions (~1ns vs ~12ns for FxHashSet hash+probe).
+/// For >63 workers: heap-allocated boxed slice of `u64` words.
+#[derive(Debug, Clone)]
+enum WorkerBitset {
+    /// Bit N set means worker N is present. Supports workers 0..63.
+    Inline(u64),
+    /// Word `i` covers workers `i*64..(i+1)*64`.
+    Heap(Box<[u64]>),
+}
+
+impl WorkerBitset {
+    /// Create a new bitset containing a single worker.
+    #[inline]
+    fn new(worker_id: u32) -> Self {
+        let id = worker_id as usize;
+        if id < 64 {
+            Self::Inline(1u64 << id)
+        } else {
+            let word_count = (id / 64) + 1;
+            let mut words = vec![0u64; word_count].into_boxed_slice();
+            words[id / 64] |= 1u64 << (id % 64);
+            Self::Heap(words)
+        }
+    }
+
+    /// Insert a worker ID into the bitset.
+    #[inline]
+    fn insert(&mut self, worker_id: u32) {
+        let id = worker_id as usize;
+        match self {
+            Self::Inline(bits) if id < 64 => {
+                *bits |= 1u64 << id;
+            }
+            Self::Inline(bits) => {
+                // Upgrade to Heap
+                let word_count = (id / 64) + 1;
+                let mut words = vec![0u64; word_count].into_boxed_slice();
+                words[0] = *bits;
+                words[id / 64] |= 1u64 << (id % 64);
+                *self = Self::Heap(words);
+            }
+            Self::Heap(words) => {
+                let word_idx = id / 64;
+                if word_idx >= words.len() {
+                    let mut new_words = vec![0u64; word_idx + 1].into_boxed_slice();
+                    new_words[..words.len()].copy_from_slice(words);
+                    new_words[word_idx] |= 1u64 << (id % 64);
+                    *self = Self::Heap(new_words);
+                } else {
+                    words[word_idx] |= 1u64 << (id % 64);
+                }
+            }
+        }
+    }
+
+    /// Remove a worker ID from the bitset.
+    #[inline]
+    fn remove(&mut self, worker_id: u32) {
+        let id = worker_id as usize;
+        match self {
+            Self::Inline(bits) => {
+                if id < 64 {
+                    *bits &= !(1u64 << id);
+                }
+            }
+            Self::Heap(words) => {
+                let word_idx = id / 64;
+                if word_idx < words.len() {
+                    words[word_idx] &= !(1u64 << (id % 64));
+                }
+            }
+        }
+    }
+
+    /// Check if a worker ID is present.
+    #[inline]
+    fn contains(&self, worker_id: u32) -> bool {
+        let id = worker_id as usize;
+        match self {
+            Self::Inline(bits) => id < 64 && (*bits & (1u64 << id)) != 0,
+            Self::Heap(words) => {
+                let word_idx = id / 64;
+                word_idx < words.len() && (words[word_idx] & (1u64 << (id % 64))) != 0
+            }
+        }
+    }
+
+    /// Check if the bitset is empty (no workers present).
+    #[inline]
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Inline(bits) => *bits == 0,
+            Self::Heap(words) => words.iter().all(|&w| w == 0),
+        }
+    }
+
+    /// Count the number of workers present.
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline(bits) => bits.count_ones() as usize,
+            Self::Heap(words) => words.iter().map(|w| w.count_ones() as usize).sum(),
+        }
+    }
+
+    /// Iterate over worker IDs in ascending order.
+    fn iter(&self) -> WorkerBitsetIter<'_> {
+        match self {
+            Self::Inline(bits) => WorkerBitsetIter {
+                words: std::slice::from_ref(bits),
+                word_idx: 0,
+                current_word: *bits,
+            },
+            Self::Heap(words) => WorkerBitsetIter {
+                words,
+                word_idx: 0,
+                current_word: words.first().copied().unwrap_or(0),
+            },
+        }
+    }
+}
+
+impl Default for WorkerBitset {
+    fn default() -> Self {
+        Self::Inline(0)
+    }
+}
+
+/// Iterator over set bits in a [`WorkerBitset`], yielding worker IDs in ascending order.
+struct WorkerBitsetIter<'a> {
+    words: &'a [u64],
+    word_idx: usize,
+    current_word: u64,
+}
+
+impl Iterator for WorkerBitsetIter<'_> {
+    type Item = u32;
+
+    #[inline]
+    fn next(&mut self) -> Option<u32> {
+        loop {
+            if self.current_word != 0 {
+                let bit = self.current_word.trailing_zeros();
+                self.current_word &= self.current_word - 1; // clear lowest set bit
+                return Some((self.word_idx as u32) * 64 + bit);
+            }
+            self.word_idx += 1;
+            if self.word_idx >= self.words.len() {
+                return None;
+            }
+            self.current_word = self.words[self.word_idx];
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SeqEntry: optimizes for the common case (one seq_hash per position+content)
 // ---------------------------------------------------------------------------
 
@@ -158,19 +321,18 @@ pub fn compute_request_content_hashes(tokens: &[u32], block_size: usize) -> Vec<
 ///
 /// Optimizes for the common case where there's only one sequence hash
 /// at a given (position, content_hash) pair, avoiding HashMap allocation.
+/// Worker sets use [`WorkerBitset`] for O(1) membership tests.
 #[derive(Debug, Clone)]
 enum SeqEntry {
     /// Single seq_hash → workers mapping (common case, no HashMap allocation).
-    Single(SequenceHash, FxHashSet<u32>),
+    Single(SequenceHash, WorkerBitset),
     /// Multiple seq_hash → workers mappings (rare: different prefixes with same content).
-    Multi(FxHashMap<SequenceHash, FxHashSet<u32>>),
+    Multi(FxHashMap<SequenceHash, WorkerBitset>),
 }
 
 impl SeqEntry {
     fn new(seq_hash: SequenceHash, worker_id: u32) -> Self {
-        let mut workers = FxHashSet::default();
-        workers.insert(worker_id);
-        Self::Single(seq_hash, workers)
+        Self::Single(seq_hash, WorkerBitset::new(worker_id))
     }
 
     /// Insert a worker for a given seq_hash, upgrading to Multi if needed.
@@ -196,13 +358,13 @@ impl SeqEntry {
     fn remove(&mut self, seq_hash: SequenceHash, worker_id: u32) -> bool {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => {
-                workers.remove(&worker_id);
+                workers.remove(worker_id);
                 workers.is_empty()
             }
             Self::Single(_, _) => false,
             Self::Multi(map) => {
                 if let Some(workers) = map.get_mut(&seq_hash) {
-                    workers.remove(&worker_id);
+                    workers.remove(worker_id);
                     if workers.is_empty() {
                         map.remove(&seq_hash);
                     }
@@ -213,7 +375,7 @@ impl SeqEntry {
     }
 
     /// Get workers for a specific prefix hash (used in query path and event processing).
-    fn get(&self, seq_hash: SequenceHash) -> Option<&FxHashSet<u32>> {
+    fn get(&self, seq_hash: SequenceHash) -> Option<&WorkerBitset> {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => Some(workers),
             Self::Single(_, _) => None,
@@ -227,10 +389,35 @@ impl SeqEntry {
     /// hash computation can be skipped entirely.
     /// Returns None for Multi entries — caller must compute prefix hash to disambiguate.
     #[inline]
-    fn workers_if_single(&self) -> Option<&FxHashSet<u32>> {
+    fn workers_if_single(&self) -> Option<&WorkerBitset> {
         match self {
             Self::Single(_, workers) => Some(workers),
             Self::Multi(_) => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Query buffers (thread-local, reused across queries)
+// ---------------------------------------------------------------------------
+
+/// Reusable buffers for [`PositionalIndexer::jump_search_matches`].
+///
+/// Stored in a `thread_local!` to avoid per-query heap allocations.
+/// Buffers grow to high-water-mark and stay there — `clear()` resets length
+/// but keeps the backing allocation.
+struct QueryBuffers {
+    seq_hashes: Vec<SequenceHash>,
+    internal_scores: FxHashMap<u32, u32>,
+    active: Vec<u32>,
+}
+
+impl QueryBuffers {
+    const fn new() -> Self {
+        Self {
+            seq_hashes: Vec::new(),
+            internal_scores: FxHashMap::with_hasher(FxBuildHasher),
+            active: Vec::new(),
         }
     }
 }
@@ -531,14 +718,14 @@ impl PositionalIndexer {
     ) -> Option<Vec<u32>> {
         let entry = index.get(&(position, content_hash))?;
         if let Some(workers) = entry.value().workers_if_single() {
-            return Some(workers.iter().copied().collect());
+            return Some(workers.iter().collect());
         }
         // Multi: need rolling hash to disambiguate
         Self::ensure_seq_hash_computed(seq_hashes, position, sequence);
         entry
             .value()
             .get(seq_hashes[position])
-            .map(|workers| workers.iter().copied().collect())
+            .map(|workers| workers.iter().collect())
     }
 
     /// Count workers at a position matching the prefix_hash (no set materialization).
@@ -602,7 +789,7 @@ impl PositionalIndexer {
                 if workers.len() < active.len() {
                     let mut i = 0;
                     while i < active.len() {
-                        if workers.contains(&active[i]) {
+                        if workers.contains(active[i]) {
                             i += 1;
                         } else {
                             internal_scores.insert(active[i], pos as u32);
@@ -632,7 +819,7 @@ impl PositionalIndexer {
             if workers.len() < active.len() {
                 let mut i = 0;
                 while i < active.len() {
-                    if workers.contains(&active[i]) {
+                    if workers.contains(active[i]) {
                         i += 1;
                     } else {
                         internal_scores.insert(active[i], pos as u32);
@@ -652,93 +839,106 @@ impl PositionalIndexer {
         content_hashes: &[ContentHash],
         early_exit: bool,
     ) -> OverlapScores {
+        // Thread-local buffers avoid allocator round-trips on every query.
+        // Each buffer is cleared and reused — the backing allocation persists
+        // across calls, growing to high-water-mark and staying there.
+        thread_local! {
+            static QUERY_BUFS: RefCell<QueryBuffers> = const { RefCell::new(QueryBuffers::new()) };
+        }
+
         let mut scores = OverlapScores::default();
 
         if content_hashes.is_empty() {
             return scores;
         }
 
-        let mut seq_hashes = Vec::with_capacity(content_hashes.len());
+        QUERY_BUFS.with(|bufs| {
+            let mut bufs = bufs.borrow_mut();
+            let QueryBuffers {
+                seq_hashes,
+                internal_scores,
+                active,
+            } = &mut *bufs;
+            seq_hashes.clear();
+            internal_scores.clear();
+            active.clear();
 
-        let Some(initial_workers) = Self::get_workers_lazy(
-            &self.index,
-            0,
-            content_hashes[0],
-            &mut seq_hashes,
-            content_hashes,
-        ) else {
-            return scores;
-        };
+            let Some(initial_workers) = Self::get_workers_lazy(
+                &self.index,
+                0,
+                content_hashes[0],
+                seq_hashes,
+                content_hashes,
+            ) else {
+                return;
+            };
 
-        let mut active = initial_workers;
-        if active.is_empty() {
-            return scores;
-        }
-
-        let len = content_hashes.len();
-        let mut internal_scores: FxHashMap<u32, u32> = FxHashMap::default();
-
-        // Early exit: just record that workers matched at position 0.
-        if early_exit {
-            for &w in &active {
-                internal_scores.insert(w, 1);
+            active.extend(initial_workers);
+            if active.is_empty() {
+                return;
             }
-            scores.scores = internal_scores;
+
+            let len = content_hashes.len();
+
+            // Early exit: just record that workers matched at position 0.
+            if early_exit {
+                for &w in active.iter() {
+                    internal_scores.insert(w, 1);
+                }
+                scores.scores = std::mem::take(internal_scores);
+                for &int_id in scores.scores.keys() {
+                    scores.tree_sizes.insert(
+                        int_id,
+                        self.tree_sizes[int_id as usize].load(Ordering::Relaxed),
+                    );
+                }
+                return;
+            }
+
+            let mut current_pos = 0;
+
+            while current_pos < len - 1 && !active.is_empty() {
+                let next_pos = (current_pos + self.jump_size).min(len - 1);
+
+                let count = Self::count_workers_at(
+                    &self.index,
+                    next_pos,
+                    content_hashes[next_pos],
+                    seq_hashes,
+                    content_hashes,
+                );
+
+                if count == active.len() {
+                    current_pos = next_pos;
+                } else {
+                    Self::linear_scan_drain(
+                        &self.index,
+                        content_hashes,
+                        seq_hashes,
+                        active,
+                        internal_scores,
+                        current_pos + 1,
+                        next_pos + 1,
+                        false,
+                    );
+                    current_pos = next_pos;
+                }
+            }
+
+            let final_score = len as u32;
+            for &w in active.iter() {
+                internal_scores.insert(w, final_score);
+            }
+
+            scores.scores = std::mem::take(internal_scores);
+
             for &int_id in scores.scores.keys() {
                 scores.tree_sizes.insert(
                     int_id,
                     self.tree_sizes[int_id as usize].load(Ordering::Relaxed),
                 );
             }
-            return scores;
-        }
-
-        let mut current_pos = 0;
-
-        while current_pos < len - 1 && !active.is_empty() {
-            let next_pos = (current_pos + self.jump_size).min(len - 1);
-
-            let count = Self::count_workers_at(
-                &self.index,
-                next_pos,
-                content_hashes[next_pos],
-                &mut seq_hashes,
-                content_hashes,
-            );
-
-            // If the worker count at the jump destination matches the active set size,
-            // all active workers are still present — safe to skip intermediate positions.
-            if count == active.len() {
-                current_pos = next_pos;
-            } else {
-                Self::linear_scan_drain(
-                    &self.index,
-                    content_hashes,
-                    &mut seq_hashes,
-                    &mut active,
-                    &mut internal_scores,
-                    current_pos + 1,
-                    next_pos + 1,
-                    false,
-                );
-                current_pos = next_pos;
-            }
-        }
-
-        let final_score = len as u32;
-        for &w in &active {
-            internal_scores.insert(w, final_score);
-        }
-
-        scores.scores = internal_scores;
-
-        // Populate tree_sizes from atomic counters — lock-free array index.
-        for &int_id in scores.scores.keys() {
-            scores.tree_sizes.insert(
-                int_id,
-                self.tree_sizes[int_id as usize].load(Ordering::Relaxed),
-            );
-        }
+        });
 
         scores
     }
@@ -1982,5 +2182,102 @@ mod tests {
                 "worker at depth {depth} has wrong tree_size"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // WorkerBitset unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bitset_inline_basic() {
+        let mut bs = WorkerBitset::new(0);
+        assert!(bs.contains(0));
+        assert!(!bs.contains(1));
+        assert_eq!(bs.len(), 1);
+
+        bs.insert(5);
+        bs.insert(63);
+        assert!(bs.contains(5));
+        assert!(bs.contains(63));
+        assert_eq!(bs.len(), 3);
+
+        bs.remove(5);
+        assert!(!bs.contains(5));
+        assert_eq!(bs.len(), 2);
+
+        bs.remove(0);
+        bs.remove(63);
+        assert!(bs.is_empty());
+    }
+
+    #[test]
+    fn test_bitset_upgrade_to_heap() {
+        let mut bs = WorkerBitset::new(3);
+        bs.insert(10);
+        assert!(matches!(bs, WorkerBitset::Inline(_)));
+
+        // Inserting worker 64 should upgrade to Heap
+        bs.insert(64);
+        assert!(matches!(bs, WorkerBitset::Heap(_)));
+
+        // Original inline bits preserved
+        assert!(bs.contains(3));
+        assert!(bs.contains(10));
+        assert!(bs.contains(64));
+        assert!(!bs.contains(0));
+        assert_eq!(bs.len(), 3);
+    }
+
+    #[test]
+    fn test_bitset_heap_operations() {
+        let mut bs = WorkerBitset::new(100);
+        assert!(matches!(bs, WorkerBitset::Heap(_)));
+        assert!(bs.contains(100));
+        assert_eq!(bs.len(), 1);
+
+        bs.insert(200);
+        bs.insert(0);
+        assert!(bs.contains(200));
+        assert!(bs.contains(0));
+        assert_eq!(bs.len(), 3);
+
+        bs.remove(100);
+        assert!(!bs.contains(100));
+        assert_eq!(bs.len(), 2);
+
+        // Grow heap for a larger worker ID
+        bs.insert(500);
+        assert!(bs.contains(500));
+        assert!(bs.contains(0));
+        assert!(bs.contains(200));
+        assert_eq!(bs.len(), 3);
+    }
+
+    #[test]
+    fn test_bitset_iter_ascending_order() {
+        let mut bs = WorkerBitset::new(10);
+        bs.insert(3);
+        bs.insert(63);
+        bs.insert(0);
+        let ids: Vec<u32> = bs.iter().collect();
+        assert_eq!(ids, vec![0, 3, 10, 63]);
+
+        // Heap variant
+        let mut bs = WorkerBitset::new(100);
+        bs.insert(5);
+        bs.insert(200);
+        bs.insert(64);
+        let ids: Vec<u32> = bs.iter().collect();
+        assert_eq!(ids, vec![5, 64, 100, 200]);
+    }
+
+    #[test]
+    fn test_bitset_default_empty() {
+        let bs = WorkerBitset::default();
+        assert!(bs.is_empty());
+        assert_eq!(bs.len(), 0);
+        assert!(!bs.contains(0));
+        let ids: Vec<u32> = bs.iter().collect();
+        assert!(ids.is_empty());
     }
 }
