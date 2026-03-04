@@ -28,7 +28,7 @@ use std::{
 use criterion::{criterion_group, criterion_main, Criterion};
 use kv_index::{
     compute_content_hash, compute_request_content_hashes, ContentHash, PositionalIndexer,
-    SequenceHash, StoredBlock, StringTree, TokenTree,
+    SequenceHash, StoredBlock, StringTree, TokenTree, WorkerBlockMap,
 };
 use rand::{
     distr::{Alphanumeric, SampleString},
@@ -445,7 +445,11 @@ fn build_populated_indexer(
     let mut all_worker_chunks = Vec::with_capacity(workers.len());
 
     for worker in workers {
-        indexer.apply_stored(worker, &shared_blocks, None).unwrap();
+        let worker_id = indexer.intern_worker(worker);
+        let mut wb = WorkerBlockMap::default();
+        indexer
+            .apply_stored(worker_id, &shared_blocks, None, &mut wb)
+            .unwrap();
 
         let unique_count = blocks_per_worker.saturating_sub(shared_prefix_blocks);
         let unique_chunks = generate_token_chunks(unique_count, block_size);
@@ -461,7 +465,7 @@ fn build_populated_indexer(
         if !unique_blocks.is_empty() {
             let parent = SequenceHash(shared_prefix_blocks as u64);
             indexer
-                .apply_stored(worker, &unique_blocks, Some(parent))
+                .apply_stored(worker_id, &unique_blocks, Some(parent), &mut wb)
                 .unwrap();
         }
 
@@ -496,9 +500,11 @@ macro_rules! bench_indexer_store {
                 for _ in 0..iters {
                     let indexer = PositionalIndexer::new(32);
                     for worker in &workers {
+                        let worker_id = indexer.intern_worker(worker);
+                        let mut wb = WorkerBlockMap::default();
                         let chunks = generate_token_chunks($blocks_per_worker, $block_size);
                         let blocks = chunks_to_stored_blocks(&chunks);
-                        let _ = indexer.apply_stored(black_box(worker), black_box(&blocks), None);
+                        let _ = indexer.apply_stored(black_box(worker_id), black_box(&blocks), None, &mut wb);
                     }
                 }
                 let duration = start.elapsed();
@@ -596,6 +602,8 @@ macro_rules! bench_indexer_concurrent {
 
                             thread::spawn(move || {
                                 let mut rng = thread_rng();
+                                let worker_id = indexer.intern_worker(&worker);
+                                let mut wb = WorkerBlockMap::default();
                                 for i in 0..$ops_per_thread {
                                     if i % 3 == 0 {
                                         // Read: find_matches
@@ -610,8 +618,12 @@ macro_rules! bench_indexer_concurrent {
                                         let new_chunks = generate_token_chunks(4, block_size);
                                         let blocks = chunks_to_stored_blocks(&new_chunks);
                                         let parent = SequenceHash(rng.random_range(1u64..65));
-                                        let _ =
-                                            indexer.apply_stored(&worker, &blocks, Some(parent));
+                                        let _ = indexer.apply_stored(
+                                            worker_id,
+                                            &blocks,
+                                            Some(parent),
+                                            &mut wb,
+                                        );
                                     }
                                 }
                             })
