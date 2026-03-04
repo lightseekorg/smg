@@ -789,10 +789,14 @@ fn build_item_from_row(
     } else {
         row.get(si.col("role"))
     };
-    let content_raw: Option<String> = if si.is_skipped("content") {
-        None
+    let content: Value = if si.is_skipped("content") {
+        Value::Null
     } else {
-        row.get(si.col("content"))
+        let content_raw: Option<String> = row.get(si.col("content"));
+        match content_raw {
+            Some(s) => serde_json::from_str(&s).map_err(ConversationItemStorageError::from)?,
+            None => Value::Null,
+        }
     };
     let status: Option<String> = if si.is_skipped("status") {
         None
@@ -803,11 +807,6 @@ fn build_item_from_row(
         Utc::now()
     } else {
         row.get(si.col("created_at"))
-    };
-
-    let content = match content_raw {
-        Some(s) => serde_json::from_str(&s).map_err(ConversationItemStorageError::from)?,
-        None => Value::Null,
     };
 
     Ok(ConversationItem {
