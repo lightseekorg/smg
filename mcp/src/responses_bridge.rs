@@ -24,6 +24,22 @@ fn resolved_name_for_entry<'a>(
         .unwrap_or_else(|| entry.tool_name())
 }
 
+/// Resolved (name, description, input_schema) triples from MCP tool entries.
+///
+/// This is the shared extraction logic used by the JSON, Chat, and Responses
+/// builder functions so that name-resolution and schema cloning live in one place.
+fn resolved_tool_fields<'a>(
+    entries: &'a [ToolEntry],
+    exposed_names: Option<&'a std::collections::HashMap<QualifiedToolName, String>>,
+) -> impl Iterator<Item = (&'a str, Option<&'a str>, Value)> + 'a {
+    entries.iter().map(move |entry| {
+        let name = resolved_name_for_entry(entry, exposed_names);
+        let description = entry.tool.description.as_deref();
+        let schema = Value::Object((*entry.tool.input_schema).clone());
+        (name, description, schema)
+    })
+}
+
 /// Build function-tool JSON payloads from MCP tool entries.
 ///
 /// These are used when routers expose MCP tools as function tools to upstream model APIs.
@@ -36,14 +52,13 @@ pub fn build_function_tools_json_with_names(
     entries: &[ToolEntry],
     exposed_names: Option<&std::collections::HashMap<QualifiedToolName, String>>,
 ) -> Vec<Value> {
-    entries
-        .iter()
-        .map(|entry| {
+    resolved_tool_fields(entries, exposed_names)
+        .map(|(name, description, parameters)| {
             json!({
                 "type": "function",
-                "name": resolved_name_for_entry(entry, exposed_names),
-                "description": entry.tool.description,
-                "parameters": Value::Object((*entry.tool.input_schema).clone())
+                "name": name,
+                "description": description,
+                "parameters": parameters
             })
         })
         .collect()
@@ -59,14 +74,13 @@ pub fn build_chat_function_tools_with_names(
     entries: &[ToolEntry],
     exposed_names: Option<&std::collections::HashMap<QualifiedToolName, String>>,
 ) -> Vec<Tool> {
-    entries
-        .iter()
-        .map(|entry| Tool {
+    resolved_tool_fields(entries, exposed_names)
+        .map(|(name, description, parameters)| Tool {
             tool_type: "function".to_string(),
             function: Function {
-                name: resolved_name_for_entry(entry, exposed_names).to_string(),
-                description: entry.tool.description.as_ref().map(|d| d.to_string()),
-                parameters: Value::Object((*entry.tool.input_schema).clone()),
+                name: name.to_string(),
+                description: description.map(|d| d.to_string()),
+                parameters,
                 strict: None,
             },
         })
@@ -86,14 +100,13 @@ pub fn build_response_tools_with_names(
     entries: &[ToolEntry],
     exposed_names: Option<&std::collections::HashMap<QualifiedToolName, String>>,
 ) -> Vec<ResponseTool> {
-    entries
-        .iter()
-        .map(|entry| {
+    resolved_tool_fields(entries, exposed_names)
+        .map(|(name, description, parameters)| {
             ResponseTool::Function(FunctionTool {
                 function: Function {
-                    name: resolved_name_for_entry(entry, exposed_names).to_string(),
-                    description: entry.tool.description.as_ref().map(|d| d.to_string()),
-                    parameters: Value::Object((*entry.tool.input_schema).clone()),
+                    name: name.to_string(),
+                    description: description.map(|d| d.to_string()),
+                    parameters,
                     strict: None,
                 },
             })
