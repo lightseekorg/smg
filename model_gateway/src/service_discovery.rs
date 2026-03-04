@@ -858,7 +858,6 @@ mod tests {
                 router_config,
             )),
             inflight_tracker: InFlightRequestTracker::new(),
-            lora_middleware: None,
         })
     }
 

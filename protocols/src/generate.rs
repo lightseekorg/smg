@@ -98,12 +98,24 @@ pub struct GenerateRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_params: Option<HashMap<String, Value>>,
 
-    /// Path to LoRA adapter(s) for model customization
+    /// LoRA adapter to use for this request.
+    ///
+    /// Accepts a plain string (local path or pre-loaded name) or a full
+    /// [`StorageSpec`](crate::lora::StorageSpec) object with `path`, `id`, and
+    /// optional `auth` fields.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lora_path: Option<String>,
+    pub lora_path: Option<crate::lora::StorageSpec>,
 
-    /// LoRA adapter ID (if pre-loaded)
+    /// Pre-loaded LoRA adapter name.
+    ///
+    /// **Deprecated** — use `lora_path` instead.  Pass the adapter name as a
+    /// plain string: `"lora_path": "my-adapter"`.
+    ///
+    /// This field is kept for backward compatibility and is forwarded to the
+    /// engine without middleware processing.  It will be removed in a future
+    /// version.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[deprecated(note = "use `lora_path` instead")]
     pub lora_id: Option<String>,
 
     /// Custom logit processor for advanced sampling control. Must be a serialized instance

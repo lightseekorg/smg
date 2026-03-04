@@ -8,8 +8,11 @@ use tracing::debug;
 use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::core::{
-    circuit_breaker::CircuitBreakerConfig, steps::workflow_data::LocalWorkerWorkflowData,
-    worker::RuntimeType, BasicWorkerBuilder, ConnectionMode, Worker, UNKNOWN_MODEL_ID,
+    circuit_breaker::CircuitBreakerConfig,
+    lora::WorkerLoraState,
+    steps::workflow_data::LocalWorkerWorkflowData,
+    worker::RuntimeType,
+    BasicWorkerBuilder, ConnectionMode, Worker, UNKNOWN_MODEL_ID,
 };
 
 /// Step 3: Create worker object(s) with merged configuration + metadata.
@@ -99,6 +102,15 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
             vec![None] // single worker, no DP
         };
 
+        // Build a LoRA state for each worker if LoRA is configured.
+        let lora_state = app_context.router_config.lora.as_ref().map(|cfg| {
+            Arc::new(WorkerLoraState::new(
+                cfg,
+                app_context.client.clone(),
+                url.clone(),
+            ))
+        });
+
         let workers: Vec<Arc<dyn Worker>> = dp_ranks
             .into_iter()
             .map(|dp| {
@@ -112,7 +124,8 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
                     .health_endpoint(health_endpoint)
                     .bootstrap_port(config.bootstrap_port)
                     .priority(config.priority)
-                    .cost(config.cost);
+                    .cost(config.cost)
+                    .lora_state(lora_state.clone());
 
                 if let Some((rank, size)) = dp {
                     builder = builder.dp_config(rank, size);

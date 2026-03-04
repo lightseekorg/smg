@@ -294,8 +294,12 @@ pub struct ChatCompletionRequest {
     #[serde(default = "default_true")]
     pub skip_special_tokens: bool,
 
-    /// Path to LoRA adapter(s) for model customization
-    pub lora_path: Option<String>,
+    /// LoRA adapter to use for this request.
+    ///
+    /// Accepts either a plain string (local path or pre-loaded name) or a full
+    /// [`StorageSpec`](crate::lora::StorageSpec) object with `path`, `id`, and
+    /// optional `auth` fields.
+    pub lora_path: Option<crate::lora::StorageSpec>,
 
     /// Session parameters for continual prompting
     pub session_params: Option<HashMap<String, Value>>,

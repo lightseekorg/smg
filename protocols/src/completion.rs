@@ -106,7 +106,8 @@ pub struct CompletionRequest {
     pub skip_special_tokens: bool,
 
     /// Path to LoRA adapter(s) for model customization
-    pub lora_path: Option<String>,
+    /// LoRA adapter to use for this request.
+    pub lora_path: Option<crate::lora::StorageSpec>,
 
     /// Session parameters for continual prompting
     pub session_params: Option<HashMap<String, Value>>,
