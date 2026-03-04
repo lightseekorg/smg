@@ -3,15 +3,170 @@
 //! This module provides unified enums that wrap proto types from SGLang, vLLM, and TensorRT-LLM,
 //! allowing the router to work with any backend transparently.
 
+use std::collections::HashMap;
+
 use futures_util::StreamExt;
 use smg_grpc_client::{
-    sglang_proto::{self as sglang, generate_complete::MatchedStop},
+    sglang_proto::{self as sglang, generate_complete::MatchedStop as SglangMatchedStop},
     sglang_scheduler::AbortOnDropStream as SglangStream,
-    trtllm_proto as trtllm,
+    trtllm_proto::{self as trtllm, generate_complete::MatchedStop as TrtllmMatchedStop},
     trtllm_service::AbortOnDropStream as TrtllmStream,
     vllm_engine::AbortOnDropStream as VllmStream,
-    vllm_proto as vllm,
+    vllm_proto::{self as vllm, generate_complete::MatchedStop as VllmMatchedStop},
 };
+
+// =====================
+// Multimodal Data
+// =====================
+
+/// Backend-specific multimodal data produced by the assembly stage.
+///
+/// Each variant carries only the fields its backend needs:
+/// - SGLang: pixel_values + model_specific_tensors + patch-only placeholders
+/// - vLLM: pixel_values + model_specific_tensors + structural placeholders + hashes + field keys
+/// - TRT-LLM: raw image bytes only (preprocessing handled server-side)
+#[derive(Debug)]
+pub enum MultimodalData {
+    Sglang(SglangMultimodalData),
+    Vllm(VllmMultimodalData),
+    Trtllm(TrtllmMultimodalData),
+}
+
+/// SGLang multimodal data: preprocessed tensors with patch-only placeholders.
+#[derive(Debug)]
+pub struct SglangMultimodalData {
+    pub image_data: Vec<Vec<u8>>,
+    pub pixel_values: Vec<u8>,
+    pub pixel_values_shape: Vec<u32>,
+    pub model_specific_tensors: HashMap<String, TensorBytes>,
+    pub im_token_id: Option<u32>,
+    /// Patch-only placeholder offsets aligned 1:1 with vision encoder output.
+    pub mm_placeholders: Vec<(u32, u32)>,
+}
+
+/// vLLM multimodal data: preprocessed tensors with hashing and field layout metadata.
+#[derive(Debug)]
+pub struct VllmMultimodalData {
+    pub pixel_values: Vec<u8>,
+    pub pixel_values_shape: Vec<u32>,
+    pub model_specific_tensors: HashMap<String, TensorBytes>,
+    pub im_token_id: Option<u32>,
+    /// Full structural placeholder offsets (vLLM filters via is_embed mask).
+    pub mm_placeholders: Vec<(u32, u32)>,
+    pub mm_hashes: Vec<String>,
+    pub batched_keys: Vec<String>,
+    pub flat_keys: HashMap<String, String>,
+    /// Tensor keys that should remain on CPU (`keep_on_cpu=True` in vLLM).
+    pub keep_on_cpu_keys: Vec<String>,
+}
+
+/// TRT-LLM multimodal data: raw image bytes only.
+#[derive(Debug)]
+pub struct TrtllmMultimodalData {
+    pub image_data: Vec<Vec<u8>>,
+}
+
+/// Raw tensor bytes with shape and dtype metadata.
+#[derive(Debug, Clone)]
+pub struct TensorBytes {
+    pub data: Vec<u8>,
+    pub shape: Vec<u32>,
+    pub dtype: String,
+}
+
+impl SglangMultimodalData {
+    /// Convert to SGLang proto MultimodalInputs.
+    pub fn into_proto(self) -> sglang::MultimodalInputs {
+        let model_specific_tensors = self
+            .model_specific_tensors
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    sglang::TensorData {
+                        data: v.data,
+                        shape: v.shape,
+                        dtype: v.dtype,
+                    },
+                )
+            })
+            .collect();
+
+        let mm_placeholders = self
+            .mm_placeholders
+            .into_iter()
+            .map(|(offset, length)| sglang::PlaceholderRange { offset, length })
+            .collect();
+
+        sglang::MultimodalInputs {
+            image_urls: vec![],
+            video_urls: vec![],
+            audio_urls: vec![],
+            image_data: self.image_data,
+            video_data: vec![],
+            audio_data: vec![],
+            modalities: vec!["image".to_string()],
+            pixel_values: Some(sglang::TensorData {
+                data: self.pixel_values,
+                shape: self.pixel_values_shape,
+                dtype: "float32".to_string(),
+            }),
+            model_specific_tensors,
+            im_token_id: self.im_token_id,
+            mm_placeholders,
+        }
+    }
+}
+
+impl VllmMultimodalData {
+    /// Convert to vLLM proto MultimodalInputs.
+    pub fn into_proto(self) -> vllm::MultimodalInputs {
+        let model_specific_tensors = self
+            .model_specific_tensors
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    vllm::TensorData {
+                        data: v.data,
+                        shape: v.shape,
+                        dtype: v.dtype,
+                    },
+                )
+            })
+            .collect();
+
+        let mm_placeholders = self
+            .mm_placeholders
+            .into_iter()
+            .map(|(offset, length)| vllm::PlaceholderRange { offset, length })
+            .collect();
+
+        vllm::MultimodalInputs {
+            pixel_values: Some(vllm::TensorData {
+                data: self.pixel_values,
+                shape: self.pixel_values_shape,
+                dtype: "float32".to_string(),
+            }),
+            model_specific_tensors,
+            im_token_id: self.im_token_id,
+            mm_placeholders,
+            mm_hashes: self.mm_hashes,
+            batched_keys: self.batched_keys,
+            flat_keys: self.flat_keys,
+            keep_on_cpu_keys: self.keep_on_cpu_keys,
+        }
+    }
+}
+
+impl TrtllmMultimodalData {
+    /// Convert to TRT-LLM proto MultimodalInput.
+    pub fn into_proto(self) -> trtllm::MultimodalInput {
+        trtllm::MultimodalInput {
+            image_data: self.image_data,
+        }
+    }
+}
 
 // =====================
 // Unified Logprobs Types
@@ -126,6 +281,10 @@ pub enum ProtoGenerateRequest {
 
 impl ProtoGenerateRequest {
     /// Get SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &sglang::GenerateRequest {
         match self {
             Self::Sglang(req) => req,
@@ -134,6 +293,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get mutable SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang_mut(&mut self) -> &mut sglang::GenerateRequest {
         match self {
             Self::Sglang(req) => req,
@@ -142,6 +305,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get vLLM variant (panics if not vLLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm(&self) -> &vllm::GenerateRequest {
         match self {
             Self::Vllm(req) => req,
@@ -150,6 +317,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get mutable vLLM variant (panics if not vLLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm_mut(&mut self) -> &mut vllm::GenerateRequest {
         match self {
             Self::Vllm(req) => req,
@@ -158,6 +329,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get TensorRT-LLM variant (panics if not TensorRT-LLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm(&self) -> &trtllm::GenerateRequest {
         match self {
             Self::Trtllm(req) => req,
@@ -166,6 +341,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get mutable TensorRT-LLM variant (panics if not TensorRT-LLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm_mut(&mut self) -> &mut trtllm::GenerateRequest {
         match self {
             Self::Trtllm(req) => req,
@@ -318,6 +497,10 @@ pub enum ProtoGenerateStreamChunk {
 
 impl ProtoGenerateStreamChunk {
     /// Get SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &sglang::GenerateStreamChunk {
         match self {
             Self::Sglang(chunk) => chunk,
@@ -326,6 +509,10 @@ impl ProtoGenerateStreamChunk {
     }
 
     /// Get vLLM variant (panics if not vLLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm(&self) -> &vllm::GenerateStreamChunk {
         match self {
             Self::Vllm(chunk) => chunk,
@@ -334,6 +521,10 @@ impl ProtoGenerateStreamChunk {
     }
 
     /// Get TensorRT-LLM variant (panics if not TensorRT-LLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm(&self) -> &trtllm::GenerateStreamChunk {
         match self {
             Self::Trtllm(chunk) => chunk,
@@ -444,6 +635,10 @@ pub enum ProtoGenerateComplete {
 
 impl ProtoGenerateComplete {
     /// Get SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &sglang::GenerateComplete {
         match self {
             Self::Sglang(complete) => complete,
@@ -452,6 +647,10 @@ impl ProtoGenerateComplete {
     }
 
     /// Get mutable SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang_mut(&mut self) -> &mut sglang::GenerateComplete {
         match self {
             Self::Sglang(complete) => complete,
@@ -460,6 +659,10 @@ impl ProtoGenerateComplete {
     }
 
     /// Get vLLM variant (panics if not vLLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm(&self) -> &vllm::GenerateComplete {
         match self {
             Self::Vllm(complete) => complete,
@@ -468,6 +671,10 @@ impl ProtoGenerateComplete {
     }
 
     /// Get TensorRT-LLM variant (panics if not TensorRT-LLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm(&self) -> &trtllm::GenerateComplete {
         match self {
             Self::Trtllm(complete) => complete,
@@ -536,28 +743,38 @@ impl ProtoGenerateComplete {
         }
     }
 
-    /// Get matched stop (SGLang only, returns oneof)
-    /// vLLM and TensorRT-LLM don't have matched_stop, returns None
-    pub fn matched_stop(&self) -> Option<&MatchedStop> {
-        match self {
-            Self::Sglang(c) => c.matched_stop.as_ref(),
-            Self::Vllm(_) | Self::Trtllm(_) => None,
-        }
-    }
-
     /// Get matched stop as a JSON value
     ///
-    /// Converts the proto MatchedStop oneof into a serde_json::Value:
+    /// Converts the backend-specific `oneof matched_stop` into a `serde_json::Value`:
     /// - MatchedTokenId → Number
     /// - MatchedStopStr → String
     /// - None → None
     pub fn matched_stop_json(&self) -> Option<serde_json::Value> {
-        self.matched_stop().map(|m| match m {
-            MatchedStop::MatchedTokenId(id) => {
-                serde_json::Value::Number(serde_json::Number::from(*id))
-            }
-            MatchedStop::MatchedStopStr(s) => serde_json::Value::String(s.clone()),
-        })
+        macro_rules! convert {
+            ($oneof:expr, $token_id:path, $stop_str:path) => {
+                $oneof.as_ref().map(|m| match m {
+                    $token_id(id) => serde_json::Value::Number((*id).into()),
+                    $stop_str(s) => serde_json::Value::String(s.clone()),
+                })
+            };
+        }
+        match self {
+            Self::Sglang(c) => convert!(
+                &c.matched_stop,
+                SglangMatchedStop::MatchedTokenId,
+                SglangMatchedStop::MatchedStopStr
+            ),
+            Self::Vllm(c) => convert!(
+                &c.matched_stop,
+                VllmMatchedStop::MatchedTokenId,
+                VllmMatchedStop::MatchedStopStr
+            ),
+            Self::Trtllm(c) => convert!(
+                &c.matched_stop,
+                TrtllmMatchedStop::MatchedTokenId,
+                TrtllmMatchedStop::MatchedStopStr
+            ),
+        }
     }
 
     /// Get output IDs (decode tokens only)

@@ -38,7 +38,7 @@ jobs:
       - name: Check package
         run: twine check --strict grpc_client/python/dist/*
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: grpc-proto-dist
           path: grpc_client/python/dist/
@@ -49,7 +49,7 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: grpc-proto-dist
           path: dist
@@ -65,4 +65,4 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_PROTO }}
         run: |
           pip install twine
-          twine upload dist/* --verbose
+          twine upload dist/* --verbose --skip-existing

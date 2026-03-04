@@ -22,7 +22,7 @@ fn current_timestamp() -> i64 {
 // Rerank API
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate, schemars::JsonSchema)]
 #[validate(schema(function = "validate_rerank_request"))]
 pub struct RerankRequest {
     /// The query text to rank documents against
@@ -95,6 +95,10 @@ fn validate_documents(documents: &[String]) -> Result<(), validator::ValidationE
 }
 
 /// Schema-level validation for cross-field dependencies
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "validator crate requires Result return type"
+)]
 fn validate_rerank_request(req: &RerankRequest) -> Result<(), validator::ValidationError> {
     // Validate top_k if specified
     if let Some(k) = req.top_k {
@@ -119,7 +123,7 @@ impl RerankRequest {
 
 /// Individual rerank result
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RerankResult {
     /// Relevance score for the document
     pub score: f32,
@@ -135,7 +139,7 @@ pub struct RerankResult {
 }
 
 /// Rerank response containing sorted results
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RerankResponse {
     /// Ranked results sorted by score (highest first)
     pub results: Vec<RerankResult>,
@@ -189,7 +193,7 @@ impl RerankResponse {
 
 /// V1 API compatibility format for rerank requests
 /// Matches Python's V1RerankReqInput
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct V1RerankReqInput {
     pub query: String,
     pub documents: Vec<String>,

@@ -1,6 +1,6 @@
 [package]
 name = "smg"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 description = "High-performance model-routing gateway for large-scale LLM deployments"
 license = "Apache-2.0"
@@ -59,7 +59,7 @@ bytemuck = { workspace = true, features = ["derive"] }
 reqwest = { workspace = true, features = ["stream", "blocking", "json", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
-uuid = { workspace = true, features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["serde"] }
 
 # Workspace crates
 openai-protocol = { workspace = true, features = ["axum"] }
@@ -72,7 +72,7 @@ smg-mcp.workspace = true
 kv-index.workspace = true
 smg-data-connector.workspace = true
 llm-multimodal.workspace = true
-smg-wasm.workspace = true
+smg-wasm = { workspace = true, features = ["storage-hooks"] }
 smg-mesh.workspace = true
 smg-grpc-client.workspace = true
 
@@ -112,27 +112,28 @@ arc-swap = "1.7.1"
 bitflags.workspace = true
 once_cell = "1.21.3"
 sha2 = "0.10"
+base64 = "0.22"
+image = { version = "0.25.4", default-features = false }
 wasmtime = { workspace = true }
+tempfile = "3.8"
 
 [build-dependencies]
 chrono = { version = "0.4", features = ["clock"] }
-toml = "0.9"
+toml = "1.0"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 portpicker = "0.1"
-tempfile = "3.8"
 lazy_static = "1.4"
-wasm-encoder = "0.244"
+wasm-encoder = "0.245"
 npyz = { version = "0.8", features = ["npz"] }
 opentelemetry-proto = { version = "0.31", features = ["gen-tonic"] }
 serial_test = "3.0"
 rsa = { version = "0.9", features = ["sha2"] }
 jsonwebtoken = "9.3"
 validator = "0.20.0"
-base64 = "0.22"
 kv-index.workspace = true
 wasmtime-wasi = { workspace = true }
 lru = { workspace = true }

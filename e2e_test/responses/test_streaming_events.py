@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 class TestStreamingEventsLocal:
     """Streaming event tests against local gRPC backend."""
 
-    def test_output_item_event_emitted(self, setup_backend):
+    def test_output_item_event_emitted(self, setup_backend, smg):
         """Test that output_index is zero-based in streaming responses.
 
         Verifies that the first output item has output_index: 0.
@@ -98,6 +99,25 @@ class TestStreamingEventsLocal:
         assert len(output_item_added_events) == len(output_array), (
             "Number of output_item.added events should match output array length"
         )
+
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="Count from 1 to 3",
+                stream=True,
+                max_output_tokens=50,
+            )
+            smg_events = list(smg_resp)
+            assert len(smg_events) > 0
+
+            smg_added = [e for e in smg_events if e.type == "response.output_item.added"]
+            assert len(smg_added) > 0
+            assert smg_added[0].output_index == 0
+
+            smg_completed = [e for e in smg_events if e.type == "response.completed"]
+            assert len(smg_completed) == 1
+            assert smg_completed[0].response.output is not None
 
 
 # =============================================================================
@@ -112,7 +132,7 @@ class TestStreamingEventsLocal:
 class TestStreamingEventsHarmony:
     """Streaming event tests against local gRPC backend with Harmony model."""
 
-    def test_output_item_event_emitted(self, setup_backend):
+    def test_output_item_event_emitted(self, setup_backend, smg):
         """Test that output_index is zero-based in streaming responses.
 
         Verifies that the first output item has output_index: 0.
@@ -182,7 +202,26 @@ class TestStreamingEventsHarmony:
             "Number of output_item.added events should match output array length"
         )
 
-    def test_reasoning_content(self, setup_backend):
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="Count from 1 to 3",
+                stream=True,
+                max_output_tokens=50,
+            )
+            smg_events = list(smg_resp)
+            assert len(smg_events) > 0
+
+            smg_added = [e for e in smg_events if e.type == "response.output_item.added"]
+            assert len(smg_added) > 0
+            assert smg_added[0].output_index == 0
+
+            smg_completed = [e for e in smg_events if e.type == "response.completed"]
+            assert len(smg_completed) == 1
+            assert smg_completed[0].response.output is not None
+
+    def test_reasoning_content(self, setup_backend, smg):
         """Test that reasoning content has correct zero-based output_index.
 
         Specifically tests that reasoning item has output_index: 0
@@ -234,3 +273,24 @@ class TestStreamingEventsHarmony:
         # Check if reasoning items are in output array
         reasoning_items_in_output = [item for item in output_array if item.type == "reasoning"]
         assert len(reasoning_items_in_output) > 0
+
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What is the capital of France? Think step by step.",
+                stream=True,
+                max_output_tokens=200,
+            )
+            smg_events = list(smg_resp)
+            assert len(smg_events) > 0
+
+            smg_added = [e for e in smg_events if e.type == "response.output_item.added"]
+            assert len(smg_added) > 0
+
+            smg_reasoning = [e for e in smg_added if e.item.type == "reasoning"]
+            smg_messages = [e for e in smg_added if e.item.type == "message"]
+            if smg_reasoning:
+                assert smg_reasoning[0].output_index == 0
+            if smg_reasoning and smg_messages:
+                assert smg_messages[0].output_index == 1

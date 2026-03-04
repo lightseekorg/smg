@@ -1,4 +1,4 @@
-use std::{ops::Deref, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -111,14 +111,6 @@ impl Tokenizer {
     /// Convert ID to token string
     pub fn id_to_token(&self, id: u32) -> Option<String> {
         self.0.id_to_token(id)
-    }
-}
-
-impl Deref for Tokenizer {
-    type Target = Arc<dyn traits::Tokenizer>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }
 

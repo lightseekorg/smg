@@ -6,7 +6,8 @@ use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, Wo
 
 use super::discover_metadata::get_server_info;
 use crate::core::{
-    steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode, UNKNOWN_MODEL_ID,
+    steps::workflow_data::{WorkerKind, WorkerWorkflowData},
+    ConnectionMode, UNKNOWN_MODEL_ID,
 };
 
 /// DP (Data Parallel) information for a worker.
@@ -22,12 +23,12 @@ pub async fn get_dp_info(url: &str, api_key: Option<&str>) -> Result<DpInfo, Str
 
     let dp_size = info
         .dp_size
-        .ok_or_else(|| format!("No dp_size in response from {}", url))?;
+        .ok_or_else(|| format!("No dp_size in response from {url}"))?;
 
     let model_id = info
         .model_id
         .filter(|s| !s.is_empty())
-        .or(info.served_model_name.filter(|s| !s.is_empty()))
+        .or_else(|| info.served_model_name.filter(|s| !s.is_empty()))
         .or_else(|| {
             info.model_path
                 .and_then(|path| path.split('/').next_back().map(|s| s.to_string()))
@@ -41,11 +42,15 @@ pub async fn get_dp_info(url: &str, api_key: Option<&str>) -> Result<DpInfo, Str
 pub struct DiscoverDPInfoStep;
 
 #[async_trait]
-impl StepExecutor<LocalWorkerWorkflowData> for DiscoverDPInfoStep {
+impl StepExecutor<WorkerWorkflowData> for DiscoverDPInfoStep {
     async fn execute(
         &self,
-        context: &mut WorkflowContext<LocalWorkerWorkflowData>,
+        context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
+        if context.data.worker_kind != Some(WorkerKind::Local) {
+            return Ok(StepResult::Skip);
+        }
+
         let config = &context.data.config;
         let app_context = context
             .data
@@ -81,7 +86,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverDPInfoStep {
             .await
             .map_err(|e| WorkflowError::StepFailed {
                 step_id: StepId::new("discover_dp_info"),
-                message: format!("Failed to get DP info: {}", e),
+                message: format!("Failed to get DP info: {e}"),
             })?;
 
         debug!(

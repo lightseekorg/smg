@@ -9,12 +9,12 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock as ParkingLotRwLock;
+use parking_lot::RwLock;
 
 use super::core::*;
 
@@ -25,13 +25,13 @@ use super::core::*;
 /// In-memory conversation storage used for development and tests
 #[derive(Default, Clone)]
 pub struct MemoryConversationStorage {
-    inner: Arc<ParkingLotRwLock<HashMap<ConversationId, Conversation>>>,
+    inner: Arc<RwLock<HashMap<ConversationId, Conversation>>>,
 }
 
 impl MemoryConversationStorage {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(ParkingLotRwLock::new(HashMap::new())),
+            inner: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -80,14 +80,21 @@ impl ConversationStorage for MemoryConversationStorage {
 // PART 2: MemoryConversationItemStorage
 // ============================================================================
 
+/// Internal store for conversation items, protected by a single lock to prevent
+/// lock ordering inversions between the three maps.
 #[derive(Default)]
+struct ConversationItemInner {
+    /// All items indexed by ID
+    items: HashMap<ConversationItemId, ConversationItem>,
+    /// Per-conversation sorted links: (timestamp, item_id_str) -> ConversationItemId
+    links: HashMap<ConversationId, BTreeMap<(i64, String), ConversationItemId>>,
+    /// Per-conversation reverse index: item_id_str -> (timestamp, item_id_str)
+    rev_index: HashMap<ConversationId, HashMap<String, (i64, String)>>,
+}
+
+#[derive(Default, Clone)]
 pub struct MemoryConversationItemStorage {
-    items: RwLock<HashMap<ConversationItemId, ConversationItem>>, // item_id -> item
-    #[allow(clippy::type_complexity)]
-    links: RwLock<HashMap<ConversationId, BTreeMap<(i64, String), ConversationItemId>>>,
-    // Per-conversation reverse index for fast after cursor lookup: item_id_str -> (ts, item_id_str)
-    #[allow(clippy::type_complexity)]
-    rev_index: RwLock<HashMap<ConversationId, HashMap<String, (i64, String)>>>,
+    inner: Arc<RwLock<ConversationItemInner>>,
 }
 
 impl MemoryConversationItemStorage {
@@ -116,8 +123,7 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
             status: new_item.status,
             created_at,
         };
-        let mut items = self.items.write().unwrap();
-        items.insert(id.clone(), item.clone());
+        self.inner.write().items.insert(id, item.clone());
         Ok(item)
     }
 
@@ -127,15 +133,33 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         item_id: &ConversationItemId,
         added_at: DateTime<Utc>,
     ) -> ConversationItemResult<()> {
-        {
-            let mut links = self.links.write().unwrap();
-            let entry = links.entry(conversation_id.clone()).or_default();
-            entry.insert((added_at.timestamp(), item_id.0.clone()), item_id.clone());
+        let mut store = self.inner.write();
+        store
+            .links
+            .entry(conversation_id.clone())
+            .or_default()
+            .insert((added_at.timestamp(), item_id.0.clone()), item_id.clone());
+        store
+            .rev_index
+            .entry(conversation_id.clone())
+            .or_default()
+            .insert(item_id.0.clone(), (added_at.timestamp(), item_id.0.clone()));
+        Ok(())
+    }
+
+    async fn link_items(
+        &self,
+        conversation_id: &ConversationId,
+        items: &[(ConversationItemId, DateTime<Utc>)],
+    ) -> ConversationItemResult<()> {
+        let mut store = self.inner.write();
+        let links = store.links.entry(conversation_id.clone()).or_default();
+        for (item_id, added_at) in items {
+            links.insert((added_at.timestamp(), item_id.0.clone()), item_id.clone());
         }
-        {
-            let mut rev = self.rev_index.write().unwrap();
-            let entry = rev.entry(conversation_id.clone()).or_default();
-            entry.insert(item_id.0.clone(), (added_at.timestamp(), item_id.0.clone()));
+        let rev = store.rev_index.entry(conversation_id.clone()).or_default();
+        for (item_id, added_at) in items {
+            rev.insert(item_id.0.clone(), (added_at.timestamp(), item_id.0.clone()));
         }
         Ok(())
     }
@@ -145,32 +169,28 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         conversation_id: &ConversationId,
         params: ListParams,
     ) -> ConversationItemResult<Vec<ConversationItem>> {
-        let links_guard = self.links.read().unwrap();
-        let map = match links_guard.get(conversation_id) {
+        let store = self.inner.read();
+        let map = match store.links.get(conversation_id) {
             Some(m) => m,
             None => return Ok(Vec::new()),
         };
 
-        let mut results: Vec<ConversationItem> = Vec::new();
         let after_key: Option<(i64, String)> = if let Some(after_id) = &params.after {
-            // O(1) lookup via reverse index for this conversation
-            if let Some(conv_idx) = self.rev_index.read().unwrap().get(conversation_id) {
-                conv_idx.get(after_id).cloned()
-            } else {
-                None
-            }
+            store
+                .rev_index
+                .get(conversation_id)
+                .and_then(|idx| idx.get(after_id).cloned())
         } else {
             None
         };
 
         let take = params.limit;
-        let items_guard = self.items.read().unwrap();
+        let mut results: Vec<ConversationItem> = Vec::new();
 
         use std::ops::Bound::{Excluded, Unbounded};
 
-        // Helper to push item if it exists and stop when reaching the limit
         let mut push_item = |key: &ConversationItemId| -> bool {
-            if let Some(it) = items_guard.get(key) {
+            if let Some(it) = store.items.get(key) {
                 results.push(it.clone());
                 if results.len() == take {
                     return true;
@@ -202,7 +222,7 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
                 }
             }
             (SortOrder::Asc, None) => {
-                for ((_ts, _id), item_key) in map.iter() {
+                for ((_ts, _id), item_key) in map {
                     if push_item(item_key) {
                         break;
                     }
@@ -217,8 +237,7 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         &self,
         item_id: &ConversationItemId,
     ) -> ConversationItemResult<Option<ConversationItem>> {
-        let items = self.items.read().unwrap();
-        Ok(items.get(item_id).cloned())
+        Ok(self.inner.read().items.get(item_id).cloned())
     }
 
     async fn is_item_linked(
@@ -226,12 +245,11 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         conversation_id: &ConversationId,
         item_id: &ConversationItemId,
     ) -> ConversationItemResult<bool> {
-        let rev = self.rev_index.read().unwrap();
-        if let Some(conv_idx) = rev.get(conversation_id) {
-            Ok(conv_idx.contains_key(&item_id.0))
-        } else {
-            Ok(false)
-        }
+        let store = self.inner.read();
+        Ok(store
+            .rev_index
+            .get(conversation_id)
+            .is_some_and(|idx| idx.contains_key(&item_id.0)))
     }
 
     async fn delete_item(
@@ -239,20 +257,14 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         conversation_id: &ConversationId,
         item_id: &ConversationItemId,
     ) -> ConversationItemResult<()> {
-        // Get the key from rev_index and remove the entry at the same time
-        let key_to_remove = {
-            let mut rev = self.rev_index.write().unwrap();
-            if let Some(conv_idx) = rev.get_mut(conversation_id) {
-                conv_idx.remove(&item_id.0)
-            } else {
-                None
-            }
-        };
+        let mut store = self.inner.write();
+        let key_to_remove = store
+            .rev_index
+            .get_mut(conversation_id)
+            .and_then(|idx| idx.remove(&item_id.0));
 
-        // If the item was in rev_index, remove it from links as well
         if let Some(key) = key_to_remove {
-            let mut links = self.links.write().unwrap();
-            if let Some(conv_links) = links.get_mut(conversation_id) {
+            if let Some(conv_links) = store.links.get_mut(conversation_id) {
                 conv_links.remove(&key);
             }
         }
@@ -277,18 +289,18 @@ struct InnerStore {
 /// In-memory implementation of response storage
 pub struct MemoryResponseStorage {
     /// Single lock wrapping both maps to prevent deadlocks and ensure atomic updates
-    store: Arc<ParkingLotRwLock<InnerStore>>,
+    store: Arc<RwLock<InnerStore>>,
 }
 
 impl MemoryResponseStorage {
     pub fn new() -> Self {
         Self {
-            store: Arc::new(ParkingLotRwLock::new(InnerStore::default())),
+            store: Arc::new(RwLock::new(InnerStore::default())),
         }
     }
 
     /// Get statistics about the store
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn stats(&self) -> MemoryStoreStats {
         let store = self.store.read();
         MemoryStoreStats {
@@ -375,39 +387,35 @@ impl ResponseStorage for MemoryResponseStorage {
         let mut chain = ResponseChain::new();
         let max_depth = max_depth.unwrap_or(100); // Default max depth to prevent infinite loops
 
-        // Collect all response IDs first
-        let mut response_ids = Vec::new();
+        // Single lock acquisition: walk the chain and collect responses atomically
+        // to prevent concurrent writers from causing silent data loss between reads.
+        let store = self.store.read();
         let mut current_id = Some(response_id.clone());
         let mut depth = 0;
 
-        // Single lock acquisition to collect the chain
-        {
-            let store = self.store.read();
-            while let Some(id) = current_id {
-                if depth >= max_depth {
-                    break;
-                }
+        while let Some(id) = current_id {
+            if depth >= max_depth {
+                break;
+            }
 
-                if let Some(response) = store.responses.get(&id) {
-                    response_ids.push(id);
+            if let Some(response) = store.responses.get(&id) {
+                #[expect(
+                    clippy::assigning_clones,
+                    reason = "false positive: while-let moves out of current_id, making clone_from invalid"
+                )]
+                {
                     current_id = response.previous_response_id.clone();
-                    depth += 1;
-                } else {
-                    break;
                 }
+                chain.add_response(response.clone());
+                depth += 1;
+            } else {
+                break;
             }
         }
+        drop(store);
 
         // Reverse to get chronological order (oldest first)
-        response_ids.reverse();
-
-        // Now collect the actual responses
-        let store = self.store.read();
-        for id in response_ids {
-            if let Some(response) = store.responses.get(&id) {
-                chain.add_response(response.clone());
-            }
-        }
+        chain.responses.reverse();
 
         Ok(chain)
     }
@@ -459,8 +467,8 @@ impl ResponseStorage for MemoryResponseStorage {
 }
 
 /// Statistics for the memory store
+#[cfg(test)]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(super) struct MemoryStoreStats {
     pub response_count: usize,
     pub identifier_count: usize,
@@ -592,14 +600,14 @@ mod tests {
         let mut response = StoredResponse::new(None);
         response.id = ResponseId::from("resp_custom");
         response.input = json!("Input");
-        response.output = json!("Output");
+        response.raw_response = json!({"output": "Output"});
         store.store_response(response.clone()).await.unwrap();
         let retrieved = store
             .get_response(&ResponseId::from("resp_custom"))
             .await
             .unwrap();
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().output, json!("Output"));
+        assert_eq!(retrieved.unwrap().raw_response["output"], json!("Output"));
     }
 
     #[tokio::test]
@@ -609,7 +617,7 @@ mod tests {
         // Store a response
         let mut response = StoredResponse::new(None);
         response.input = json!("Hello");
-        response.output = json!("Hi there!");
+        response.raw_response = json!({"output": "Hi there!"});
         let response_id = store.store_response(response).await.unwrap();
 
         // Retrieve it
@@ -630,17 +638,17 @@ mod tests {
         // Create a chain of responses
         let mut response1 = StoredResponse::new(None);
         response1.input = json!("First");
-        response1.output = json!("First response");
+        response1.raw_response = json!({"output": "First response"});
         let id1 = store.store_response(response1).await.unwrap();
 
         let mut response2 = StoredResponse::new(Some(id1.clone()));
         response2.input = json!("Second");
-        response2.output = json!("Second response");
+        response2.raw_response = json!({"output": "Second response"});
         let id2 = store.store_response(response2).await.unwrap();
 
         let mut response3 = StoredResponse::new(Some(id2.clone()));
         response3.input = json!("Third");
-        response3.output = json!("Third response");
+        response3.raw_response = json!({"output": "Third response"});
         let id3 = store.store_response(response3).await.unwrap();
 
         // Get the chain
@@ -663,19 +671,16 @@ mod tests {
         // Store responses for different users
         let mut response1 = StoredResponse::new(None);
         response1.input = json!("User1 message");
-        response1.output = json!("Response to user1");
         response1.safety_identifier = Some("user1".to_string());
         store.store_response(response1).await.unwrap();
 
         let mut response2 = StoredResponse::new(None);
         response2.input = json!("Another user1 message");
-        response2.output = json!("Another response to user1");
         response2.safety_identifier = Some("user1".to_string());
         store.store_response(response2).await.unwrap();
 
         let mut response3 = StoredResponse::new(None);
         response3.input = json!("User2 message");
-        response3.output = json!("Response to user2");
         response3.safety_identifier = Some("user2".to_string());
         store.store_response(response3).await.unwrap();
 
@@ -717,18 +722,277 @@ mod tests {
 
         let mut response1 = StoredResponse::new(None);
         response1.input = json!("Test1");
-        response1.output = json!("Reply1");
         response1.safety_identifier = Some("user1".to_string());
         store.store_response(response1).await.unwrap();
 
         let mut response2 = StoredResponse::new(None);
         response2.input = json!("Test2");
-        response2.output = json!("Reply2");
         response2.safety_identifier = Some("user2".to_string());
         store.store_response(response2).await.unwrap();
 
         let stats = store.stats();
         assert_eq!(stats.response_count, 2);
         assert_eq!(stats.identifier_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_conversation_item_storage_clone_shares_state() {
+        let store = MemoryConversationItemStorage::new();
+        let clone = store.clone();
+
+        // Write through original
+        let item = store
+            .create_item(make_item("message", Some("user"), json!([])))
+            .await
+            .unwrap();
+
+        // Read through clone — should see the same item
+        let found = clone.get_item(&item.id).await.unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, item.id);
+    }
+
+    // ========================================================================
+    // MemoryConversationStorage Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_conversation_create_generates_id() {
+        let store = MemoryConversationStorage::new();
+        let conv = store
+            .create_conversation(NewConversation::default())
+            .await
+            .expect("create_conversation should succeed");
+        assert!(
+            conv.id.0.starts_with("conv_"),
+            "generated ID should have conv_ prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conversation_create_with_custom_id() {
+        let store = MemoryConversationStorage::new();
+        let input = NewConversation {
+            id: Some(ConversationId::from("conv_my_custom")),
+            metadata: None,
+        };
+        let conv = store
+            .create_conversation(input)
+            .await
+            .expect("create_conversation should succeed");
+        assert_eq!(conv.id.0, "conv_my_custom");
+    }
+
+    #[tokio::test]
+    async fn test_conversation_create_preserves_metadata() {
+        let store = MemoryConversationStorage::new();
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("key".to_string(), json!("value"));
+        metadata.insert("count".to_string(), json!(42));
+
+        let input = NewConversation {
+            id: None,
+            metadata: Some(metadata.clone()),
+        };
+        let conv = store
+            .create_conversation(input)
+            .await
+            .expect("create_conversation should succeed");
+        let stored_metadata = conv.metadata.expect("metadata should be present");
+        assert_eq!(stored_metadata["key"], json!("value"));
+        assert_eq!(stored_metadata["count"], json!(42));
+    }
+
+    #[tokio::test]
+    async fn test_conversation_get_nonexistent_returns_none() {
+        let store = MemoryConversationStorage::new();
+        let result = store
+            .get_conversation(&ConversationId::from("conv_does_not_exist"))
+            .await
+            .expect("get_conversation should succeed");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_conversation_get_returns_stored() {
+        let store = MemoryConversationStorage::new();
+        let conv = store
+            .create_conversation(NewConversation {
+                id: Some(ConversationId::from("conv_stored")),
+                metadata: None,
+            })
+            .await
+            .expect("create_conversation should succeed");
+
+        let retrieved = store
+            .get_conversation(&conv.id)
+            .await
+            .expect("get_conversation should succeed")
+            .expect("conversation should exist");
+        assert_eq!(retrieved.id, conv.id);
+        assert_eq!(retrieved.created_at, conv.created_at);
+    }
+
+    #[tokio::test]
+    async fn test_conversation_update_metadata() {
+        let store = MemoryConversationStorage::new();
+        let conv = store
+            .create_conversation(NewConversation {
+                id: Some(ConversationId::from("conv_update")),
+                metadata: None,
+            })
+            .await
+            .expect("create_conversation should succeed");
+
+        // Update with new metadata
+        let mut new_metadata = serde_json::Map::new();
+        new_metadata.insert("updated".to_string(), json!(true));
+
+        let updated = store
+            .update_conversation(&conv.id, Some(new_metadata))
+            .await
+            .expect("update_conversation should succeed")
+            .expect("conversation should exist for update");
+        let meta = updated
+            .metadata
+            .expect("metadata should be present after update");
+        assert_eq!(meta["updated"], json!(true));
+
+        // Verify the update persists on subsequent get
+        let fetched = store
+            .get_conversation(&conv.id)
+            .await
+            .expect("get_conversation should succeed")
+            .expect("conversation should still exist");
+        let fetched_meta = fetched.metadata.expect("metadata should persist");
+        assert_eq!(fetched_meta["updated"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_conversation_update_nonexistent_returns_none() {
+        let store = MemoryConversationStorage::new();
+        let result = store
+            .update_conversation(&ConversationId::from("conv_ghost"), None)
+            .await
+            .expect("update_conversation should succeed");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_conversation_delete_removes() {
+        let store = MemoryConversationStorage::new();
+        let conv = store
+            .create_conversation(NewConversation {
+                id: Some(ConversationId::from("conv_to_delete")),
+                metadata: None,
+            })
+            .await
+            .expect("create_conversation should succeed");
+
+        let deleted = store
+            .delete_conversation(&conv.id)
+            .await
+            .expect("delete_conversation should succeed");
+        assert!(
+            deleted,
+            "delete should return true for existing conversation"
+        );
+
+        let after = store
+            .get_conversation(&conv.id)
+            .await
+            .expect("get_conversation should succeed");
+        assert!(after.is_none(), "conversation should be gone after delete");
+    }
+
+    #[tokio::test]
+    async fn test_conversation_delete_nonexistent_returns_false() {
+        let store = MemoryConversationStorage::new();
+        let deleted = store
+            .delete_conversation(&ConversationId::from("conv_never_existed"))
+            .await
+            .expect("delete_conversation should succeed");
+        assert!(
+            !deleted,
+            "delete should return false for non-existent conversation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multiple_conversations_coexist() {
+        let store = MemoryConversationStorage::new();
+
+        let conv1 = store
+            .create_conversation(NewConversation {
+                id: Some(ConversationId::from("conv_alpha")),
+                metadata: None,
+            })
+            .await
+            .expect("create conv1 should succeed");
+
+        let conv2 = store
+            .create_conversation(NewConversation {
+                id: Some(ConversationId::from("conv_beta")),
+                metadata: None,
+            })
+            .await
+            .expect("create conv2 should succeed");
+
+        // Both should be retrievable
+        let got1 = store
+            .get_conversation(&conv1.id)
+            .await
+            .expect("get conv1 should succeed")
+            .expect("conv1 should exist");
+        let got2 = store
+            .get_conversation(&conv2.id)
+            .await
+            .expect("get conv2 should succeed")
+            .expect("conv2 should exist");
+
+        assert_eq!(got1.id.0, "conv_alpha");
+        assert_eq!(got2.id.0, "conv_beta");
+
+        // Deleting one doesn't affect the other
+        store
+            .delete_conversation(&conv1.id)
+            .await
+            .expect("delete conv1 should succeed");
+
+        assert!(store
+            .get_conversation(&conv1.id)
+            .await
+            .expect("get should succeed")
+            .is_none());
+        assert!(store
+            .get_conversation(&conv2.id)
+            .await
+            .expect("get should succeed")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_delete_item_unlinks_but_preserves_item() {
+        let store = MemoryConversationItemStorage::new();
+        let conv: ConversationId = "conv_del".into();
+
+        let item = store
+            .create_item(make_item("message", Some("user"), json!([])))
+            .await
+            .unwrap();
+        let t = Utc::now();
+        store.link_item(&conv, &item.id, t).await.unwrap();
+
+        // Item is linked
+        assert!(store.is_item_linked(&conv, &item.id).await.unwrap());
+
+        // Delete (unlink)
+        store.delete_item(&conv, &item.id).await.unwrap();
+
+        // No longer linked
+        assert!(!store.is_item_linked(&conv, &item.id).await.unwrap());
+
+        // But item data itself is still retrievable
+        assert!(store.get_item(&item.id).await.unwrap().is_some());
     }
 }

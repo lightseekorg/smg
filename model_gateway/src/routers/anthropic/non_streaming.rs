@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use openai_protocol::messages::{InputContent, InputMessage, Message, Role};
+use openai_protocol::messages::{ContentBlock, InputContent, InputMessage, Message, Role};
 use smg_mcp::McpToolSession;
 use tracing::warn;
 
@@ -34,11 +34,15 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
     }
 
     // MCP tool loop path
-    let session_id = format!("msg_{}", uuid::Uuid::new_v4());
+    let session_id = format!("msg_{}", uuid::Uuid::now_v7());
     let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
     let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &session_id);
 
+    // Inject MCP tools into the request as regular tools
+    mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session);
+
     let mut all_mcp_calls: Vec<mcp::McpToolCall> = Vec::new();
+    let mut prior_content_blocks: Vec<ContentBlock> = Vec::new();
 
     let mut message = match send_one_request(router, &req_ctx).await {
         Ok(m) => m,
@@ -51,13 +55,19 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
         let result = mcp::IterationResult::from_message(&message);
         match mcp::process_iteration(&result, &session, &req_ctx.model_id).await {
             mcp::ToolLoopAction::Done => {
-                let final_message = mcp::rebuild_response_with_mcp_blocks(message, &all_mcp_calls);
+                let final_message = mcp::rebuild_response_with_mcp_blocks(
+                    message,
+                    &all_mcp_calls,
+                    &prior_content_blocks,
+                );
                 return (StatusCode::OK, Json(final_message)).into_response();
             }
             mcp::ToolLoopAction::Error(msg) => {
                 return error::bad_gateway("mcp_tool_loop_error", msg);
             }
             mcp::ToolLoopAction::Continue(cont) => {
+                // Collect content blocks from this iteration for the final response
+                prior_content_blocks.extend(message.content.clone());
                 all_mcp_calls.extend(cont.mcp_calls);
                 req_ctx.request.messages.push(InputMessage {
                     role: Role::Assistant,
@@ -79,7 +89,8 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
     // Max iterations — check if the last response completed naturally
     let result = mcp::IterationResult::from_message(&message);
     if result.tool_use_blocks.is_empty() {
-        let final_message = mcp::rebuild_response_with_mcp_blocks(message, &all_mcp_calls);
+        let final_message =
+            mcp::rebuild_response_with_mcp_blocks(message, &all_mcp_calls, &prior_content_blocks);
         return (StatusCode::OK, Json(final_message)).into_response();
     }
 
@@ -89,10 +100,7 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
     );
     error::bad_gateway(
         "mcp_max_iterations",
-        format!(
-            "MCP tool loop exceeded maximum iterations ({})",
-            DEFAULT_MAX_ITERATIONS
-        ),
+        format!("MCP tool loop exceeded maximum iterations ({DEFAULT_MAX_ITERATIONS})"),
     )
 }
 
@@ -104,28 +112,20 @@ async fn send_one_request(
     let model_id = &req_ctx.model_id;
     let start_time = Instant::now();
 
-    let selected_worker = worker::select_worker(&router.worker_registry, model_id)?;
     worker::record_router_request(model_id, false);
-    let (url, req_headers) = worker::build_request(&*selected_worker, req_ctx.headers.as_ref());
+    let (url, req_headers) = worker::build_request(&*req_ctx.worker, req_ctx.headers.as_ref());
     let response = worker::send_request(
         &router.http_client,
         &url,
         &req_headers,
         &req_ctx.request,
         router.request_timeout,
-        &*selected_worker,
     )
     .await?;
 
     if !response.status().is_success() {
-        return Err(worker::handle_error_response(
-            response,
-            model_id,
-            start_time,
-            &*selected_worker,
-        )
-        .await);
+        return Err(worker::handle_error_response(response, model_id, start_time).await);
     }
 
-    worker::parse_response(response, model_id, start_time, &*selected_worker).await
+    worker::parse_response(response, model_id, start_time).await
 }

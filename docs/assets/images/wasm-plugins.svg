@@ -158,7 +158,7 @@
   <rect x="630" y="150" width="85" height="26" rx="10" fill="url(#wp-greenGrad)"/>
   <rect x="630" y="168" width="85" height="8" fill="url(#wp-greenGrad)"/>
   <text x="672" y="169" text-anchor="middle" class="wp-label" font-size="10" fill="white">Worker</text>
-  <text x="672" y="195" text-anchor="middle" class="wp-feature">vLLM / SGLang</text>
+  <text x="672" y="195" text-anchor="middle" class="wp-feature">SGLang / vLLM</text>
   <text x="672" y="212" text-anchor="middle" class="wp-feature">LLM Inference</text>
   <text x="672" y="229" text-anchor="middle" class="wp-feature">KV Cache</text>
 

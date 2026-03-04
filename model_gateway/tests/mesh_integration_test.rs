@@ -6,9 +6,8 @@
 use std::sync::Arc;
 
 use smg_mesh::{
-    gossip::NodeStatus, AppState, MembershipState, MeshSyncManager, RateLimitConfig, SKey,
-    StateStores, TreeInsertOp, TreeOperation, WorkerState, GLOBAL_RATE_LIMIT_COUNTER_KEY,
-    GLOBAL_RATE_LIMIT_KEY,
+    gossip::NodeStatus, AppState, MembershipState, MeshSyncManager, RateLimitConfig, StateStores,
+    TreeInsertOp, TreeOperation, WorkerState, GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
 };
 
 /// Create test stores for a node
@@ -105,8 +104,8 @@ async fn test_rate_limit_cluster_consistency() {
 
     for stores in [&stores1, &stores2, &stores3] {
         for (i, &name) in node_names.iter().enumerate() {
-            let key = SKey::new(name.to_string());
-            stores.membership.insert(
+            let key = name.to_string();
+            let _ = stores.membership.insert(
                 key,
                 MembershipState {
                     name: name.to_string(),
@@ -125,9 +124,9 @@ async fn test_rate_limit_cluster_consistency() {
         limit_per_second: 100,
     };
     let serialized = serde_json::to_vec(&config).unwrap();
-    let key = SKey::new(GLOBAL_RATE_LIMIT_KEY.to_string());
+    let key = GLOBAL_RATE_LIMIT_KEY.to_string();
     for stores in [&stores1, &stores2, &stores3] {
-        stores.app.insert(
+        let _ = stores.app.insert(
             key.clone(),
             AppState {
                 key: GLOBAL_RATE_LIMIT_KEY.to_string(),
@@ -158,16 +157,40 @@ async fn test_rate_limit_cluster_consistency() {
     // Simulate counter merging (in real scenario, this happens via gossip)
     // Get counters from each node and merge them into all nodes
     if let Some(counter2) = stores2.rate_limit.get_counter(&test_key) {
-        manager1.apply_remote_rate_limit_counter(test_key.clone(), &counter2);
-        manager3.apply_remote_rate_limit_counter(test_key.clone(), &counter2);
+        manager1.apply_remote_rate_limit_counter_value_with_actor(
+            test_key.clone(),
+            "node2".to_string(),
+            counter2,
+        );
+        manager3.apply_remote_rate_limit_counter_value_with_actor(
+            test_key.clone(),
+            "node2".to_string(),
+            counter2,
+        );
     }
     if let Some(counter3) = stores3.rate_limit.get_counter(&test_key) {
-        manager1.apply_remote_rate_limit_counter(test_key.clone(), &counter3);
-        manager2.apply_remote_rate_limit_counter(test_key.clone(), &counter3);
+        manager1.apply_remote_rate_limit_counter_value_with_actor(
+            test_key.clone(),
+            "node3".to_string(),
+            counter3,
+        );
+        manager2.apply_remote_rate_limit_counter_value_with_actor(
+            test_key.clone(),
+            "node3".to_string(),
+            counter3,
+        );
     }
     if let Some(counter1) = stores1.rate_limit.get_counter(&test_key) {
-        manager2.apply_remote_rate_limit_counter(test_key.clone(), &counter1);
-        manager3.apply_remote_rate_limit_counter(test_key.clone(), &counter1);
+        manager2.apply_remote_rate_limit_counter_value_with_actor(
+            test_key.clone(),
+            "node1".to_string(),
+            counter1,
+        );
+        manager3.apply_remote_rate_limit_counter_value_with_actor(
+            test_key.clone(),
+            "node1".to_string(),
+            counter1,
+        );
     }
 
     // Check aggregated value
@@ -349,8 +372,8 @@ async fn test_rate_limit_window_reset() {
         limit_per_second: 100,
     };
     let serialized = serde_json::to_vec(&config).unwrap();
-    let key = SKey::new(GLOBAL_RATE_LIMIT_KEY.to_string());
-    stores.app.insert(
+    let key = GLOBAL_RATE_LIMIT_KEY.to_string();
+    let _ = stores.app.insert(
         key,
         AppState {
             key: GLOBAL_RATE_LIMIT_KEY.to_string(),

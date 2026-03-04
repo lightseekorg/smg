@@ -4,8 +4,9 @@ use axum::http::StatusCode;
 use openai_protocol::{
     common::{GenerationRequest, ToolChoice, ToolChoiceValue, UsageInfo},
     responses::{
-        ReasoningEffort, ResponseInput, ResponseReasoningParam, ResponseTool, ResponseToolType,
-        ResponsesRequest, ServiceTier, Truncation,
+        CodeInterpreterTool, McpTool, ReasoningEffort, RequireApproval, ResponseInput,
+        ResponseReasoningParam, ResponseTool, ResponsesRequest, ServiceTier, Truncation,
+        WebSearchPreviewTool,
     },
 };
 use smg::{
@@ -81,17 +82,15 @@ async fn test_non_streaming_mcp_minimal_e2e_with_persistence() {
         stream: Some(false),
         temperature: Some(0.2),
         tool_choice: Some(ToolChoice::default()),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
-            function: None,
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
             authorization: None,
             headers: None,
-            server_label: Some("mock".to_string()),
+            server_label: "mock".to_string(),
             server_description: None,
             require_approval: None,
             allowed_tools: None,
-        }]),
+        })]),
         top_logprobs: Some(0),
         top_p: None,
         truncation: Some(Truncation::Disabled),
@@ -311,10 +310,9 @@ fn test_responses_request_creation() {
         stream: Some(false),
         temperature: Some(0.7),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::WebSearchPreview,
-            ..Default::default()
-        }]),
+        tools: Some(vec![ResponseTool::WebSearchPreview(
+            WebSearchPreviewTool::default(),
+        )]),
         top_logprobs: Some(5),
         top_p: Some(0.9),
         truncation: Some(Truncation::Disabled),
@@ -436,6 +434,32 @@ fn test_usage_conversion() {
 }
 
 #[test]
+fn test_harmony_usage_cached_tokens_propagated() {
+    use openai_protocol::responses::InputTokensDetails;
+
+    // Simulate the Harmony path: Usage (not UsageInfo) -> InputTokensDetails via From trait
+    let usage = openai_protocol::common::Usage::from_counts(100, 50).with_cached_tokens(30);
+    let details = usage
+        .prompt_tokens_details
+        .as_ref()
+        .map(InputTokensDetails::from)
+        .expect("input_tokens_details should be Some when cached tokens are set");
+    assert_eq!(details.cached_tokens, 30);
+}
+
+#[test]
+fn test_harmony_usage_no_cached_tokens() {
+    use openai_protocol::responses::InputTokensDetails;
+
+    let usage = openai_protocol::common::Usage::from_counts(100, 50);
+    let details = usage
+        .prompt_tokens_details
+        .as_ref()
+        .map(InputTokensDetails::from);
+    assert!(details.is_none());
+}
+
+#[test]
 fn test_reasoning_param_default() {
     let param = ResponseReasoningParam {
         effort: Some(ReasoningEffort::Medium),
@@ -470,10 +494,9 @@ fn test_json_serialization() {
         stream: Some(true),
         temperature: Some(0.9),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::CodeInterpreter,
-            ..Default::default()
-        }]),
+        tools: Some(vec![ResponseTool::CodeInterpreter(
+            CodeInterpreterTool::default(),
+        )]),
         top_logprobs: Some(10),
         top_p: Some(0.8),
         truncation: Some(Truncation::Auto),
@@ -504,6 +527,7 @@ fn test_json_serialization() {
     assert_eq!(parsed.tools.as_ref().map(|t| t.len()), Some(1));
 }
 
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[tokio::test]
 async fn test_multi_turn_loop_with_mcp() {
     // This test verifies the multi-turn loop functionality:
@@ -572,14 +596,15 @@ async fn test_multi_turn_loop_with_mcp() {
         stream: Some(false),
         temperature: Some(0.7),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
-            server_label: Some("mock".to_string()),
+            authorization: None,
+            headers: None,
+            server_label: "mock".to_string(),
             server_description: Some("Mock MCP server for testing".to_string()),
-            require_approval: Some("never".to_string()),
-            ..Default::default()
-        }]),
+            require_approval: Some(RequireApproval::Never),
+            allowed_tools: None,
+        })]),
         top_logprobs: Some(0),
         top_p: Some(1.0),
         truncation: Some(Truncation::Disabled),
@@ -664,6 +689,7 @@ async fn test_multi_turn_loop_with_mcp() {
     mcp.stop().await;
 }
 
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[tokio::test]
 async fn test_max_tool_calls_limit() {
     // This test verifies that max_tool_calls is respected
@@ -723,12 +749,15 @@ async fn test_max_tool_calls_limit() {
         stream: Some(false),
         temperature: Some(0.7),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
-            server_label: Some("mock".to_string()),
-            ..Default::default()
-        }]),
+            authorization: None,
+            headers: None,
+            server_label: "mock".to_string(),
+            server_description: None,
+            require_approval: None,
+            allowed_tools: None,
+        })]),
         top_logprobs: Some(0),
         top_p: Some(1.0),
         truncation: Some(Truncation::Disabled),
@@ -783,6 +812,11 @@ async fn test_max_tool_calls_limit() {
 
 /// Helper function to set up common test infrastructure for streaming MCP tests
 /// Returns (mcp_server, worker, router, temp_dir)
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn setup_streaming_mcp_test() -> (
     MockMCPServer,
     MockWorker,
@@ -864,6 +898,7 @@ fn parse_sse_events(body: &str) -> Vec<(Option<String>, serde_json::Value)> {
     events
 }
 
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[tokio::test]
 async fn test_streaming_with_mcp_tool_calls() {
     // This test verifies that streaming works with MCP tool calls:
@@ -894,14 +929,15 @@ async fn test_streaming_with_mcp_tool_calls() {
         stream: Some(true), // KEY: Enable streaming
         temperature: Some(0.7),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
-            server_label: Some("mock".to_string()),
+            authorization: None,
+            headers: None,
+            server_label: "mock".to_string(),
             server_description: Some("Mock MCP for streaming test".to_string()),
-            require_approval: Some("never".to_string()),
-            ..Default::default()
-        }]),
+            require_approval: Some(RequireApproval::Never),
+            allowed_tools: None,
+        })]),
         top_logprobs: Some(0),
         top_p: Some(1.0),
         truncation: Some(Truncation::Disabled),
@@ -944,7 +980,7 @@ async fn test_streaming_with_mcp_tool_calls() {
     let body_bytes = to_bytes(response_body, usize::MAX).await.unwrap();
     let body_text = String::from_utf8_lossy(&body_bytes);
 
-    println!("Streaming SSE response:\n{}", body_text);
+    println!("Streaming SSE response:\n{body_text}");
 
     // Parse all SSE events into structured format
     let events = parse_sse_events(&body_text);
@@ -1088,33 +1124,27 @@ async fn test_streaming_with_mcp_tool_calls() {
                 println!("✓ Found response.completed event");
             }
             _ => {
-                println!("  Other event: {}", event_type);
+                println!("  Other event: {event_type}");
             }
         }
 
         if let Some(name) = event_name {
-            println!("  Event name: {}", name);
+            println!("  Event name: {name}");
         }
     }
 
     // Verify key events were present
     println!("\n=== Event Summary ===");
-    println!("MCP list_tools added: {}", found_mcp_list_tools);
-    println!(
-        "MCP list_tools in_progress: {}",
-        found_mcp_list_tools_in_progress
-    );
-    println!(
-        "MCP list_tools completed: {}",
-        found_mcp_list_tools_completed
-    );
-    println!("Response created: {}", found_response_created);
-    println!("MCP call added: {}", found_mcp_call_added);
-    println!("MCP call in_progress: {}", found_mcp_call_in_progress);
-    println!("MCP call arguments delta: {}", found_mcp_call_arguments);
-    println!("MCP call arguments done: {}", found_mcp_call_arguments_done);
-    println!("MCP call done: {}", found_mcp_call_done);
-    println!("Response completed: {}", found_response_completed);
+    println!("MCP list_tools added: {found_mcp_list_tools}");
+    println!("MCP list_tools in_progress: {found_mcp_list_tools_in_progress}");
+    println!("MCP list_tools completed: {found_mcp_list_tools_completed}");
+    println!("Response created: {found_response_created}");
+    println!("MCP call added: {found_mcp_call_added}");
+    println!("MCP call in_progress: {found_mcp_call_in_progress}");
+    println!("MCP call arguments delta: {found_mcp_call_arguments}");
+    println!("MCP call arguments done: {found_mcp_call_arguments_done}");
+    println!("MCP call done: {found_mcp_call_done}");
+    println!("Response completed: {found_response_completed}");
 
     // Assert critical events are present
     assert!(
@@ -1154,6 +1184,7 @@ async fn test_streaming_with_mcp_tool_calls() {
     mcp.stop().await;
 }
 
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[tokio::test]
 async fn test_streaming_multi_turn_with_mcp() {
     // Test streaming with multiple tool call rounds
@@ -1176,12 +1207,15 @@ async fn test_streaming_multi_turn_with_mcp() {
         stream: Some(true),
         temperature: Some(0.8),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
-            server_label: Some("mock".to_string()),
-            ..Default::default()
-        }]),
+            authorization: None,
+            headers: None,
+            server_label: "mock".to_string(),
+            server_description: None,
+            require_approval: None,
+            allowed_tools: None,
+        })]),
         top_logprobs: Some(0),
         top_p: Some(1.0),
         truncation: Some(Truncation::Disabled),
@@ -1205,7 +1239,7 @@ async fn test_streaming_multi_turn_with_mcp() {
     let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body_text = String::from_utf8_lossy(&body_bytes);
 
-    println!("Multi-turn streaming response:\n{}", body_text);
+    println!("Multi-turn streaming response:\n{body_text}");
 
     // Verify streaming completed successfully
     assert!(body_text.contains("data: [DONE]"));
@@ -1216,7 +1250,7 @@ async fn test_streaming_multi_turn_with_mcp() {
         .split("\n\n")
         .filter(|s| !s.trim().is_empty())
         .count();
-    println!("Total events in multi-turn stream: {}", event_count);
+    println!("Total events in multi-turn stream: {event_count}");
 
     assert!(event_count > 0, "Should have received streaming events");
 

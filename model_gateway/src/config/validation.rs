@@ -173,7 +173,16 @@ impl ConfigValidator {
                 balance_rel_threshold,
                 eviction_interval_secs,
                 max_tree_size,
+                block_size,
             } => {
+                if *block_size == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "block_size".to_string(),
+                        value: block_size.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+
                 if !(0.0..=1.0).contains(cache_threshold) {
                     return Err(ConfigError::InvalidValue {
                         field: "cache_threshold".to_string(),
@@ -325,6 +334,14 @@ impl ConfigValidator {
             return Err(ConfigError::InvalidValue {
                 field: "worker_startup_check_interval_secs".to_string(),
                 value: config.worker_startup_check_interval_secs.to_string(),
+                reason: "Must be > 0".to_string(),
+            });
+        }
+
+        if config.load_monitor_interval_secs == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "load_monitor_interval_secs".to_string(),
+                value: config.load_monitor_interval_secs.to_string(),
                 reason: "Must be > 0".to_string(),
             });
         }
@@ -547,7 +564,7 @@ impl ConfigValidator {
         for (idx, ca_cert) in config.ca_certificates.iter().enumerate() {
             if ca_cert.is_empty() {
                 return Err(ConfigError::ValidationFailed {
-                    reason: format!("CA certificate at index {} cannot be empty", idx),
+                    reason: format!("CA certificate at index {idx} cannot be empty"),
                 });
             }
         }
@@ -646,7 +663,7 @@ impl ConfigValidator {
                     return Err(ConfigError::InvalidValue {
                         field: "worker_url".to_string(),
                         value: url.clone(),
-                        reason: format!("Invalid URL format: {}", e),
+                        reason: format!("Invalid URL format: {e}"),
                     });
                 }
             }
@@ -734,6 +751,7 @@ mod tests {
                 balance_rel_threshold: 1.1,
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
+                block_size: 16,
             },
         );
 
@@ -753,6 +771,7 @@ mod tests {
                 balance_rel_threshold: 1.1,
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
+                block_size: 16,
             },
         );
 
@@ -807,6 +826,7 @@ mod tests {
                 balance_rel_threshold: 1.1,
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
+                block_size: 16,
             },
         );
 
@@ -851,6 +871,7 @@ mod tests {
                     balance_rel_threshold: 1.1,
                     eviction_interval_secs: 60,
                     max_tree_size: 1000,
+                    block_size: 16,
                 }),
                 decode_policy: Some(PolicyConfig::PowerOfTwo {
                     load_check_interval_secs: 60,

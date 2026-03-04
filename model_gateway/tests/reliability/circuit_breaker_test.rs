@@ -36,7 +36,7 @@ mod circuit_breaker_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Make requests until we see failures (500) and then circuit breaker opens (503)
         let mut saw_500 = false;
@@ -96,7 +96,7 @@ mod circuit_breaker_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // With circuit breaker disabled, should always see 500 (never 503)
         for _ in 0..5 {
@@ -145,7 +145,7 @@ mod circuit_breaker_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Send enough requests to trigger CB on the failing worker
         // The healthy worker should continue to serve requests
@@ -216,7 +216,7 @@ mod circuit_breaker_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // With retries, requests should succeed by retrying on healthy worker
         let payload = json!({

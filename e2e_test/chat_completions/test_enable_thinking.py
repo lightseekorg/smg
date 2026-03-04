@@ -12,6 +12,7 @@ import logging
 
 import pytest
 import requests
+from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ API_KEY = "not-used"
 class TestEnableThinking:
     """Tests for enable_thinking feature with Qwen3 reasoning parser."""
 
-    def test_chat_completion_with_reasoning(self, setup_backend):
+    def test_chat_completion_with_reasoning(self, setup_backend, smg):
         """Test non-streaming with enable_thinking=True, reasoning_content should not be empty."""
         _, model, client, gateway = setup_backend
 
@@ -55,7 +56,21 @@ class TestEnableThinking:
         assert "reasoning_content" in data["choices"][0]["message"]
         assert data["choices"][0]["message"]["reasoning_content"] is not None
 
-    def test_chat_completion_without_reasoning(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Hello"}],
+                temperature=0,
+                extra_body={
+                    "separate_reasoning": True,
+                    "chat_template_kwargs": {"enable_thinking": True},
+                },
+            )
+            assert len(smg_resp.choices) > 0
+            assert smg_resp.choices[0].message.reasoning_content is not None
+
+    def test_chat_completion_without_reasoning(self, setup_backend, smg):
         """Test non-streaming with enable_thinking=False, reasoning_content should be empty."""
         _, model, client, gateway = setup_backend
 
@@ -81,7 +96,22 @@ class TestEnableThinking:
         if "reasoning_content" in data["choices"][0]["message"]:
             assert data["choices"][0]["message"]["reasoning_content"] is None
 
-    def test_stream_chat_completion_with_reasoning(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Hello"}],
+                temperature=0,
+                extra_body={
+                    "separate_reasoning": True,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+            )
+            assert len(smg_resp.choices) > 0
+            if smg_resp.choices[0].message.reasoning_content is not None:
+                assert smg_resp.choices[0].message.reasoning_content is None
+
+    def test_stream_chat_completion_with_reasoning(self, setup_backend, smg):
         """Test streaming with enable_thinking=True, reasoning_content should not be empty."""
         _, model, client, gateway = setup_backend
 
@@ -121,7 +151,30 @@ class TestEnableThinking:
         assert has_reasoning, "The reasoning content is not included in the stream response"
         assert has_content, "The stream response does not contain normal content"
 
-    def test_stream_chat_completion_without_reasoning(self, setup_backend):
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_has_reasoning = False
+            smg_has_content = False
+            with smg.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Hello"}],
+                temperature=0,
+                stream=True,
+                extra_body={
+                    "separate_reasoning": True,
+                    "chat_template_kwargs": {"enable_thinking": True},
+                },
+            ) as stream:
+                for chunk in stream:
+                    if chunk.choices and len(chunk.choices) > 0:
+                        if chunk.choices[0].delta.reasoning_content:
+                            smg_has_reasoning = True
+                        if chunk.choices[0].delta.content:
+                            smg_has_content = True
+            assert smg_has_reasoning, "SmgClient: reasoning content not in stream response"
+            assert smg_has_content, "SmgClient: stream response has no normal content"
+
+    def test_stream_chat_completion_without_reasoning(self, setup_backend, smg):
         """Test streaming with enable_thinking=False, reasoning_content should be empty."""
         _, model, client, gateway = setup_backend
 
@@ -162,3 +215,28 @@ class TestEnableThinking:
             "The reasoning content should not be included in the stream response"
         )
         assert has_content, "The stream response does not contain normal content"
+
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_has_reasoning = False
+            smg_has_content = False
+            with smg.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Hello"}],
+                temperature=0,
+                stream=True,
+                extra_body={
+                    "separate_reasoning": True,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+            ) as stream:
+                for chunk in stream:
+                    if chunk.choices and len(chunk.choices) > 0:
+                        if chunk.choices[0].delta.reasoning_content:
+                            smg_has_reasoning = True
+                        if chunk.choices[0].delta.content:
+                            smg_has_content = True
+            assert not smg_has_reasoning, (
+                "SmgClient: reasoning content should not be in stream response"
+            )
+            assert smg_has_content, "SmgClient: stream response has no normal content"

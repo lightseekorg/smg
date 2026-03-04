@@ -31,7 +31,7 @@ use openai_protocol::{
 };
 use serde_json::{json, Value};
 use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
-use smg_mcp::{McpToolSession, ResponseFormat, ToolExecutionInput};
+use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, trace, warn};
@@ -47,10 +47,13 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        grpc::common::responses::{
-            build_sse_response, persist_response_if_needed,
-            streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
-            ResponsesContext,
+        grpc::{
+            common::responses::{
+                build_sse_response, persist_response_if_needed,
+                streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
+                ResponsesContext,
+            },
+            utils,
         },
         mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
@@ -80,7 +83,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
     let chat_response = ctx
         .pipeline
         .execute_chat(
-            chat_request.clone(),
+            chat_request,
             params.headers,
             params.model_id,
             ctx.components.clone(),
@@ -99,6 +102,10 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
     let conversation_storage = ctx.conversation_storage.clone();
     let conversation_item_storage = ctx.conversation_item_storage.clone();
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "streaming task is fire-and-forget; client disconnect terminates it"
+    )]
     tokio::spawn(async move {
         if let Err(e) = process_and_transform_sse_stream(
             body,
@@ -111,13 +118,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
         .await
         {
             warn!("Error transforming SSE stream: {}", e);
-            let error_event = json!({
-                "error": {
-                    "message": e,
-                    "type": "stream_error"
-                }
-            });
-            let _ = tx.send(Ok(Bytes::from(format!("data: {}\n\n", error_event))));
+            utils::send_error_sse(&tx, &e, "stream_error");
         }
 
         // Send final [DONE] event
@@ -141,7 +142,7 @@ async fn process_and_transform_sse_stream(
     let mut accumulator = StreamingResponseAccumulator::new(&original_request);
 
     // Create event emitter for OpenAI-compatible streaming
-    let response_id = format!("resp_{}", Uuid::new_v4());
+    let response_id = format!("resp_{}", Uuid::now_v7());
     let model = original_request.model.clone();
     let created_at = chrono::Utc::now().timestamp() as u64;
     let mut event_emitter = ResponseStreamEventEmitter::new(response_id, model, created_at);
@@ -163,7 +164,7 @@ async fn process_and_transform_sse_stream(
 
     // Process stream chunks (each chunk is a complete SSE event)
     while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
+        let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
 
         // Convert chunk to string
         let event_str = String::from_utf8_lossy(&chunk);
@@ -190,7 +191,7 @@ async fn process_and_transform_sse_stream(
                 Err(_) => {
                     // Not a valid chat chunk - might be error event, pass through
                     debug!("Non-chunk SSE event, passing through: {}", event);
-                    if tx.send(Ok(Bytes::from(format!("{}\n\n", event)))).is_err() {
+                    if tx.send(Ok(Bytes::from(format!("{event}\n\n")))).is_err() {
                         return Err("Client disconnected".to_string());
                     }
                 }
@@ -272,8 +273,8 @@ impl StreamingResponseAccumulator {
     fn process_chunk(&mut self, chunk: &ChatCompletionStreamResponse) {
         // Initialize metadata on first chunk
         if self.response_id.is_empty() {
-            self.response_id = chunk.id.clone();
-            self.model = chunk.model.clone();
+            self.response_id.clone_from(&chunk.id);
+            self.model.clone_from(&chunk.model);
             self.created_at = chunk.created as i64;
         }
 
@@ -416,12 +417,12 @@ impl StreamingResponseAccumulator {
 /// This streams each iteration's response to the client while accumulating
 /// to check for tool calls. If tool calls are found, executes them and
 /// continues with the next streaming iteration.
-pub(super) async fn execute_tool_loop_streaming(
+pub(super) fn execute_tool_loop_streaming(
     ctx: &ResponsesContext,
     current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
-    mcp_servers: Vec<(String, String)>,
+    mcp_servers: Vec<McpServerBinding>,
 ) -> Response {
     // Create SSE channel for client
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
@@ -431,6 +432,10 @@ pub(super) async fn execute_tool_loop_streaming(
     let original_request_clone = original_request.clone();
 
     // Spawn background task for tool loop
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "streaming task is fire-and-forget; client disconnect terminates it"
+    )]
     tokio::spawn(async move {
         let result = execute_tool_loop_streaming_internal(
             &ctx_clone,
@@ -444,13 +449,7 @@ pub(super) async fn execute_tool_loop_streaming(
 
         if let Err(e) = result {
             warn!("Streaming tool loop error: {}", e);
-            let error_event = json!({
-                "error": {
-                    "message": e,
-                    "type": "tool_loop_error"
-                }
-            });
-            let _ = tx.send(Ok(Bytes::from(format!("data: {}\n\n", error_event))));
+            utils::send_error_sse(&tx, &e, "tool_loop_error");
         }
 
         // Send [DONE]
@@ -461,10 +460,14 @@ pub(super) async fn execute_tool_loop_streaming(
     let stream = UnboundedReceiverStream::new(rx);
     let body = Body::from_stream(stream);
 
+    #[expect(
+        clippy::expect_used,
+        reason = "Response::builder with valid status and no invalid headers is infallible"
+    )]
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .body(body)
-        .unwrap();
+        .expect("infallible: valid status code, no invalid headers");
 
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -488,25 +491,25 @@ async fn execute_tool_loop_streaming_internal(
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
-    mcp_servers: Vec<(String, String)>,
+    mcp_servers: Vec<McpServerBinding>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
     let mut state = ToolLoopState::new(original_request.input.clone());
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
     // Generate response ID first so we can use it for both emitter and session
-    let response_id = format!("resp_{}", Uuid::new_v4());
+    let response_id = format!("resp_{}", Uuid::now_v7());
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &response_id);
 
     // Create response event emitter
-    let model = current_request.model.clone();
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
-    let mut emitter = ResponseStreamEventEmitter::new(response_id, model.clone(), created_at);
+    let mut emitter =
+        ResponseStreamEventEmitter::new(response_id, current_request.model.clone(), created_at);
     emitter.set_original_request(original_request.clone());
 
     // Emit initial response.created and response.in_progress events
@@ -529,12 +532,11 @@ async fn execute_tool_loop_streaming_internal(
         state.iteration += 1;
 
         // Record tool loop iteration metric
-        Metrics::record_mcp_tool_iteration(&model);
+        Metrics::record_mcp_tool_iteration(&current_request.model);
 
         if state.iteration > DEFAULT_MAX_ITERATIONS {
             return Err(format!(
-                "Tool loop exceeded maximum iterations ({})",
-                DEFAULT_MAX_ITERATIONS
+                "Tool loop exceeded maximum iterations ({DEFAULT_MAX_ITERATIONS})"
             ));
         }
 
@@ -542,17 +544,17 @@ async fn execute_tool_loop_streaming_internal(
 
         // Emit mcp_list_tools as first output item (only once, on first iteration)
         if !mcp_list_tools_emitted {
-            for (label, key) in session.mcp_servers().iter() {
-                let tools_for_server = session.list_tools_for_server(key);
+            for binding in session.mcp_servers() {
+                let tools_for_server = session.list_tools_for_server(&binding.server_key);
 
-                emitter.emit_mcp_list_tools_sequence(label, &tools_for_server, &tx)?;
+                emitter.emit_mcp_list_tools_sequence(&binding.label, &tools_for_server, &tx)?;
             }
             mcp_list_tools_emitted = true;
         }
 
         // Convert to chat request
         let mut chat_request = conversions::responses_to_chat(&current_request)
-            .map_err(|e| format!("Failed to convert request: {}", e))?;
+            .map_err(|e| format!("Failed to convert request: {e}"))?;
 
         // Prepare tools and tool_choice for this iteration (same logic as non-streaming)
         prepare_chat_tools_and_choice(&mut chat_request, &mcp_chat_tools, state.iteration);
@@ -769,12 +771,12 @@ async fn execute_tool_loop_streaming_internal(
 
                 // Record MCP tool metrics
                 Metrics::record_mcp_tool_duration(
-                    &model,
+                    &current_request.model,
                     &tool_output.tool_name,
                     tool_output.duration,
                 );
                 Metrics::record_mcp_tool_call(
-                    &model,
+                    &current_request.model,
                     &tool_output.tool_name,
                     if success {
                         metrics_labels::RESULT_SUCCESS
@@ -862,7 +864,7 @@ async fn execute_tool_loop_streaming_internal(
             }
 
             // Build next request with conversation history
-            current_request = build_next_request(&state, &current_request);
+            current_request = build_next_request(&state, current_request);
 
             continue;
         }
@@ -913,7 +915,7 @@ async fn convert_and_accumulate_stream(
     let mut stream = body.into_data_stream();
 
     while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
+        let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
 
         // Parse chunk
         let event_str = String::from_utf8_lossy(&chunk);
@@ -964,10 +966,10 @@ impl ChatResponseAccumulator {
 
     fn process_chunk(&mut self, chunk: &ChatCompletionStreamResponse) {
         if !chunk.id.is_empty() {
-            self.id = chunk.id.clone();
+            self.id.clone_from(&chunk.id);
         }
         if !chunk.model.is_empty() {
-            self.model = chunk.model.clone();
+            self.model.clone_from(&chunk.model);
         }
 
         if let Some(choice) = chunk.choices.first() {
@@ -997,11 +999,11 @@ impl ChatResponseAccumulator {
                     });
 
                     if let Some(id) = &delta.id {
-                        entry.id = id.clone();
+                        entry.id.clone_from(id);
                     }
                     if let Some(function) = &delta.function {
                         if let Some(name) = &function.name {
-                            entry.function.name = name.clone();
+                            entry.function.name.clone_from(name);
                         }
                         if let Some(args) = &function.arguments {
                             if let Some(ref mut existing_args) = entry.function.arguments {

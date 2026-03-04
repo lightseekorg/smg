@@ -122,6 +122,7 @@ impl RouterConfigBuilder {
             balance_rel_threshold,
             eviction_interval_secs,
             max_tree_size,
+            block_size: 16,
         };
         self
     }
@@ -179,6 +180,11 @@ impl RouterConfigBuilder {
 
     pub fn worker_startup_check_interval_secs(mut self, interval: u64) -> Self {
         self.config.worker_startup_check_interval_secs = interval;
+        self
+    }
+
+    pub fn load_monitor_interval_secs(mut self, interval: u64) -> Self {
+        self.config.load_monitor_interval_secs = interval;
         self
     }
 
@@ -311,7 +317,7 @@ impl RouterConfigBuilder {
     pub fn disable_trace(mut self) -> Self {
         self.config.trace_config = Some(TraceConfig {
             enable_trace: false,
-            otlp_traces_endpoint: "".to_string(),
+            otlp_traces_endpoint: String::new(),
         });
         self
     }
@@ -350,6 +356,11 @@ impl RouterConfigBuilder {
 
     pub fn enable_wasm(mut self, enable: bool) -> Self {
         self.config.enable_wasm = enable;
+        self
+    }
+
+    pub fn maybe_storage_hook_wasm_path(mut self, path: Option<&str>) -> Self {
+        self.config.storage_hook_wasm_path = path.map(|p| p.to_string());
         self
     }
 
@@ -668,13 +679,10 @@ impl RouterConfigBuilder {
         match (&self.client_cert_path, &self.client_key_path) {
             (Some(cert_path), Some(key_path)) => {
                 let cert = std::fs::read(cert_path).map_err(|e| ConfigError::ValidationFailed {
-                    reason: format!(
-                        "Failed to read client certificate from {}: {}",
-                        cert_path, e
-                    ),
+                    reason: format!("Failed to read client certificate from {cert_path}: {e}"),
                 })?;
                 let key = std::fs::read(key_path).map_err(|e| ConfigError::ValidationFailed {
-                    reason: format!("Failed to read client key from {}: {}", key_path, e),
+                    reason: format!("Failed to read client key from {key_path}: {e}"),
                 })?;
 
                 // Combine cert and key into single PEM for reqwest::Identity
@@ -706,7 +714,7 @@ impl RouterConfigBuilder {
         // Read CA certificates
         for path in &self.ca_cert_paths {
             let cert = std::fs::read(path).map_err(|e| ConfigError::ValidationFailed {
-                reason: format!("Failed to read CA certificate from {}: {}", path, e),
+                reason: format!("Failed to read CA certificate from {path}: {e}"),
             })?;
             self.config.ca_certificates.push(cert);
         }
@@ -719,13 +727,10 @@ impl RouterConfigBuilder {
         match (&self.server_cert_path, &self.server_key_path) {
             (Some(cert_path), Some(key_path)) => {
                 let cert = std::fs::read(cert_path).map_err(|e| ConfigError::ValidationFailed {
-                    reason: format!(
-                        "Failed to read server certificate from {}: {}",
-                        cert_path, e
-                    ),
+                    reason: format!("Failed to read server certificate from {cert_path}: {e}"),
                 })?;
                 let key = std::fs::read(key_path).map_err(|e| ConfigError::ValidationFailed {
-                    reason: format!("Failed to read server key from {}: {}", key_path, e),
+                    reason: format!("Failed to read server key from {key_path}: {e}"),
                 })?;
                 self.config.server_cert = Some(cert);
                 self.config.server_key = Some(key);
@@ -746,12 +751,12 @@ impl RouterConfigBuilder {
         if let Some(mcp_config_path) = &self.mcp_config_path {
             let contents = std::fs::read_to_string(mcp_config_path).map_err(|e| {
                 ConfigError::ValidationFailed {
-                    reason: format!("Failed to read MCP config from {}: {}", mcp_config_path, e),
+                    reason: format!("Failed to read MCP config from {mcp_config_path}: {e}"),
                 }
             })?;
             let mcp_config: McpConfig =
                 serde_yaml::from_str(&contents).map_err(|e| ConfigError::ValidationFailed {
-                    reason: format!("Failed to parse MCP config from {}: {}", mcp_config_path, e),
+                    reason: format!("Failed to parse MCP config from {mcp_config_path}: {e}"),
                 })?;
             self.config.mcp_config = Some(mcp_config);
         }

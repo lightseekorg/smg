@@ -15,7 +15,7 @@ on:
         default: 'all'
 
 concurrency:
-  group: nightly-benchmark
+  group: nightly-benchmark-${{ github.event_name }}
   cancel-in-progress: false
 
 permissions:
@@ -25,6 +25,8 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
   GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.3
+  # Fast test mode for PR runs; full benchmark for nightly / manual dispatch
+  BENCH_TEST_MODE: ${{ github.event_name == 'pull_request' && '1' || '0' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -61,7 +63,7 @@ jobs:
         run: bash scripts/ci_build_wheel.sh
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: smg-wheel
           path: bindings/python/dist/*.whl
@@ -92,7 +94,7 @@ jobs:
           - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bSingle }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false }
-          - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false }
+          - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false }
 
     steps:
       - name: Check filters
@@ -127,7 +129,7 @@ jobs:
 
       - name: Download wheel artifact
         if: steps.filter.outputs.skip != 'true'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: smg-wheel
           path: wheel/
@@ -168,7 +170,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always() && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-${{ matrix.model.slug }}-single-${{ matrix.variant.id }}-${{ github.run_id }}
           path: nightly_*/
@@ -199,7 +201,7 @@ jobs:
           - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bMulti }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
-          - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
+          - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
 
     steps:
       - name: Check filters
@@ -234,7 +236,7 @@ jobs:
 
       - name: Download wheel artifact
         if: steps.filter.outputs.skip != 'true'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: smg-wheel
           path: wheel/
@@ -275,7 +277,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always() && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-${{ matrix.model.slug }}-multi-${{ matrix.variant.id }}-${{ github.run_id }}
           path: nightly_*/
@@ -304,7 +306,7 @@ jobs:
           - { id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8, slug: meta-llama-Llama-4-Maverick-17B-128E-Instruct-FP8, test_class: TestNightlyLlama4MaverickSingle }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
-          - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
+          - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
 
     steps:
       - name: Check filters
@@ -345,7 +347,7 @@ jobs:
 
       - name: Download wheel artifact
         if: steps.filter.outputs.skip != 'true'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: smg-wheel
           path: wheel/
@@ -385,7 +387,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always() && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-${{ matrix.model.slug }}-single-${{ matrix.variant.id }}-${{ github.run_id }}
           path: nightly_*/
@@ -413,7 +415,7 @@ jobs:
   #         - { id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8, slug: meta-llama-Llama-4-Maverick-17B-128E-Instruct-FP8, test_class: TestNightlyLlama4MaverickMulti }
   #       variant:
   #         - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
-  #         - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
+  #         - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
   #   # tp=8, keep disabled for nightly
 
   # ---------------------------------------------------------------------------
@@ -431,7 +433,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download all benchmark results
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: nightly-*
           merge-multiple: true
@@ -444,7 +446,7 @@ jobs:
 
       - name: Upload comparison charts
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-comparison-charts-${{ github.run_id }}
           path: nightly_charts/

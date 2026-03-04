@@ -12,6 +12,10 @@ use super::{
     worker::ProviderType,
 };
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if passes &T"
+)]
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }
@@ -38,7 +42,7 @@ fn default_model_type() -> ModelType {
 /// assert!(card.model_type.supports_vision());
 /// assert!(card.provider.is_none()); // Local model, no external provider
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelCard {
     // === Identity ===
     /// Primary model ID (e.g., "meta-llama/Llama-3.1-8B-Instruct")
@@ -293,7 +297,7 @@ impl ModelCard {
         self.id2label
             .get(&class_idx)
             .cloned()
-            .unwrap_or_else(|| format!("LABEL_{}", class_idx))
+            .unwrap_or_else(|| format!("LABEL_{class_idx}"))
     }
 }
 

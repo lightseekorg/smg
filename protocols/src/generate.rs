@@ -14,7 +14,7 @@ use crate::validated::Normalizable;
 // SGLang Generate API (native format)
 // ============================================================================
 
-#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, Serialize, Deserialize, Validate, schemars::JsonSchema)]
 #[validate(schema(function = "validate_generate_request"))]
 pub struct GenerateRequest {
     /// Text input - SGLang native format
@@ -259,7 +259,7 @@ impl GenerationRequest for GenerateRequest {
 ///   {"text": "...", "output_ids": [...], "meta_info": {...}}
 /// ]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GenerateResponse {
     pub text: String,
     pub output_ids: Vec<u32>,
@@ -268,7 +268,7 @@ pub struct GenerateResponse {
 
 /// Metadata for a single generate completion
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GenerateMetaInfo {
     pub id: String,
     pub finish_reason: GenerateFinishReason,
@@ -283,7 +283,7 @@ pub struct GenerateMetaInfo {
 }
 
 /// Finish reason for generate endpoint
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum GenerateFinishReason {
     Length {
@@ -298,7 +298,7 @@ pub enum GenerateFinishReason {
     Other(Value),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum GenerateFinishType {
     Length,

@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn test_empty_url_handling() {
         let error1 = WorkerError::HealthCheckFailed {
-            url: "".to_string(),
+            url: String::new(),
             reason: "No connection".to_string(),
         };
         assert_eq!(
@@ -136,14 +136,12 @@ mod tests {
         );
 
         let error2 = WorkerError::NetworkError {
-            url: "".to_string(),
+            url: String::new(),
             error: "DNS failure".to_string(),
         };
         assert_eq!(error2.to_string(), "Network error for worker : DNS failure");
 
-        let error3 = WorkerError::WorkerNotFound {
-            url: "".to_string(),
-        };
+        let error3 = WorkerError::WorkerNotFound { url: String::new() };
         assert_eq!(error3.to_string(), "Worker not found: ");
     }
 

@@ -41,7 +41,7 @@ impl ChatCompletionResponseBuilder {
     ///
     /// This populates the model field from the request.
     pub fn copy_from_request(mut self, request: &ChatCompletionRequest) -> Self {
-        self.model = request.model.clone();
+        self.model.clone_from(&request.model);
         self
     }
 
@@ -145,6 +145,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 20,
             total_tokens: 30,
+            prompt_tokens_details: None,
             completion_tokens_details: None,
         };
 

@@ -8,7 +8,7 @@ use wfaas::{
     StepExecutor, StepResult, WorkflowContext, WorkflowData, WorkflowError, WorkflowResult,
 };
 
-use crate::core::{steps::workflow_data::WorkerRegistrationData, Worker};
+use crate::core::{steps::workflow_data::WorkerRegistrationData, ConnectionMode, Worker};
 
 /// Unified step to update policy registry for registered workers.
 ///
@@ -18,7 +18,7 @@ pub struct UpdatePoliciesStep;
 
 impl UpdatePoliciesStep {
     /// Check for conflicts between prefill and decode worker configurations for a model.
-    fn check_worker_conflicts(&self, model_id: &str, workers: &[Arc<dyn Worker>]) {
+    fn check_worker_conflicts(model_id: &str, workers: &[Arc<dyn Worker>]) {
         let prefill_workers: Vec<_> = workers
             .iter()
             .filter(|w| {
@@ -106,7 +106,7 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for UpdatePolicie
         // Track unique model IDs we've updated policies for
         let mut updated_models = Vec::new();
 
-        for worker in workers.iter() {
+        for worker in workers {
             let model_id = worker.model_id().to_string();
 
             // Notify policy registry
@@ -118,12 +118,23 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for UpdatePolicie
             let all_workers = app_context.worker_registry.get_by_model(&model_id);
 
             // Check for configuration conflicts between prefill and decode
-            self.check_worker_conflicts(&model_id, &all_workers);
+            Self::check_worker_conflicts(&model_id, &all_workers);
             if let Some(policy) = app_context.policy_registry.get_policy(&model_id) {
                 if policy.name() == "cache_aware" {
                     app_context
                         .policy_registry
                         .init_cache_aware_policy(&model_id, &all_workers);
+                }
+            }
+
+            // Start KV event subscription for gRPC workers with cache_aware policy
+            if let Some(ref monitor) = app_context.kv_event_monitor {
+                if let Some(policy) = app_context.policy_registry.get_policy(&model_id) {
+                    if policy.name() == "cache_aware"
+                        && *worker.connection_mode() == ConnectionMode::Grpc
+                    {
+                        monitor.on_worker_added(worker).await;
+                    }
                 }
             }
 

@@ -19,6 +19,7 @@ use openai_protocol::{
     },
     UNKNOWN_MODEL_ID,
 };
+use tracing::warn;
 
 use crate::routers::grpc::common::responses::utils::extract_tools_from_response_tools;
 
@@ -143,6 +144,14 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                             tool_call_id: call_id.clone(),
                         });
                     }
+                    ResponseInputOutputItem::McpApprovalResponse { .. }
+                    | ResponseInputOutputItem::McpApprovalRequest { .. } => {
+                        warn!(
+                            function = "responses_to_chat",
+                            "Approval item reached chat conversion"
+                        );
+                        return Err("Unsupported input item type".to_string());
+                    }
                 }
             }
         }
@@ -153,11 +162,9 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
         return Err("Request must contain at least one message".to_string());
     }
 
-    // 3. Extract function tools from ResponseTools
-    // Only function tools are extracted here (include_mcp: false).
-    // MCP tools are merged later by the tool loop (see tool_loop.rs:prepare_chat_tools_and_choice)
-    // before the chat pipeline, where tool_choice constraints are applied to ALL tools combined.
-    let function_tools = extract_tools_from_response_tools(req.tools.as_deref(), false);
+    // 3. Extract function tools from ResponseTools.
+    // MCP tools are merged later by the tool loop (see tool_loop.rs:prepare_chat_tools_and_choice).
+    let function_tools = extract_tools_from_response_tools(req.tools.as_deref());
     let tools = if function_tools.is_empty() {
         None
     } else {
@@ -190,7 +197,7 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
         skip_special_tokens: true,
         tools,
         tool_choice: req.tool_choice.clone(),
-        response_format: map_text_to_response_format(&req.text),
+        response_format: map_text_to_response_format(req.text.as_ref()),
         ..Default::default()
     })
 }
@@ -202,7 +209,7 @@ fn extract_text_from_content(content: &[ResponseContentPart]) -> String {
         .filter_map(|part| match part {
             ResponseContentPart::InputText { text } => Some(text.as_str()),
             ResponseContentPart::OutputText { text, .. } => Some(text.as_str()),
-            _ => None,
+            ResponseContentPart::Unknown => None,
         })
         .collect::<Vec<_>>()
         .join("")
@@ -239,8 +246,8 @@ fn role_to_chat_message(role: &str, text: String) -> ChatMessage {
 ///
 /// Converts the structured output configuration from the Responses API format
 /// to the Chat API format for non-Harmony models.
-fn map_text_to_response_format(text: &Option<TextConfig>) -> Option<ResponseFormat> {
-    let text_config = text.as_ref()?;
+fn map_text_to_response_format(text: Option<&TextConfig>) -> Option<ResponseFormat> {
+    let text_config = text?;
     let format = text_config.format.as_ref()?;
 
     match format {
@@ -415,7 +422,7 @@ mod tests {
     #[test]
     fn test_empty_input_error() {
         let req = ResponsesRequest {
-            input: ResponseInput::Text("".to_string()),
+            input: ResponseInput::Text(String::new()),
             ..Default::default()
         };
 

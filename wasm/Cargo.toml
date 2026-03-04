@@ -1,6 +1,6 @@
 [package]
 name = "smg-wasm"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "WebAssembly runtime and module management for Shepherd Model Gateway"
 license = "Apache-2.0"
@@ -15,17 +15,24 @@ categories = ["wasm", "web-programming"]
 [lib]
 name = "smg_wasm"
 
+[features]
+default = []
+storage-hooks = ["dep:smg-data-connector", "dep:async-trait", "dep:serde_json"]
+
 [dependencies]
 async-channel = "2.5"
+async-trait = { workspace = true, optional = true }
 axum = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 lru = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, optional = true }
 sha2 = "0.10"
+smg-data-connector = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt-multi-thread", "time"] }
 tracing = { workspace = true }
-uuid = { workspace = true, features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["serde"] }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 

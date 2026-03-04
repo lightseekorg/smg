@@ -185,7 +185,7 @@ pub fn stack_batch(tensors: &[Array3<f32>]) -> Result<Array4<f32>> {
     for tensor in tensors.iter().skip(1) {
         if tensor.shape() != shape {
             return Err(TransformError::InvalidShape {
-                expected: format!("[{}, {}, {}]", c, h, w),
+                expected: format!("[{c}, {h}, {w}]"),
                 actual: tensor.shape().to_vec(),
             });
         }
@@ -399,7 +399,7 @@ mod tests {
         normalize(&mut tensor, &mean, &std);
 
         // (0.5 - 0.5) / 0.5 = 0.0
-        for val in tensor.iter() {
+        for val in &tensor {
             assert!(val.abs() < 1e-6);
         }
     }
@@ -409,7 +409,7 @@ mod tests {
         let mut tensor = Array3::<f32>::from_elem((3, 2, 2), 255.0);
         rescale(&mut tensor, 1.0 / 255.0);
 
-        for val in tensor.iter() {
+        for val in &tensor {
             assert!((val - 1.0).abs() < 1e-6);
         }
     }

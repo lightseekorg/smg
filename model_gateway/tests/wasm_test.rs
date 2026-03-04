@@ -25,8 +25,9 @@ use smg::{
     server::{build_app, AppState},
     wasm::{
         module::{
-            WasmModuleAddRequest, WasmModuleAddResponse, WasmModuleAttachPoint,
-            WasmModuleDescriptor, WasmModuleListResponse, WasmModuleType,
+            MiddlewareAttachPoint, WasmModuleAddRequest, WasmModuleAddResponse,
+            WasmModuleAddResult, WasmModuleAttachPoint, WasmModuleDescriptor,
+            WasmModuleListResponse, WasmModuleType,
         },
         module_manager::WasmModuleManager,
     },
@@ -39,14 +40,13 @@ use tokio::fs;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[expect(clippy::expect_used)]
 /// Create a test AppContext with WASM manager initialized
 async fn create_test_context_with_wasm() -> Arc<AppContext> {
     let config = RouterConfig::default();
 
     // Initialize WASM manager first
-    let wasm_manager = Arc::new(
-        WasmModuleManager::with_default_config().expect("Failed to create WASM module manager"),
-    );
+    let wasm_manager = Arc::new(WasmModuleManager::with_default_config());
 
     // Create AppContext with wasm_manager from the start
     let client = reqwest::Client::new();
@@ -135,6 +135,7 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
     app_context
 }
 
+#[expect(clippy::expect_used, clippy::unwrap_used)]
 /// Create a test WASM component file
 /// Dynamically generates a valid WASM component programmatically without external tools
 /// This ensures tests work in new environments without requiring pre-built files or external tools
@@ -165,6 +166,7 @@ async fn create_test_wasm_component(temp_dir: &TempDir) -> String {
         .to_string()
 }
 
+#[expect(clippy::expect_used)]
 /// Create a test app with WASM support
 async fn create_test_app_with_wasm() -> (axum::Router, Arc<AppContext>, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
@@ -188,7 +190,7 @@ async fn create_test_app_with_wasm() -> (axum::Router, Arc<AppContext>, TempDir)
 
     let app = build_app(
         app_state,
-        smg::middleware::AuthConfig { api_key: None },
+        smg::middleware::AuthConfig::new(None),
         None, // No control plane auth for tests
         256 * 1024 * 1024,
         request_id_headers,
@@ -213,7 +215,7 @@ async fn test_wasm_api_add_module() {
             file_path: wasm_file_path.clone(),
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -238,20 +240,19 @@ async fn test_wasm_api_add_module() {
     assert_eq!(response_json.modules.len(), 1);
     let module_result = &response_json.modules[0].add_result;
 
-    // Print error for debugging
-    if let Some(smg::wasm::module::WasmModuleAddResult::Error(err)) = module_result {
-        eprintln!("Module registration failed: {}", err);
-    }
+    // Assert module didn't fail with error
+    assert!(
+        !matches!(module_result, Some(WasmModuleAddResult::Error(_))),
+        "Module registration failed: {module_result:?}"
+    );
 
     // If status is not OK, check the error message
-    if status != StatusCode::OK {
-        eprintln!("Response status: {:?}", status);
-        eprintln!("Response body: {}", String::from_utf8_lossy(&body));
-        panic!(
-            "Expected OK status but got {:?}. Error: {:?}",
-            status, module_result
-        );
-    }
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Expected OK status but got {status:?}. Error: {module_result:?}. Body: {}",
+        String::from_utf8_lossy(&body)
+    );
 
     assert!(module_result.is_some());
 
@@ -260,7 +261,7 @@ async fn test_wasm_api_add_module() {
         let modules = wasm_manager.get_modules().expect("Failed to get modules");
         assert!(!modules.is_empty(), "Module should be registered");
 
-        if let Some(smg::wasm::module::WasmModuleAddResult::Success(uuid)) = module_result {
+        if let Some(WasmModuleAddResult::Success(uuid)) = module_result {
             let module = wasm_manager
                 .get_module(*uuid)
                 .expect("Failed to get module");
@@ -279,7 +280,7 @@ async fn test_wasm_api_add_module_invalid_file() {
             file_path: "/nonexistent/path/to/module.component.wasm".to_string(),
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -311,7 +312,7 @@ async fn test_wasm_api_add_module_invalid_file() {
     assert!(module_result.is_some());
 
     // Verify it's an error result
-    if let Some(smg::wasm::module::WasmModuleAddResult::Error(_)) = module_result {
+    if let Some(WasmModuleAddResult::Error(_)) = module_result {
         // Expected error
     } else {
         panic!("Expected error result for invalid file path");
@@ -334,7 +335,7 @@ async fn test_wasm_api_add_module_invalid_wasm() {
             file_path: invalid_wasm_path.to_str().unwrap().to_string(),
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -366,7 +367,7 @@ async fn test_wasm_api_add_module_invalid_wasm() {
     assert!(module_result.is_some());
 
     // Verify it's an error result
-    if let Some(smg::wasm::module::WasmModuleAddResult::Error(_)) = module_result {
+    if let Some(WasmModuleAddResult::Error(_)) = module_result {
         // Expected error
     } else {
         panic!("Expected error result for invalid WASM file");
@@ -385,7 +386,7 @@ async fn test_wasm_api_list_modules() {
             file_path: wasm_file_path.clone(),
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -453,7 +454,7 @@ async fn test_wasm_api_remove_module() {
             file_path: wasm_file_path.clone(),
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -483,30 +484,29 @@ async fn test_wasm_api_remove_module() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Get the module UUID
-    let module_uuid = if let Some(smg::wasm::module::WasmModuleAddResult::Success(uuid)) =
-        &response_json.modules[0].add_result
-    {
-        *uuid
-    } else {
-        // If we can't get UUID from response, try to find it from manager
-        if let Some(wasm_manager) = app_context.wasm_manager.as_ref() {
-            let modules = wasm_manager.get_modules().expect("Failed to get modules");
-            modules
-                .iter()
-                .find(|m| m.module_meta.name == "test_module_remove")
-                .map(|m| m.module_uuid)
-                .expect("Module should be registered")
+    let module_uuid =
+        if let Some(WasmModuleAddResult::Success(uuid)) = &response_json.modules[0].add_result {
+            *uuid
         } else {
-            panic!("WASM manager not available");
-        }
-    };
+            // If we can't get UUID from response, try to find it from manager
+            if let Some(wasm_manager) = app_context.wasm_manager.as_ref() {
+                let modules = wasm_manager.get_modules().expect("Failed to get modules");
+                modules
+                    .iter()
+                    .find(|m| m.module_meta.name == "test_module_remove")
+                    .map(|m| m.module_uuid)
+                    .expect("Module should be registered")
+            } else {
+                panic!("WASM manager not available");
+            }
+        };
 
     // Now remove the module
     let remove_response = app
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(format!("/wasm/{}", module_uuid))
+                .uri(format!("/wasm/{module_uuid}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -514,17 +514,11 @@ async fn test_wasm_api_remove_module() {
         .unwrap();
 
     let remove_status = remove_response.status();
-    if remove_status != StatusCode::OK {
-        let body = to_bytes(remove_response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        eprintln!(
-            "Remove module failed with status {:?}: {}",
-            remove_status,
-            String::from_utf8_lossy(&body)
-        );
-        panic!("Expected OK status but got {:?}", remove_status);
-    }
+    assert_eq!(
+        remove_status,
+        StatusCode::OK,
+        "Expected OK status for remove but got {remove_status:?}"
+    );
 
     // Wait for removal to complete
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -543,12 +537,12 @@ async fn test_wasm_api_remove_module_not_found() {
     let (app, _app_context, _temp_dir) = create_test_app_with_wasm().await;
 
     // Try to remove a non-existent module
-    let fake_uuid = Uuid::new_v4();
+    let fake_uuid = Uuid::now_v7();
     let remove_response = app
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(format!("/wasm/{}", fake_uuid))
+                .uri(format!("/wasm/{fake_uuid}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -578,7 +572,7 @@ async fn test_wasm_module_duplicate_sha256() {
             file_path: wasm_file_path.clone(),
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -609,7 +603,7 @@ async fn test_wasm_module_duplicate_sha256() {
             file_path: wasm_file_path.clone(), // Same file
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -641,7 +635,7 @@ async fn test_wasm_module_duplicate_sha256() {
     assert!(module_result.is_some());
 
     // Verify it's an error result (duplicate)
-    if let Some(smg::wasm::module::WasmModuleAddResult::Error(err_msg)) = module_result {
+    if let Some(WasmModuleAddResult::Error(err_msg)) = module_result {
         assert!(
             err_msg.contains("duplicate")
                 || err_msg.contains("Duplicate")
@@ -677,7 +671,7 @@ async fn test_wasm_module_execution() {
         file_path: wasm_file_path.clone(),
         module_type: WasmModuleType::Middleware,
         attach_points: vec![WasmModuleAttachPoint::Middleware(
-            smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+            MiddlewareAttachPoint::OnRequest,
         )],
         add_result: None,
     };
@@ -704,9 +698,7 @@ async fn test_wasm_module_execution() {
     let start = std::time::Instant::now();
 
     let module_uuid = loop {
-        if start.elapsed() > timeout {
-            panic!("Workflow timeout");
-        }
+        assert!(start.elapsed() <= timeout, "Workflow timeout");
 
         let state = engines
             .wasm_registration
@@ -724,7 +716,7 @@ async fn test_wasm_module_execution() {
                     .expect("Module UUID should be in context");
             }
             wfaas::WorkflowStatus::Failed => {
-                panic!("Workflow failed: {:?}", state);
+                panic!("Workflow failed: {state:?}");
             }
             _ => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -750,7 +742,7 @@ async fn test_wasm_module_execution() {
     let request = middleware_types::Request {
         method: "GET".to_string(),
         path: "/test".to_string(),
-        query: "".to_string(),
+        query: String::new(),
         headers: vec![],
         body: vec![],
         request_id: "test-request-id".to_string(),
@@ -758,8 +750,7 @@ async fn test_wasm_module_execution() {
     };
 
     let input = WasmComponentInput::MiddlewareRequest(request);
-    let attach_point =
-        WasmModuleAttachPoint::Middleware(smg::wasm::module::MiddlewareAttachPoint::OnRequest);
+    let attach_point = WasmModuleAttachPoint::Middleware(MiddlewareAttachPoint::OnRequest);
 
     // Execute the module
     let result = wasm_manager
@@ -782,13 +773,9 @@ async fn test_wasm_module_execution() {
                 }
             }
         }
-        Err(e) => {
+        Err(_e) => {
             // Execution might fail if the WASM component is not properly built
             // This is acceptable for testing - we're testing the execution path, not the component itself
-            eprintln!(
-                "Module execution failed (expected if component is not properly built): {:?}",
-                e
-            );
         }
     }
 

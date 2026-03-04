@@ -1,26 +1,22 @@
 //! MCP tool processing layer for Anthropic Messages API
 //!
-//! Provides MCP server connection, tool injection, tool execution,
-//! and the standard `process_iteration` interface used by both
-//! streaming and non-streaming processors.
+//! Provides tool injection, tool execution, and the standard
+//! `process_iteration` interface used by both streaming and
+//! non-streaming processors.
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::{hash_map::Entry, HashMap};
 
-use axum::response::Response;
 use openai_protocol::messages::{
     ContentBlock, CreateMessageRequest, CustomTool, InputContentBlock, InputSchema, Message,
     RedactedThinkingBlock, ServerToolUseBlock, StopReason, TextBlock, ThinkingBlock, Tool,
-    ToolChoice, ToolResultBlock, ToolResultContent, ToolResultContentBlock, ToolUseBlock,
-    WebSearchToolResultBlock,
+    ToolChoice, ToolReferenceBlock, ToolResultBlock, ToolResultContent, ToolResultContentBlock,
+    ToolSearchToolResultBlock, ToolUseBlock, WebSearchToolResultBlock,
 };
 use serde_json::Value;
 use smg_mcp::{McpToolSession, ToolEntry, ToolExecutionInput};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
-use crate::{
-    observability::metrics::{metrics_labels, Metrics},
-    routers::{error as router_error, mcp_utils},
-};
+use crate::observability::metrics::{metrics_labels, Metrics};
 
 // ============================================================================
 // Standard I/O types for processor ↔ MCP layer communication
@@ -144,56 +140,17 @@ pub(crate) fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> 
         .collect()
 }
 
-/// Connect MCP servers, inject tools into the request, and return connected servers.
-///
-/// Request is validated by `ValidatedJson` before reaching the router,
-/// so `mcp_server_configs()` is guaranteed to be `Some` here.
-pub(crate) async fn ensure_connection(
-    request: &mut CreateMessageRequest,
-    orchestrator: &Arc<smg_mcp::McpOrchestrator>,
-) -> Result<Vec<(String, String)>, Response> {
-    let inputs: Vec<mcp_utils::McpServerInput> = request
-        .mcp_server_configs()
-        .unwrap_or_default()
-        .iter()
-        .map(|server| mcp_utils::McpServerInput {
-            label: server.name.clone(),
-            url: Some(server.url.clone()),
-            authorization: server.authorization_token.clone(),
-            headers: HashMap::new(),
-        })
-        .collect();
-
-    let mcp_servers = mcp_utils::connect_mcp_servers(orchestrator, &inputs).await;
-    if mcp_servers.is_empty() {
-        error!("Failed to connect to any MCP servers");
-        return Err(router_error::bad_gateway(
-            "mcp_connection_failed",
-            "Failed to connect to MCP servers. Check server URLs and authorization.",
-        ));
-    }
-
-    info!(
-        server_count = mcp_servers.len(),
-        "MCP: connected to MCP servers"
-    );
-
-    let allowed_tools = collect_allowed_tools_from_toolsets(&request.tools);
-
-    let session_id = format!("msg_{}", uuid::Uuid::new_v4());
-    let session = McpToolSession::new(orchestrator, mcp_servers.clone(), &session_id);
-
-    inject_mcp_tools_into_request(request, &session, &allowed_tools);
-
-    Ok(mcp_servers)
-}
-
 /// Strip `mcp_servers` from request and inject MCP tools as regular tools.
-fn inject_mcp_tools_into_request(
+///
+/// Tool filtering is already applied by `McpServerBinding.allowed_tools` during
+/// session creation — this function just converts and injects.
+/// Respects `defer_loading` settings from `McpToolset` entries.
+pub(crate) fn inject_mcp_tools_into_request(
     request: &mut CreateMessageRequest,
     session: &McpToolSession<'_>,
-    allowed_tools_filter: &Option<Vec<String>>,
 ) {
+    let defer_configs = collect_defer_loading_per_server(request.tools.as_ref());
+
     request.mcp_servers = None;
 
     let mut tools: Vec<Tool> = request
@@ -205,15 +162,21 @@ fn inject_mcp_tools_into_request(
         .collect();
 
     for entry in session.mcp_tools() {
-        let tool_name = entry.tool.name.to_string();
+        let server_label = session.resolve_tool_server_label(entry.tool.name.as_ref());
+        let defer_loading = defer_configs
+            .get(&server_label)
+            .map(|cfg| {
+                cfg.per_tool_overrides
+                    .get(entry.tool.name.as_ref())
+                    .copied()
+                    .unwrap_or(cfg.default_defer)
+            })
+            .unwrap_or(false);
 
-        if let Some(allowed) = allowed_tools_filter {
-            if !allowed.contains(&tool_name) {
-                continue;
-            }
-        }
-
-        tools.push(Tool::Custom(convert_tool_entry_to_anthropic_tool(entry)));
+        tools.push(Tool::Custom(convert_tool_entry_to_anthropic_tool(
+            entry,
+            defer_loading,
+        )));
     }
 
     if !tools.is_empty() {
@@ -311,17 +274,17 @@ async fn execute_mcp_tool_calls(
 
 /// Replace tool_use blocks with mcp_tool_use/mcp_tool_result pairs in the response.
 ///
-/// All MCP blocks are emitted first, then the original content blocks follow (with any
-/// matched ToolUse blocks skipped to avoid duplication). This ensures the final text
-/// block appears after all MCP tool activity.
+/// Builds the final response by combining:
+/// 1. Prior iteration content blocks (e.g., server_tool_use, tool_search_tool_result, text)
+///    with their ToolUse blocks replaced by mcp_tool_use/mcp_tool_result pairs
+/// 2. MCP tool_use/tool_result pairs for the current iteration's tool calls
+/// 3. The final message's content blocks (e.g., the end_turn text) with matched
+///    ToolUse blocks skipped
 pub(crate) fn rebuild_response_with_mcp_blocks(
     mut message: Message,
     mcp_calls: &[McpToolCall],
+    prior_content_blocks: &[ContentBlock],
 ) -> Message {
-    if mcp_calls.is_empty() {
-        return message;
-    }
-
     let call_lookup: HashMap<&str, &McpToolCall> = mcp_calls
         .iter()
         .map(|c| (c.original_id.as_str(), c))
@@ -329,12 +292,29 @@ pub(crate) fn rebuild_response_with_mcp_blocks(
 
     let mut new_content: Vec<ContentBlock> = Vec::new();
 
-    // First: emit all MCP tool_use/tool_result pairs
-    for call in mcp_calls {
-        push_mcp_blocks(&mut new_content, call);
+    // First: emit prior iteration content, replacing ToolUse with MCP pairs
+    for block in prior_content_blocks {
+        match block {
+            ContentBlock::ToolUse { id, .. } if call_lookup.contains_key(id.as_str()) => {
+                let call = call_lookup[id.as_str()];
+                push_mcp_blocks(&mut new_content, call);
+            }
+            _ => new_content.push(block.clone()),
+        }
     }
 
-    // Then: append original content, skipping ToolUse blocks already covered by MCP pairs
+    // Then: emit MCP pairs for any calls NOT already covered by prior blocks
+    for call in mcp_calls {
+        if !prior_content_blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == &call.original_id))
+        {
+            push_mcp_blocks(&mut new_content, call);
+        }
+    }
+
+    // Finally: append the final message's content (e.g., end_turn text),
+    // skipping ToolUse blocks already covered by MCP pairs
     for block in std::mem::take(&mut message.content) {
         match &block {
             ContentBlock::ToolUse { id, .. } if call_lookup.contains_key(id.as_str()) => {
@@ -348,53 +328,118 @@ pub(crate) fn rebuild_response_with_mcp_blocks(
     message
 }
 
+/// Extract per-server allowed tool names from `McpToolset` entries.
+///
+/// Returns a map of `mcp_server_name` → `Option<Vec<String>>`:
+/// - `None` → all tools allowed for that server
+/// - `Some(names)` → only these tools allowed
+pub(crate) fn collect_allowed_tools_per_server(
+    tools: Option<&Vec<Tool>>,
+) -> HashMap<String, Option<Vec<String>>> {
+    let Some(tools) = tools else {
+        return HashMap::new();
+    };
+
+    let mut result: HashMap<String, Option<Vec<String>>> = HashMap::new();
+
+    for tool in tools {
+        let Tool::McpToolset(toolset) = tool else {
+            continue;
+        };
+
+        let default_enabled = toolset
+            .default_config
+            .as_ref()
+            .and_then(|c| c.enabled)
+            .unwrap_or(true);
+
+        let allowed = match &toolset.configs {
+            Some(configs) => {
+                let names: Vec<String> = configs
+                    .iter()
+                    .filter(|(_, config)| config.enabled.unwrap_or(default_enabled))
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                Some(names)
+            }
+            None if default_enabled => None,
+            None => Some(Vec::new()),
+        };
+
+        if result.contains_key(&toolset.mcp_server_name) {
+            warn!(
+                server_name = %toolset.mcp_server_name,
+                "Duplicate mcp_toolset for the same server; keeping first entry"
+            );
+            continue;
+        }
+        result.insert(toolset.mcp_server_name.clone(), allowed);
+    }
+
+    result
+}
+
+/// Per-server defer loading configuration.
+pub(crate) struct DeferConfig {
+    /// Default defer_loading for all tools from this server.
+    pub default_defer: bool,
+    /// Per-tool overrides: tool name → defer_loading.
+    pub per_tool_overrides: HashMap<String, bool>,
+}
+
+/// Extract per-server defer loading configuration from `McpToolset` entries.
+///
+/// Follows the same `default_config` / per-tool `configs` pattern as
+/// `collect_allowed_tools_per_server()`.
+pub(crate) fn collect_defer_loading_per_server(
+    tools: Option<&Vec<Tool>>,
+) -> HashMap<String, DeferConfig> {
+    let Some(tools) = tools else {
+        return HashMap::new();
+    };
+
+    let mut result: HashMap<String, DeferConfig> = HashMap::new();
+
+    for tool in tools {
+        let Tool::McpToolset(toolset) = tool else {
+            continue;
+        };
+
+        let default_defer = toolset
+            .default_config
+            .as_ref()
+            .and_then(|c| c.defer_loading)
+            .unwrap_or(false);
+
+        let per_tool_overrides = toolset
+            .configs
+            .as_ref()
+            .map(|configs| {
+                configs
+                    .iter()
+                    .filter_map(|(name, config)| config.defer_loading.map(|dl| (name.clone(), dl)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // First entry wins (same as collect_allowed_tools_per_server)
+        if let Entry::Vacant(entry) = result.entry(toolset.mcp_server_name.clone()) {
+            entry.insert(DeferConfig {
+                default_defer,
+                per_tool_overrides,
+            });
+        }
+    }
+
+    result
+}
+
 // ============================================================================
 // Private helpers
 // ============================================================================
 
-/// Collect allowed tools filter from `McpToolset` entries in the tools array.
-///
-/// Returns `None` (no filtering) if any toolset allows all tools.
-fn collect_allowed_tools_from_toolsets(tools: &Option<Vec<Tool>>) -> Option<Vec<String>> {
-    let tools = tools.as_ref()?;
-
-    let mut all_allowed = Vec::new();
-    let mut saw_mcp_toolset = false;
-    for tool in tools {
-        if let Tool::McpToolset(toolset) = tool {
-            saw_mcp_toolset = true;
-            let default_enabled = toolset
-                .default_config
-                .as_ref()
-                .and_then(|c| c.enabled)
-                .unwrap_or(true);
-
-            match &toolset.configs {
-                Some(configs) => {
-                    for (tool_name, config) in configs {
-                        let enabled = config.enabled.unwrap_or(default_enabled);
-                        if enabled {
-                            all_allowed.push(tool_name.clone());
-                        }
-                    }
-                }
-                None if default_enabled => {
-                    // This server allows all tools — skip global filtering
-                    return None;
-                }
-                None => {}
-            }
-        }
-    }
-    if saw_mcp_toolset {
-        Some(all_allowed)
-    } else {
-        None
-    }
-}
-
 /// Convert an MCP `ToolEntry` to an Anthropic `CustomTool`.
-fn convert_tool_entry_to_anthropic_tool(entry: &ToolEntry) -> CustomTool {
+fn convert_tool_entry_to_anthropic_tool(entry: &ToolEntry, defer_loading: bool) -> CustomTool {
     let schema_map = (*entry.tool.input_schema).clone();
     let schema_type = schema_map
         .get("type")
@@ -433,6 +478,7 @@ fn convert_tool_entry_to_anthropic_tool(entry: &ToolEntry) -> CustomTool {
         tool_type: None,
         description: entry.tool.description.as_ref().map(|d| d.to_string()),
         input_schema,
+        defer_loading: defer_loading.then_some(true),
         cache_control: None,
     }
 }
@@ -489,6 +535,28 @@ fn build_assistant_content_blocks(content: &[ContentBlock]) -> Vec<InputContentB
                         cache_control: None,
                     },
                 ));
+            }
+            ContentBlock::ToolSearchToolResult {
+                tool_use_id,
+                content,
+            } => {
+                blocks.push(InputContentBlock::ToolSearchToolResult(
+                    ToolSearchToolResultBlock {
+                        tool_use_id: tool_use_id.clone(),
+                        content: content.clone(),
+                        cache_control: None,
+                    },
+                ));
+            }
+            ContentBlock::ToolReference {
+                tool_name,
+                description,
+            } => {
+                blocks.push(InputContentBlock::ToolReference(ToolReferenceBlock {
+                    block_type: "tool_reference".to_string(),
+                    tool_name: tool_name.clone(),
+                    description: description.clone(),
+                }));
             }
             // MCP blocks are handled separately by rebuild_response_with_mcp_blocks
             ContentBlock::McpToolUse { .. } | ContentBlock::McpToolResult { .. } => {}

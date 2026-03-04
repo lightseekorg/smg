@@ -12,6 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(feature = "axum")]
 use serde_json::{json, Value};
@@ -26,7 +27,9 @@ pub const DEFAULT_WORKER_COST: f32 = 1.0;
 // ── Enums ────────────────────────────────────────────────────────────
 
 /// Worker type classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkerType {
     /// Regular worker for standard routing.
@@ -59,13 +62,15 @@ impl std::str::FromStr for WorkerType {
         } else if s.eq_ignore_ascii_case("decode") {
             Ok(WorkerType::Decode)
         } else {
-            Err(format!("Unknown worker type: {}", s))
+            Err(format!("Unknown worker type: {s}"))
         }
     }
 }
 
 /// Connection mode for worker communication.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ConnectionMode {
     /// HTTP/REST connection.
@@ -84,8 +89,31 @@ impl std::fmt::Display for ConnectionMode {
     }
 }
 
+/// Composite key identifying a group of workers with the same characteristics.
+///
+/// Groups workers by `(model_id, worker_type, connection_mode)` — the natural
+/// partitioning used for metrics, load monitoring, and policy management.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorkerGroupKey {
+    pub model_id: String,
+    pub worker_type: WorkerType,
+    pub connection_mode: ConnectionMode,
+}
+
+impl std::fmt::Display for WorkerGroupKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}",
+            self.model_id, self.worker_type, self.connection_mode
+        )
+    }
+}
+
 /// Runtime implementation type for workers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeType {
     /// SGLang runtime (default).
@@ -123,7 +151,7 @@ impl std::str::FromStr for RuntimeType {
         } else if s.eq_ignore_ascii_case("external") {
             Ok(RuntimeType::External)
         } else {
-            Err(format!("Unknown runtime type: {}", s))
+            Err(format!("Unknown runtime type: {s}"))
         }
     }
 }
@@ -133,7 +161,7 @@ impl std::str::FromStr for RuntimeType {
 /// Different providers have different API formats and requirements.
 /// `None` (when used as `Option<ProviderType>`) means native/passthrough —
 /// no transformation needed (local SGLang backends).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderType {
     /// OpenAI API — strip SGLang-specific fields.
@@ -141,6 +169,10 @@ pub enum ProviderType {
     OpenAI,
     /// xAI/Grok — special handling for input items.
     #[serde(alias = "xai", alias = "grok")]
+    #[expect(
+        clippy::upper_case_acronyms,
+        reason = "xAI is a proper company name; XAI matches industry convention and existing serde aliases"
+    )]
     XAI,
     /// Anthropic Claude — different API format.
     #[serde(alias = "anthropic", alias = "claude")]
@@ -163,6 +195,41 @@ impl ProviderType {
             Self::Gemini => "gemini",
             Self::Custom(s) => s.as_str(),
         }
+    }
+
+    /// Detect provider from URL host.
+    /// Returns `None` for URLs that don't match known providers or can't be parsed.
+    pub fn from_url(url: &str) -> Option<Self> {
+        let host = url::Url::parse(url).ok()?.host_str()?.to_lowercase();
+
+        if host.ends_with("openai.com") {
+            Some(Self::OpenAI)
+        } else if host.ends_with("x.ai") {
+            Some(Self::XAI)
+        } else if host.ends_with("anthropic.com") {
+            Some(Self::Anthropic)
+        } else if host.ends_with("googleapis.com") {
+            Some(Self::Gemini)
+        } else {
+            None
+        }
+    }
+
+    /// Environment variable name for per-provider admin API key (model discovery).
+    /// Returns `None` for `Custom` providers since there's no known env var.
+    pub fn admin_key_env_var(&self) -> Option<&'static str> {
+        match self {
+            Self::OpenAI => Some("OPENAI_ADMIN_KEY"),
+            Self::XAI => Some("XAI_ADMIN_KEY"),
+            Self::Anthropic => Some("ANTHROPIC_ADMIN_KEY"),
+            Self::Gemini => Some("GEMINI_ADMIN_KEY"),
+            Self::Custom(_) => None,
+        }
+    }
+
+    /// Whether this provider uses `x-api-key` header instead of `Authorization: Bearer`.
+    pub fn uses_x_api_key(&self) -> bool {
+        matches!(self, Self::Anthropic)
     }
 
     /// Detect provider from model name (heuristic fallback).
@@ -225,7 +292,7 @@ fn default_max_connection_attempts() -> u32 {
 // ── Health check config ─────────────────────────────────────────────
 
 /// Health check configuration shared across protocol and runtime layers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HealthCheckConfig {
     /// Health check timeout in seconds (default: 30).
     #[serde(default = "default_health_check_timeout")]
@@ -331,7 +398,12 @@ impl From<Vec<ModelCard>> for WorkerModels {
     fn from(models: Vec<ModelCard>) -> Self {
         match models.len() {
             0 => Self::Wildcard,
-            1 => Self::Single(Box::new(models.into_iter().next().unwrap())),
+            1 => {
+                let Some(model) = models.into_iter().next() else {
+                    return Self::Wildcard;
+                };
+                Self::Single(Box::new(model))
+            }
             _ => Self::Multi(models),
         }
     }
@@ -352,6 +424,17 @@ impl<'de> Deserialize<'de> for WorkerModels {
     }
 }
 
+/// JsonSchema: wire format is `Vec<ModelCard>`.
+impl JsonSchema for WorkerModels {
+    fn schema_name() -> String {
+        "WorkerModels".to_string()
+    }
+
+    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        Vec::<ModelCard>::json_schema(gen)
+    }
+}
+
 // ── Core identity ────────────────────────────────────────────────────
 
 /// Core worker identity and configuration.
@@ -363,7 +446,7 @@ impl<'de> Deserialize<'de> for WorkerModels {
 /// Fields use `#[serde(default)]` so the same struct works for both input
 /// (partial config from user) and output (fully resolved state).
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerSpec {
     /// Worker URL.
     pub url: String,
@@ -433,6 +516,12 @@ pub struct WorkerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_role: Option<String>,
 
+    /// KV cache block size (tokens per block) for event-driven routing.
+    /// When set, overrides the router-level default for this worker's model.
+    /// Typically matches the backend engine's page size (e.g. 16 for SGLang).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_block_size: Option<usize>,
+
     /// Per-worker health check overrides (partial — only `Some` fields override router defaults).
     #[serde(default, skip_serializing_if = "HealthCheckUpdate::is_empty")]
     pub health: HealthCheckUpdate,
@@ -440,6 +529,12 @@ pub struct WorkerSpec {
     /// Maximum connection attempts during worker registration (default: 20).
     #[serde(default = "default_max_connection_attempts")]
     pub max_connection_attempts: u32,
+
+    /// Per-worker load monitor interval override (seconds).
+    /// When set, workers in the same group use this interval for load polling.
+    /// Falls back to the global `load_monitor_interval_secs` from router config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_monitor_interval_secs: Option<u64>,
 }
 
 impl WorkerSpec {
@@ -463,8 +558,10 @@ impl WorkerSpec {
             dp_size: None,
             kv_connector: None,
             kv_role: None,
+            kv_block_size: None,
             health: HealthCheckUpdate::default(),
             max_connection_attempts: default_max_connection_attempts(),
+            load_monitor_interval_secs: None,
         }
     }
 }
@@ -473,7 +570,7 @@ impl WorkerSpec {
 
 /// Worker information for API responses.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerInfo {
     /// Worker unique identifier.
     pub id: String,
@@ -506,7 +603,7 @@ impl WorkerInfo {
 }
 
 /// Job status for async control plane operations
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct JobStatus {
     pub job_type: String,
     pub worker_url: String,
@@ -560,7 +657,7 @@ impl JobStatus {
 }
 
 /// Worker list response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerListResponse {
     pub workers: Vec<WorkerInfo>,
     pub total: usize,
@@ -568,7 +665,7 @@ pub struct WorkerListResponse {
 }
 
 /// Worker statistics
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerStats {
     pub total_workers: usize,
     pub healthy_workers: usize,
@@ -578,7 +675,7 @@ pub struct WorkerStats {
 }
 
 /// Worker statistics by type
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerTypeStats {
     pub regular: usize,
     pub prefill: usize,
@@ -593,7 +690,7 @@ pub struct WorkerTypeStats {
 /// where `#[serde(default)]` on [`HealthCheckConfig`] would silently reset
 /// unspecified fields to defaults.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HealthCheckUpdate {
     pub timeout_secs: Option<u64>,
     pub check_interval_secs: Option<u64>,
@@ -633,7 +730,7 @@ impl HealthCheckUpdate {
 
 /// Worker update request
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerUpdateRequest {
     /// Update priority
     pub priority: Option<u32>,
@@ -654,7 +751,7 @@ pub struct WorkerUpdateRequest {
 // ── Response types ──────────────────────────────────────────────────
 
 /// Generic API response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerApiResponse {
     pub success: bool,
     pub message: String,
@@ -664,7 +761,7 @@ pub struct WorkerApiResponse {
 }
 
 /// Error response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerErrorResponse {
     pub error: String,
     pub code: String,
@@ -689,6 +786,51 @@ pub struct WorkerLoadsResult {
     pub failed: usize,
 }
 
+/// Per-DP-rank load snapshot from a backend.
+///
+/// Contains core metrics from the sglang `/v1/loads` endpoint or `GetLoads` gRPC RPC.
+/// Each snapshot represents one data-parallel rank's scheduler state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SchedulerLoadSnapshot {
+    pub dp_rank: i32,
+    pub num_running_reqs: i32,
+    pub num_waiting_reqs: i32,
+    pub num_total_reqs: i32,
+    pub num_used_tokens: i32,
+    pub max_total_num_tokens: i32,
+    /// Token usage ratio (0.0–1.0).
+    pub token_usage: f64,
+    pub gen_throughput: f64,
+    pub cache_hit_rate: f64,
+    pub utilization: f64,
+    pub max_running_requests: i32,
+}
+
+/// Full load response for a single worker across all DP ranks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkerLoadResponse {
+    pub timestamp: String,
+    pub dp_rank_count: i32,
+    pub loads: Vec<SchedulerLoadSnapshot>,
+}
+
+impl WorkerLoadResponse {
+    /// Average token usage ratio across DP ranks. Returns 0.0 if empty.
+    pub fn effective_token_usage(&self) -> f64 {
+        if self.loads.is_empty() {
+            return 0.0;
+        }
+        self.loads.iter().map(|l| l.token_usage).sum::<f64>() / self.loads.len() as f64
+    }
+
+    /// Total used tokens summed across all DP ranks.
+    pub fn total_used_tokens(&self) -> i64 {
+        self.loads.iter().map(|l| l.num_used_tokens as i64).sum()
+    }
+}
+
 /// Individual worker load information
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WorkerLoadInfo {
@@ -696,6 +838,8 @@ pub struct WorkerLoadInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_type: Option<String>,
     pub load: isize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<WorkerLoadResponse>,
 }
 
 #[cfg(feature = "axum")]
@@ -734,7 +878,13 @@ impl IntoResponse for WorkerLoadsResult {
         let loads: Vec<Value> = self
             .loads
             .iter()
-            .map(|info| json!({"worker": &info.worker, "load": info.load}))
+            .map(|info| {
+                let mut entry = json!({"worker": &info.worker, "load": info.load});
+                if let Some(ref details) = info.details {
+                    entry["details"] = json!(details);
+                }
+                entry
+            })
             .collect();
         Json(json!({"workers": loads})).into_response()
     }

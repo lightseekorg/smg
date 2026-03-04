@@ -28,7 +28,7 @@
 
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -54,11 +54,12 @@ use super::{
     metrics::McpMetrics,
     pool::{McpConnectionPool, PoolKey},
     reconnect::ReconnectionManager,
+    session::McpServerBinding,
 };
 use crate::{
     approval::{
-        ApprovalDecision, ApprovalManager, ApprovalMode, ApprovalOutcome, ApprovalParams,
-        McpApprovalRequest,
+        audit::AuditLog, policy::PolicyEngine, ApprovalDecision, ApprovalManager, ApprovalMode,
+        ApprovalOutcome, ApprovalParams, McpApprovalRequest,
     },
     error::{McpError, McpResult},
     inventory::{
@@ -71,7 +72,7 @@ use crate::{
 
 /// Build request headers from token and custom headers.
 fn build_request_headers(
-    token: &Option<String>,
+    token: Option<&str>,
     custom_headers: &HashMap<String, String>,
 ) -> McpResult<reqwest::header::HeaderMap> {
     let mut headers = reqwest::header::HeaderMap::new();
@@ -79,19 +80,19 @@ fn build_request_headers(
     if let Some(tok) = token {
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", tok)
+            format!("Bearer {tok}")
                 .parse()
-                .map_err(|e| McpError::Transport(format!("auth token: {}", e)))?,
+                .map_err(|e| McpError::Transport(format!("auth token: {e}")))?,
         );
     }
 
     for (key, value) in custom_headers {
         headers.insert(
             reqwest::header::HeaderName::from_bytes(key.as_bytes())
-                .map_err(|e| McpError::Transport(format!("header name: {}", e)))?,
+                .map_err(|e| McpError::Transport(format!("header name: {e}")))?,
             value
                 .parse()
-                .map_err(|e| McpError::Transport(format!("header value: {}", e)))?,
+                .map_err(|e| McpError::Transport(format!("header value: {e}")))?,
         );
     }
 
@@ -101,7 +102,7 @@ fn build_request_headers(
 /// Build HTTP client with default headers.
 fn build_http_client(
     proxy_config: Option<&McpProxyConfig>,
-    token: &Option<String>,
+    token: Option<&str>,
     custom_headers: &HashMap<String, String>,
 ) -> McpResult<reqwest::Client> {
     let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
@@ -117,7 +118,7 @@ fn build_http_client(
 
     builder
         .build()
-        .map_err(|e| McpError::Transport(format!("build HTTP client: {}", e)))
+        .map_err(|e| McpError::Transport(format!("build HTTP client: {e}")))
 }
 
 /// Type alias for MCP client with handler.
@@ -188,7 +189,7 @@ impl ToolCallResult {
             ToolCallResult::Success(item) => match serde_json::to_string(&item) {
                 Ok(s) => (s, false, None),
                 Err(e) => {
-                    let err = format!("Failed to serialize tool result: {}", e);
+                    let err = format!("Failed to serialize tool result: {e}");
                     (
                         serde_json::json!({"error": &err}).to_string(),
                         true,
@@ -325,8 +326,8 @@ impl McpOrchestrator {
         let metrics = Arc::new(McpMetrics::new());
         let rate_limiter = Arc::new(RateLimiter::new(config.rate_limits.unwrap_or_default()));
         // Build approval manager from config
-        let audit_log = Arc::new(crate::approval::audit::AuditLog::new());
-        let policy_engine = Arc::new(crate::approval::policy::PolicyEngine::from_yaml_config(
+        let audit_log = Arc::new(AuditLog::new());
+        let policy_engine = Arc::new(PolicyEngine::from_yaml_config(
             &config.policy,
             Arc::clone(&audit_log),
         ));
@@ -430,6 +431,12 @@ impl McpOrchestrator {
     /// Create a simplified orchestrator for testing.
     #[cfg(test)]
     pub fn new_test() -> Self {
+        Self::new_test_with_config(McpConfig::default())
+    }
+
+    /// Create a simplified orchestrator with a specific config for testing.
+    #[cfg(test)]
+    pub fn new_test_with_config(config: McpConfig) -> Self {
         use crate::approval::{audit::AuditLog, policy::PolicyEngine};
 
         let (refresh_tx, _) = mpsc::channel(10);
@@ -448,7 +455,7 @@ impl McpOrchestrator {
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
             reconnection_locks: DashMap::new(),
-            config: McpConfig::default(),
+            config,
         }
     }
 
@@ -662,10 +669,10 @@ impl McpOrchestrator {
                             .stderr(std::process::Stdio::inherit());
                     }),
                 )
-                .map_err(|e| McpError::Transport(format!("create stdio transport: {}", e)))?;
+                .map_err(|e| McpError::Transport(format!("create stdio transport: {e}")))?;
 
                 handler.serve(transport).await.map_err(|e| {
-                    McpError::ConnectionFailed(format!("initialize stdio client: {}", e))
+                    McpError::ConnectionFailed(format!("initialize stdio client: {e}"))
                 })
             }
 
@@ -676,7 +683,8 @@ impl McpOrchestrator {
             } => {
                 let proxy_config =
                     super::proxy::resolve_proxy_config(config, self.config.proxy.as_ref());
-                let http_client = build_http_client(proxy_config, token, custom_headers)?;
+                let http_client =
+                    build_http_client(proxy_config, token.as_deref(), custom_headers)?;
 
                 let sse_config = SseClientConfig {
                     sse_endpoint: url.clone().into(),
@@ -685,11 +693,12 @@ impl McpOrchestrator {
 
                 let transport = SseClientTransport::start_with_client(http_client, sse_config)
                     .await
-                    .map_err(|e| McpError::Transport(format!("create SSE transport: {}", e)))?;
+                    .map_err(|e| McpError::Transport(format!("create SSE transport: {e}")))?;
 
-                handler.serve(transport).await.map_err(|e| {
-                    McpError::ConnectionFailed(format!("initialize SSE client: {}", e))
-                })
+                handler
+                    .serve(transport)
+                    .await
+                    .map_err(|e| McpError::ConnectionFailed(format!("initialize SSE client: {e}")))
             }
 
             McpTransport::Streamable {
@@ -699,13 +708,14 @@ impl McpOrchestrator {
             } => {
                 let proxy_config =
                     super::proxy::resolve_proxy_config(config, self.config.proxy.as_ref());
-                let http_client = build_http_client(proxy_config, token, custom_headers)?;
+                let http_client =
+                    build_http_client(proxy_config, token.as_deref(), custom_headers)?;
                 let cfg = StreamableHttpClientTransportConfig::with_uri(url.as_str());
 
                 let transport = StreamableHttpClientTransport::with_client(http_client, cfg);
 
                 handler.serve(transport).await.map_err(|e| {
-                    McpError::ConnectionFailed(format!("initialize streamable client: {}", e))
+                    McpError::ConnectionFailed(format!("initialize streamable client: {e}"))
                 })
             }
         }
@@ -767,11 +777,15 @@ impl McpOrchestrator {
         let tool_inventory = Arc::clone(&self.tool_inventory);
         let static_servers = self.static_servers.clone();
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "background refresh handler runs for orchestrator lifetime; shutdown is coordinated via CancellationToken"
+        )]
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     // Stop the loop if the shutdown token is triggered
-                    _ = token.cancelled() => { //
+                    () = token.cancelled() => { //
                         debug!("Refresh handler shutting down");
                         break;
                     }
@@ -977,7 +991,7 @@ impl McpOrchestrator {
 
         // First, search connected static servers (dynamically registered via connect_static_server).
         // This handles servers registered after orchestrator initialization.
-        for entry in self.static_servers.iter() {
+        for entry in &self.static_servers {
             if let Some(result) = extract_builtin(&entry.config) {
                 return Some(result);
             }
@@ -992,6 +1006,27 @@ impl McpOrchestrator {
         }
 
         None
+    }
+
+    /// Returns the set of server names that have `builtin_type` configured.
+    pub fn builtin_server_names(&self) -> HashSet<String> {
+        let mut names = HashSet::new();
+
+        // Check connected static servers first
+        for entry in &self.static_servers {
+            if entry.config.builtin_type.is_some() {
+                names.insert(entry.config.name.clone());
+            }
+        }
+
+        // Also check initial config (covers not-yet-connected servers and tests)
+        for server_config in &self.config.servers {
+            if server_config.builtin_type.is_some() {
+                names.insert(server_config.name.clone());
+            }
+        }
+
+        names
     }
 
     /// Execute a single tool using an already-resolved qualified binding.
@@ -1090,7 +1125,7 @@ impl McpOrchestrator {
         match raw_result {
             Ok(Some(raw_result)) => (
                 entry.response_format.clone(),
-                self.call_result_to_json(&raw_result),
+                Self::call_result_to_json(&raw_result),
                 raw_result.is_error.unwrap_or(false),
                 None,
             ),
@@ -1104,7 +1139,7 @@ impl McpOrchestrator {
                 )
             }
             Err(e) => {
-                let err = format!("Tool call failed: {}", e);
+                let err = format!("Tool call failed: {e}");
                 (
                     entry.response_format.clone(),
                     serde_json::json!({ "error": &err }),
@@ -1224,16 +1259,16 @@ impl McpOrchestrator {
         &self,
         inputs: Vec<ToolExecutionInput>,
         allowed_servers: &[String],
-        mcp_servers: &[(String, String)],
+        mcp_servers: &[McpServerBinding],
         request_ctx: &McpRequestContext<'_>,
     ) -> Vec<ToolExecutionOutput> {
         let fallback_label = mcp_servers
             .first()
-            .map(|(label, _)| label.as_str())
+            .map(|b| b.label.as_str())
             .unwrap_or("mcp");
         let server_label_map: HashMap<_, _> = mcp_servers
             .iter()
-            .map(|(label, key)| (key.as_str(), label.as_str()))
+            .map(|b| (b.server_key.as_str(), b.label.as_str()))
             .collect();
         let mut results = Vec::with_capacity(inputs.len());
 
@@ -1276,7 +1311,7 @@ impl McpOrchestrator {
             .await?
         {
             ApprovalExecutionResult::Success(result) => {
-                let output = self.transform_result(
+                let output = Self::transform_result(
                     &result,
                     &entry.response_format,
                     &request_ctx.request_id,
@@ -1456,7 +1491,7 @@ impl McpOrchestrator {
         let (target_server, target_tool) = if let Some(alias) = &entry.alias_target {
             // Apply argument mapping
             if let Some(mapping) = &alias.arg_mapping {
-                arguments = self.apply_arg_mapping(arguments, mapping);
+                arguments = Self::apply_arg_mapping(arguments, mapping);
             }
             (
                 alias.target.server_key().to_string(),
@@ -1518,7 +1553,7 @@ impl McpOrchestrator {
     }
 
     /// Apply argument mapping for aliased tools.
-    fn apply_arg_mapping(&self, mut args: Value, mapping: &ArgMapping) -> Value {
+    fn apply_arg_mapping(mut args: Value, mapping: &ArgMapping) -> Value {
         if let Value::Object(ref mut map) = args {
             // Apply renames
             for (from, to) in &mapping.renames {
@@ -1538,7 +1573,6 @@ impl McpOrchestrator {
 
     /// Transform MCP result to OpenAI format.
     fn transform_result(
-        &self,
         result: &CallToolResult,
         format: &ResponseFormat,
         tool_call_id: &str,
@@ -1547,7 +1581,7 @@ impl McpOrchestrator {
         arguments: &str,
     ) -> ResponseOutputItem {
         // Convert CallToolResult content to JSON for transformation
-        let result_json = self.call_result_to_json(result);
+        let result_json = Self::call_result_to_json(result);
 
         ResponseTransformer::transform(
             &result_json,
@@ -1560,7 +1594,7 @@ impl McpOrchestrator {
     }
 
     /// Convert CallToolResult to JSON value.
-    fn call_result_to_json(&self, result: &CallToolResult) -> Value {
+    fn call_result_to_json(result: &CallToolResult) -> Value {
         // Serialize the CallToolResult content to JSON
         // The content is a Vec of annotated content items
         serde_json::to_value(&result.content).unwrap_or_else(|e| {
@@ -1584,7 +1618,7 @@ impl McpOrchestrator {
                 ServiceError::TransportClosed | ServiceError::TransportSend(_) => {
                     McpError::ServerDisconnected(server_key.to_string())
                 }
-                _ => McpError::ToolExecution(format!("MCP call failed: {}", e)),
+                _ => McpError::ToolExecution(format!("MCP call failed: {e}")),
             });
         }
 
@@ -1595,7 +1629,7 @@ impl McpOrchestrator {
                     // recovery logic is currently scoped to static servers.
                     McpError::ServerDisconnected(server_key.to_string())
                 }
-                _ => McpError::ToolExecution(format!("MCP call failed: {}", e)),
+                _ => McpError::ToolExecution(format!("MCP call failed: {e}")),
             });
         }
 
@@ -1619,7 +1653,7 @@ impl McpOrchestrator {
         let target_entry = self
             .tool_inventory
             .get_entry(target_server, target_tool)
-            .ok_or_else(|| McpError::ToolNotFound(format!("{}:{}", target_server, target_tool)))?;
+            .ok_or_else(|| McpError::ToolNotFound(format!("{target_server}:{target_tool}")))?;
 
         // Create alias entry
         let alias_target = AliasTarget {
@@ -1665,14 +1699,14 @@ impl McpOrchestrator {
 
     /// Set request context on all static server handlers.
     pub fn set_handler_contexts(&self, ctx: &HandlerRequestContext) {
-        for entry in self.static_servers.iter() {
+        for entry in &self.static_servers {
             entry.handler.set_request_context(ctx.clone());
         }
     }
 
     /// Clear request context from all static server handlers.
     pub fn clear_handler_contexts(&self) {
-        for entry in self.static_servers.iter() {
+        for entry in &self.static_servers {
             entry.handler.clear_request_context();
         }
     }
@@ -1749,7 +1783,8 @@ impl McpOrchestrator {
                     } => {
                         let proxy_config =
                             super::proxy::resolve_proxy_config(&cfg, global_proxy.as_ref());
-                        let http_client = build_http_client(proxy_config, token, custom_headers)?;
+                        let http_client =
+                            build_http_client(proxy_config, token.as_deref(), custom_headers)?;
                         let cfg_http = StreamableHttpClientTransportConfig::with_uri(url.as_str());
 
                         let transport =
@@ -1757,7 +1792,7 @@ impl McpOrchestrator {
 
                         ().serve(transport)
                             .await
-                            .map_err(|e| McpError::ConnectionFailed(format!("streamable: {}", e)))
+                            .map_err(|e| McpError::ConnectionFailed(format!("streamable: {e}")))
                     }
                     McpTransport::Sse {
                         url,
@@ -1766,7 +1801,8 @@ impl McpOrchestrator {
                     } => {
                         let proxy_config =
                             super::proxy::resolve_proxy_config(&cfg, global_proxy.as_ref());
-                        let http_client = build_http_client(proxy_config, token, custom_headers)?;
+                        let http_client =
+                            build_http_client(proxy_config, token.as_deref(), custom_headers)?;
 
                         let sse_config = SseClientConfig {
                             sse_endpoint: url.clone().into(),
@@ -1777,12 +1813,12 @@ impl McpOrchestrator {
                             SseClientTransport::start_with_client(http_client, sse_config)
                                 .await
                                 .map_err(|e| {
-                                    McpError::Transport(format!("create SSE transport: {}", e))
+                                    McpError::Transport(format!("create SSE transport: {e}"))
                                 })?;
 
                         ().serve(transport)
                             .await
-                            .map_err(|e| McpError::ConnectionFailed(format!("SSE: {}", e)))
+                            .map_err(|e| McpError::ConnectionFailed(format!("SSE: {e}")))
                     }
                     McpTransport::Stdio { .. } => Err(McpError::Transport(
                         "Stdio not supported for dynamic connections".to_string(),
@@ -1952,13 +1988,13 @@ impl McpOrchestrator {
         let entry = self
             .tool_inventory
             .get_entry(server_key, tool_name)
-            .ok_or_else(|| McpError::ToolNotFound(format!("{}:{}", server_key, tool_name)))?;
+            .ok_or_else(|| McpError::ToolNotFound(format!("{server_key}:{tool_name}")))?;
 
         // Execute directly (approval already handled)
         let result = self.execute_tool_impl(&entry, arguments.clone()).await?;
 
         // Transform response
-        let output = self.transform_result(
+        let output = Self::transform_result(
             &result,
             &entry.response_format,
             &request_ctx.request_id,
@@ -1997,7 +2033,7 @@ impl McpOrchestrator {
         // Cancel pending approvals
         self.approval_manager.cancel_all_pending();
 
-        for _ in self.static_servers.iter() {
+        for _ in &self.static_servers {
             self.metrics.record_connection_closed();
         }
         self.static_servers.clear();
@@ -2170,9 +2206,9 @@ impl<'a> McpRequestContext<'a> {
         let result = client
             .call_tool(request)
             .await
-            .map_err(|e| McpError::ToolExecution(format!("MCP call failed: {}", e)))?;
+            .map_err(|e| McpError::ToolExecution(format!("MCP call failed: {e}")))?;
 
-        let output = self.orchestrator.transform_result(
+        let output = McpOrchestrator::transform_result(
             &result,
             &entry.response_format,
             &self.request_id,
@@ -2189,7 +2225,7 @@ impl<'a> McpRequestContext<'a> {
         let mut tools = self.orchestrator.list_tools(Some(&self.tenant_ctx));
 
         // Add dynamic tools
-        for entry in self.dynamic_tools.iter() {
+        for entry in &self.dynamic_tools {
             tools.push(entry.value().clone());
         }
 
@@ -2276,14 +2312,15 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
+    use crate::core::config::Tool as McpTool;
 
-    fn create_test_tool(name: &str) -> crate::core::config::Tool {
+    fn create_test_tool(name: &str) -> McpTool {
         use std::sync::Arc;
 
-        crate::core::config::Tool {
+        McpTool {
             name: Cow::Owned(name.to_string()),
             title: None,
-            description: Some(Cow::Owned(format!("Test tool: {}", name))),
+            description: Some(Cow::Owned(format!("Test tool: {name}"))),
             input_schema: Arc::new(serde_json::Map::new()),
             output_schema: None,
             annotations: None,
@@ -2320,7 +2357,9 @@ mod tests {
 
         let rx = match outcome {
             ApprovalOutcome::Pending { rx, .. } => rx,
-            _ => panic!("Expected the outcome to be Pending for interactive mode"),
+            ApprovalOutcome::Decided(_) => {
+                panic!("Expected the outcome to be Pending for interactive mode")
+            }
         };
 
         let shutdown_result = timeout(Duration::from_secs(5), orchestrator.shutdown()).await;
@@ -2336,7 +2375,9 @@ mod tests {
                     "Denial reason should be 'System shutdown'"
                 );
             }
-            _ => panic!("Expected the tool call to be Denied, but it was Approved"),
+            ApprovalDecision::Approved => {
+                panic!("Expected the tool call to be Denied, but it was Approved")
+            }
         }
 
         assert_eq!(
@@ -2448,8 +2489,6 @@ mod tests {
 
     #[test]
     fn test_arg_mapping() {
-        let orchestrator = McpOrchestrator::new_test();
-
         let mapping = ArgMapping::new()
             .with_rename("query", "search_query")
             .with_default("limit", serde_json::json!(10));
@@ -2458,7 +2497,7 @@ mod tests {
             "query": "rust programming"
         });
 
-        let result = orchestrator.apply_arg_mapping(args, &mapping);
+        let result = McpOrchestrator::apply_arg_mapping(args, &mapping);
 
         let obj = result.as_object().unwrap();
         assert!(obj.contains_key("search_query"));

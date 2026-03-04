@@ -10,7 +10,10 @@ use tracing::{debug, info, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::core::{
-    steps::{workflow_data::LocalWorkerWorkflowData, TokenizerConfigRequest},
+    steps::{
+        workflow_data::{WorkerKind, WorkerWorkflowData},
+        TokenizerConfigRequest,
+    },
     Job,
 };
 
@@ -22,11 +25,15 @@ use crate::core::{
 pub struct SubmitTokenizerJobStep;
 
 #[async_trait]
-impl StepExecutor<LocalWorkerWorkflowData> for SubmitTokenizerJobStep {
+impl StepExecutor<WorkerWorkflowData> for SubmitTokenizerJobStep {
     async fn execute(
         &self,
-        context: &mut WorkflowContext<LocalWorkerWorkflowData>,
+        context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
+        if context.data.worker_kind != Some(WorkerKind::Local) {
+            return Ok(StepResult::Skip);
+        }
+
         let labels = &context.data.final_labels;
         let app_context = context
             .data
@@ -60,7 +67,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for SubmitTokenizerJobStep {
         // Get cache config from router config
         let cache_config = app_context.router_config.tokenizer_cache.to_option();
 
-        for worker in workers.iter() {
+        for worker in workers {
             let model_id = worker.model_id().to_string();
 
             // Get tokenizer path with fallback chain:

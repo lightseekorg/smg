@@ -59,7 +59,14 @@ impl DecodeStream {
         )?;
 
         if new_text.len() > prefix_text.len() && !new_text.ends_with("�") {
-            let new_text = new_text[prefix_text.len()..].to_string();
+            // Find the nearest char boundary at or before prefix_text.len()
+            // to avoid panicking on multi-byte UTF-8 sequences
+            let mut split_at = prefix_text.len();
+            while !new_text.is_char_boundary(split_at) && split_at > 0 {
+                split_at -= 1;
+            }
+
+            let new_text = new_text[split_at..].to_string();
 
             self.prefix_offset = self.read_offset;
             self.read_offset = self.all_token_ids.len();

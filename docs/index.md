@@ -107,7 +107,7 @@ Circuit breakers, automatic retries with exponential backoff, rate limiting, and
 
 **Gateway = Full Server**
 
-SMG handles everything: tokenization, chat templates, tool parsing, MCP loops, detokenization, and PD routing. Workers run raw inference on vLLM, SGLang, or TensorRT-LLM.
+SMG handles everything: tokenization, chat templates, tool parsing, MCP loops, detokenization, and PD routing. Workers run raw inference on SGLang, vLLM, or TensorRT-LLM.
 
 </div>
 
@@ -117,7 +117,7 @@ SMG handles everything: tokenization, chat templates, tool parsing, MCP loops, d
 
 **Gateway = Smart Proxy**
 
-SMG handles routing, load balancing, and failover. Workers run full OpenAI-compatible servers (vLLM, SGLang, TRT-LLM). Supports PD disaggregation.
+SMG handles routing, load balancing, and failover. Workers run full OpenAI-compatible servers (SGLang, vLLM, TRT-LLM). Supports PD disaggregation.
 
 </div>
 

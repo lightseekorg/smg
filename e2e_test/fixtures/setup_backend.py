@@ -59,6 +59,15 @@ _thread_cache: dict[int, _CachedBackend] = {}
 _cache_lock = threading.Lock()
 
 
+def _release_workers(workers: list) -> None:
+    """Release a list of workers, logging warnings on failure."""
+    for w in workers:
+        try:
+            w.release()
+        except Exception as e:
+            logger.warning("Failed to release worker during cleanup: %s", e)
+
+
 def _create_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
     """Extract configuration from request and return the appropriate backend generator.
 
@@ -96,10 +105,10 @@ def _create_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
 
     # PD disaggregation backends - explicit connection modes
     if backend_name == "pd_http":
-        return _setup_pd_http_backend(request, model_pool, model_id, workers_config, gateway_config)
+        return _setup_pd_http_backend(model_pool, model_id, workers_config, gateway_config)
 
     if backend_name == "pd_grpc":
-        return _setup_pd_grpc_backend(request, model_pool, model_id, workers_config, gateway_config)
+        return _setup_pd_grpc_backend(model_pool, model_id, workers_config, gateway_config)
 
     # Check if this is a local backend (grpc, http)
     try:
@@ -256,7 +265,6 @@ def cleanup_all_cached_backends() -> None:
 
 
 def _setup_pd_http_backend(
-    request: pytest.FixtureRequest,
     model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
@@ -274,7 +282,6 @@ def _setup_pd_http_backend(
 
 
 def _setup_pd_grpc_backend(
-    request: pytest.FixtureRequest,
     model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
@@ -413,12 +420,7 @@ def _setup_pd_backend_common(
                 f"{len(decodes)} decode (need {num_prefill} prefill, {num_decode} decode)"
             )
     except Exception:
-        # Release all acquired workers on any failure
-        for w in acquired_workers:
-            try:
-                w.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(acquired_workers)
         raise
 
     model_path = prefills[0].model_path
@@ -435,12 +437,7 @@ def _setup_pd_backend_common(
             log_dir=gateway_config.get("log_dir"),
         )
     except Exception:
-        # Release workers if gateway fails to start
-        for w in acquired_workers:
-            try:
-                w.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(acquired_workers)
         raise
 
     client = openai.OpenAI(
@@ -463,11 +460,7 @@ def _setup_pd_backend_common(
     finally:
         logger.info("Tearing down %s PD gateway", runtime_label)
         gateway.shutdown()
-        for worker in acquired_workers:
-            try:
-                worker.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(acquired_workers)
 
 
 def _setup_grpc_backend(
@@ -480,18 +473,84 @@ def _setup_grpc_backend(
     """Setup a runtime-specific gRPC backend (vLLM or TensorRT-LLM)."""
     runtime = get_runtime()
     runtime_label = RUNTIME_LABELS.get(runtime, runtime)
+    num_workers = workers_config.get("count") or 1
 
-    logger.info("Setting up %s gRPC backend for model %s", runtime_label, model_id)
+    logger.info(
+        "Setting up %s gRPC backend for model %s (%d workers)",
+        runtime_label,
+        model_id,
+        num_workers,
+    )
 
-    instance = None
+    instances: list = []
+
     try:
-        instance = model_pool.get_grpc_worker(model_id)
-    except RuntimeError as e:
-        pytest.fail(str(e))
-    assert instance is not None
+        if num_workers > 1:
+            # Multi-worker: find existing gRPC workers, launch missing ones
+            # get_workers_by_type auto-acquires all returned workers
+            all_existing = model_pool.get_workers_by_type(model_id, WorkerType.REGULAR)
+            existing_grpc = [w for w in all_existing if w.mode == ConnectionMode.GRPC]
 
-    model_path = instance.model_path
-    worker_urls = [instance.worker_url]
+            # Track all acquired workers immediately so they get cleaned up on failure
+            instances = list(existing_grpc)
+
+            # Release workers we won't use (wrong mode)
+            for w in all_existing:
+                if w not in existing_grpc:
+                    w.release()
+
+            if len(existing_grpc) >= num_workers:
+                instances = existing_grpc[:num_workers]
+                for w in existing_grpc[num_workers:]:
+                    w.release()
+            else:
+                missing = num_workers - len(existing_grpc)
+                workers_to_launch = [
+                    WorkerIdentity(
+                        model_id,
+                        ConnectionMode.GRPC,
+                        WorkerType.REGULAR,
+                        len(existing_grpc) + i,
+                    )
+                    for i in range(missing)
+                ]
+                logger.info(
+                    "Have %d/%d %s gRPC workers. Launching %d more",
+                    len(existing_grpc),
+                    num_workers,
+                    runtime_label,
+                    missing,
+                )
+                new_instances = model_pool.launch_workers(workers_to_launch, startup_timeout=300)
+
+                if not new_instances:
+                    pytest.fail(
+                        f"Failed to launch {runtime_label} gRPC workers: needed "
+                        f"{missing} workers but could not allocate GPUs"
+                    )
+
+                for inst in new_instances:
+                    inst.acquire()
+                    instances.append(inst)
+
+            if len(instances) < num_workers:
+                pytest.fail(
+                    f"Failed to get {num_workers} {runtime_label} gRPC workers for {model_id} "
+                    f"(got {len(instances)})"
+                )
+            worker_urls = [inst.worker_url for inst in instances]
+            model_path = instances[0].model_path
+        else:
+            # Single worker: use existing get_grpc_worker path
+            instance = model_pool.get_grpc_worker(model_id)
+            instances = [instance]
+            worker_urls = [instance.worker_url]
+            model_path = instance.model_path
+    except Exception as e:
+        _release_workers(instances)
+        if isinstance(e, RuntimeError):
+            pytest.fail(str(e))
+        raise
 
     gateway = Gateway()
     try:
@@ -505,12 +564,7 @@ def _setup_grpc_backend(
             log_dir=gateway_config.get("log_dir"),
         )
     except Exception:
-        # Release worker if gateway fails to start
-        if instance is not None:
-            try:
-                instance.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(instances)
         raise
 
     client = openai.OpenAI(
@@ -519,10 +573,10 @@ def _setup_grpc_backend(
     )
 
     logger.info(
-        "Setup %s gRPC backend: model=%s, worker=%s, gateway=%s, policy=%s",
+        "Setup %s gRPC backend: model=%s, workers=%d, gateway=%s, policy=%s",
         runtime_label,
         model_id,
-        instance.worker_url,
+        len(instances),
         gateway.base_url,
         gateway_config["policy"],
     )
@@ -532,11 +586,7 @@ def _setup_grpc_backend(
     finally:
         logger.info("Tearing down %s gRPC gateway", runtime_label)
         gateway.shutdown()
-        if instance is not None:
-            try:
-                instance.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(instances)
 
 
 def _setup_local_backend(
@@ -596,12 +646,7 @@ def _setup_local_backend(
             worker_urls = [instance.worker_url]
             model_path = instance.model_path
     except Exception as e:
-        # Release any acquired instances on failure
-        for inst in instances:
-            try:
-                inst.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(instances)
         if isinstance(e, RuntimeError):
             pytest.fail(str(e))
         raise
@@ -619,12 +664,7 @@ def _setup_local_backend(
             log_dir=gateway_config.get("log_dir"),
         )
     except Exception:
-        # Release workers if gateway fails to start
-        for inst in instances:
-            try:
-                inst.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(instances)
         raise
 
     client = openai.OpenAI(
@@ -646,12 +686,7 @@ def _setup_local_backend(
     finally:
         logger.info("Tearing down gateway for %s backend", backend_name)
         gateway.shutdown()
-        # Release references to allow eviction
-        for inst in instances:
-            try:
-                inst.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(instances)
 
 
 def _setup_cloud_backend(
@@ -739,21 +774,13 @@ def backend_router(request: pytest.FixtureRequest, model_pool: ModelPool):
             model_path=instance.model_path,
         )
     except Exception:
-        # Release worker if gateway fails to start
         if instance is not None:
-            try:
-                instance.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+            _release_workers([instance])
         raise
 
     try:
         yield gateway
     finally:
         gateway.shutdown()
-        # Release reference to allow eviction
         if instance is not None:
-            try:
-                instance.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+            _release_workers([instance])

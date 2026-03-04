@@ -12,6 +12,10 @@ fi
 echo "Installing e2e test dependencies..."
 python3 -m pip install pytest pytest-rerunfailures httpx openai anthropic grpcio grpcio-health-checking numpy pandas
 
+# Install SmgClient (pure Python client for cross-SDK parity testing)
+echo "Installing smg-client..."
+python3 -m pip install clients/python/
+
 # Install any extra dependencies passed as arguments
 if [ $# -gt 0 ]; then
     echo "Installing extra dependencies: $@"

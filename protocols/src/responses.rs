@@ -1,11 +1,11 @@
 // OpenAI Responses API types
 // https://platform.openai.com/docs/api-reference/responses
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 use super::{
     common::{
@@ -20,49 +20,72 @@ use crate::{builders::ResponsesResponseBuilder, validated::Normalizable};
 // Response Tools (MCP and others)
 // ============================================================================
 
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseTool {
+    /// Function tool.
+    #[serde(rename = "function")]
+    Function(FunctionTool),
+
+    /// Built-in tool.
+    #[serde(rename = "web_search_preview")]
+    WebSearchPreview(WebSearchPreviewTool),
+
+    /// Built-in tool.
+    #[serde(rename = "code_interpreter")]
+    CodeInterpreter(CodeInterpreterTool),
+
+    /// MCP server tool.
+    #[serde(rename = "mcp")]
+    Mcp(McpTool),
+}
+
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ResponseTool {
-    #[serde(rename = "type")]
-    pub r#type: ResponseToolType,
-    // Function tool fields (used when type == "function")
-    // In Responses API, function fields are flattened at the top level
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FunctionTool {
+    /// Flatten to match Responses API tool JSON shape.
     #[serde(flatten)]
-    pub function: Option<Function>,
-    // MCP-specific fields (used when type == "mcp")
+    pub function: Function,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct McpTool {
     pub server_url: Option<String>,
     pub authorization: Option<String>,
     /// Custom headers to send to MCP server (from request payload, not HTTP headers)
     pub headers: Option<HashMap<String, String>>,
-    pub server_label: Option<String>,
+    pub server_label: String,
     pub server_description: Option<String>,
-    pub require_approval: Option<String>,
+    /// Approval requirement configuration for MCP tools.
+    pub require_approval: Option<RequireApproval>,
     pub allowed_tools: Option<Vec<String>>,
 }
 
-impl Default for ResponseTool {
-    fn default() -> Self {
-        Self {
-            r#type: ResponseToolType::WebSearchPreview,
-            function: None,
-            server_url: None,
-            authorization: None,
-            headers: None,
-            server_label: None,
-            server_description: None,
-            require_approval: None,
-            allowed_tools: None,
-        }
-    }
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchPreviewTool {
+    pub search_context_size: Option<String>,
+    pub user_location: Option<Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeInterpreterTool {
+    pub container: Option<Value>,
+}
+
+/// `require_approval` values.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum ResponseToolType {
-    Function,
-    WebSearchPreview,
-    CodeInterpreter,
-    Mcp,
+pub enum RequireApproval {
+    Always,
+    Never,
 }
 
 // ============================================================================
@@ -70,18 +93,22 @@ pub enum ResponseToolType {
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponseReasoningParam {
     #[serde(default = "default_reasoning_effort")]
     pub effort: Option<ReasoningEffort>,
     pub summary: Option<ReasoningSummary>,
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default function must match field type Option<T>"
+)]
 fn default_reasoning_effort() -> Option<ReasoningEffort> {
     Some(ReasoningEffort::Medium)
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
     Minimal,
@@ -90,7 +117,7 @@ pub enum ReasoningEffort {
     High,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningSummary {
     Auto,
@@ -103,14 +130,14 @@ pub enum ReasoningSummary {
 // ============================================================================
 
 /// Content can be either a simple string or array of content parts (for SimpleInputMessage)
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum StringOrContentParts {
     String(String),
     Array(Vec<ResponseContentPart>),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseInputOutputItem {
@@ -151,6 +178,22 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
+    #[serde(rename = "mcp_approval_request")]
+    McpApprovalRequest {
+        id: String,
+        server_label: String,
+        name: String,
+        arguments: String,
+    },
+    #[serde(rename = "mcp_approval_response")]
+    McpApprovalResponse {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        approval_request_id: String,
+        approve: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     #[serde(untagged)]
     SimpleInputMessage {
         content: StringOrContentParts,
@@ -161,7 +204,7 @@ pub enum ResponseInputOutputItem {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseContentPart {
@@ -180,7 +223,7 @@ pub enum ResponseContentPart {
     Unknown,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseReasoningContent {
@@ -190,7 +233,7 @@ pub enum ResponseReasoningContent {
 
 /// MCP Tool information for the mcp_list_tools output item
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct McpToolInfo {
     pub name: String,
     pub description: Option<String>,
@@ -199,7 +242,7 @@ pub struct McpToolInfo {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseOutputItem {
@@ -243,6 +286,13 @@ pub enum ResponseOutputItem {
         output: String,
         server_label: String,
     },
+    #[serde(rename = "mcp_approval_request")]
+    McpApprovalRequest {
+        id: String,
+        server_label: String,
+        name: String,
+        arguments: String,
+    },
     #[serde(rename = "web_search_call")]
     WebSearchCall {
         id: String,
@@ -271,7 +321,7 @@ pub enum ResponseOutputItem {
 // ============================================================================
 
 /// Status for web search tool calls.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchCallStatus {
     InProgress,
@@ -281,7 +331,7 @@ pub enum WebSearchCallStatus {
 }
 
 /// Action performed during a web search.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WebSearchAction {
     Search {
@@ -302,7 +352,7 @@ pub enum WebSearchAction {
 }
 
 /// A source returned from web search.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct WebSearchSource {
     #[serde(rename = "type")]
     pub source_type: String,
@@ -310,7 +360,7 @@ pub struct WebSearchSource {
 }
 
 /// Status for code interpreter tool calls.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeInterpreterCallStatus {
     InProgress,
@@ -321,7 +371,7 @@ pub enum CodeInterpreterCallStatus {
 }
 
 /// Output from code interpreter execution.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CodeInterpreterOutput {
     Logs { logs: String },
@@ -329,7 +379,7 @@ pub enum CodeInterpreterOutput {
 }
 
 /// Status for file search tool calls.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FileSearchCallStatus {
     InProgress,
@@ -341,7 +391,7 @@ pub enum FileSearchCallStatus {
 
 /// A result from file search.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FileSearchResult {
     pub file_id: String,
     pub filename: String,
@@ -354,8 +404,9 @@ pub struct FileSearchResult {
 // Configuration Enums
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(rename = "ResponsesServiceTier")]
 pub enum ServiceTier {
     #[default]
     Auto,
@@ -365,7 +416,7 @@ pub enum ServiceTier {
     Priority,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Truncation {
     Auto,
@@ -373,7 +424,7 @@ pub enum Truncation {
     Disabled,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseStatus {
     Queued,
@@ -384,7 +435,7 @@ pub enum ResponseStatus {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ReasoningInfo {
     pub effort: Option<String>,
     pub summary: Option<String>,
@@ -395,7 +446,7 @@ pub struct ReasoningInfo {
 // ============================================================================
 
 /// Text configuration for structured output requests
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct TextConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<TextFormat>,
@@ -403,7 +454,7 @@ pub struct TextConfig {
 
 /// Text format: text (default), json_object (legacy), or json_schema (recommended)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum TextFormat {
     #[serde(rename = "text")]
@@ -421,7 +472,7 @@ pub enum TextFormat {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IncludeField {
     #[serde(rename = "code_interpreter_call.outputs")]
@@ -444,7 +495,7 @@ pub enum IncludeField {
 
 /// OpenAI Responses API usage format (different from standard UsageInfo)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponseUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -453,19 +504,27 @@ pub struct ResponseUsage {
     pub output_tokens_details: Option<OutputTokensDetails>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ResponsesUsage {
     Classic(UsageInfo),
     Modern(ResponseUsage),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct InputTokensDetails {
     pub cached_tokens: u32,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+impl From<&PromptTokenUsageInfo> for InputTokensDetails {
+    fn from(d: &PromptTokenUsageInfo) -> Self {
+        Self {
+            cached_tokens: d.cached_tokens,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct OutputTokensDetails {
     pub reasoning_tokens: u32,
 }
@@ -477,11 +536,10 @@ impl UsageInfo {
             input_tokens: self.prompt_tokens,
             output_tokens: self.completion_tokens,
             total_tokens: self.total_tokens,
-            input_tokens_details: self.prompt_tokens_details.as_ref().map(|details| {
-                InputTokensDetails {
-                    cached_tokens: details.cached_tokens,
-                }
-            }),
+            input_tokens_details: self
+                .prompt_tokens_details
+                .as_ref()
+                .map(InputTokensDetails::from),
             output_tokens_details: self.reasoning_tokens.map(|tokens| OutputTokensDetails {
                 reasoning_tokens: tokens,
             }),
@@ -515,7 +573,7 @@ impl ResponseUsage {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponsesGetParams {
     #[serde(default)]
     pub include: Vec<String>,
@@ -555,10 +613,18 @@ fn default_repetition_penalty() -> f32 {
     1.0
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default function must match field type Option<T>"
+)]
 fn default_temperature() -> Option<f32> {
     Some(1.0)
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default function must match field type Option<T>"
+)]
 fn default_top_p() -> Option<f32> {
     Some(1.0)
 }
@@ -567,7 +633,7 @@ fn default_top_p() -> Option<f32> {
 // Request/Response Types
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate, schemars::JsonSchema)]
 #[validate(schema(function = "validate_responses_cross_parameters"))]
 pub struct ResponsesRequest {
     /// Run the request in the background
@@ -712,7 +778,7 @@ pub struct ResponsesRequest {
     pub repetition_penalty: f32,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ResponseInput {
     Items(Vec<ResponseInputOutputItem>),
@@ -766,10 +832,10 @@ impl Normalizable for ResponsesRequest {
         // 1. Apply tool_choice defaults
         if self.tool_choice.is_none() {
             if let Some(tools) = &self.tools {
-                let choice_value = if !tools.is_empty() {
-                    ToolChoiceValue::Auto
-                } else {
+                let choice_value = if tools.is_empty() {
                     ToolChoiceValue::None
+                } else {
+                    ToolChoiceValue::Auto
                 };
                 self.tool_choice = Some(ToolChoice::Value(choice_value));
             }
@@ -859,6 +925,8 @@ impl GenerationRequest for ResponsesRequest {
                     ResponseInputOutputItem::FunctionCallOutput { output, .. } => {
                         Some(output.clone())
                     }
+                    ResponseInputOutputItem::McpApprovalRequest { .. } => None,
+                    ResponseInputOutputItem::McpApprovalResponse { .. } => None,
                 })
                 .collect::<Vec<String>>()
                 .join(" "),
@@ -867,12 +935,11 @@ impl GenerationRequest for ResponsesRequest {
 }
 
 /// Validate conversation ID format
-pub fn validate_conversation_id(conv_id: &str) -> Result<(), validator::ValidationError> {
+pub fn validate_conversation_id(conv_id: &str) -> Result<(), ValidationError> {
     if !conv_id.starts_with("conv_") {
-        let mut error = validator::ValidationError::new("invalid_conversation_id");
+        let mut error = ValidationError::new("invalid_conversation_id");
         error.message = Some(std::borrow::Cow::Owned(format!(
-            "Invalid 'conversation': '{}'. Expected an ID that begins with 'conv_'.",
-            conv_id
+            "Invalid 'conversation': '{conv_id}'. Expected an ID that begins with 'conv_'."
         )));
         return Err(error);
     }
@@ -883,10 +950,9 @@ pub fn validate_conversation_id(conv_id: &str) -> Result<(), validator::Validati
         .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
 
     if !is_valid {
-        let mut error = validator::ValidationError::new("invalid_conversation_id");
+        let mut error = ValidationError::new("invalid_conversation_id");
         error.message = Some(std::borrow::Cow::Owned(format!(
-            "Invalid 'conversation': '{}'. Expected an ID that contains letters, numbers, underscores, or dashes, but this value contained additional characters.",
-            conv_id
+            "Invalid 'conversation': '{conv_id}'. Expected an ID that contains letters, numbers, underscores, or dashes, but this value contained additional characters."
         )));
         return Err(error);
     }
@@ -894,9 +960,7 @@ pub fn validate_conversation_id(conv_id: &str) -> Result<(), validator::Validati
 }
 
 /// Validates tool_choice requires tools and references exist
-fn validate_tool_choice_with_tools(
-    request: &ResponsesRequest,
-) -> Result<(), validator::ValidationError> {
+fn validate_tool_choice_with_tools(request: &ResponsesRequest) -> Result<(), ValidationError> {
     let Some(tool_choice) = &request.tool_choice else {
         return Ok(());
     };
@@ -906,7 +970,7 @@ fn validate_tool_choice_with_tools(
 
     // Check if tool_choice requires tools but none are provided
     if is_some_choice && !has_tools {
-        let mut e = validator::ValidationError::new("tool_choice_requires_tools");
+        let mut e = ValidationError::new("tool_choice_requires_tools");
         e.message = Some("Invalid value for 'tool_choice': 'tool_choice' is only allowed when 'tools' are specified.".into());
         return Err(e);
     }
@@ -917,11 +981,14 @@ fn validate_tool_choice_with_tools(
     }
 
     // Extract function tool names from ResponseTools
-    let tools = request.tools.as_ref().unwrap();
+    // INVARIANT: has_tools is true here, so tools is Some and non-empty
+    let Some(tools) = request.tools.as_ref() else {
+        return Ok(());
+    };
     let function_tool_names: Vec<&str> = tools
         .iter()
-        .filter_map(|t| match t.r#type {
-            ResponseToolType::Function => t.function.as_ref().map(|f| f.name.as_str()),
+        .filter_map(|t| match t {
+            ResponseTool::Function(ft) => Some(ft.function.name.as_str()),
             _ => None,
         })
         .collect();
@@ -930,7 +997,7 @@ fn validate_tool_choice_with_tools(
     match tool_choice {
         ToolChoice::Function { function, .. } => {
             if !function_tool_names.contains(&function.name.as_str()) {
-                let mut e = validator::ValidationError::new("tool_choice_function_not_found");
+                let mut e = ValidationError::new("tool_choice_function_not_found");
                 e.message = Some(
                     format!(
                         "Invalid value for 'tool_choice': function '{}' not found in 'tools'.",
@@ -948,11 +1015,10 @@ fn validate_tool_choice_with_tools(
         } => {
             // Validate mode is "auto" or "required"
             if mode != "auto" && mode != "required" {
-                let mut e = validator::ValidationError::new("tool_choice_invalid_mode");
+                let mut e = ValidationError::new("tool_choice_invalid_mode");
                 e.message = Some(
                     format!(
-                        "Invalid value for 'tool_choice.mode': must be 'auto' or 'required', got '{}'.",
-                        mode
+                        "Invalid value for 'tool_choice.mode': must be 'auto' or 'required', got '{mode}'."
                     )
                     .into(),
                 );
@@ -963,11 +1029,10 @@ fn validate_tool_choice_with_tools(
             for tool_ref in allowed_tools {
                 if let ToolReference::Function { name } = tool_ref {
                     if !function_tool_names.contains(&name.as_str()) {
-                        let mut e = validator::ValidationError::new("tool_choice_tool_not_found");
+                        let mut e = ValidationError::new("tool_choice_tool_not_found");
                         e.message = Some(
                             format!(
-                                "Invalid value for 'tool_choice.tools': tool '{}' not found in 'tools'.",
-                                name
+                                "Invalid value for 'tool_choice.tools': tool '{name}' not found in 'tools'."
                             )
                             .into(),
                         );
@@ -978,16 +1043,14 @@ fn validate_tool_choice_with_tools(
                 // as they are resolved dynamically at runtime
             }
         }
-        _ => {}
+        ToolChoice::Value(_) => {}
     }
 
     Ok(())
 }
 
 /// Schema-level validation for cross-field dependencies
-fn validate_responses_cross_parameters(
-    request: &ResponsesRequest,
-) -> Result<(), validator::ValidationError> {
+fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(), ValidationError> {
     // 1. Validate tool_choice requires tools (enhanced)
     validate_tool_choice_with_tools(request)?;
 
@@ -999,7 +1062,7 @@ fn validate_responses_cross_parameters(
             .is_some_and(|inc| inc.contains(&IncludeField::MessageOutputTextLogprobs));
 
         if !has_logprobs_include {
-            let mut e = validator::ValidationError::new("top_logprobs_requires_include");
+            let mut e = ValidationError::new("top_logprobs_requires_include");
             e.message = Some(
                 "top_logprobs requires include field with 'message.output_text.logprobs'".into(),
             );
@@ -1009,14 +1072,14 @@ fn validate_responses_cross_parameters(
 
     // 3. Validate background/stream conflict
     if request.background == Some(true) && request.stream == Some(true) {
-        let mut e = validator::ValidationError::new("background_conflicts_with_stream");
+        let mut e = ValidationError::new("background_conflicts_with_stream");
         e.message = Some("Cannot use background mode with streaming".into());
         return Err(e);
     }
 
     // 4. Validate conversation and previous_response_id are mutually exclusive
     if request.conversation.is_some() && request.previous_response_id.is_some() {
-        let mut e = validator::ValidationError::new("mutually_exclusive_parameters");
+        let mut e = ValidationError::new("mutually_exclusive_parameters");
         e.message = Some("Mutually exclusive parameters. Ensure you are only providing one of: 'previous_response_id' or 'conversation'.".into());
         return Err(e);
     }
@@ -1033,7 +1096,7 @@ fn validate_responses_cross_parameters(
         });
 
         if !has_valid_input {
-            let mut e = validator::ValidationError::new("input_missing_user_message");
+            let mut e = ValidationError::new("input_missing_user_message");
             e.message = Some("Input items must contain at least one message".into());
             return Err(e);
         }
@@ -1051,18 +1114,18 @@ fn validate_responses_cross_parameters(
 // ============================================================================
 
 /// Validates response input is not empty and has valid content
-fn validate_response_input(input: &ResponseInput) -> Result<(), validator::ValidationError> {
+fn validate_response_input(input: &ResponseInput) -> Result<(), ValidationError> {
     match input {
         ResponseInput::Text(text) => {
             if text.is_empty() {
-                let mut e = validator::ValidationError::new("input_text_empty");
+                let mut e = ValidationError::new("input_text_empty");
                 e.message = Some("Input text cannot be empty".into());
                 return Err(e);
             }
         }
         ResponseInput::Items(items) => {
             if items.is_empty() {
-                let mut e = validator::ValidationError::new("input_items_empty");
+                let mut e = ValidationError::new("input_items_empty");
                 e.message = Some("Input items cannot be empty".into());
                 return Err(e);
             }
@@ -1076,23 +1139,23 @@ fn validate_response_input(input: &ResponseInput) -> Result<(), validator::Valid
 }
 
 /// Validates individual input items have valid content
-fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), validator::ValidationError> {
+fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationError> {
     match item {
         ResponseInputOutputItem::Message { content, .. } => {
             if content.is_empty() {
-                let mut e = validator::ValidationError::new("message_content_empty");
+                let mut e = ValidationError::new("message_content_empty");
                 e.message = Some("Message content cannot be empty".into());
                 return Err(e);
             }
         }
         ResponseInputOutputItem::SimpleInputMessage { content, .. } => match content {
             StringOrContentParts::String(s) if s.is_empty() => {
-                let mut e = validator::ValidationError::new("message_content_empty");
+                let mut e = ValidationError::new("message_content_empty");
                 e.message = Some("Message content cannot be empty".into());
                 return Err(e);
             }
             StringOrContentParts::Array(parts) if parts.is_empty() => {
-                let mut e = validator::ValidationError::new("message_content_empty");
+                let mut e = ValidationError::new("message_content_empty");
                 e.message = Some("Message content parts cannot be empty".into());
                 return Err(e);
             }
@@ -1103,45 +1166,70 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), validator::
         }
         ResponseInputOutputItem::FunctionCallOutput { output, .. } => {
             if output.is_empty() {
-                let mut e = validator::ValidationError::new("function_output_empty");
+                let mut e = ValidationError::new("function_output_empty");
                 e.message = Some("Function call output cannot be empty".into());
                 return Err(e);
             }
         }
-        _ => {}
+        ResponseInputOutputItem::FunctionToolCall { .. } => {}
+        ResponseInputOutputItem::McpApprovalRequest { .. } => {}
+        ResponseInputOutputItem::McpApprovalResponse { .. } => {}
     }
     Ok(())
 }
 
 /// Validates ResponseTool structure based on tool type
-fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), validator::ValidationError> {
-    for tool in tools {
-        match tool.r#type {
-            ResponseToolType::Function => {
-                if tool.function.is_none() {
-                    let mut e = validator::ValidationError::new("function_tool_missing_function");
-                    e.message = Some("Function tool must have a function definition".into());
-                    return Err(e);
-                }
+fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError> {
+    // MCP server_label must be present and unique (case-insensitive).
+    let mut seen_mcp_labels: HashSet<String> = HashSet::new();
+
+    for (idx, tool) in tools.iter().enumerate() {
+        if let ResponseTool::Mcp(mcp) = tool {
+            let raw_label = mcp.server_label.as_str();
+            if raw_label.is_empty() {
+                let mut e = ValidationError::new("missing_required_parameter");
+                e.message = Some(
+                    format!("Missing required parameter: 'tools[{idx}].server_label'.").into(),
+                );
+                return Err(e);
             }
-            ResponseToolType::Mcp => {
-                if tool.server_url.is_none() && tool.server_label.is_none() {
-                    let mut e = validator::ValidationError::new("mcp_tool_missing_connection_info");
-                    e.message = Some("MCP tool must have either server_url or server_label".into());
-                    return Err(e);
-                }
+
+            // OpenAI spec-compatible validation: require a non-empty label that starts with a
+            // letter and contains only letters, digits, '-' and '_'.
+            let valid = raw_label.starts_with(|c: char| c.is_ascii_alphabetic())
+                && raw_label
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            if !valid {
+                let mut e = ValidationError::new("invalid_server_label");
+                e.message = Some(
+                    format!(
+                        "Invalid input {raw_label}: 'server_label' must start with a letter and consist of only letters, digits, '-' and '_'"
+                    )
+                    .into(),
+                );
+                return Err(e);
             }
-            _ => {}
+
+            let normalized = raw_label.to_lowercase();
+            if !seen_mcp_labels.insert(normalized) {
+                let mut e = ValidationError::new("mcp_tool_duplicate_server_label");
+                e.message = Some(
+                    format!("Duplicate MCP server_label '{raw_label}' found in 'tools' parameter.")
+                        .into(),
+                );
+                return Err(e);
+            }
         }
     }
     Ok(())
 }
 
 /// Validates text format configuration (JSON schema name cannot be empty)
-fn validate_text_format(text: &TextConfig) -> Result<(), validator::ValidationError> {
+fn validate_text_format(text: &TextConfig) -> Result<(), ValidationError> {
     if let Some(TextFormat::JsonSchema { name, .. }) = &text.format {
         if name.is_empty() {
-            let mut e = validator::ValidationError::new("json_schema_name_empty");
+            let mut e = ValidationError::new("json_schema_name_empty");
             e.message = Some("JSON schema name cannot be empty".into());
             return Err(e);
         }
@@ -1189,12 +1277,12 @@ pub fn generate_id(prefix: &str) -> String {
     // Generate exactly 50 hex characters (25 bytes) for the part after the underscore
     let mut bytes = [0u8; 25];
     rng.fill_bytes(&mut bytes);
-    let hex_string: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("{}_{}", prefix, hex_string)
+    let hex_string: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{prefix}_{hex_string}")
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponsesResponse {
     /// Response ID
     pub id: String,

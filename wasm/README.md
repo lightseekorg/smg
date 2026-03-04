@@ -131,6 +131,8 @@ See [`examples/wasm/`](../../examples/wasm/) for complete examples:
 1. **[wasm-guest-auth](../../examples/wasm/wasm-guest-auth/)** - API key authentication middleware
 2. **[wasm-guest-logging](../../examples/wasm/wasm-guest-logging/)** - Request tracking and status code conversion
 3. **[wasm-guest-ratelimit](../../examples/wasm/wasm-guest-ratelimit/)** - Rate limiting middleware
+4. **[wasm-guest-storage-hook](../../examples/wasm/wasm-guest-storage-hook/)** - Multi-tenant storage hook with audit trail extra columns
+5. **[wasm-guest-storage-hook-passthrough](../../examples/wasm/wasm-guest-storage-hook-passthrough/)** - Minimal passthrough storage hook for testing
 
 Each example includes:
 - Complete source code

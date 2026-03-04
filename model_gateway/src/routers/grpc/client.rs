@@ -2,13 +2,17 @@
 
 use std::collections::HashMap;
 
-use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
+use openai_protocol::{
+    chat::ChatCompletionRequest, generate::GenerateRequest, worker::WorkerLoadResponse,
+};
 use smg_grpc_client::{
-    sglang_proto::MultimodalInputs, SglangSchedulerClient, TrtllmServiceClient, VllmEngineClient,
+    tokenizer_bundle, tokenizer_bundle::StreamBundle, SglangSchedulerClient, TrtllmServiceClient,
+    VllmEngineClient,
 };
 
-use crate::routers::grpc::proto_wrapper::{
-    ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream,
+use crate::routers::grpc::{
+    proto_wrapper::{ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream},
+    MultimodalData,
 };
 
 /// Health check response (common across backends)
@@ -27,6 +31,10 @@ pub enum GrpcClient {
 }
 
 impl GrpcClient {
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &SglangSchedulerClient {
         match self {
             Self::Sglang(client) => client,
@@ -34,6 +42,10 @@ impl GrpcClient {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang_mut(&mut self) -> &mut SglangSchedulerClient {
         match self {
             Self::Sglang(client) => client,
@@ -41,6 +53,10 @@ impl GrpcClient {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm(&self) -> &VllmEngineClient {
         match self {
             Self::Vllm(client) => client,
@@ -48,6 +64,10 @@ impl GrpcClient {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm_mut(&mut self) -> &mut VllmEngineClient {
         match self {
             Self::Vllm(client) => client,
@@ -55,6 +75,10 @@ impl GrpcClient {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm(&self) -> &TrtllmServiceClient {
         match self {
             Self::Trtllm(client) => client,
@@ -62,6 +86,10 @@ impl GrpcClient {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm_mut(&mut self) -> &mut TrtllmServiceClient {
         match self {
             Self::Trtllm(client) => client,
@@ -89,7 +117,7 @@ impl GrpcClient {
             "sglang" => Ok(Self::Sglang(SglangSchedulerClient::connect(url).await?)),
             "vllm" => Ok(Self::Vllm(VllmEngineClient::connect(url).await?)),
             "trtllm" | "tensorrt-llm" => Ok(Self::Trtllm(TrtllmServiceClient::connect(url).await?)),
-            _ => Err(format!("Unknown runtime type: {}", runtime_type).into()),
+            _ => Err(format!("Unknown runtime type: {runtime_type}").into()),
         }
     }
 
@@ -133,6 +161,35 @@ impl GrpcClient {
         }
     }
 
+    /// Get the full load response from the backend.
+    /// Only supported for SGLang backends. Returns per-DP-rank load metrics.
+    pub async fn get_loads(
+        &self,
+    ) -> Result<WorkerLoadResponse, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            Self::Sglang(client) => {
+                let resp = client.get_loads(vec!["core".to_string()]).await?;
+                Ok(WorkerLoadResponse::from(resp))
+            }
+            _ => Err("GetLoads RPC not supported for this backend".into()),
+        }
+    }
+
+    /// Subscribe to KV cache events (all backends).
+    pub async fn subscribe_kv_events(
+        &self,
+        start_seq: u64,
+    ) -> Result<
+        tonic::Streaming<smg_grpc_client::common_proto::KvEventBatch>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        match self {
+            Self::Sglang(client) => client.subscribe_kv_events(start_seq).await,
+            Self::Vllm(client) => client.subscribe_kv_events(start_seq).await,
+            Self::Trtllm(client) => client.subscribe_kv_events(start_seq).await,
+        }
+    }
+
     pub async fn get_server_info(
         &self,
     ) -> Result<ServerInfo, Box<dyn std::error::Error + Send + Sync>> {
@@ -145,6 +202,29 @@ impl GrpcClient {
         }
     }
 
+    /// Fetch tokenizer bundle from backend runtime and validate integrity/safety.
+    pub async fn get_tokenizer(
+        &self,
+    ) -> Result<StreamBundle, Box<dyn std::error::Error + Send + Sync>> {
+        let bundle = match self {
+            Self::Sglang(client) => client.get_tokenizer().await,
+            Self::Vllm(client) => client.get_tokenizer().await,
+            Self::Trtllm(client) => client.get_tokenizer().await,
+        }?;
+
+        tokenizer_bundle::validate_bundle_sha256(&bundle).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Tokenizer bundle SHA256 validation failed: {e}"),
+            )
+        })?;
+
+        Ok(bundle)
+    }
+
+    /// Generate streaming response from request
+    ///
+    /// Dispatches to the appropriate backend client and wraps the result in ProtoStream
     pub async fn generate(
         &mut self,
         req: ProtoGenerateRequest,
@@ -162,6 +242,10 @@ impl GrpcClient {
                 let stream = client.generate(*boxed_req).await?;
                 Ok(ProtoStream::Trtllm(stream))
             }
+            #[expect(
+                clippy::panic,
+                reason = "client and request types are always matched by construction in the pipeline"
+            )]
             _ => panic!("Mismatched client and request types"),
         }
     }
@@ -175,47 +259,69 @@ impl GrpcClient {
                 let resp = client.embed(*boxed_req).await?;
                 Ok(ProtoEmbedResponse::Sglang(resp))
             }
+            #[expect(
+                clippy::panic,
+                reason = "client and request types are always matched by construction in the pipeline"
+            )]
             _ => panic!("Mismatched client and request types or unsupported embedding backend"),
         }
     }
 
+    #[expect(
+        clippy::unreachable,
+        reason = "assembly stage guarantees matching MultimodalData variant for each backend"
+    )]
     pub fn build_chat_request(
         &self,
         request_id: String,
         body: &ChatCompletionRequest,
         processed_text: String,
         token_ids: Vec<u32>,
-        multimodal_inputs: Option<MultimodalInputs>,
+        multimodal_inputs: Option<MultimodalData>,
         tool_constraints: Option<(String, String)>,
     ) -> Result<ProtoGenerateRequest, String> {
         match self {
             Self::Sglang(client) => {
+                let sglang_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Sglang(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
-                    multimodal_inputs,
+                    sglang_mm,
                     tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
             }
             Self::Vllm(client) => {
+                let vllm_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Vllm(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
+                    vllm_mm,
                     tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
             }
             Self::Trtllm(client) => {
+                let trtllm_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Trtllm(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
+                    trtllm_mm,
                     tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
@@ -373,7 +479,7 @@ fn pick_prost_fields(labels: &mut HashMap<String, String>, s: &prost_types::Stru
             if let Some(ref kind) = val.kind {
                 match kind {
                     prost_types::value::Kind::StringValue(s) if !s.is_empty() && s != "null" => {
-                        labels.insert(key.to_string(), s.clone());
+                        labels.insert((*key).to_string(), s.clone());
                     }
                     prost_types::value::Kind::NumberValue(n) if *n != 0.0 => {
                         let formatted = if *n == (*n as i64) as f64 {
@@ -381,10 +487,10 @@ fn pick_prost_fields(labels: &mut HashMap<String, String>, s: &prost_types::Stru
                         } else {
                             n.to_string()
                         };
-                        labels.insert(key.to_string(), formatted);
+                        labels.insert((*key).to_string(), formatted);
                     }
                     prost_types::value::Kind::BoolValue(b) => {
-                        labels.insert(key.to_string(), b.to_string());
+                        labels.insert((*key).to_string(), b.to_string());
                     }
                     _ => {}
                 }

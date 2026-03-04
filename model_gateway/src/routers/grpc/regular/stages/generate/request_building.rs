@@ -10,8 +10,7 @@ use crate::routers::{
     grpc::{
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, RequestContext},
-        proto_wrapper::ProtoGenerateRequest,
-        utils,
+        proto_wrapper::ProtoRequest,
     },
 };
 
@@ -62,7 +61,7 @@ impl PipelineStage for GenerateRequestBuildingStage {
         let request_id = generate_request
             .rid
             .clone()
-            .unwrap_or_else(|| format!("gen-{}", Uuid::new_v4()));
+            .unwrap_or_else(|| format!("gen-{}", Uuid::now_v7()));
 
         // Build proto request using centralized dispatch
         let mut proto_request = builder_client
@@ -77,28 +76,13 @@ impl PipelineStage for GenerateRequestBuildingStage {
                 error::bad_request("build_request_failed", e)
             })?;
 
-        // Inject tokenized stop sequences for TRT-LLM requests
-        if let ProtoGenerateRequest::Trtllm(ref mut req) = proto_request {
-            let stop = generate_request
-                .sampling_params
-                .as_ref()
-                .and_then(|p| p.stop.as_ref());
-            if let Some(stop) = stop {
-                if let Some(tokenizer) = ctx.state.tokenizer.as_ref() {
-                    utils::inject_trtllm_stop_words(req, tokenizer.as_ref(), stop);
-                }
-            }
-        }
-
         if self.inject_pd_metadata {
             if let Some(workers) = ctx.state.workers.as_ref() {
                 helpers::maybe_inject_pd_metadata(&mut proto_request, workers);
             }
         }
 
-        ctx.state.proto_request = Some(
-            crate::routers::grpc::proto_wrapper::ProtoRequest::Generate(proto_request),
-        );
+        ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
         Ok(None)
     }
 

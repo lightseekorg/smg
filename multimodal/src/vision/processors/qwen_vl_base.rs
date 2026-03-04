@@ -22,12 +22,12 @@
 //! ```
 
 use image::{DynamicImage, GenericImageView};
-use ndarray::Array3;
+use ndarray::{Array2, Array3};
 
 use crate::vision::{
     image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
-    transforms::{normalize, pil_to_filter, resize, stack_batch, to_tensor, TransformError},
+    transforms::{normalize, pil_to_filter, resize, to_tensor, TransformError},
 };
 
 /// Python-compatible rounding (banker's rounding / round half to even).
@@ -149,7 +149,7 @@ impl QwenVLProcessorBase {
         // Validate minimum dimensions
         if height < factor || width < factor {
             return Err(TransformError::InvalidShape {
-                expected: format!("dimensions >= {} (patch_size * merge_size)", factor),
+                expected: format!("dimensions >= {factor} (patch_size * merge_size)"),
                 actual: vec![height, width],
             });
         }
@@ -252,7 +252,7 @@ impl QwenVLProcessorBase {
         grid_t: usize,
         grid_h: usize,
         grid_w: usize,
-    ) -> Vec<f32> {
+    ) -> Result<Vec<f32>, TransformError> {
         use ndarray::IxDyn;
 
         let channel = tensor.shape()[0];
@@ -281,7 +281,9 @@ impl QwenVLProcessorBase {
             .view()
             .insert_axis(ndarray::Axis(0))
             .broadcast((temporal_patch_size, channel, height, width))
-            .expect("Broadcast failed")
+            .ok_or_else(|| TransformError::ShapeError(
+                format!("Broadcast failed: cannot broadcast [1, {channel}, {height}, {width}] to [{temporal_patch_size}, {channel}, {height}, {width}]")
+            ))?
             .to_owned();
 
         // Step 2: Reshape to split spatial dimensions into grid and patch components
@@ -304,7 +306,7 @@ impl QwenVLProcessorBase {
 
         let reshaped = expanded
             .into_shape_with_order(shape_9d)
-            .expect("Reshape failed");
+            .map_err(|e| TransformError::ShapeError(format!("Reshape to 9D failed: {e}")))?;
 
         // Step 3: Permute axes to match HuggingFace output order
         // From: [grid_t, temporal, C, grid_h/merge, merge, patch, grid_w/merge, merge, patch]
@@ -321,10 +323,14 @@ impl QwenVLProcessorBase {
         let contiguous = permuted.as_standard_layout().into_owned();
         let flat = contiguous
             .into_shape_with_order(IxDyn(&[num_patches, patch_features]))
-            .expect("Final reshape failed");
+            .map_err(|e| {
+                TransformError::ShapeError(format!(
+                    "Final reshape to [{num_patches}, {patch_features}] failed: {e}"
+                ))
+            })?;
 
         let (vec, _offset) = flat.into_raw_vec_and_offset();
-        vec
+        Ok(vec)
     }
 }
 
@@ -349,39 +355,31 @@ impl ImagePreProcessor for QwenVLProcessorBase {
         // Store original sizes
         let image_sizes: Vec<(u32, u32)> = images.iter().map(|img| img.dimensions()).collect();
 
-        // First pass: calculate target dimensions for each image
-        let mut target_sizes = Vec::with_capacity(images.len());
-        for image in images {
-            let (w, h) = image.dimensions();
-            let (new_h, new_w) = self.smart_resize(h as usize, w as usize)?;
-            target_sizes.push((new_h, new_w));
-        }
-
-        // Find max height and width across all images
-        let max_height = target_sizes.iter().map(|(h, _)| *h).max().unwrap_or(0);
-        let max_width = target_sizes.iter().map(|(_, w)| *w).max().unwrap_or(0);
-
-        // Process each image with uniform max dimensions
         let mean = config.get_image_mean();
         let std = config.get_image_std();
         let filter = pil_to_filter(config.resampling);
 
-        let mut tensors = Vec::with_capacity(images.len());
+        let patch_size = self.config.patch_size;
+        let temporal_patch_size = self.config.temporal_patch_size;
+        let patch_features = 3 * temporal_patch_size * patch_size * patch_size;
+
+        let mut all_patches: Vec<f32> = Vec::new();
+        let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
         let mut grid_thw_data = Vec::with_capacity(images.len() * 3);
         let mut num_img_tokens = Vec::with_capacity(images.len());
 
-        for (i, image) in images.iter().enumerate() {
-            let (target_h, target_w) = target_sizes[i];
+        for image in images {
+            let (w, h) = image.dimensions();
+            let (target_h, target_w) = self.smart_resize(h as usize, w as usize)?;
 
-            // Resize to the target size for this image
+            // Resize to the image's own target size
             let resized = if config.do_resize.unwrap_or(true) {
-                // For batching: resize to max dimensions to enable stacking
-                resize(image, max_width as u32, max_height as u32, filter)
+                resize(image, target_w as u32, target_h as u32, filter)
             } else {
                 image.clone()
             };
 
-            // Convert to tensor
+            // Convert to tensor [C, H, W]
             let mut tensor = to_tensor(&resized);
 
             // Normalize
@@ -389,27 +387,40 @@ impl ImagePreProcessor for QwenVLProcessorBase {
                 normalize(&mut tensor, &mean, &std);
             }
 
-            tensors.push(tensor);
-
-            // Grid dimensions are based on the individual image's target size
+            // Grid dimensions based on the target size
             let (grid_t, grid_h, grid_w) = self.calculate_grid_thw(target_h, target_w, 1);
-            grid_thw_data.push(grid_t as u32);
-            grid_thw_data.push(grid_h as u32);
-            grid_thw_data.push(grid_w as u32);
+            grid_thw_data.push(grid_t as i64);
+            grid_thw_data.push(grid_h as i64);
+            grid_thw_data.push(grid_w as i64);
 
-            // Token count is based on individual grid
+            let num_patches = grid_t * grid_h * grid_w;
             let tokens = self.calculate_tokens_from_grid(grid_t, grid_h, grid_w);
             num_img_tokens.push(tokens);
+
+            // Patchify: [C, H, W] → flat Vec<f32> of (num_patches, patch_features)
+            let patches = self.reshape_to_patches(&tensor, grid_t, grid_h, grid_w)?;
+            all_patches.extend(patches);
+            patches_per_image.push(num_patches as i64);
         }
 
-        // Stack tensors into batch (now all same size)
-        let pixel_values = stack_batch(&tensors)?;
+        let total_patches: usize = patches_per_image.iter().map(|&n| n as usize).sum();
+        let pixel_values =
+            Array2::from_shape_vec((total_patches, patch_features), all_patches).map_err(|e| {
+                TransformError::ShapeError(format!(
+                    "Failed to create patchified pixel_values [{total_patches}, {patch_features}]: {e}"
+                ))
+            })?;
 
-        // Create result with model-specific image_grid_thw
-        let result = PreprocessedImages::new(pixel_values, num_img_tokens, image_sizes).with_extra(
-            "image_grid_thw",
-            ModelSpecificValue::uint_2d(grid_thw_data, images.len(), 3),
-        );
+        let result =
+            PreprocessedImages::new_dynamic(pixel_values.into_dyn(), num_img_tokens, image_sizes)
+                .with_extra(
+                    "image_grid_thw",
+                    ModelSpecificValue::int_2d(grid_thw_data, images.len(), 3),
+                )
+                .with_extra(
+                    "patches_per_image",
+                    ModelSpecificValue::int_1d(patches_per_image),
+                );
 
         Ok(result)
     }

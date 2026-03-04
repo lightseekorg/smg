@@ -16,7 +16,10 @@ use tracing::debug;
 
 use crate::{
     config::RouterConfig,
-    core::{steps::WorkflowEngines, JobQueue, LoadMonitor, WorkerRegistry, WorkerService},
+    core::{
+        steps::WorkflowEngines, JobQueue, KvEventMonitor, LoadMonitor, WorkerRegistry,
+        WorkerService,
+    },
     middleware::TokenBucket,
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
@@ -59,6 +62,7 @@ pub struct AppContext {
     pub wasm_manager: Option<Arc<WasmModuleManager>>,
     pub worker_service: Arc<WorkerService>,
     pub inflight_tracker: Arc<InFlightRequestTracker>,
+    pub kv_event_monitor: Option<Arc<KvEventMonitor>>,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -87,6 +91,7 @@ pub struct AppContextBuilder {
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
     mcp_orchestrator: Option<Arc<OnceLock<Arc<McpOrchestrator>>>>,
     wasm_manager: Option<Arc<WasmModuleManager>>,
+    kv_event_monitor: Option<Arc<KvEventMonitor>>,
 }
 
 impl AppContext {
@@ -96,14 +101,19 @@ impl AppContext {
 
     /// Create AppContext from config with all components initialized
     /// This is the main entry point that replaces ~194 lines of initialization in server.rs
-    pub async fn from_config(
+    pub fn from_config(
         router_config: RouterConfig,
         request_timeout_secs: u64,
-    ) -> Result<Self, String> {
-        AppContextBuilder::from_config(router_config, request_timeout_secs)
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self, String>> + Send>> {
+        Box::pin(async move {
+            Box::pin(AppContextBuilder::from_config(
+                router_config,
+                request_timeout_secs,
+            ))
             .await?
             .build()
             .map_err(|e| e.to_string())
+        })
     }
 }
 
@@ -127,6 +137,7 @@ impl AppContextBuilder {
             workflow_engines: None,
             mcp_orchestrator: None,
             wasm_manager: None,
+            kv_event_monitor: None,
         }
     }
 
@@ -227,6 +238,11 @@ impl AppContextBuilder {
         self
     }
 
+    pub fn kv_event_monitor(mut self, kv_event_monitor: Option<Arc<KvEventMonitor>>) -> Self {
+        self.kv_event_monitor = kv_event_monitor;
+        self
+    }
+
     pub fn build(self) -> Result<AppContext, AppContextBuildError> {
         let router_config = self
             .router_config
@@ -284,6 +300,7 @@ impl AppContextBuilder {
             wasm_manager: self.wasm_manager,
             worker_service,
             inflight_tracker: InFlightRequestTracker::new(),
+            kv_event_monitor: self.kv_event_monitor,
         })
     }
 
@@ -296,18 +313,20 @@ impl AppContextBuilder {
         Ok(Self::new()
             .with_client(&router_config, request_timeout_secs)?
             .maybe_rate_limiter(&router_config)
-            .with_tokenizer_registry(&router_config)?
+            .with_tokenizer_registry()
             .with_reasoning_parser_factory()
             .with_tool_parser_factory()
             .with_worker_registry()
             .with_policy_registry(&router_config)
-            .with_storage(&router_config)?
-            .with_load_monitor(&router_config)
+            .with_storage(&router_config)
+            .await?
+            .with_load_monitor(&router_config)?
             .with_worker_job_queue()
             .with_workflow_engines()
             .with_mcp_orchestrator(&router_config)
             .await?
-            .with_wasm_manager(&router_config)?
+            .with_wasm_manager(&router_config)
+            .with_kv_event_monitor(&router_config)
             .router_config(router_config))
     }
 
@@ -348,7 +367,7 @@ impl AppContextBuilder {
         // Configure mTLS client identity if provided (certificates already loaded during config creation)
         if let Some(identity_pem) = &config.client_identity {
             let identity = reqwest::Identity::from_pem(identity_pem)
-                .map_err(|e| format!("Failed to create client identity: {}", e))?;
+                .map_err(|e| format!("Failed to create client identity: {e}"))?;
             client_builder = client_builder.identity(identity);
             debug!("mTLS client authentication enabled");
         }
@@ -356,7 +375,7 @@ impl AppContextBuilder {
         // Add CA certificates for verifying worker TLS (certificates already loaded during config creation)
         for ca_cert in &config.ca_certificates {
             let cert = reqwest::Certificate::from_pem(ca_cert)
-                .map_err(|e| format!("Failed to add CA certificate: {}", e))?;
+                .map_err(|e| format!("Failed to add CA certificate: {e}"))?;
             client_builder = client_builder.add_root_certificate(cert);
         }
         if !config.ca_certificates.is_empty() {
@@ -368,7 +387,7 @@ impl AppContextBuilder {
 
         let client = client_builder
             .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+            .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
         self.client = Some(client);
         Ok(self)
@@ -414,9 +433,9 @@ impl AppContextBuilder {
     /// - Via POST /v1/tokenizers API (registers under user-specified name)
     ///
     /// This unified approach ensures consistent behavior (caching, validation) across all paths.
-    fn with_tokenizer_registry(mut self, _config: &RouterConfig) -> Result<Self, String> {
+    fn with_tokenizer_registry(mut self) -> Self {
         self.tokenizer_registry = Some(Arc::new(TokenizerRegistry::new()));
-        Ok(self)
+        self
     }
 
     /// Create worker registry
@@ -432,15 +451,35 @@ impl AppContextBuilder {
     }
 
     /// Create all storage backends using the factory function
-    fn with_storage(mut self, config: &RouterConfig) -> Result<Self, String> {
+    async fn with_storage(mut self, config: &RouterConfig) -> Result<Self, String> {
+        let hook: Option<Arc<dyn smg_data_connector::hooks::StorageHook>> =
+            match &config.storage_hook_wasm_path {
+                Some(path) => {
+                    let bytes = tokio::fs::read(path)
+                        .await
+                        .map_err(|e| format!("failed to read WASM storage hook at {path}: {e}"))?;
+                    let wasm_hook =
+                        tokio::task::spawn_blocking(move || smg_wasm::WasmStorageHook::new(&bytes))
+                            .await
+                            .map_err(|e| format!("WASM compilation task panicked: {e}"))?
+                            .map_err(|e| {
+                                format!("failed to compile WASM storage hook at {path}: {e}")
+                            })?;
+                    debug!("loaded WASM storage hook from {path}");
+                    Some(Arc::new(wasm_hook))
+                }
+                None => None,
+            };
+
         let storage_config = StorageFactoryConfig {
             backend: &config.history_backend,
             oracle: config.oracle.as_ref(),
             postgres: config.postgres.as_ref(),
             redis: config.redis.as_ref(),
+            hook,
         };
         let (response_storage, conversation_storage, conversation_item_storage) =
-            create_storage(storage_config)?;
+            create_storage(storage_config).await?;
 
         self.response_storage = Some(response_storage);
         self.conversation_storage = Some(conversation_storage);
@@ -450,24 +489,24 @@ impl AppContextBuilder {
     }
 
     /// Create load monitor
-    fn with_load_monitor(mut self, config: &RouterConfig) -> Self {
+    fn with_load_monitor(mut self, config: &RouterConfig) -> Result<Self, String> {
         let client = self
             .client
             .as_ref()
-            .expect("client must be set before load monitor");
+            .ok_or_else(|| "client must be set before load monitor".to_string())?;
         self.load_monitor = Some(Arc::new(LoadMonitor::new(
             self.worker_registry
                 .as_ref()
-                .expect("worker_registry must be set")
+                .ok_or_else(|| "worker_registry must be set before load monitor".to_string())?
                 .clone(),
             self.policy_registry
                 .as_ref()
-                .expect("policy_registry must be set")
+                .ok_or_else(|| "policy_registry must be set before load monitor".to_string())?
                 .clone(),
             client.clone(),
-            config.worker_startup_check_interval_secs,
+            config.load_monitor_interval_secs,
         )));
-        self
+        Ok(self)
     }
 
     /// Create worker job queue OnceLock container
@@ -508,7 +547,7 @@ impl AppContextBuilder {
 
         let orchestrator = McpOrchestrator::new(empty_config)
             .await
-            .map_err(|e| format!("Failed to initialize MCP orchestrator: {}", e))?;
+            .map_err(|e| format!("Failed to initialize MCP orchestrator: {e}"))?;
 
         // Store the initialized orchestrator in the OnceLock
         mcp_orchestrator_lock
@@ -519,17 +558,43 @@ impl AppContextBuilder {
         Ok(self)
     }
 
+    /// Create KV event monitor for event-driven cache-aware routing.
+    ///
+    /// The monitor is created when the default policy is cache_aware, regardless
+    /// of connection mode. The monitor itself is cheap (empty DashMaps) and stays
+    /// dormant until workers are added. The UpdatePoliciesStep gates subscriptions
+    /// on `cache_aware && gRPC`, so HTTP workers are never subscribed.
+    fn with_kv_event_monitor(mut self, config: &RouterConfig) -> Self {
+        use crate::config::types::PolicyConfig;
+
+        let is_cache_aware = matches!(config.policy, PolicyConfig::CacheAware { .. });
+
+        if is_cache_aware {
+            let monitor = Arc::new(KvEventMonitor::new(None));
+            debug!("Created KV event monitor for event-driven cache-aware routing");
+
+            // Inject monitor into PolicyRegistry — propagates to default_policy
+            // and any other existing cache-aware policies.
+            if let Some(ref registry) = self.policy_registry {
+                registry.set_kv_event_monitor(Some(Arc::clone(&monitor)));
+            }
+
+            self.kv_event_monitor = Some(monitor);
+        }
+
+        self
+    }
+
     /// Create wasm manager if enabled in config
-    fn with_wasm_manager(mut self, config: &RouterConfig) -> Result<Self, String> {
+    fn with_wasm_manager(mut self, config: &RouterConfig) -> Self {
         self.wasm_manager = if config.enable_wasm {
-            Some(Arc::new(
-                WasmModuleManager::new(WasmRuntimeConfig::default())
-                    .map_err(|e| format!("Failed to initialize WASM module manager: {}", e))?,
-            ))
+            Some(Arc::new(WasmModuleManager::new(
+                WasmRuntimeConfig::default(),
+            )))
         } else {
             None
         };
-        Ok(self)
+        self
     }
 }
 

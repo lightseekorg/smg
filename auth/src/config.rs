@@ -23,7 +23,7 @@ pub enum Role {
 
 impl Role {
     /// Check if this role has admin privileges for control plane APIs.
-    pub fn is_admin(&self) -> bool {
+    pub fn is_admin(self) -> bool {
         matches!(self, Role::Admin)
     }
 }
@@ -44,7 +44,7 @@ impl std::str::FromStr for Role {
         match s.to_lowercase().as_str() {
             "admin" => Ok(Role::Admin),
             "user" => Ok(Role::User),
-            _ => Err(format!("Invalid role: {}. Valid roles: admin, user", s)),
+            _ => Err(format!("Invalid role: {s}. Valid roles: admin, user")),
         }
     }
 }
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn test_api_key_debug_redacts_hash() {
         let entry = ApiKeyEntry::new("test", "Test Key", "secret", Role::Admin);
-        let debug_str = format!("{:?}", entry);
+        let debug_str = format!("{entry:?}");
 
         // Should contain REDACTED, not the actual hash
         assert!(debug_str.contains("[REDACTED]"));

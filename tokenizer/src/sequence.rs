@@ -32,11 +32,11 @@ impl std::fmt::Debug for Sequence {
                 &format_args!("{}", {
                     let token_ids = self.token_ids();
                     if token_ids.len() <= 20 {
-                        format!("{:?}", token_ids)
+                        format!("{token_ids:?}")
                     } else {
                         let first_ten = &token_ids[..10];
                         let last_ten = &token_ids[token_ids.len() - 10..];
-                        format!("{:?} ... {:?}", first_ten, last_ten)
+                        format!("{first_ten:?} ... {last_ten:?}")
                     }
                 }),
             )
@@ -271,7 +271,7 @@ mod tests {
         let mut seq = Sequence::new(tokenizer);
 
         seq.append_text("Test", false).unwrap();
-        let debug_str = format!("{:?}", seq);
+        let debug_str = format!("{seq:?}");
         assert!(debug_str.contains("Sequence"));
         assert!(debug_str.contains("token count"));
     }

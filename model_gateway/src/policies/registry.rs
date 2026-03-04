@@ -1,6 +1,7 @@
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use serde_json;
 use smg_mesh::OptionalMeshSyncManager;
 use tracing::{debug, info, warn};
@@ -12,7 +13,10 @@ use tracing::{debug, info, warn};
 /// All subsequent workers of the same model use the established policy.
 /// When the last worker of a model is removed, the policy mapping is cleaned up.
 use super::{BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PolicyFactory};
-use crate::{config::types::PolicyConfig, core::Worker};
+use crate::{
+    config::types::PolicyConfig,
+    core::{KvEventMonitor, Worker},
+};
 
 /// Registry for managing model-to-policy mappings
 #[derive(Clone)]
@@ -36,6 +40,10 @@ pub struct PolicyRegistry {
     /// When None, the registry works independently without mesh synchronization
     /// Uses RwLock for thread-safe access when setting mesh_sync after initialization
     mesh_sync: Arc<RwLock<OptionalMeshSyncManager>>,
+
+    /// Optional KV event monitor for event-driven cache-aware routing.
+    /// When set, new CacheAwarePolicy instances are injected with this monitor.
+    kv_event_monitor: Arc<RwLock<Option<Arc<KvEventMonitor>>>>,
 }
 
 impl PolicyRegistry {
@@ -50,12 +58,47 @@ impl PolicyRegistry {
             prefill_policy: Arc::new(OnceLock::new()),
             decode_policy: Arc::new(OnceLock::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
+            kv_event_monitor: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Set mesh sync manager (thread-safe, can be called after initialization)
     pub fn set_mesh_sync(&self, mesh_sync: OptionalMeshSyncManager) {
-        *self.mesh_sync.write().unwrap() = mesh_sync;
+        let mut guard = self.mesh_sync.write();
+        *guard = mesh_sync;
+    }
+
+    /// Set KV event monitor (thread-safe, can be called after initialization).
+    /// Propagates to all existing cache-aware policies (including default, prefill, decode).
+    pub fn set_kv_event_monitor(&self, monitor: Option<Arc<KvEventMonitor>>) {
+        {
+            let mut guard = self.kv_event_monitor.write();
+            guard.clone_from(&monitor);
+        }
+
+        // Propagate to existing cache-aware policies so they don't miss the monitor.
+        // This covers the default_policy (created before the monitor was available)
+        // and any model/PD policies that were already set up.
+        Self::maybe_inject_monitor(&self.default_policy, monitor.as_ref());
+        if let Some(p) = self.prefill_policy.get() {
+            Self::maybe_inject_monitor(p, monitor.as_ref());
+        }
+        if let Some(p) = self.decode_policy.get() {
+            Self::maybe_inject_monitor(p, monitor.as_ref());
+        }
+        for entry in self.model_policies.iter() {
+            Self::maybe_inject_monitor(entry.value(), monitor.as_ref());
+        }
+    }
+
+    /// Inject KV event monitor into a policy if it's cache-aware.
+    fn maybe_inject_monitor(
+        policy: &Arc<dyn LoadBalancingPolicy>,
+        monitor: Option<&Arc<KvEventMonitor>>,
+    ) {
+        if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
+            cache_aware.set_kv_event_monitor(monitor.cloned());
+        }
     }
 
     /// Called when a worker is added
@@ -98,10 +141,17 @@ impl PolicyRegistry {
             .insert(model_id.to_string(), Arc::clone(&policy));
 
         // Sync to mesh if enabled (no-op if mesh is not enabled)
-        if let Some(ref mesh_sync) = *self.mesh_sync.read().unwrap() {
-            // Serialize policy config (simplified - just store policy name for now)
-            let config = serde_json::to_vec(&policy.name()).unwrap_or_default();
-            mesh_sync.sync_policy_state(model_id.to_string(), policy.name().to_string(), config);
+        {
+            let guard = self.mesh_sync.read();
+            if let Some(ref mesh_sync) = *guard {
+                // Serialize policy config (simplified - just store policy name for now)
+                let config = serde_json::to_vec(&policy.name()).unwrap_or_default();
+                mesh_sync.sync_policy_state(
+                    model_id.to_string(),
+                    policy.name().to_string(),
+                    config,
+                );
+            }
         }
 
         policy
@@ -143,8 +193,11 @@ impl PolicyRegistry {
             }
 
             // Sync removal to mesh if enabled (no-op if mesh is not enabled)
-            if let Some(ref mesh_sync) = *self.mesh_sync.read().unwrap() {
-                mesh_sync.remove_policy_state(model_id);
+            {
+                let guard = self.mesh_sync.read();
+                if let Some(ref mesh_sync) = *guard {
+                    mesh_sync.remove_policy_state(model_id);
+                }
             }
         }
     }
@@ -186,8 +239,16 @@ impl PolicyRegistry {
     fn create_policy_from_type(&self, policy_type: &str) -> Arc<dyn LoadBalancingPolicy> {
         if policy_type == "cache_aware" {
             let mut cache_aware = CacheAwarePolicy::new();
-            let mesh_sync = &*self.mesh_sync.read().unwrap();
-            cache_aware.set_mesh_sync(mesh_sync.clone());
+            {
+                let guard = self.mesh_sync.read();
+                cache_aware.set_mesh_sync(guard.clone());
+            }
+            {
+                let guard = self.kv_event_monitor.read();
+                if let Some(ref monitor) = *guard {
+                    cache_aware.set_kv_event_monitor(Some(Arc::clone(monitor)));
+                }
+            }
             Arc::new(cache_aware)
         } else {
             PolicyFactory::create_by_name(policy_type).unwrap_or_else(|| {

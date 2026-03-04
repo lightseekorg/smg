@@ -4,7 +4,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use tokio::time::interval;
+use tokio::{sync::watch, time::interval};
 use tracing::{debug, info};
 
 use super::sync::MeshSyncManager;
@@ -29,7 +29,7 @@ impl RateLimitWindow {
     ///
     /// # Arguments
     /// * `shutdown_rx` - A watch receiver that signals when to stop the task
-    pub async fn start_reset_task(self, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
+    pub async fn start_reset_task(self, mut shutdown_rx: watch::Receiver<bool>) {
         let mut interval_timer = interval(Duration::from_secs(self.window_seconds));
         info!(
             "Starting rate limit window reset task with {}s interval",
@@ -95,9 +95,13 @@ mod tests {
         let window = RateLimitWindow::new(sync_manager, 1);
 
         // Create shutdown channel
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         // Spawn the reset task
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test: handle is awaited with timeout below"
+        )]
         let task_handle = tokio::spawn(async move {
             window.start_reset_task(shutdown_rx).await;
         });
@@ -128,13 +132,13 @@ mod tests {
         stores.rate_limit.update_membership(&["node1".to_string()]);
 
         // Setup config
-        let key = crate::crdt::SKey::new(GLOBAL_RATE_LIMIT_KEY.to_string());
+        let key = GLOBAL_RATE_LIMIT_KEY.to_string();
         let config = RateLimitConfig {
             limit_per_second: 100,
         };
         let serialized = serde_json::to_vec(&config).unwrap();
-        stores.app.insert(
-            key,
+        let _ = stores.app.insert(
+            key.clone(),
             crate::stores::AppState {
                 key: GLOBAL_RATE_LIMIT_KEY.to_string(),
                 value: serialized,
@@ -153,9 +157,13 @@ mod tests {
             let window = RateLimitWindow::new(sync_manager.clone(), 1); // 1 second
 
             // Create shutdown channel
-            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
             // Start reset task in background
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "test: handle is awaited with timeout below"
+            )]
             let reset_handle = tokio::spawn(async move {
                 window.start_reset_task(shutdown_rx).await;
             });
@@ -183,7 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limit_window_reset_with_counter() {
-        use crate::{crdt::SKey, stores::MembershipState};
+        use crate::stores::MembershipState;
 
         // Use with_self_name to ensure RateLimitStore uses the same self_name
         let stores = Arc::new(StateStores::with_self_name("test_node".to_string()));
@@ -193,7 +201,7 @@ mod tests {
         ));
 
         // First, add this node to membership so it can be an owner
-        let membership_key = SKey::new("test_node".to_string());
+        let membership_key = "test_node".to_string();
         let membership_state = MembershipState {
             name: "test_node".to_string(),
             address: "127.0.0.1:8080".to_string(),
@@ -201,7 +209,7 @@ mod tests {
             version: 1,
             metadata: Default::default(),
         };
-        stores
+        let _ = stores
             .membership
             .insert(membership_key, membership_state, "test_node".to_string());
 
@@ -237,8 +245,7 @@ mod tests {
         // After reset, value should be <= 0 (since we decrement by current count)
         assert!(
             reset_value <= 0,
-            "Counter should be reset to 0 or less, got: {}",
-            reset_value
+            "Counter should be reset to 0 or less, got: {reset_value}"
         );
     }
 

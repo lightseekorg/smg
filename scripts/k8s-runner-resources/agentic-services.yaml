@@ -1,0 +1,136 @@
+# Standalone services for agentic runner pods.
+# These run as shared Deployments + ClusterIP Services so all runner pods
+# connect to the same instances instead of running per-pod sidecars.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oracle-db
+  namespace: actions-runner-system
+  labels:
+    app: oracle-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oracle-db
+  template:
+    metadata:
+      labels:
+        app: oracle-db
+    spec:
+      containers:
+        - name: oracle-db
+          image: gvenzl/oracle-free:23-slim-faststart
+          ports:
+            - containerPort: 1521
+          env:
+            - name: ORACLE_PASSWORD
+              value: oracle
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          readinessProbe:
+            exec:
+              command: ["healthcheck.sh"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command: ["healthcheck.sh"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oracle-db
+  namespace: actions-runner-system
+  labels:
+    app: oracle-db
+spec:
+  selector:
+    app: oracle-db
+  ports:
+    - port: 1521
+      targetPort: 1521
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: brave-search-mcp
+  namespace: actions-runner-system
+  labels:
+    app: brave-search-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: brave-search-mcp
+  template:
+    metadata:
+      labels:
+        app: brave-search-mcp
+    spec:
+      containers:
+        - name: brave-search-mcp
+          image: mcp/brave-search:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: BRAVE_MCP_TRANSPORT
+              value: http
+            - name: BRAVE_MCP_PORT
+              value: "8080"
+            - name: BRAVE_MCP_ENABLED_TOOLS
+              value: "brave_web_search brave_local_search"
+            - name: BRAVE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: brave-api-key
+                  key: api-key
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: brave-search-mcp
+  namespace: actions-runner-system
+  labels:
+    app: brave-search-mcp
+spec:
+  selector:
+    app: brave-search-mcp
+  ports:
+    - port: 8080
+      targetPort: 8080

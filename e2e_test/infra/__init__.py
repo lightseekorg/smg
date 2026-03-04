@@ -1,6 +1,9 @@
 """Infrastructure for parallel GPU test execution."""
 
 from .constants import (  # Enums; Convenience sets; Fixture parameters; Defaults; Environment variables
+    BRAVE_MCP_HOST,
+    BRAVE_MCP_PORT,
+    BRAVE_MCP_URL,
     CLOUD_RUNTIMES,
     DEFAULT_HOST,
     DEFAULT_MODEL,
@@ -90,6 +93,9 @@ __all__ = [
     # Defaults
     "DEFAULT_MODEL",
     "DEFAULT_HOST",
+    "BRAVE_MCP_HOST",
+    "BRAVE_MCP_PORT",
+    "BRAVE_MCP_URL",
     "DEFAULT_RUNTIME",
     "DEFAULT_STARTUP_TIMEOUT",
     "DEFAULT_ROUTER_TIMEOUT",
@@ -154,7 +160,6 @@ __all__ = [
     "EMBEDDING_MODELS",
     "REASONING_MODELS",
     "FUNCTION_CALLING_MODELS",
-    # Third-party models
     "THIRD_PARTY_MODELS",
     # Evaluation
     "run_eval",

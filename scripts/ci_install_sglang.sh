@@ -18,6 +18,27 @@ fi
 
 echo "Using uv version: $(uv --version)"
 
+# Install CUDA toolkit (nvcc) — required for SGLang JIT kernel compilation.
+# SGLang >= 0.5.9 JIT-compiles CUDA kernels (RoPE, etc.) at runtime via tvm_ffi,
+# which invokes nvcc. The CI runners have CUDA runtime (driver) but not the compiler.
+CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+if [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
+    echo "Installing CUDA toolkit (nvcc not found at ${CUDA_HOME}/bin/nvcc)..."
+    curl -fsSL -o /tmp/cuda-keyring.deb \
+        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+    sudo dpkg -i /tmp/cuda-keyring.deb
+    rm /tmp/cuda-keyring.deb
+    sudo apt-get update -qq
+    sudo apt-get install -y --no-install-recommends cuda-nvcc-12-9 cuda-cudart-dev-12-9
+    # Ensure CUDA_HOME points to the installed toolkit
+    if [ ! -d "${CUDA_HOME}/bin" ] && [ -d "/usr/local/cuda-12.9/bin" ]; then
+        sudo ln -sfn /usr/local/cuda-12.9 "${CUDA_HOME}"
+    fi
+    echo "nvcc installed: $(${CUDA_HOME}/bin/nvcc --version | tail -1)"
+else
+    echo "nvcc already available: $(${CUDA_HOME}/bin/nvcc --version | tail -1)"
+fi
+
 # Install SGLang with all dependencies
 echo "Installing SGLang..."
 uv pip install "sglang[all]"

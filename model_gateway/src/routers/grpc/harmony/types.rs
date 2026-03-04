@@ -3,7 +3,6 @@
 use openai_harmony::chat::Content;
 use openai_protocol::common::ToolCall;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// Harmony message format
 ///
@@ -15,7 +14,7 @@ pub(crate) struct HarmonyMessage {
 }
 
 /// Some methods are kept for API completeness even if currently unused.
-#[allow(dead_code)]
+#[expect(dead_code)]
 impl HarmonyMessage {
     pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
@@ -99,9 +98,6 @@ pub(crate) struct HarmonyChannelOutput {
     /// Finish reason
     pub finish_reason: String,
 
-    /// Matched stop token (if any)
-    pub matched_stop: Option<Value>,
-
     /// Number of reasoning tokens (from analysis and commentary channels)
     pub reasoning_token_count: u32,
 }
@@ -121,7 +117,7 @@ pub(crate) struct HarmonyChannelDelta {
     pub final_delta: Option<String>,
 
     /// Whether this is the final delta
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub is_final: bool,
 }
 

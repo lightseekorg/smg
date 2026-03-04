@@ -33,7 +33,9 @@ class WorkerLauncher(ABC):
     """Abstract base class for backend worker launchers."""
 
     @abstractmethod
-    def build_command(self, args: argparse.Namespace, host: str, port: int) -> list[str]:
+    def build_command(
+        self, args: argparse.Namespace, backend_args: list[str], host: str, port: int
+    ) -> list[str]:
         """Build the CLI command list to launch a worker."""
         ...
 
@@ -60,18 +62,42 @@ class WorkerLauncher(ABC):
         base_gpu = dp_rank * tp_size
         gpu_ids = range(base_gpu, base_gpu + tp_size)
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
+        env["PYTHONUNBUFFERED"] = "1"
         return env
 
+    def _filter_backend_args(self, backend_args: list[str], filter_args: list[str]) -> list[str]:
+        """Filter out args from backend_args that are already set by the launcher.
+
+        Handles both ``--key value`` and ``--key=value`` syntax.
+        """
+        filtered = []
+        skip_next = False
+        for arg in backend_args:
+            if skip_next:
+                skip_next = False
+                continue
+            key = arg.split("=", 1)[0]
+            if key in filter_args:
+                if "=" not in arg:
+                    skip_next = True  # value is the next token
+                continue
+            filtered.append(arg)
+        return filtered
+
     def launch(
-        self,
-        args: argparse.Namespace,
-        host: str,
-        port: int,
-        env: dict | None = None,
+        self, args: argparse.Namespace, backend_args: list[str], host: str, port: int, env: dict
     ) -> subprocess.Popen:
         """Launch the worker subprocess."""
-        cmd = self.build_command(args, host, port)
-        return subprocess.Popen(cmd, start_new_session=True, env=env or os.environ.copy())
+        cmd = self.build_command(args, backend_args, host, port)
+        logger.info("Launching worker with command: %s", " ".join(cmd))
+
+        return subprocess.Popen(
+            cmd,
+            start_new_session=True,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
 
 
 class SglangWorkerLauncher(WorkerLauncher):
@@ -80,7 +106,9 @@ class SglangWorkerLauncher(WorkerLauncher):
     def _get_tp_size(self, args: argparse.Namespace) -> int:
         return getattr(args, "tp_size", 1)
 
-    def build_command(self, args: argparse.Namespace, host: str, port: int) -> list[str]:
+    def build_command(
+        self, args: argparse.Namespace, backend_args: list[str], host: str, port: int
+    ) -> list[str]:
         cmd = [
             sys.executable,
             "-m",
@@ -94,22 +122,35 @@ class SglangWorkerLauncher(WorkerLauncher):
         ]
         if getattr(args, "connection_mode", "grpc") == "grpc":
             cmd.append("--grpc-mode")
+
+        if getattr(args, "connection_mode", "grpc") == "http" and getattr(
+            args, "enable_token_usage_details", False
+        ):
+            cmd.append("--enable-cache-report")
+
+        cmd.extend(self._filter_backend_args(backend_args, ["--model-path", "--host", "--port"]))
         return cmd
 
 
 class VllmWorkerLauncher(WorkerLauncher):
-    """Launcher for vLLM inference workers (gRPC mode only)."""
+    """Launcher for vLLM inference workers."""
 
     def _get_tp_size(self, args: argparse.Namespace) -> int:
         return getattr(args, "tensor_parallel_size", 1)
 
-    def build_command(self, args: argparse.Namespace, host: str, port: int) -> list[str]:
-        if getattr(args, "connection_mode", "grpc") != "grpc":
-            raise ValueError("vLLM backend only supports grpc connection mode")
-        return [
+    def build_command(
+        self, args: argparse.Namespace, backend_args: list[str], host: str, port: int
+    ) -> list[str]:
+        vllm_entry_points = (
+            "vllm.entrypoints.grpc_server"
+            if args.connection_mode == "grpc"
+            else "vllm.entrypoints.openai.api_server"
+        )
+
+        cmd = [
             sys.executable,
             "-m",
-            "vllm.entrypoints.grpc_server",
+            vllm_entry_points,
             "--model",
             getattr(args, "model", ""),
             "--host",
@@ -117,6 +158,14 @@ class VllmWorkerLauncher(WorkerLauncher):
             "--port",
             str(port),
         ]
+        if getattr(args, "connection_mode", "grpc") == "http" and getattr(
+            args, "enable_token_usage_details", False
+        ):
+            cmd.append("--enable-prompt-tokens-details")
+
+        cmd.extend(self._filter_backend_args(backend_args, ["--model", "--host", "--port"]))
+
+        return cmd
 
 
 class TrtllmWorkerLauncher(WorkerLauncher):
@@ -127,22 +176,72 @@ class TrtllmWorkerLauncher(WorkerLauncher):
     """
 
     def _get_tp_size(self, args: argparse.Namespace) -> int:
-        return getattr(args, "tp_size", 1)
+        """Get tensor parallel size from args or config file.
 
-    def build_command(self, args: argparse.Namespace, host: str, port: int) -> list[str]:
+        Priority: args.tp_size > args.tensor_parallel_size > config file > default(1)
+
+        Raises:
+            FileNotFoundError: If --config path does not exist.
+            yaml.YAMLError: If --config file contains invalid YAML.
+        """
+        # Try --tp-size argument first
+        tp_size = getattr(args, "tp_size", None)
+        if tp_size is not None:
+            return tp_size
+
+        # Try --tensor-parallel-size (vLLM-style naming)
+        tp_size = getattr(args, "tensor_parallel_size", None)
+        if tp_size is not None:
+            return tp_size
+
+        # Try reading from config YAML file — let I/O and parse errors propagate
+        # so misconfigurations are caught early instead of silently using tp=1.
+        config_path = getattr(args, "config", None)
+        if config_path:
+            import yaml
+
+            with open(config_path) as f:
+                config = yaml.safe_load(f)
+            if config and "tensor_parallel_size" in config:
+                return int(config["tensor_parallel_size"])
+            if config and "tp_size" in config:
+                return int(config["tp_size"])
+            logger.warning(
+                "Config %s does not contain tensor_parallel_size or tp_size, defaulting to 1",
+                config_path,
+            )
+
+        return 1
+
+    def build_command(
+        self, args: argparse.Namespace, backend_args: list[str], host: str, port: int
+    ) -> list[str]:
         if getattr(args, "connection_mode", "grpc") != "grpc":
             raise ValueError("TensorRT-LLM backend only supports grpc connection mode")
-        return [
+
+        cmd = [
             sys.executable,
             "-m",
             "tensorrt_llm.commands.serve",
-            getattr(args, "model", ""),
+            getattr(args, "model_path", ""),
             "--grpc",
             "--host",
             host,
             "--port",
             str(port),
         ]
+
+        # Add optional config file
+        # TRT-LLM Click options use underscores (e.g. --tensor_parallel_size)
+        # while SGLang/vLLM use hyphens. Normalize so users can pass either form.
+        normalized = [
+            "--" + a[2:].replace("-", "_") if a.startswith("--") else a for a in backend_args
+        ]
+        cmd.extend(
+            self._filter_backend_args(normalized, ["--model", "--model_path", "--host", "--port"])
+        )
+
+        return cmd
 
 
 BACKEND_LAUNCHERS: dict[str, type[WorkerLauncher]] = {
@@ -273,9 +372,21 @@ def _add_vllm_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_trtllm_stub_args(parser: argparse.ArgumentParser) -> None:
-    """Stub for TRT-LLM args until full integration."""
-    group = parser.add_argument_group("TRT-LLM Options (stub)")
-    group.add_argument("--model", type=str, help="Model path")
+    """Add TensorRT-LLM specific arguments.
+
+    Note: TensorRT-LLM doesn't provide a centralized argument manager like
+    vLLM's EngineArgs. We manually add the most commonly used arguments.
+    TP size is read from the config file, not passed as CLI argument.
+    """
+    group = parser.add_argument_group("TensorRT-LLM Options")
+    group.add_argument(
+        "--model",
+        "--model-path",
+        dest="model_path",
+        type=str,
+        help="Model path (HuggingFace ID or local path)",
+    )
+    group.add_argument("--tp_size", type=int, help="Tensor parallel size (overrides config file)")
 
 
 BACKEND_ARG_ADDERS = {
@@ -285,7 +396,7 @@ BACKEND_ARG_ADDERS = {
 }
 
 BACKEND_CHOICES = list(BACKEND_ARG_ADDERS.keys())
-DEFAULT_BACKEND = "sglang"
+DEFAULT_BACKEND = os.getenv("SMG_DEFAULT_BACKEND", "sglang")
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +417,7 @@ def add_serve_args(parser: argparse.ArgumentParser) -> None:
         "--connection-mode",
         default="grpc",
         choices=["grpc", "http"],
-        help="Connection mode for workers (default: grpc). Note: vllm and trtllm only support grpc",
+        help="Connection mode for workers (default: grpc). Note: trtllm only support grpc",
     )
     # Router host/port - may be overridden by backend (e.g. sglang)
     group.add_argument(
@@ -346,6 +457,11 @@ def add_serve_args(parser: argparse.ArgumentParser) -> None:
         default=300,
         help="Seconds to wait for workers to become healthy (default: 300)",
     )
+    group.add_argument(
+        "--enable-token-usage-details",
+        action="store_true",
+        help="Enable detailed token usage reporting (if supported by backend and router)",
+    )
 
 
 def _import_backend_args(backend: str, parser: argparse.ArgumentParser) -> None:
@@ -355,26 +471,31 @@ def _import_backend_args(backend: str, parser: argparse.ArgumentParser) -> None:
 
 def parse_serve_args(
     argv: list[str] | None = None,
-) -> tuple[str, argparse.Namespace]:
+) -> tuple[str, argparse.Namespace, list[str]]:
     """Two-pass argument parsing for serve command.
 
-    Pass 1: Extract --backend with parse_known_args (no backend imports).
-    Pass 2: Build full parser with backend-specific + router args.
+    Pass 1: Parse with only serve + router args (parse_known_args). We get
+    --backend and known flags; any remaining argv tokens are left as
+    backend_args (no backend-specific parser loaded yet).
+    Pass 2: Build full parser with serve + backend-specific + router args,
+    then parse_args(argv) to get the full namespace. backend_args from pass 1
+    are returned unchanged for the launcher to pass through to worker commands.
 
     Returns:
-        Tuple of (backend_name, parsed_namespace).
+        Tuple of (backend_name, parsed_namespace, backend_args).
+        backend_args: argv tokens not recognized in pass 1 (e.g. --config path).
     """
     if argv is None:
         argv = []
 
-    # Pass 1: extract --backend (lightweight, no backend imports)
+    # Pass 1: serve + router args only; unknown tokens become backend_args
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--backend", default=DEFAULT_BACKEND, choices=BACKEND_CHOICES)
-    pre_args, _ = pre_parser.parse_known_args(argv)
-    backend = pre_args.backend
+    add_serve_args(pre_parser)
+    RouterArgs.add_cli_args(pre_parser, use_router_prefix=True, exclude_host_port=True)
+    serve_router_args, backend_args = pre_parser.parse_known_args(argv)
+    backend = serve_router_args.backend
 
-    # Pass 2: build full parser with backend-specific args
-    # Use conflict_handler='resolve' to let backend args override serve defaults
+    # Pass 2: full parser with backend-specific args; resolve so backend can override
     parser = argparse.ArgumentParser(
         description=f"Launch {backend} worker(s) + gateway router",
         conflict_handler="resolve",
@@ -383,8 +504,11 @@ def parse_serve_args(
     _import_backend_args(backend, parser)
     RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
 
-    args = parser.parse_args(argv)
-    return backend, args
+    if backend == "trtllm":
+        args, _ = parser.parse_known_args(argv)
+    else:
+        args = parser.parse_args(argv)
+    return backend, args, backend_args
 
 
 # ---------------------------------------------------------------------------
@@ -397,9 +521,10 @@ _WORKER_SHUTDOWN_TIMEOUT = 30
 class ServeOrchestrator:
     """Coordinate worker launch, health checking, router startup, and shutdown."""
 
-    def __init__(self, backend: str, args: argparse.Namespace):
+    def __init__(self, backend: str, args: argparse.Namespace, backend_args: list[str]):
         self.backend = backend
         self.args = args
+        self.backend_args = backend_args
         self.launcher: WorkerLauncher = BACKEND_LAUNCHERS[backend]()
         self.workers: list[tuple[subprocess.Popen, int]] = []
         self._shutting_down = False
@@ -426,7 +551,7 @@ class ServeOrchestrator:
         host = self.args.worker_host
         for dp_rank, port in enumerate(ports):
             env = self.launcher.gpu_env(self.args, dp_rank)
-            proc = self.launcher.launch(self.args, host, port, env)
+            proc = self.launcher.launch(self.args, self.backend_args, host, port, env)
             self.workers.append((proc, port))
             logger.info(
                 "Launched %s worker on %s:%d (pid %d, GPUs: %s)",
@@ -502,6 +627,10 @@ class ServeOrchestrator:
 
 def serve_main(argv: list[str] | None = None) -> None:
     """Parse serve args, create orchestrator, and run."""
-    backend, args = parse_serve_args(argv)
-    orchestrator = ServeOrchestrator(backend, args)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    backend, args, backend_args = parse_serve_args(argv)
+    orchestrator = ServeOrchestrator(backend, args, backend_args)
     orchestrator.run()

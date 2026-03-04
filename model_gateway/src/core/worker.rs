@@ -2,11 +2,12 @@ use std::{
     fmt,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, LazyLock, RwLock as StdRwLock,
+        Arc, LazyLock,
     },
     time::Duration,
 };
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::body::Body;
 // Re-export protocol types as the canonical types for the gateway
@@ -33,6 +34,10 @@ pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8998;
 /// vLLM Mooncake KV connector name
 pub const MOONCAKE_CONNECTOR: &str = "MooncakeConnector";
 
+#[expect(
+    clippy::expect_used,
+    reason = "LazyLock static initialization — reqwest::Client::build() only fails on TLS backend misconfiguration which is unrecoverable"
+)]
 static WORKER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(DEFAULT_WORKER_HTTP_TIMEOUT_SECS))
@@ -115,7 +120,7 @@ pub trait Worker: Send + Sync + fmt::Debug {
     /// Get the worker's URL
     fn url(&self) -> &str;
     /// Get the worker's API key
-    fn api_key(&self) -> &Option<String>;
+    fn api_key(&self) -> Option<&String>;
     /// Get the worker's type (Regular, Prefill, or Decode)
     /// Returns a reference to avoid cloning on every access
     fn worker_type(&self) -> &WorkerType;
@@ -193,7 +198,7 @@ pub trait Worker: Send + Sync + fmt::Debug {
             .spec
             .dp_base_url
             .as_deref()
-            .unwrap_or(self.url())
+            .unwrap_or_else(|| self.url())
     }
 
     /// Get DP rank if this is a DP-aware worker
@@ -333,7 +338,7 @@ pub trait Worker: Send + Sync + fmt::Debug {
         self.metadata()
             .find_model(model_id)
             .map(|m| m.get_label(class_idx))
-            .unwrap_or_else(|| format!("LABEL_{}", class_idx))
+            .unwrap_or_else(|| format!("LABEL_{class_idx}"))
     }
 
     /// Check if this worker supports a specific model.
@@ -349,8 +354,8 @@ pub trait Worker: Send + Sync + fmt::Debug {
     }
 
     /// Get all models this worker can serve.
-    fn models(&self) -> &[ModelCard] {
-        self.metadata().spec.models.all()
+    fn models(&self) -> Vec<ModelCard> {
+        self.metadata().spec.models.all().to_vec()
     }
 
     /// Set models for this worker (for lazy discovery).
@@ -481,10 +486,10 @@ pub struct BasicWorker {
     /// Lazily initialized gRPC client for gRPC workers.
     /// Uses OnceCell for lock-free reads after initialization.
     pub grpc_client: Arc<OnceCell<Arc<GrpcClient>>>,
-    /// Runtime-mutable models override (for lazy discovery)
-    /// When set, overrides metadata.models for routing decisions.
-    /// Uses std::sync::RwLock for synchronous access in supports_model().
-    pub models_override: Arc<StdRwLock<Option<WorkerModels>>>,
+    /// Runtime-mutable models override (for lazy discovery).
+    /// When not `Wildcard`, overrides metadata.models for routing decisions.
+    /// Uses `ArcSwap` for lock-free reads on the hot path (`supports_model`).
+    pub models_override: Arc<ArcSwap<WorkerModels>>,
 }
 
 impl fmt::Debug for BasicWorker {
@@ -511,8 +516,8 @@ impl Worker for BasicWorker {
         &self.metadata.spec.url
     }
 
-    fn api_key(&self) -> &Option<String> {
-        &self.metadata.spec.api_key
+    fn api_key(&self) -> Option<&String> {
+        self.metadata.spec.api_key.as_ref()
     }
 
     fn worker_type(&self) -> &WorkerType {
@@ -578,7 +583,7 @@ impl Worker for BasicWorker {
 
             Err(WorkerError::HealthCheckFailed {
                 url: self.metadata.spec.url.clone(),
-                reason: format!("Health check failed (consecutive failures: {})", failures),
+                reason: format!("Health check failed (consecutive failures: {failures})"),
             })
         }
     }
@@ -633,38 +638,36 @@ impl Worker for BasicWorker {
         &self.circuit_breaker
     }
 
+    fn models(&self) -> Vec<ModelCard> {
+        let overridden = self.models_override.load();
+        let source = if overridden.is_wildcard() {
+            self.metadata.spec.models.all()
+        } else {
+            overridden.all()
+        };
+        source.to_vec()
+    }
+
     fn supports_model(&self, model_id: &str) -> bool {
-        // Check models_override first (for lazy discovery)
-        if let Ok(guard) = self.models_override.read() {
-            if let Some(ref models) = *guard {
-                // Models were discovered - check if this model is supported
-                return models.supports(model_id);
-            }
+        let overridden = self.models_override.load();
+        if !overridden.is_wildcard() {
+            return overridden.supports(model_id);
         }
-        // Fall back to metadata.models
         self.metadata.supports_model(model_id)
     }
 
     fn set_models(&self, models: Vec<ModelCard>) {
-        if let Ok(mut guard) = self.models_override.write() {
-            tracing::debug!(
-                "Setting {} models for worker {} via lazy discovery",
-                models.len(),
-                self.metadata.spec.url
-            );
-            *guard = Some(WorkerModels::from(models));
-        }
+        tracing::debug!(
+            "Setting {} models for worker {} via lazy discovery",
+            models.len(),
+            self.metadata.spec.url
+        );
+        self.models_override
+            .store(Arc::new(WorkerModels::from(models)));
     }
 
     fn has_models_discovered(&self) -> bool {
-        // Check if models_override has been set
-        if let Ok(guard) = self.models_override.read() {
-            if guard.is_some() {
-                return true;
-            }
-        }
-        // Fall back to checking metadata.models
-        !self.metadata.spec.models.is_wildcard()
+        !self.models_override.load().is_wildcard() || !self.metadata.spec.models.is_wildcard()
     }
 
     async fn get_grpc_client(&self) -> WorkerResult<Option<Arc<GrpcClient>>> {
@@ -699,7 +702,7 @@ impl Worker for BasicWorker {
                                 );
                                 Err(WorkerError::ConnectionFailed {
                                     url: self.metadata.spec.url.clone(),
-                                    reason: format!("Failed to connect to gRPC server: {}", e),
+                                    reason: format!("Failed to connect to gRPC server: {e}"),
                                 })
                             }
                         }
@@ -880,8 +883,7 @@ impl<T: Send + Unpin + 'static> http_body::Body for AttachedBody<T> {
 /// The checker sleeps until the next worker is due for a health check,
 /// so it wakes only when there is actual work to do.
 pub(crate) struct HealthChecker {
-    #[allow(dead_code)]
-    handle: tokio::task::JoinHandle<()>,
+    handle: Option<tokio::task::JoinHandle<()>>,
     shutdown_notify: Arc<tokio::sync::Notify>,
 }
 
@@ -897,17 +899,32 @@ impl HealthChecker {
         shutdown_notify: Arc<tokio::sync::Notify>,
     ) -> Self {
         Self {
-            handle,
+            handle: Some(handle),
             shutdown_notify,
         }
     }
 
     /// Shutdown the health checker gracefully.
-    /// Wakes the sleeping task immediately so it can exit.
-    #[allow(dead_code)]
-    pub async fn shutdown(self) {
+    /// Wakes the sleeping task immediately so it can exit cleanly.
+    /// Prefer this over dropping when you can `.await` — it lets the
+    /// current health-check iteration finish instead of aborting mid-flight.
+    #[expect(
+        dead_code,
+        reason = "Drop::drop handles abort; this exists for graceful shutdown when an async context is available"
+    )]
+    pub async fn shutdown(&mut self) {
         self.shutdown_notify.notify_one();
-        let _ = self.handle.await;
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for HealthChecker {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -1136,6 +1153,10 @@ mod tests {
 
         for _ in 0..100 {
             let worker_clone = Arc::clone(&worker);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "Test helper: short-lived tasks joined before test ends"
+            )]
             let handle = tokio::spawn(async move {
                 worker_clone.increment_load();
             });
@@ -1167,6 +1188,10 @@ mod tests {
 
         for _ in 0..100 {
             let worker_clone = Arc::clone(&worker);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "Test helper: short-lived tasks joined before test ends"
+            )]
             let handle = tokio::spawn(async move {
                 worker_clone.decrement_load();
             });
@@ -1193,6 +1218,10 @@ mod tests {
 
         for i in 0..100 {
             let worker_clone = Arc::clone(&worker);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "Test helper: short-lived tasks joined before test ends"
+            )]
             let handle = tokio::spawn(async move {
                 worker_clone.set_healthy(i % 2 == 0);
                 time::sleep(Duration::from_micros(10)).await;
@@ -1264,6 +1293,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::print_stderr)]
     fn test_load_counter_performance() {
         use std::time::Instant;
 
@@ -1281,7 +1311,7 @@ mod tests {
         let duration = start.elapsed();
 
         let ops_per_sec = iterations as f64 / duration.as_secs_f64();
-        println!("Load counter operations per second: {:.0}", ops_per_sec);
+        eprintln!("Load counter operations per second: {ops_per_sec:.0}");
 
         assert!(ops_per_sec > 1_000_000.0);
     }
@@ -1736,5 +1766,29 @@ mod tests {
         drop(guard2);
         assert_eq!(worker.load(), 0);
         assert_eq!(worker.worker_routing_key_load().value(), 0);
+    }
+
+    #[test]
+    fn test_lazy_discovered_models_override_wildcard() {
+        let worker = BasicWorkerBuilder::new("http://test:8080").build();
+
+        // Wildcard worker starts with no models listed, but accepts any model
+        assert!(worker.models().is_empty());
+        assert!(!worker.has_models_discovered());
+        assert!(worker.supports_model("gpt-4o-mini")); // wildcard accepts anything
+
+        // Simulate lazy discovery via set_models
+        let discovered = vec![
+            ModelCard::new("gpt-4o-mini"),
+            ModelCard::new("text-embedding-3-small"),
+        ];
+        worker.set_models(discovered);
+
+        let ids: Vec<String> = worker.models().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec!["gpt-4o-mini", "text-embedding-3-small"]);
+        assert!(worker.supports_model("gpt-4o-mini"));
+        assert!(worker.supports_model("text-embedding-3-small"));
+        assert!(!worker.supports_model("non-existent-model"));
+        assert!(worker.has_models_discovered());
     }
 }

@@ -1,13 +1,14 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex, RwLock},
+    sync::Arc,
     thread,
     time::{Duration, SystemTime},
 };
 
 use dashmap::DashMap;
+use parking_lot::{Mutex, RwLock};
 use rand::Rng;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::{
@@ -54,19 +55,9 @@ impl BucketPolicy {
                 thread::sleep(Duration::from_secs(interval_secs as u64));
 
                 for bucket_ref in buckets_clone.iter() {
-                    let model_id = bucket_ref.key();
                     let bucket = bucket_ref.value();
-                    match bucket.write() {
-                        Ok(mut bucket_guard) => {
-                            bucket_guard.adjust_boundary();
-                        }
-                        Err(e) => {
-                            error!(
-                                "Failed to acquire write lock for bucket {}: {}",
-                                model_id, e
-                            );
-                        }
-                    }
+                    let mut bucket_guard = bucket.write();
+                    bucket_guard.adjust_boundary();
                 }
             }))
         };
@@ -105,12 +96,8 @@ impl BucketPolicy {
                 .map(|worker| worker.url().to_string())
                 .collect();
 
-            let lock_result = bucket.write();
-            if let Ok(mut bucket_guard) = lock_result {
-                bucket_guard.init_prefill_worker_urls(worker_urls);
-            } else {
-                error!("Failed to acquire write lock for bucket initialization");
-            }
+            let mut bucket_guard = bucket.write();
+            bucket_guard.init_prefill_worker_urls(worker_urls);
         }
     }
 
@@ -126,35 +113,38 @@ impl BucketPolicy {
             })
             .clone();
 
-        let lock_result = bucket.write();
-        if let Ok(mut bucket_guard) = lock_result {
-            let worker_url = worker.url().to_string();
+        let mut bucket_guard = bucket.write();
+        let worker_url = worker.url().to_string();
 
-            let prefill_worker_urls_clone = {
-                let mut prefill_worker_urls = bucket_guard.prefill_worker_urls.lock().unwrap();
-                if !prefill_worker_urls.contains(&worker_url) {
-                    prefill_worker_urls.push(worker_url.clone());
-                }
-                let cloned = prefill_worker_urls.clone();
-
-                let mut chars_per_url = bucket_guard.chars_per_url.lock().unwrap();
-                chars_per_url.entry(worker_url.clone()).or_insert(0);
-
-                cloned
-            };
-
-            bucket_guard.init_prefill_worker_urls(prefill_worker_urls_clone);
-
-            info!(
-                "Added worker {} to bucket for model {}",
-                worker_url, model_key
-            );
-        } else {
-            error!(
-                "Failed to acquire write lock for bucket of model {}",
-                model_key
-            );
+        // Check for duplicate before modifying state to avoid resetting load counters
+        {
+            let prefill_worker_urls = bucket_guard.prefill_worker_urls.lock();
+            if prefill_worker_urls.contains(&worker_url) {
+                debug!(
+                    "Worker {} already in bucket for model {}, skipping",
+                    worker_url, model_key
+                );
+                return;
+            }
         }
+
+        let prefill_worker_urls_clone = {
+            let mut prefill_worker_urls = bucket_guard.prefill_worker_urls.lock();
+            prefill_worker_urls.push(worker_url.clone());
+            let cloned = prefill_worker_urls.clone();
+
+            let mut chars_per_url = bucket_guard.chars_per_url.lock();
+            chars_per_url.entry(worker_url.clone()).or_insert(0);
+
+            cloned
+        };
+
+        bucket_guard.init_prefill_worker_urls(prefill_worker_urls_clone);
+
+        info!(
+            "Added worker {} to bucket for model {}",
+            worker_url, model_key
+        );
     }
 
     pub fn remove_prefill_url(&self, worker: &dyn Worker) {
@@ -164,36 +154,26 @@ impl BucketPolicy {
             let bucket = bucket_entry.value();
             let worker_url = worker.url().to_string();
 
-            let lock_result = bucket.write();
-            if let Ok(mut bucket_guard) = lock_result {
-                let (updated_len, updated_urls) = {
-                    let mut prefill_worker_urls = bucket_guard.prefill_worker_urls.lock().unwrap();
-                    prefill_worker_urls.retain(|u| u != &worker_url);
-                    let len = prefill_worker_urls.len();
-                    let urls_clone = prefill_worker_urls.clone();
+            let mut bucket_guard = bucket.write();
+            let (updated_len, updated_urls) = {
+                let mut prefill_worker_urls = bucket_guard.prefill_worker_urls.lock();
+                prefill_worker_urls.retain(|u| u != &worker_url);
+                let len = prefill_worker_urls.len();
+                let urls_clone = prefill_worker_urls.clone();
 
-                    let mut chars_per_url = bucket_guard.chars_per_url.lock().unwrap();
-                    chars_per_url.remove(&worker_url);
+                let mut chars_per_url = bucket_guard.chars_per_url.lock();
+                chars_per_url.remove(&worker_url);
 
-                    (len, urls_clone)
-                };
+                (len, urls_clone)
+            };
 
-                bucket_guard.bucket_cnt = updated_len;
+            bucket_guard.bucket_cnt = updated_len;
+            bucket_guard.init_prefill_worker_urls(updated_urls);
 
-                if updated_len > 0 {
-                    bucket_guard.init_prefill_worker_urls(updated_urls);
-                }
-
-                info!(
-                    "Removed worker {} from bucket for model {} (remaining workers: {})",
-                    worker_url, model_key, bucket_guard.bucket_cnt
-                );
-            } else {
-                error!(
-                    "Failed to acquire write lock for bucket of model {}",
-                    model_key
-                );
-            }
+            info!(
+                "Removed worker {} from bucket for model {} (remaining workers: {})",
+                worker_url, model_key, bucket_guard.bucket_cnt
+            );
         } else {
             warn!(
                 "No bucket found for model {} when trying to remove worker",
@@ -226,8 +206,8 @@ impl LoadBalancingPolicy for BucketPolicy {
             .map(|entry| entry.value().clone());
         let prefill_url = if let Some(bucket) = bucket {
             let (choiced_url, chars_per_url_snapshot) = {
-                let buc = bucket.read().unwrap();
-                let chars_per_url_snapshot = buc.chars_per_url.lock().unwrap().clone();
+                let buc = bucket.read();
+                let chars_per_url_snapshot = buc.chars_per_url.lock().clone();
                 let choiced_url = buc.find_boundary(char_count);
                 (choiced_url, chars_per_url_snapshot)
             };
@@ -270,7 +250,7 @@ impl LoadBalancingPolicy for BucketPolicy {
             };
 
             {
-                let mut buc = bucket.write().unwrap();
+                let mut buc = bucket.write();
                 buc.post_process_request(char_count, prefill_url.clone());
             }
 
@@ -372,13 +352,13 @@ impl Bucket {
     pub fn init_prefill_worker_urls(&mut self, prefill_worker_urls: Vec<String>) {
         let bucket_cnt = prefill_worker_urls.len();
         self.bucket_cnt = bucket_cnt;
-        let mut urls_lock = self.prefill_worker_urls.lock().unwrap();
-        *urls_lock = prefill_worker_urls.clone();
+        let mut urls_lock = self.prefill_worker_urls.lock();
+        urls_lock.clone_from(&prefill_worker_urls);
 
-        let mut chars_lock = self.chars_per_url.lock().unwrap();
+        let mut chars_lock = self.chars_per_url.lock();
         chars_lock.clear();
 
-        for url in prefill_worker_urls.iter() {
+        for url in &prefill_worker_urls {
             chars_lock.insert(url.clone(), 0);
         }
 
@@ -409,7 +389,7 @@ impl Bucket {
 
     pub fn post_process_request(&mut self, char_cnt: usize, prefill_url: String) {
         {
-            let mut map = self.chars_per_url.lock().unwrap();
+            let mut map = self.chars_per_url.lock();
             *map.entry(prefill_url.clone()).or_insert(0) += char_cnt;
         }
 
@@ -431,7 +411,7 @@ impl Bucket {
                 self.t_req_loads.remove(&removed_req.id);
                 removed_load += removed_req.char_cnt;
 
-                let mut map = self.chars_per_url.lock().unwrap();
+                let mut map = self.chars_per_url.lock();
                 if let Some(count) = map.get_mut(&removed_req.prefill_worker_url) {
                     *count = count.saturating_sub(removed_req.char_cnt);
                 }
@@ -440,7 +420,7 @@ impl Bucket {
 
         self.load_total = self.load_total.saturating_sub(removed_load);
 
-        let id = Uuid::new_v4().to_string();
+        let id = Uuid::now_v7().to_string();
 
         self.t_req_loads.insert(id.clone(), char_cnt);
 
@@ -480,10 +460,10 @@ impl Bucket {
     }
 
     fn update_workers_cnt(&mut self) {
-        let pwu = self.prefill_worker_urls.lock().unwrap();
+        let pwu = self.prefill_worker_urls.lock();
         self.bucket_cnt = pwu.len();
 
-        let mut char_map = self.chars_per_url.lock().unwrap();
+        let mut char_map = self.chars_per_url.lock();
         let current_urls: HashSet<_> = char_map.keys().cloned().collect();
         let new_urls: HashSet<_> = pwu.iter().cloned().collect();
 
@@ -521,14 +501,14 @@ impl Bucket {
         info!("Before adjusting boundary | {:?}", self.boundary);
         self.bucket_load = new_single_bucket_load;
         let mut new_boundary = Vec::new();
-        let mut hist_load: Vec<usize> = self.t_req_loads.values().cloned().collect();
-        hist_load.sort();
+        let mut hist_load: Vec<usize> = self.t_req_loads.values().copied().collect();
+        hist_load.sort_unstable();
         let mut upper_bound: usize = 0;
         let mut last_load_index: usize = 0;
         let max_value = usize::MAX;
 
         let worker_url = {
-            let guard = self.prefill_worker_urls.lock().unwrap();
+            let guard = self.prefill_worker_urls.lock();
             (*guard).clone()
         };
 
@@ -541,7 +521,7 @@ impl Bucket {
             }
             let mut load_accumulator = 0;
             let mut break_flag = false;
-            for &load in hist_load[last_load_index..].iter() {
+            for &load in &hist_load[last_load_index..] {
                 load_accumulator += load;
                 if load_accumulator >= new_single_bucket_load {
                     if iter.peek().is_none() {
@@ -658,16 +638,11 @@ mod tests {
                 .get(model_key)
                 .map(|entry| entry.value().clone());
             if let Some(bucket) = bucket {
-                let lock_result = bucket.write();
-                if let Ok(bucket_guard) = lock_result {
+                let bucket_guard = bucket.write();
+                {
                     // Expected Boundary: [0, 33] [34, 67] [68, MAX]
                     assert_eq!(bucket_guard.boundary[0].range[1], 33);
                     assert_eq!(bucket_guard.boundary[1].range[1], 67);
-                } else {
-                    error!(
-                        "Failed to acquire write lock for bucket of model {}",
-                        model_key
-                    );
                 }
             }
         }
@@ -846,16 +821,11 @@ mod tests {
                 .get(model_key)
                 .map(|entry| entry.value().clone());
             if let Some(bucket) = bucket {
-                let lock_result = bucket.write();
-                if let Ok(bucket_guard) = lock_result {
+                let bucket_guard = bucket.write();
+                {
                     // Expected Boundary: [0, 33] [34, 67] [68, MAX]
                     assert_eq!(bucket_guard.boundary[0].range[1], 1364);
                     assert_eq!(bucket_guard.boundary[1].range[1], 2729);
-                } else {
-                    error!(
-                        "Failed to acquire write lock for bucket of model {}",
-                        model_key
-                    );
                 }
             }
         }
@@ -927,16 +897,11 @@ mod tests {
                 .get(model_key)
                 .map(|entry| entry.value().clone());
             if let Some(bucket) = bucket {
-                let lock_result = bucket.write();
-                if let Ok(bucket_guard) = lock_result {
+                let bucket_guard = bucket.write();
+                {
                     // Expected Boundary: [0, 33] [34, 67] [68, MAX]
                     assert_eq!(bucket_guard.boundary[0].range[1], 20);
                     assert_eq!(bucket_guard.boundary[1].range[1], 26);
-                } else {
-                    error!(
-                        "Failed to acquire write lock for bucket of model {}",
-                        model_key
-                    );
                 }
             }
         }
@@ -1008,16 +973,11 @@ mod tests {
                 .get(model_key)
                 .map(|entry| entry.value().clone());
             if let Some(bucket) = bucket {
-                let lock_result = bucket.write();
-                if let Ok(bucket_guard) = lock_result {
+                let bucket_guard = bucket.write();
+                {
                     // Expected Boundary: [0, 33] [34, 67] [68, MAX]
                     assert_eq!(bucket_guard.boundary[0].range[1], 40);
                     assert_eq!(bucket_guard.boundary[1].range[1], 57);
-                } else {
-                    error!(
-                        "Failed to acquire write lock for bucket of model {}",
-                        model_key
-                    );
                 }
             }
         }
@@ -1064,16 +1024,11 @@ mod tests {
                 .get(model_key)
                 .map(|entry| entry.value().clone());
             if let Some(bucket) = bucket {
-                let lock_result = bucket.write();
-                if let Ok(bucket_guard) = lock_result {
+                let bucket_guard = bucket.write();
+                {
                     // Expected Boundary: [0, 33] [34, 67] [68, MAX]
                     assert_eq!(bucket_guard.boundary[0].range[1], 1364);
                     assert_eq!(bucket_guard.boundary[1].range[1], 2729);
-                } else {
-                    error!(
-                        "Failed to acquire write lock for bucket of model {}",
-                        model_key
-                    );
                 }
             }
         }
@@ -1098,16 +1053,11 @@ mod tests {
                 .get(model_key)
                 .map(|entry| entry.value().clone());
             if let Some(bucket) = bucket {
-                let lock_result = bucket.write();
-                if let Ok(bucket_guard) = lock_result {
+                let bucket_guard = bucket.write();
+                {
                     // Expected Boundary: [0, 33] [34, 67] [68, MAX]
                     assert_eq!(bucket_guard.boundary[0].range[1], 20);
                     assert_eq!(bucket_guard.boundary[1].range[1], 27);
-                } else {
-                    error!(
-                        "Failed to acquire write lock for bucket of model {}",
-                        model_key
-                    );
                 }
             }
         }
@@ -1131,16 +1081,11 @@ mod tests {
                 .get(model_key)
                 .map(|entry| entry.value().clone());
             if let Some(bucket) = bucket {
-                let lock_result = bucket.write();
-                if let Ok(bucket_guard) = lock_result {
+                let bucket_guard = bucket.write();
+                {
                     // Expected Boundary: [0, 33] [34, 67] [68, MAX]
                     assert_eq!(bucket_guard.boundary[0].range[1], 7);
                     assert_eq!(bucket_guard.boundary[1].range[1], 10);
-                } else {
-                    error!(
-                        "Failed to acquire write lock for bucket of model {}",
-                        model_key
-                    );
                 }
             }
         }
@@ -1187,16 +1132,11 @@ mod tests {
                 .get(model_key)
                 .map(|entry| entry.value().clone());
             if let Some(bucket) = bucket {
-                let lock_result = bucket.write();
-                if let Ok(bucket_guard) = lock_result {
+                let bucket_guard = bucket.write();
+                {
                     // Expected Boundary: [0, 33] [34, 67] [68, MAX]
                     assert_eq!(bucket_guard.boundary[0].range[1], 1364);
                     assert_eq!(bucket_guard.boundary[1].range[1], 2729);
-                } else {
-                    error!(
-                        "Failed to acquire write lock for bucket of model {}",
-                        model_key
-                    );
                 }
             }
         }
@@ -1265,16 +1205,11 @@ mod tests {
                 .get(model_key)
                 .map(|entry| entry.value().clone());
             if let Some(bucket) = bucket {
-                let lock_result = bucket.write();
-                if let Ok(bucket_guard) = lock_result {
+                let bucket_guard = bucket.write();
+                {
                     // Expected Boundary: [0, 33] [34, 67] [68, MAX]
                     assert_eq!(bucket_guard.boundary[0].range[1], 20);
                     assert_eq!(bucket_guard.boundary[1].range[1], 26);
-                } else {
-                    error!(
-                        "Failed to acquire write lock for bucket of model {}",
-                        model_key
-                    );
                 }
             }
         }
@@ -1343,16 +1278,11 @@ mod tests {
                 .get(model_key)
                 .map(|entry| entry.value().clone());
             if let Some(bucket) = bucket {
-                let lock_result = bucket.write();
-                if let Ok(bucket_guard) = lock_result {
+                let bucket_guard = bucket.write();
+                {
                     // Expected Boundary: [0, 33] [34, 67] [68, MAX]
                     assert_eq!(bucket_guard.boundary[0].range[1], 20);
                     assert_eq!(bucket_guard.boundary[1].range[1], 26);
-                } else {
-                    error!(
-                        "Failed to acquire write lock for bucket of model {}",
-                        model_key
-                    );
                 }
             }
         }

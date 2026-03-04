@@ -191,6 +191,21 @@ def wait_for_gpu_memory_to_clear(
     physical_devices = get_physical_device_indices(devices)
     start_time = time.time()
 
+    # Define threshold check once (loop-invariant)
+    if threshold_bytes is not None:
+        threshold_gb = threshold_bytes / (1024**3)
+
+        def is_free(used: float, total: float) -> bool:
+            return used <= threshold_gb
+
+        threshold_desc = f"{threshold_gb:.1f} GiB"
+    else:
+
+        def is_free(used: float, total: float) -> bool:
+            return used / total <= threshold_ratio  # type: ignore[operator]
+
+        threshold_desc = f"{threshold_ratio:.2%}"  # type: ignore[str-format]
+
     with nvml_context():
         while True:
             output: dict[int, str] = {}
@@ -208,19 +223,6 @@ def wait_for_gpu_memory_to_clear(
                 "GPU memory used/total (GiB): %s",
                 " ".join(f"{k}={v}" for k, v in output.items()),
             )
-
-            if threshold_bytes is not None:
-
-                def is_free(used: float, total: float) -> bool:
-                    return used <= threshold_bytes / (1024**3)
-
-                threshold_desc = f"{threshold_bytes / (1024**3):.1f} GiB"
-            else:
-
-                def is_free(used: float, total: float) -> bool:
-                    return used / total <= threshold_ratio  # type: ignore[operator]
-
-                threshold_desc = f"{threshold_ratio:.2%}"  # type: ignore[str-format]
 
             dur_s = time.time() - start_time
             if all(is_free(used, total) for used, total in output_raw.values()):

@@ -7,8 +7,9 @@ use openai_protocol::{
     chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
     common::{ChatLogProbs, ToolCall, Usage},
     responses::{
-        OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
-        ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+        InputTokensDetails, OutputTokensDetails, ResponseContentPart, ResponseOutputItem,
+        ResponseReasoningContent, ResponseStatus, ResponseUsage, ResponsesRequest,
+        ResponsesResponse, ResponsesUsage,
     },
 };
 use tracing::error;
@@ -69,17 +70,13 @@ impl HarmonyResponseProcessor {
                 );
                 error::internal_error(
                     "create_harmony_parser_failed",
-                    format!("Failed to create Harmony parser: {}", e),
+                    format!("Failed to create Harmony parser: {e}"),
                 )
             })?;
 
-            // Parse Harmony channels with finish_reason and matched_stop
+            // Parse Harmony channels with finish_reason
             let parsed = parser
-                .parse_complete(
-                    complete.output_ids(),
-                    complete.finish_reason().to_string(),
-                    matched_stop.clone(),
-                )
+                .parse_complete(complete.output_ids(), complete.finish_reason().to_string())
                 .map_err(|e| {
                     error!(
                         function = "process_non_streaming_chat_response",
@@ -88,17 +85,15 @@ impl HarmonyResponseProcessor {
                     );
                     error::internal_error(
                         "harmony_parsing_failed",
-                        format!("Harmony parsing failed: {}", e),
+                        format!("Harmony parsing failed: {e}"),
                     )
                 })?;
 
             // Convert output logprobs if present
             let logprobs: Option<ChatLogProbs> = if request_logprobs {
-                complete.output_logprobs().and_then(|lp| {
-                    convert_harmony_logprobs(&lp)
-                        .map_err(|e| error!("Failed to convert logprobs: {}", e))
-                        .ok()
-                })
+                complete
+                    .output_logprobs()
+                    .map(|lp| convert_harmony_logprobs(&lp))
             } else {
                 None
             };
@@ -216,18 +211,12 @@ impl HarmonyResponseProcessor {
             );
             error::internal_error(
                 "create_harmony_parser_failed",
-                format!("Failed to create Harmony parser: {}", e),
+                format!("Failed to create Harmony parser: {e}"),
             )
         })?;
 
-        let matched_stop = complete.matched_stop_json();
-
         let parsed = parser
-            .parse_complete(
-                complete.output_ids(),
-                complete.finish_reason().to_string(),
-                matched_stop,
-            )
+            .parse_complete(complete.output_ids(), complete.finish_reason().to_string())
             .map_err(|e| {
                 error!(
                     function = "process_responses_iteration",
@@ -236,7 +225,7 @@ impl HarmonyResponseProcessor {
                 );
                 error::internal_error(
                     "harmony_parsing_failed",
-                    format!("Harmony parsing failed: {}", e),
+                    format!("Harmony parsing failed: {e}"),
                 )
             })?;
 
@@ -318,7 +307,10 @@ impl HarmonyResponseProcessor {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
                 total_tokens: usage.total_tokens,
-                input_tokens_details: None,
+                input_tokens_details: usage
+                    .prompt_tokens_details
+                    .as_ref()
+                    .map(InputTokensDetails::from),
                 output_tokens_details: usage.completion_tokens_details.as_ref().and_then(|d| {
                     d.reasoning_tokens.map(|tokens| OutputTokensDetails {
                         reasoning_tokens: tokens,

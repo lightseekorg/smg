@@ -180,7 +180,7 @@ THIRD_PARTY_MODELS: dict[str, dict] = {
     },
     "anthropic": {
         "description": "Anthropic API",
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-6",
         "api_key_env": "ANTHROPIC_API_KEY",
         "client_type": "anthropic",
     },
