@@ -436,13 +436,18 @@ fn build_populated_indexer(
     block_size: usize,
     shared_prefix_blocks: usize,
     jump_size: usize,
-) -> (Arc<PositionalIndexer>, Vec<Vec<Vec<TokenId>>>) {
+) -> (
+    Arc<PositionalIndexer>,
+    Vec<Vec<Vec<TokenId>>>,
+    Vec<WorkerBlockMap>,
+) {
     let indexer = Arc::new(PositionalIndexer::new(jump_size));
 
     let shared_chunks = generate_token_chunks(shared_prefix_blocks, block_size);
     let shared_blocks = chunks_to_stored_blocks(&shared_chunks);
 
     let mut all_worker_chunks = Vec::with_capacity(workers.len());
+    let mut all_worker_blocks = Vec::with_capacity(workers.len());
 
     for worker in workers {
         let worker_id = indexer.intern_worker(worker);
@@ -473,9 +478,10 @@ fn build_populated_indexer(
         let mut worker_chunks = shared_chunks.clone();
         worker_chunks.extend(unique_chunks);
         all_worker_chunks.push(worker_chunks);
+        all_worker_blocks.push(wb);
     }
 
-    (indexer, all_worker_chunks)
+    (indexer, all_worker_chunks, all_worker_blocks)
 }
 
 // ============================================================================
@@ -591,20 +597,19 @@ macro_rules! bench_indexer_concurrent {
                 let start = Instant::now();
                 for _ in 0..iters {
                     let workers = generate_worker_endpoints($num_workers);
-                    let (indexer, worker_chunks) =
+                    let (indexer, worker_chunks, worker_blocks) =
                         build_populated_indexer(&workers, 64, $block_size, 8, 64);
 
                     let handles: Vec<_> = (0..$num_threads)
                         .map(|t| {
                             let indexer = Arc::clone(&indexer);
-                            let worker = workers[t % workers.len()].clone();
                             let chunks = worker_chunks[t % workers.len()].clone();
+                            let mut wb = worker_blocks[t % workers.len()].clone();
+                            let worker_id = indexer.intern_worker(&workers[t % workers.len()]);
                             let block_size = $block_size;
 
                             thread::spawn(move || {
                                 let mut rng = thread_rng();
-                                let worker_id = indexer.intern_worker(&worker);
-                                let mut wb = WorkerBlockMap::default();
                                 for i in 0..$ops_per_thread {
                                     if i % 3 == 0 {
                                         // Read: find_matches
@@ -775,7 +780,7 @@ fn bench_summary(c: &mut Criterion) {
 
             // MATCH benchmarks: build a populated indexer, then query it
             let max_blocks = *BLOCKS_PER_WORKER.last().unwrap();
-            let (indexer, worker_chunks) = build_populated_indexer(
+            let (indexer, worker_chunks, _worker_blocks) = build_populated_indexer(
                 &workers,
                 max_blocks,
                 block_size,
