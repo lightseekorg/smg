@@ -227,7 +227,11 @@ impl McpConnectionPool {
         self.connections.lock().contains(key)
     }
 
-    /// Get by URL only (backward compat). Prefer `get()` with full `PoolKey`.
+    /// Look up a connection by URL only (backward compatibility).
+    ///
+    /// **O(n)** — performs a linear scan of all pooled connections under the
+    /// lock. Callers on hot paths should prefer [`get()`](Self::get) with a
+    /// full [`PoolKey`] for O(1) lookup.
     pub fn get_by_url(&self, url: &str) -> Option<Arc<McpClient>> {
         self.connections
             .lock()
@@ -236,6 +240,12 @@ impl McpConnectionPool {
             .map(|(_, cached)| Arc::clone(&cached.client))
     }
 
+    /// Check whether a connection with the given URL exists (backward
+    /// compatibility).
+    ///
+    /// **O(n)** — performs a linear scan of all pooled connections under the
+    /// lock. Callers on hot paths should prefer [`contains()`](Self::contains)
+    /// with a full [`PoolKey`] for O(1) lookup.
     pub fn contains_url(&self, url: &str) -> bool {
         self.connections
             .lock()
