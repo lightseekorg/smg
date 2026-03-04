@@ -7,10 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::routers::gemini::{
-    context::RequestContext,
-    state::StepResult,
-};
+use crate::routers::gemini::{context::RequestContext, state::StepResult};
 
 /// Select a healthy upstream worker for the requested model.
 ///
@@ -39,5 +36,9 @@ pub(crate) async fn worker_selection(_ctx: &mut RequestContext) -> Result<StepRe
     // 7. Set ctx.upstream_url = Some(format!("{}/v1/interactions", worker.url())).
     // 8. Set ctx.state = LoadPreviousInteraction.
 
-    Err((StatusCode::NOT_IMPLEMENTED, "worker selection not yet implemented").into_response())
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "worker selection not yet implemented",
+    )
+        .into_response())
 }

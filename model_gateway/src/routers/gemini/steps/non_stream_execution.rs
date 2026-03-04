@@ -8,10 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::routers::gemini::{
-    context::RequestContext,
-    state::StepResult,
-};
+use crate::routers::gemini::{context::RequestContext, state::StepResult};
 
 /// POST the payload to the upstream worker and handle the response.
 ///

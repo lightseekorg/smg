@@ -4,12 +4,14 @@
 //! - `SharedComponents`: created once per router, `Arc`-cloned for each request.
 //! - `RequestContext`: created fresh per request, owned and mutated by steps.
 
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 use axum::http::HeaderMap;
+use bytes::Bytes;
 use openai_protocol::interactions::InteractionsRequest;
 use serde_json::Value;
 use smg_mcp::McpOrchestrator;
+use tokio::sync::mpsc;
 
 use super::state::RequestState;
 use crate::core::{Worker, WorkerRegistry};
@@ -24,7 +26,7 @@ use crate::core::{Worker, WorkerRegistry};
 /// into every `RequestContext`.
 ///
 /// TODO: Create InteractionsStorage and add in context
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub(crate) struct SharedComponents {
     /// HTTP client for upstream requests.
     pub client: reqwest::Client,
@@ -44,7 +46,7 @@ pub(crate) struct SharedComponents {
 ///
 /// Steps read and write fields on this struct. The `state` field
 /// determines which step the driver executes next.
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub(crate) struct RequestContext {
     /// Immutable request data from the client.
     pub input: RequestInput,
@@ -63,7 +65,7 @@ pub(crate) struct RequestContext {
 }
 
 /// Immutable request data captured at the start of processing.
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub(crate) struct RequestInput {
     /// Original client request (`Arc` for cheap cloning into spawned tasks).
     pub original_request: Arc<InteractionsRequest>,
@@ -78,7 +80,7 @@ pub(crate) struct RequestInput {
 
 /// Mutable processing state populated incrementally by steps.
 #[derive(Default)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub(crate) struct ProcessingState {
     /// Selected upstream worker (set by `WorkerSelection`).
     pub worker: Option<Arc<dyn Worker>>,
@@ -94,10 +96,10 @@ pub(crate) struct ProcessingState {
 }
 
 /// State specific to streaming responses.
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub(crate) struct StreamingState {
     /// SSE sender channel (set before spawning the streaming task).
-    pub sse_tx: Option<tokio::sync::mpsc::UnboundedSender<Result<bytes::Bytes, std::io::Error>>>,
+    pub sse_tx: Option<mpsc::UnboundedSender<Result<Bytes, io::Error>>>,
 
     /// Whether this is the first tool-loop iteration.
     ///

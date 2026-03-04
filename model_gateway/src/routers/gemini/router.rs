@@ -26,7 +26,7 @@ use crate::{core::WorkerRegistry, routers::RouterTrait};
 
 pub struct GeminiRouter {
     shared_components: Arc<SharedComponents>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     healthy: AtomicBool,
 }
 
@@ -38,20 +38,20 @@ impl std::fmt::Debug for GeminiRouter {
 
 impl GeminiRouter {
     /// Create a new `GeminiRouter`.
-    pub async fn new(
+    pub fn new(
         worker_registry: Arc<WorkerRegistry>,
         mcp_orchestrator: Arc<McpOrchestrator>,
         client: reqwest::Client,
-    ) -> Result<Self, String> {
+    ) -> Self {
         let shared_components = Arc::new(SharedComponents {
             client,
             worker_registry,
             mcp_orchestrator,
         });
-        Ok(Self {
+        Self {
             shared_components,
             healthy: AtomicBool::new(true),
-        })
+        }
     }
 
     /// Main handler for `POST /v1/interactions`.
@@ -83,6 +83,10 @@ impl GeminiRouter {
             // the real response flows through `sse_tx` events. The driver returns
             // a dummy Response only to satisfy the state machine's return type.
             // We log errors here so failures aren't completely silent.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "fire-and-forget SSE streaming driver; gateway shutdown need not wait for individual streams"
+            )]
             tokio::spawn(async move {
                 let response = driver::execute(&mut ctx).await;
                 if !response.status().is_success() {
