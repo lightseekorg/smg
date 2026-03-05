@@ -12,6 +12,8 @@
 #![expect(clippy::print_stdout)]
 // Benchmark binary — panicking on task join failure is acceptable.
 #![expect(clippy::expect_used)]
+// Benchmark binary — tokio::spawn is required for concurrent benchmark replay.
+#![expect(clippy::disallowed_methods)]
 
 use std::{
     sync::{
@@ -42,7 +44,7 @@ struct Args {
     #[arg(long, hide = true)]
     bench: bool,
 
-    /// Number of workers (concurrent replay tasks).
+    /// Number of workers (concurrent replay tasks). Must be >= 1.
     #[arg(long, default_value_t = 256)]
     num_workers: usize,
 
@@ -88,9 +90,9 @@ struct Args {
     #[arg(long, default_value_t = 20)]
     sweep_steps: usize,
 
-    /// Count event blocks in throughput (for multi-threaded indexers).
-    #[arg(long, default_value_t = true)]
-    count_events: bool,
+    /// Exclude event blocks from throughput (only count request blocks).
+    #[arg(long)]
+    no_count_events: bool,
 
     /// Worker duplication factor (simulates TP replicas).
     #[arg(long, default_value_t = 1)]
@@ -329,6 +331,7 @@ struct BenchmarkResults {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+    assert!(args.num_workers > 0, "--num-workers must be >= 1");
     let sweep = !args.no_sweep;
 
     println!("=== Throughput Benchmark ===");
@@ -407,10 +410,10 @@ async fn run_sweep(args: &Args, base_traces: &[Vec<TimedEntry>]) {
     println!("SWEEP SUMMARY");
     println!("{}", "=".repeat(80));
     println!(
-        "{:<12} | {:<18} | {:<18} | {:<18}",
-        "Duration", "Offered", "Actual", "Block Throughput"
+        "{:<12} | {:<18} | {:<18}",
+        "Duration", "Offered", "Block Throughput"
     );
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(60));
 
     let mut peak_throughput = 0.0f64;
     let mut peak_dur = 0u64;
@@ -429,10 +432,9 @@ async fn run_sweep(args: &Args, base_traces: &[Vec<TimedEntry>]) {
         }
 
         println!(
-            "{:<12} | {:<18} | {:<18} | {:<18}{}",
+            "{:<12} | {:<18} | {:<18}{}",
             dur_label,
             format_throughput(result.offered_block_throughput),
-            format_throughput(result.block_throughput),
             format_throughput(result.block_throughput),
             if is_peak && results.len() > 1 {
                 " <-- peak"
@@ -442,14 +444,13 @@ async fn run_sweep(args: &Args, base_traces: &[Vec<TimedEntry>]) {
         );
     }
 
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(60));
     println!(
         "Peak: {} block ops/sec at {peak_dur}ms duration",
         format_throughput(peak_throughput),
     );
 }
 
-#[expect(clippy::disallowed_methods)] // tokio::spawn is required for concurrent benchmark replay
 async fn run_benchmark(args: &Args, traces: Vec<Vec<TimedEntry>>) -> BenchmarkResults {
     let indexer = Arc::new(PositionalIndexer::new(args.jump_size));
 
@@ -485,37 +486,21 @@ async fn run_benchmark(args: &Args, traces: Vec<Vec<TimedEntry>>) -> BenchmarkRe
             let err_count = total_errors.clone();
             let latencies = latencies.clone();
             let worker_id = (worker_idx + replica * args.num_workers) as u32;
-            let count_events = args.count_events;
+            let count_events = !args.no_count_events;
 
             tasks.push(tokio::spawn(async move {
                 let mut state = TaskState::new(count_events);
 
                 let base_time = tokio::time::Instant::now();
-                let mut trace_iter = trace.iter().peekable();
 
-                while let Some(entry) = trace_iter.next() {
-                    let entry_ts = entry.timestamp_us;
+                for entry in trace.iter() {
+                    // Pace to this entry's timestamp before processing
+                    let target = base_time + Duration::from_micros(entry.timestamp_us);
+                    if target > tokio::time::Instant::now() {
+                        tokio::time::sleep_until(target).await;
+                    }
 
                     state.process(&entry.entry, &indexer, worker_id);
-
-                    // Process all entries at the same timestamp
-                    while let Some(next) = trace_iter.peek() {
-                        if next.timestamp_us == entry_ts {
-                            // Safe: we just peeked and confirmed Some
-                            let next = trace_iter.next().expect("peeked Some");
-                            state.process(&next.entry, &indexer, worker_id);
-                        } else {
-                            break;
-                        }
-                    }
-
-                    // Pace to next entry's timestamp
-                    if let Some(next) = trace_iter.peek() {
-                        let target = base_time + Duration::from_micros(next.timestamp_us);
-                        if target > tokio::time::Instant::now() {
-                            tokio::time::sleep_until(target).await;
-                        }
-                    }
                 }
 
                 req_blocks.fetch_add(state.req_blocks, Ordering::Relaxed);
