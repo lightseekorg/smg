@@ -251,12 +251,39 @@ impl WorkerRegistry {
 
     /// Register a new worker
     pub fn register(&self, worker: Arc<dyn Worker>) -> WorkerId {
-        let worker_id = if let Some(existing_id) = self.url_to_id.get(worker.url()) {
+        let (worker_id, old_worker) = if let Some(existing_id) = self.url_to_id.get(worker.url()) {
             // Worker with this URL already exists, update it
-            existing_id.clone()
+            let w_id = existing_id.clone();
+            let old_w = self.workers.get(&w_id).map(|e| e.clone());
+            (w_id, old_w)
         } else {
-            WorkerId::new()
+            (WorkerId::new(), None)
         };
+
+        // If replacing an existing worker, remove old memberships first to avoid duplicates
+        if let Some(old) = old_worker {
+            // Clean up old index
+            let old_model_id = old.model_id().to_string();
+            if let Some(mut entry) = self.model_index.get_mut(&old_model_id) {
+                let new_workers: Vec<Arc<dyn Worker>> = entry
+                    .iter()
+                    .filter(|w| w.url() != old.url())
+                    .cloned()
+                    .collect();
+                *entry = Arc::from(new_workers.into_boxed_slice());
+            }
+            self.rebuild_hash_ring(&old_model_id);
+
+            // Clean up old type workers
+            if let Some(mut type_workers) = self.type_workers.get_mut(old.worker_type()) {
+                type_workers.retain(|id| id != &worker_id);
+            }
+
+            // Clean up old connection workers
+            if let Some(mut conn_workers) = self.connection_workers.get_mut(old.connection_mode()) {
+                conn_workers.retain(|id| id != &worker_id);
+            }
+        }
 
         // Store worker
         self.workers.insert(worker_id.clone(), worker.clone());

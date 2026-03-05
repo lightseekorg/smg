@@ -179,10 +179,5 @@ name = "wasm_instantiation"
 harness = false
 path = "benches/wasm_instantiation.rs"
 
-[[bench]]
-name = "worker_registry_get_url_by_id"
-harness = false
-path = "benches/worker_registry_get_url_by_id.rs"
-
 [lints]
 workspace = true
