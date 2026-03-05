@@ -183,7 +183,7 @@ impl VllmEngineClient {
     pub async fn generate(
         &self,
         req: proto::GenerateRequest,
-    ) -> Result<AbortOnDropStream, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<AbortOnDropStream, tonic::Status> {
         let request_id = req.request_id.clone();
         let mut client = self.client.clone();
         let mut request = Request::new(req);
@@ -203,9 +203,7 @@ impl VllmEngineClient {
     }
 
     /// Perform health check
-    pub async fn health_check(
-        &self,
-    ) -> Result<proto::HealthCheckResponse, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn health_check(&self) -> Result<proto::HealthCheckResponse, tonic::Status> {
         debug!("Sending health check request");
         // HealthCheckRequest is now empty - server generates its own health check internally
         let request = Request::new(proto::HealthCheckRequest {});
@@ -221,7 +219,7 @@ impl VllmEngineClient {
         &self,
         request_id: String,
         _reason: String,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), tonic::Status> {
         debug!("Sending abort request for {}", request_id);
         let request = Request::new(proto::AbortRequest {
             request_ids: vec![request_id.clone()],
@@ -234,9 +232,7 @@ impl VllmEngineClient {
     }
 
     /// Get model information
-    pub async fn get_model_info(
-        &self,
-    ) -> Result<proto::GetModelInfoResponse, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_model_info(&self) -> Result<proto::GetModelInfoResponse, tonic::Status> {
         debug!("Requesting model info");
         let request = Request::new(proto::GetModelInfoRequest {});
 
@@ -247,9 +243,7 @@ impl VllmEngineClient {
     }
 
     /// Get server information
-    pub async fn get_server_info(
-        &self,
-    ) -> Result<proto::GetServerInfoResponse, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_server_info(&self) -> Result<proto::GetServerInfoResponse, tonic::Status> {
         debug!("Requesting server info");
         let request = Request::new(proto::GetServerInfoRequest {});
 

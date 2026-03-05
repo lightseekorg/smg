@@ -121,9 +121,7 @@ impl GrpcClient {
         }
     }
 
-    pub async fn health_check(
-        &self,
-    ) -> Result<HealthCheckResponse, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn health_check(&self) -> Result<HealthCheckResponse, tonic::Status> {
         match self {
             Self::Sglang(client) => {
                 let resp = client.health_check().await?;
@@ -151,9 +149,7 @@ impl GrpcClient {
         }
     }
 
-    pub async fn get_model_info(
-        &self,
-    ) -> Result<ModelInfo, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_model_info(&self) -> Result<ModelInfo, tonic::Status> {
         match self {
             Self::Sglang(client) => Ok(ModelInfo::Sglang(Box::new(client.get_model_info().await?))),
             Self::Vllm(client) => Ok(ModelInfo::Vllm(client.get_model_info().await?)),
@@ -163,15 +159,15 @@ impl GrpcClient {
 
     /// Get the full load response from the backend.
     /// Only supported for SGLang backends. Returns per-DP-rank load metrics.
-    pub async fn get_loads(
-        &self,
-    ) -> Result<WorkerLoadResponse, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_loads(&self) -> Result<WorkerLoadResponse, tonic::Status> {
         match self {
             Self::Sglang(client) => {
                 let resp = client.get_loads(vec!["core".to_string()]).await?;
                 Ok(WorkerLoadResponse::from(resp))
             }
-            _ => Err("GetLoads RPC not supported for this backend".into()),
+            _ => Err(tonic::Status::unimplemented(
+                "GetLoads RPC not supported for this backend",
+            )),
         }
     }
 
@@ -179,10 +175,7 @@ impl GrpcClient {
     pub async fn subscribe_kv_events(
         &self,
         start_seq: u64,
-    ) -> Result<
-        tonic::Streaming<smg_grpc_client::common_proto::KvEventBatch>,
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
+    ) -> Result<tonic::Streaming<smg_grpc_client::common_proto::KvEventBatch>, tonic::Status> {
         match self {
             Self::Sglang(client) => client.subscribe_kv_events(start_seq).await,
             Self::Vllm(client) => client.subscribe_kv_events(start_seq).await,
@@ -190,9 +183,7 @@ impl GrpcClient {
         }
     }
 
-    pub async fn get_server_info(
-        &self,
-    ) -> Result<ServerInfo, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_server_info(&self) -> Result<ServerInfo, tonic::Status> {
         match self {
             Self::Sglang(client) => Ok(ServerInfo::Sglang(Box::new(
                 client.get_server_info().await?,
@@ -232,15 +223,15 @@ impl GrpcClient {
     ) -> Result<ProtoStream, tonic::Status> {
         match (self, req) {
             (Self::Sglang(client), ProtoGenerateRequest::Sglang(boxed_req)) => {
-                let stream = client.generate(*boxed_req).await.map_err(into_status)?;
+                let stream = client.generate(*boxed_req).await?;
                 Ok(ProtoStream::Sglang(stream))
             }
             (Self::Vllm(client), ProtoGenerateRequest::Vllm(boxed_req)) => {
-                let stream = client.generate(*boxed_req).await.map_err(into_status)?;
+                let stream = client.generate(*boxed_req).await?;
                 Ok(ProtoStream::Vllm(stream))
             }
             (Self::Trtllm(client), ProtoGenerateRequest::Trtllm(boxed_req)) => {
-                let stream = client.generate(*boxed_req).await.map_err(into_status)?;
+                let stream = client.generate(*boxed_req).await?;
                 Ok(ProtoStream::Trtllm(stream))
             }
             #[expect(
@@ -257,7 +248,7 @@ impl GrpcClient {
     ) -> Result<ProtoEmbedResponse, tonic::Status> {
         match (self, req) {
             (Self::Sglang(client), ProtoEmbedRequest::Sglang(boxed_req)) => {
-                let resp = client.embed(*boxed_req).await.map_err(into_status)?;
+                let resp = client.embed(*boxed_req).await?;
                 Ok(ProtoEmbedResponse::Sglang(resp))
             }
             #[expect(
@@ -366,15 +357,6 @@ impl GrpcClient {
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
         }
-    }
-}
-
-/// Downcast a boxed error to `tonic::Status`, falling back to `Status::internal`.
-/// The grpc_client crate returns `Box<dyn Error>` but the concrete type is always `tonic::Status`.
-fn into_status(err: Box<dyn std::error::Error + Send + Sync>) -> tonic::Status {
-    match err.downcast::<tonic::Status>() {
-        Ok(status) => *status,
-        Err(other) => tonic::Status::internal(other.to_string()),
     }
 }
 

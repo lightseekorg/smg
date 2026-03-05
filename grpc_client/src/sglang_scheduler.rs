@@ -183,7 +183,7 @@ impl SglangSchedulerClient {
     pub async fn generate(
         &self,
         req: proto::GenerateRequest,
-    ) -> Result<AbortOnDropStream, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<AbortOnDropStream, tonic::Status> {
         let request_id = req.request_id.clone();
         let mut client = self.client.clone();
         let mut request = Request::new(req);
@@ -206,7 +206,7 @@ impl SglangSchedulerClient {
     pub async fn embed(
         &self,
         req: proto::EmbedRequest,
-    ) -> Result<proto::EmbedResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<proto::EmbedResponse, tonic::Status> {
         let mut client = self.client.clone();
         let mut request = Request::new(req);
 
@@ -220,9 +220,7 @@ impl SglangSchedulerClient {
     }
 
     /// Perform health check
-    pub async fn health_check(
-        &self,
-    ) -> Result<proto::HealthCheckResponse, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn health_check(&self) -> Result<proto::HealthCheckResponse, tonic::Status> {
         debug!("Sending health check request");
         // HealthCheckRequest is now empty - server generates its own health check internally
         let request = Request::new(proto::HealthCheckRequest {});
@@ -238,7 +236,7 @@ impl SglangSchedulerClient {
         &self,
         request_id: String,
         reason: String,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), tonic::Status> {
         debug!(
             "Sending abort request for {} (reason: {})",
             request_id, reason
@@ -260,9 +258,7 @@ impl SglangSchedulerClient {
     }
 
     /// Get model information
-    pub async fn get_model_info(
-        &self,
-    ) -> Result<proto::GetModelInfoResponse, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_model_info(&self) -> Result<proto::GetModelInfoResponse, tonic::Status> {
         debug!("Requesting model info");
         let request = Request::new(proto::GetModelInfoRequest {});
 
@@ -273,9 +269,7 @@ impl SglangSchedulerClient {
     }
 
     /// Get server information
-    pub async fn get_server_info(
-        &self,
-    ) -> Result<proto::GetServerInfoResponse, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_server_info(&self) -> Result<proto::GetServerInfoResponse, tonic::Status> {
         debug!("Requesting server info");
         let request = Request::new(proto::GetServerInfoRequest {});
 
@@ -289,7 +283,7 @@ impl SglangSchedulerClient {
     pub async fn get_loads(
         &self,
         include: Vec<String>,
-    ) -> Result<proto::GetLoadsResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<proto::GetLoadsResponse, tonic::Status> {
         debug!("Requesting load metrics");
         let request = Request::new(proto::GetLoadsRequest {
             dp_rank: None,

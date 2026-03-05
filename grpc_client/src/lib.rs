@@ -60,10 +60,7 @@ macro_rules! impl_subscribe_kv_events {
         pub async fn subscribe_kv_events(
             &self,
             start_sequence_number: u64,
-        ) -> Result<
-            tonic::Streaming<$crate::common_proto::KvEventBatch>,
-            Box<dyn std::error::Error + Send + Sync>,
-        > {
+        ) -> Result<tonic::Streaming<$crate::common_proto::KvEventBatch>, tonic::Status> {
             let request = tonic::Request::new($crate::common_proto::SubscribeKvEventsRequest {
                 start_sequence_number,
             });
