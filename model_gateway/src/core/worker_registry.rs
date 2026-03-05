@@ -393,6 +393,11 @@ impl WorkerRegistry {
     /// Remove a worker by URL
     pub fn remove_by_url(&self, url: &str) -> Option<Arc<dyn Worker>> {
         if let Some((_, worker_id)) = self.url_to_id.remove(url) {
+            // Ensure id_to_url is also cleaned up. This is critical for pending workers
+            // that were reserved but not yet registered into `self.workers`,
+            // because `self.remove(&worker_id)` exits early without cleaning maps
+            // if the worker isn't found in `self.workers`.
+            self.id_to_url.remove(&worker_id);
             self.remove(&worker_id)
         } else {
             None
