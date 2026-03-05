@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Detect changes
         id: changes
@@ -32,8 +32,11 @@ jobs:
             echo "proto=true" >> "$GITHUB_OUTPUT"
             echo "servicer=true" >> "$GITHUB_OUTPUT"
           else
-            proto=$(git diff HEAD~1 --name-only | grep -q 'grpc_client/python/pyproject.toml' && echo true || echo false)
-            servicer=$(git diff HEAD~1 --name-only | grep -q 'grpc_servicer/pyproject.toml' && echo true || echo false)
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+            changed="$(git diff --name-only "$base" "$head")"
+            proto=$(echo "$changed" | grep -q '^grpc_client/python/pyproject.toml$' && echo true || echo false)
+            servicer=$(echo "$changed" | grep -q '^grpc_servicer/pyproject.toml$' && echo true || echo false)
             echo "proto=$proto" >> "$GITHUB_OUTPUT"
             echo "servicer=$servicer" >> "$GITHUB_OUTPUT"
           fi
@@ -99,12 +102,18 @@ jobs:
   # ── Tier 2: Servicer (waits for Tier 1 if proto changed) ──
   build-servicer:
     name: Build smg-grpc-servicer
-    needs: [detect, upload-proto]
-    # Run if: proto wasn't released (skipped) OR proto upload succeeded
+    needs: [detect, build-proto, upload-proto]
+    # Run if: proto wasn't needed (skipped) OR proto built and uploaded successfully
     if: >-
       always()
       && needs.detect.outputs.servicer == 'true'
-      && needs.upload-proto.result != 'failure'
+      && (
+        needs.detect.outputs.proto != 'true'
+        || (
+          needs.build-proto.result == 'success'
+          && needs.upload-proto.result != 'failure'
+        )
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
