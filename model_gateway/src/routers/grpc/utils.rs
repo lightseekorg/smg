@@ -683,8 +683,7 @@ pub(crate) async fn collect_stream_responses(
             Err(e) => {
                 error!(function = "collect_stream_responses", worker = %worker_name, grpc_code = ?e.code(), error = ?e, "Worker stream error");
                 // Don't mark as completed - let Drop send abort for error cases
-                return Err(grpc_err(
-                    &e,
+                return Err(e.to_http_error(
                     "worker_stream_failed",
                     format!("{worker_name} stream failed: {e}"),
                 ));
@@ -1033,48 +1032,65 @@ pub(crate) fn error_type_from_status(status: StatusCode) -> &'static str {
     }
 }
 
-/// Map gRPC status code to HTTP status code for error responses.
-pub(crate) fn grpc_to_http_status(code: Code) -> StatusCode {
-    match code {
-        Code::InvalidArgument | Code::FailedPrecondition | Code::OutOfRange => {
-            StatusCode::BAD_REQUEST
+/// Extension methods for `tonic::Status`.
+pub(crate) trait TonicStatusExt {
+    /// Map gRPC status code to the corresponding HTTP status code.
+    fn http_status(&self) -> StatusCode;
+
+    /// Returns `true` if this is a server-side error (should trip the circuit breaker).
+    /// Client errors (InvalidArgument, NotFound, etc.) return `false`.
+    fn is_server_error(&self) -> bool;
+
+    /// Convert this gRPC error into an HTTP error response with the appropriate status code.
+    fn to_http_error(&self, code: &str, msg: String) -> Response;
+}
+
+impl TonicStatusExt for tonic::Status {
+    fn http_status(&self) -> StatusCode {
+        match self.code() {
+            Code::InvalidArgument | Code::FailedPrecondition | Code::OutOfRange => {
+                StatusCode::BAD_REQUEST
+            }
+            Code::Unauthenticated => StatusCode::UNAUTHORIZED,
+            Code::PermissionDenied => StatusCode::FORBIDDEN,
+            Code::NotFound => StatusCode::NOT_FOUND,
+            Code::AlreadyExists | Code::Aborted => StatusCode::CONFLICT,
+            Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
+            Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Code::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
+            // Internal, Unknown, Unimplemented, DataLoss, Cancelled
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
-        Code::Unauthenticated => StatusCode::UNAUTHORIZED,
-        Code::PermissionDenied => StatusCode::FORBIDDEN,
-        Code::NotFound => StatusCode::NOT_FOUND,
-        Code::AlreadyExists | Code::Aborted => StatusCode::CONFLICT,
-        Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
-        Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-        Code::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
-        // Internal, Unknown, Unimplemented, DataLoss, Cancelled
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+
+    fn is_server_error(&self) -> bool {
+        matches!(
+            self.code(),
+            Code::Internal
+                | Code::Unavailable
+                | Code::Unknown
+                | Code::DataLoss
+                | Code::DeadlineExceeded
+        )
+    }
+
+    fn to_http_error(&self, code: &str, msg: String) -> Response {
+        error::create_error(self.http_status(), code, msg)
     }
 }
 
-/// Returns true if the gRPC status code represents a server error
-/// (should trip the circuit breaker), false for client errors (should not).
-pub(crate) fn is_grpc_server_error(code: Code) -> bool {
-    matches!(
-        code,
-        Code::Internal
-            | Code::Unavailable
-            | Code::Unknown
-            | Code::DataLoss
-            | Code::DeadlineExceeded
-    )
+/// Extension for `Result<T, tonic::Status>` to check circuit breaker health.
+pub(crate) trait TonicResultExt {
+    /// Returns `true` if the result is healthy for the circuit breaker.
+    /// `Ok` and client-error results are healthy; only server errors are failures.
+    fn is_healthy(&self) -> bool;
 }
 
-/// Map a `tonic::Status` to an HTTP error response with the appropriate status code.
-pub(crate) fn grpc_err(status: &tonic::Status, code: &str, msg: String) -> Response {
-    error::create_error(grpc_to_http_status(status.code()), code, msg)
-}
-
-/// Returns `true` if a gRPC `Result` should count as healthy for the circuit breaker.
-/// `Ok` and client-error results are healthy; only server errors are failures.
-pub(crate) fn is_grpc_result_healthy<T>(result: &Result<T, tonic::Status>) -> bool {
-    result
-        .as_ref()
-        .map_or_else(|e| !is_grpc_server_error(e.code()), |_| true)
+impl<T> TonicResultExt for Result<T, tonic::Status> {
+    fn is_healthy(&self) -> bool {
+        self.as_ref()
+            .map_or_else(|e| !e.is_server_error(), |_| true)
+    }
 }
 
 #[cfg(test)]

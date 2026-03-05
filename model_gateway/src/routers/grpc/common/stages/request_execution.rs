@@ -17,7 +17,7 @@ use crate::{
                 ProtoEmbedRequest, ProtoEmbedResponseVariant, ProtoGenerateRequest, ProtoRequest,
                 ProtoStream,
             },
-            utils::{grpc_err, is_grpc_result_healthy, is_grpc_server_error},
+            utils::{TonicResultExt, TonicStatusExt},
         },
     },
 };
@@ -169,12 +169,11 @@ impl RequestExecutionStage {
         })?;
 
         let result = client.generate(proto_request).await;
-        workers.record_outcome(is_grpc_result_healthy(&result));
+        workers.record_outcome(result.is_healthy());
 
         let stream = result.map_err(|e| {
             error!(function = "execute_single", error = %e, "Failed to start generation");
-            grpc_err(
-                &e,
+            e.to_http_error(
                 "start_generation_failed",
                 format!("Failed to start generation: {e}"),
             )
@@ -201,8 +200,7 @@ impl RequestExecutionStage {
 
         let response = client.embed(proto_request).await.map_err(|e| {
             error!(function = "execute_single_embed", error = %e, "Failed to start embedding");
-            grpc_err(
-                &e,
+            e.to_http_error(
                 "start_embedding_failed",
                 format!("Failed to start embedding: {e}"),
             )
@@ -262,22 +260,18 @@ impl RequestExecutionStage {
         );
 
         // Record circuit breaker outcomes (client errors don't count as failures)
-        workers.record_dual_outcomes(
-            is_grpc_result_healthy(&prefill_result),
-            is_grpc_result_healthy(&decode_result),
-        );
+        workers.record_dual_outcomes(prefill_result.is_healthy(), decode_result.is_healthy());
 
         // Handle prefill result
         let prefill_stream = prefill_result.map_err(|e| {
             error!(function = "execute_dual_dispatch", error = %e, "Prefill worker failed to start");
-            grpc_err(&e, "prefill_worker_failed_to_start", format!("Prefill worker failed to start: {e}"))
+            e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {e}"))
         })?;
 
         // Handle decode result
         let decode_stream = decode_result.map_err(|e| {
             error!(function = "execute_dual_dispatch", error = %e, "Decode worker failed to start");
-            grpc_err(
-                &e,
+            e.to_http_error(
                 "decode_worker_failed_to_start",
                 format!("Decode worker failed to start: {e}"),
             )
@@ -363,9 +357,9 @@ impl RequestExecutionStage {
             .generate(prefill_request)
             .await
             .map_err(|e| {
-                workers.record_outcome_prefill(!is_grpc_server_error(e.code()));
+                workers.record_outcome_prefill(!e.is_server_error());
                 error!(function = "execute_sequential_pd", error = %e, "Prefill worker failed to start");
-                grpc_err(&e, "prefill_worker_failed_to_start", format!("Prefill worker failed to start: {e}"))
+                e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {e}"))
             })?;
 
         // Drain prefill response (we just need to wait for completion)
@@ -375,10 +369,9 @@ impl RequestExecutionStage {
                     // Just consume the response, we use bootstrap info from worker metadata
                 }
                 Err(e) => {
-                    workers.record_outcome_prefill(!is_grpc_server_error(e.code()));
+                    workers.record_outcome_prefill(!e.is_server_error());
                     error!(function = "execute_sequential_pd", error = %e, "Prefill stream error");
-                    return Err(grpc_err(
-                        &e,
+                    return Err(e.to_http_error(
                         "prefill_stream_error",
                         format!("Prefill stream error: {e}"),
                     ));
@@ -403,10 +396,9 @@ impl RequestExecutionStage {
 
         // Send request to decode
         let decode_stream = decode_client.generate(decode_request).await.map_err(|e| {
-            workers.record_outcome_decode(!is_grpc_server_error(e.code()));
+            workers.record_outcome_decode(!e.is_server_error());
             error!(function = "execute_sequential_pd", error = %e, "Decode worker failed to start");
-            grpc_err(
-                &e,
+            e.to_http_error(
                 "decode_worker_failed_to_start",
                 format!("Decode worker failed to start: {e}"),
             )
