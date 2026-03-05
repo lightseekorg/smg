@@ -58,7 +58,7 @@ fn bench_get_url_by_id(c: &mut Criterion) {
         let (registry, first_id, last_id, _urls) = setup_registry(size);
         let missing = unknown_id();
 
-        // --- hot: look up the last-registered worker (best/average DashMap case) ---
+        // hot: look up the last-registered worker (best/average DashMap case)
         group.bench_with_input(
             BenchmarkId::new("hot (last registered)", size),
             &size,
@@ -69,7 +69,7 @@ fn bench_get_url_by_id(c: &mut Criterion) {
             },
         );
 
-        //  cold: look up the first-registered worker (worst-case for scan order) ---
+        // cold: look up the first-registered worker (worst-case for scan order)
         group.bench_with_input(
             BenchmarkId::new("cold (first registered)", size),
             &size,
@@ -80,7 +80,7 @@ fn bench_get_url_by_id(c: &mut Criterion) {
             },
         );
 
-        // missing: the WorkerId is not in the registry → always full scan ---
+        // missing: the WorkerId is not in the registry → always full scan
         group.bench_with_input(
             BenchmarkId::new("missing (full scan, worst case)", size),
             &size,
@@ -101,7 +101,7 @@ fn bench_get_by_url_baseline(c: &mut Criterion) {
     for &size in &[10usize, 100, 500, 2_000] {
         let (registry, _first_id, _last_id, urls) = setup_registry(size);
 
-        // Look up the first URL (arbitrary – all lookups are O(1))
+        // Look up the first URL (arbitrary all lookups are O(1))
         let first_url = urls[0].clone();
         let last_url = urls[urls.len() - 1].clone();
 
