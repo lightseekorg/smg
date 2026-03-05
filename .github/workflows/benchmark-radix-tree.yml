@@ -61,7 +61,6 @@ jobs:
             --num-sessions 200000 \
             --num-workers 256 \
             --jump-size 8 \
-            --sweep \
             --sweep-min-ms 10 \
             --sweep-steps 20 2>&1 | tee throughput_output.txt
 

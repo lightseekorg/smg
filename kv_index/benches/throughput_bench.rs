@@ -76,11 +76,7 @@ struct Args {
     #[arg(long, default_value_t = 60_000)]
     benchmark_duration_ms: u64,
 
-    /// Enable sweep mode (find peak throughput).
-    #[arg(long, default_value_t = true)]
-    sweep: bool,
-
-    /// Disable sweep mode (single run).
+    /// Disable sweep mode (run a single duration instead of peak-finding).
     #[arg(long)]
     no_sweep: bool,
 
@@ -131,6 +127,7 @@ struct TaskState {
     worker_blocks: WorkerBlockMap,
     req_blocks: u64,
     evt_blocks: u64,
+    errors: u64,
     latencies: Vec<u64>,
     count_events: bool,
 }
@@ -141,6 +138,7 @@ impl TaskState {
             worker_blocks: WorkerBlockMap::default(),
             req_blocks: 0,
             evt_blocks: 0,
+            errors: 0,
             latencies: Vec::new(),
             count_events,
         }
@@ -160,14 +158,15 @@ impl TaskState {
                 blocks,
                 parent_seq_hash,
             } => {
-                let _ = indexer.apply_stored(
-                    worker_id,
-                    blocks,
-                    *parent_seq_hash,
-                    &mut self.worker_blocks,
-                );
-                if self.count_events {
-                    self.evt_blocks += blocks.len() as u64;
+                if indexer
+                    .apply_stored(worker_id, blocks, *parent_seq_hash, &mut self.worker_blocks)
+                    .is_ok()
+                {
+                    if self.count_events {
+                        self.evt_blocks += blocks.len() as u64;
+                    }
+                } else {
+                    self.errors += 1;
                 }
             }
         }
@@ -213,8 +212,12 @@ fn generate_traces(args: &Args) -> Vec<Vec<TimedEntry>> {
         let worker_id = session_id % args.num_workers;
 
         // Session-specific prefix: draw a contiguous slice from the pool.
-        let prefix_start =
-            (session_id * 7) % prefix_pool.len().saturating_sub(args.shared_prefix_blocks);
+        let prefix_range = prefix_pool.len().saturating_sub(args.shared_prefix_blocks);
+        let prefix_start = if prefix_range == 0 {
+            0
+        } else {
+            (session_id * 7) % prefix_range
+        };
         let prefix_end = (prefix_start + args.shared_prefix_blocks).min(prefix_pool.len());
         let session_prefix = &prefix_pool[prefix_start..prefix_end];
 
@@ -316,6 +319,7 @@ struct BenchmarkResults {
     total_request_blocks: u64,
     total_event_blocks: u64,
     total_blocks: u64,
+    total_errors: u64,
     actual_duration: Duration,
     block_throughput: f64,
     offered_block_throughput: f64,
@@ -325,7 +329,7 @@ struct BenchmarkResults {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let sweep = args.sweep && !args.no_sweep;
+    let sweep = !args.no_sweep;
 
     println!("=== Throughput Benchmark ===");
     println!(
@@ -375,7 +379,7 @@ async fn main() {
         run_sweep(&args, &base_traces).await;
     } else {
         let traces = rescale_traces(&base_traces, args.benchmark_duration_ms);
-        let result = run_benchmark(&args, &traces).await;
+        let result = run_benchmark(&args, traces).await;
         print_results(&result);
     }
 }
@@ -394,7 +398,7 @@ async fn run_sweep(args: &Args, base_traces: &[Vec<TimedEntry>]) {
         println!("\n--- Sweep: benchmark_duration_ms = {dur_ms} ---");
 
         let traces = rescale_traces(base_traces, dur_ms);
-        let result = run_benchmark(args, &traces).await;
+        let result = run_benchmark(args, traces).await;
         print_results(&result);
         results.push((dur_ms, result));
     }
@@ -410,8 +414,6 @@ async fn run_sweep(args: &Args, base_traces: &[Vec<TimedEntry>]) {
 
     let mut peak_throughput = 0.0f64;
     let mut peak_dur = 0u64;
-
-    results.sort_by(|a, b| b.0.cmp(&a.0));
 
     for (dur_ms, result) in &results {
         let dur_label = if *dur_ms >= 1000 {
@@ -448,7 +450,7 @@ async fn run_sweep(args: &Args, base_traces: &[Vec<TimedEntry>]) {
 }
 
 #[expect(clippy::disallowed_methods)] // tokio::spawn is required for concurrent benchmark replay
-async fn run_benchmark(args: &Args, traces: &[Vec<TimedEntry>]) -> BenchmarkResults {
+async fn run_benchmark(args: &Args, traces: Vec<Vec<TimedEntry>>) -> BenchmarkResults {
     let indexer = Arc::new(PositionalIndexer::new(args.jump_size));
 
     let num_total_workers = args.num_workers * args.duplication_factor;
@@ -456,7 +458,7 @@ async fn run_benchmark(args: &Args, traces: &[Vec<TimedEntry>]) -> BenchmarkResu
         indexer.intern_worker(&format!("worker-{w}"));
     }
 
-    let traces: Vec<Arc<Vec<TimedEntry>>> = traces.iter().map(|t| Arc::new(t.clone())).collect();
+    let traces: Vec<Arc<Vec<TimedEntry>>> = traces.into_iter().map(Arc::new).collect();
 
     let max_ts_us = traces
         .iter()
@@ -468,6 +470,7 @@ async fn run_benchmark(args: &Args, traces: &[Vec<TimedEntry>]) -> BenchmarkResu
 
     let total_request_blocks = Arc::new(AtomicU64::new(0));
     let total_event_blocks = Arc::new(AtomicU64::new(0));
+    let total_errors = Arc::new(AtomicU64::new(0));
     let latencies = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
     let wall_start = Instant::now();
@@ -479,6 +482,7 @@ async fn run_benchmark(args: &Args, traces: &[Vec<TimedEntry>]) -> BenchmarkResu
             let trace = worker_trace.clone();
             let req_blocks = total_request_blocks.clone();
             let evt_blocks = total_event_blocks.clone();
+            let err_count = total_errors.clone();
             let latencies = latencies.clone();
             let worker_id = (worker_idx + replica * args.num_workers) as u32;
             let count_events = args.count_events;
@@ -516,6 +520,7 @@ async fn run_benchmark(args: &Args, traces: &[Vec<TimedEntry>]) -> BenchmarkResu
 
                 req_blocks.fetch_add(state.req_blocks, Ordering::Relaxed);
                 evt_blocks.fetch_add(state.evt_blocks, Ordering::Relaxed);
+                err_count.fetch_add(state.errors, Ordering::Relaxed);
                 latencies.lock().extend(state.latencies);
             }));
         }
@@ -528,6 +533,7 @@ async fn run_benchmark(args: &Args, traces: &[Vec<TimedEntry>]) -> BenchmarkResu
     let actual_duration = wall_start.elapsed();
     let req_blocks = total_request_blocks.load(Ordering::Relaxed);
     let evt_blocks = total_event_blocks.load(Ordering::Relaxed);
+    let errors = total_errors.load(Ordering::Relaxed);
     let total_blocks = req_blocks + evt_blocks;
 
     let block_throughput = total_blocks as f64 / actual_duration.as_secs_f64();
@@ -542,13 +548,15 @@ async fn run_benchmark(args: &Args, traces: &[Vec<TimedEntry>]) -> BenchmarkResu
     let latency_p99_us = if lats.is_empty() {
         0.0
     } else {
-        lats[lats.len() * 99 / 100] as f64 / 1000.0
+        let p99_idx = lats.len().saturating_sub(1) * 99 / 100;
+        lats[p99_idx] as f64 / 1000.0
     };
 
     BenchmarkResults {
         total_request_blocks: req_blocks,
         total_event_blocks: evt_blocks,
         total_blocks,
+        total_errors: errors,
         actual_duration,
         block_throughput,
         offered_block_throughput,
@@ -564,8 +572,10 @@ fn compute_sweep_durations(min_ms: u64, max_ms: u64, steps: usize) -> Vec<u64> {
     if steps <= 1 {
         return vec![max_ms];
     }
-    let log_min = (min_ms as f64).ln();
-    let log_max = (max_ms as f64).ln();
+    let safe_min = min_ms.max(1);
+    let safe_max = max_ms.max(1);
+    let log_min = (safe_min as f64).ln();
+    let log_max = (safe_max as f64).ln();
     (0..steps)
         .map(|i| {
             let t = i as f64 / (steps - 1) as f64;
@@ -605,4 +615,7 @@ fn print_results(result: &BenchmarkResults) {
         format_throughput(result.offered_block_throughput),
         result.latency_p99_us,
     );
+    if result.total_errors > 0 {
+        println!("  Errors: {} apply_stored failures", result.total_errors);
+    }
 }
