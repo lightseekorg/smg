@@ -330,8 +330,7 @@ fn load_mooncake_trace(path: &str) -> Vec<MooncakeRequest> {
         if line.trim().is_empty() {
             continue;
         }
-        let req: MooncakeRequest =
-            serde_json::from_str(&line).expect("failed to parse trace line");
+        let req: MooncakeRequest = serde_json::from_str(&line).expect("failed to parse trace line");
         requests.push(req);
     }
     requests
@@ -426,8 +425,11 @@ fn convert_mooncake_traces(worker_traces: Vec<Vec<MooncakeRequest>>) -> Vec<Vec<
             // Mooncake timestamps are in milliseconds; convert to microseconds.
             let timestamp_us = req.timestamp.saturating_sub(global_min_ts) * 1000;
 
-            let content_hashes: Vec<ContentHash> =
-                req.hash_ids.iter().map(|&id| content_hash_from_id(id)).collect();
+            let content_hashes: Vec<ContentHash> = req
+                .hash_ids
+                .iter()
+                .map(|&id| content_hash_from_id(id))
+                .collect();
 
             // Request: find_matches
             entries.push(TimedEntry {
