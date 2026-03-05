@@ -196,6 +196,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                             num_prompt_logprobs=num_prompt_logprobs,
                         )
 
+        except grpc.aio.AbortError:
+            raise
         except ValueError as e:
             # Invalid request error (equiv to 400).
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
