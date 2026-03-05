@@ -2,6 +2,8 @@
 
 use std::{collections::HashMap, marker::PhantomData, sync::Arc, time::Duration};
 
+// Re-export for convenience
+pub use arc_store::ArcStateStore;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
@@ -200,5 +202,102 @@ impl<D: WorkflowData> StateStore<D> for InMemoryStore<D> {
             }
         }
         false
+    }
+}
+
+mod arc_store {
+    use super::*;
+    use crate::oracle_store::OracleStateStore;
+
+    /// Runtime-switchable state store backend.
+    ///
+    /// Wraps either [`InMemoryStore`] or [`OracleStateStore`] behind a single type,
+    /// enabling runtime selection without monomorphizing all callers. The engine uses
+    /// `WorkflowEngine<D, ArcStateStore<D>>` as a single concrete type.
+    #[derive(Clone)]
+    pub enum ArcStateStore<D: WorkflowData> {
+        Memory(InMemoryStore<D>),
+        Oracle(OracleStateStore<D>),
+    }
+
+    impl<D: WorkflowData> ArcStateStore<D> {
+        pub fn memory() -> Self {
+            Self::Memory(InMemoryStore::new())
+        }
+
+        pub fn oracle(store: OracleStateStore<D>) -> Self {
+            Self::Oracle(store)
+        }
+    }
+
+    impl<D: WorkflowData> std::fmt::Debug for ArcStateStore<D> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Memory(_) => f.debug_tuple("ArcStateStore::Memory").finish(),
+                Self::Oracle(s) => f.debug_tuple("ArcStateStore::Oracle").field(s).finish(),
+            }
+        }
+    }
+
+    /// Delegates every [`StateStore`] method to the active variant.
+    macro_rules! delegate {
+        ($self:ident, $method:ident $(, $arg:expr)*) => {
+            match $self {
+                Self::Memory(s) => s.$method($($arg),*).await,
+                Self::Oracle(s) => s.$method($($arg),*).await,
+            }
+        };
+    }
+
+    #[async_trait]
+    impl<D: WorkflowData> StateStore<D> for ArcStateStore<D> {
+        async fn save(&self, state: WorkflowState<D>) -> WorkflowResult<()> {
+            delegate!(self, save, state)
+        }
+
+        async fn load(&self, instance_id: WorkflowInstanceId) -> WorkflowResult<WorkflowState<D>> {
+            delegate!(self, load, instance_id)
+        }
+
+        async fn update<F>(&self, instance_id: WorkflowInstanceId, f: F) -> WorkflowResult<()>
+        where
+            F: FnOnce(&mut WorkflowState<D>) + Send,
+        {
+            match self {
+                Self::Memory(s) => s.update(instance_id, f).await,
+                Self::Oracle(s) => s.update(instance_id, f).await,
+            }
+        }
+
+        async fn delete(&self, instance_id: WorkflowInstanceId) -> WorkflowResult<()> {
+            delegate!(self, delete, instance_id)
+        }
+
+        async fn list_active(&self) -> WorkflowResult<Vec<WorkflowState<D>>> {
+            delegate!(self, list_active)
+        }
+
+        async fn list_all(&self) -> WorkflowResult<Vec<WorkflowState<D>>> {
+            delegate!(self, list_all)
+        }
+
+        async fn is_cancelled(&self, instance_id: WorkflowInstanceId) -> WorkflowResult<bool> {
+            delegate!(self, is_cancelled, instance_id)
+        }
+
+        async fn cleanup_old_workflows(&self, ttl: Duration) -> usize {
+            delegate!(self, cleanup_old_workflows, ttl)
+        }
+
+        async fn get_context(
+            &self,
+            instance_id: WorkflowInstanceId,
+        ) -> WorkflowResult<WorkflowContext<D>> {
+            delegate!(self, get_context, instance_id)
+        }
+
+        async fn cleanup_if_terminal(&self, instance_id: WorkflowInstanceId) -> bool {
+            delegate!(self, cleanup_if_terminal, instance_id)
+        }
     }
 }

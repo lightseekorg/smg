@@ -822,8 +822,34 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         .set(worker_job_queue)
         .expect("JobQueue should only be initialized once");
 
+    // Build Oracle state store config if workflow_state_oracle is enabled
+    let wf_oracle_config = if config.router_config.workflow_state_oracle {
+        config
+            .router_config
+            .oracle
+            .as_ref()
+            .map(|oc| wfaas::OracleStateStoreConfig {
+                connect_descriptor: oc.connect_descriptor.clone(),
+                username: oc.username.clone(),
+                password: oc.password.clone(),
+                external_auth: oc.external_auth,
+                wallet_path: oc.wallet_path.clone(),
+                pool_max: 8,
+                pool_timeout_secs: oc.pool_timeout_secs,
+                table_name: None,
+                owner: config
+                    .router_config
+                    .oracle
+                    .as_ref()
+                    .and_then(|o| o.schema.as_ref())
+                    .and_then(|s| s.owner.clone()),
+            })
+    } else {
+        None
+    };
+
     // Initialize typed workflow engines
-    let engines = WorkflowEngines::new(&config.router_config);
+    let engines = WorkflowEngines::new(&config.router_config, wf_oracle_config.as_ref());
 
     // Subscribe logging to all workflow engines
     engines.subscribe_all(Arc::new(LoggingSubscriber)).await;
