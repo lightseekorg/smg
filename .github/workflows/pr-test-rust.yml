@@ -353,11 +353,11 @@ jobs:
           - name: e2e
             timeout: 20
             test_dirs: "e2e_test/router e2e_test/embeddings"
-            # py is needed for pytest-parallel; sentence-transformers provides HuggingFace reference embeddings
-            extra_deps: "pytest-parallel py sentence-transformers"
+            extra_deps: "pytest-xdist filelock sentence-transformers"
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"  # Thread-based parallelism
+            parallel_opts: "-n 4 --dist loadscope"
+            capture_opts: "-rA"
             ignore_opts: ""
     runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -414,7 +414,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} ${{ matrix.capture_opts || '-s' }} -vv
 
       - name: Upload benchmark results
         if: matrix.upload_benchmarks && success()
@@ -444,19 +444,21 @@ jobs:
           - name: chat-completions-sglang
             timeout: 20
             test_dirs: "e2e_test/chat_completions"
-            extra_deps: "pytest-parallel py"
+            extra_deps: "pytest-xdist filelock"
             env_vars: "E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"
+            parallel_opts: "-n 4 --dist loadscope"
+            capture_opts: "-rA"
             test_filter: ""
             ignore_opts: ""
           - name: chat-completions-vllm
             timeout: 20
             test_dirs: "e2e_test/chat_completions"
-            extra_deps: "pytest-parallel py"
+            extra_deps: "pytest-xdist filelock"
             env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"
+            parallel_opts: "-n 4 --dist loadscope"
+            capture_opts: "-rA"
             # TODO: Remove filter when vLLM supports logprobs and n>1 with greedy sampling
             # Excludes: 5-grpc (logprobs=5), 2-None-grpc (n=2 with no logprobs), multiple_choices (n=2 tests)
             test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
@@ -465,10 +467,11 @@ jobs:
           - name: chat-completions-trtllm
             timeout: 60
             test_dirs: "e2e_test/chat_completions"
-            extra_deps: "pytest-parallel py"
+            extra_deps: "pytest-xdist filelock"
             env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"
+            parallel_opts: "-n 4 --dist loadscope"
+            capture_opts: "-rA"
             test_filter: ""
             setup_trtllm: true
             ignore_opts: ""
@@ -534,7 +537,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} ${{ matrix.capture_opts || '-s' }} -vv
 
   e2e-agentic:
     name: ${{ matrix.name }}
@@ -618,7 +621,7 @@ jobs:
           BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} ${{ matrix.capture_opts || '-s' }} -vv
 
       - name: Cleanup Oracle test users
         if: always() && matrix.setup_agentic_deps

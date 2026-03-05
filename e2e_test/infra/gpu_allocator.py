@@ -5,18 +5,18 @@ from __future__ import annotations
 import logging
 import os
 import socket
-import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-# Port reservation system to prevent TOCTOU race conditions in parallel tests.
-# When multiple threads call get_open_port() simultaneously, the kernel can
-# return the same port to different threads between socket close and actual bind.
+# Port reservation system to prevent TOCTOU race conditions.
+# Under xdist each worker is a separate process, so this in-process set
+# only guards against the same *process* getting a duplicate port in
+# rapid succession.  Cross-process port conflicts are handled by the
+# ModelPool shared state file.
 _reserved_ports: set[int] = set()
-_port_lock = threading.Lock()
 
 # Try to import nvidia-ml-py for GPU detection
 try:
@@ -82,10 +82,14 @@ class GPUSlot:
 def get_open_port(max_attempts: int = 10) -> int:
     """Get an available port with reservation to prevent race conditions.
 
-    Uses a two-phase approach to prevent TOCTOU (time-of-check-time-of-use) races
-    when multiple threads request ports simultaneously:
+    Uses a two-phase approach:
     1. Find an available port from the kernel
-    2. Reserve it in our tracking set before releasing the socket
+    2. Reserve it in our in-process tracking set
+
+    Under xdist, each worker is a separate process.  Cross-process port
+    conflicts are prevented by the ModelPool shared state file; this set
+    only guards against the same process getting duplicates in rapid
+    succession.
 
     Args:
         max_attempts: Maximum attempts to find an unreserved port.
@@ -103,14 +107,11 @@ def get_open_port(max_attempts: int = 10) -> int:
             s.listen(1)
             port = s.getsockname()[1]
 
-        # Reserve the port before releasing the socket
-        with _port_lock:
-            if port not in _reserved_ports:
-                _reserved_ports.add(port)
-                logger.debug("Reserved port %d (attempt %d)", port, attempt + 1)
-                return port
+        if port not in _reserved_ports:
+            _reserved_ports.add(port)
+            logger.debug("Reserved port %d (attempt %d)", port, attempt + 1)
+            return port
 
-        # Port was already reserved by another thread, try again
         logger.debug(
             "Port %d already reserved, retrying (attempt %d/%d)",
             port,
@@ -129,9 +130,8 @@ def release_port(port: int) -> None:
     Args:
         port: The port number to release.
     """
-    with _port_lock:
-        _reserved_ports.discard(port)
-        logger.debug("Released port %d", port)
+    _reserved_ports.discard(port)
+    logger.debug("Released port %d", port)
 
 
 def get_physical_device_indices(devices: list[int]) -> list[int]:
@@ -244,7 +244,13 @@ def wait_for_gpu_memory_to_clear(
 
 
 class GPUAllocator:
-    """Detects GPUs and assigns them to model slots using bin-packing."""
+    """Detects GPUs and assigns them to model slots using bin-packing.
+
+    Under xdist, each worker process has its own GPUAllocator instance.
+    Cross-process GPU coordination is handled by the ModelPool shared state
+    file; this allocator only tracks the local process's view.  The caller
+    (ModelPool) is responsible for holding the file lock.
+    """
 
     def __init__(self, gpus: list[GPUInfo] | None = None):
         """Initialize the allocator.
@@ -255,7 +261,6 @@ class GPUAllocator:
         self.gpus = gpus if gpus is not None else self._detect_gpus()
         self.slots: list[GPUSlot] = []
         self._used_gpus: set[int] = set()  # Track GPUs used across all allocations
-        self._lock = threading.RLock()  # Protects slots and _used_gpus
 
     def _detect_gpus(self) -> list[GPUInfo]:
         """Auto-detect available GPUs via nvidia-ml-py (NVML)."""
@@ -317,8 +322,6 @@ class GPUAllocator:
         Note: This method tracks used GPUs across multiple calls, so subsequent
         allocations will use different GPUs than previous ones.
 
-        Thread-safe: Protected by internal lock.
-
         Args:
             model_specs: Dict of model_id -> spec dict with 'memory_gb' and 'tp' keys
             preserve_order: If True, allocate in dict order (test order) instead
@@ -327,13 +330,12 @@ class GPUAllocator:
         Returns:
             List of GPUSlots with assigned models (only the newly allocated slots)
         """
-        with self._lock:
-            return self._allocate_slots_unlocked(model_specs, preserve_order)
+        return self._allocate_slots_unlocked(model_specs, preserve_order)
 
     def _allocate_slots_unlocked(
         self, model_specs: dict[str, dict], preserve_order: bool = False
     ) -> list[GPUSlot]:
-        """Internal allocation logic. Caller must hold _lock."""
+        """Internal allocation logic."""
         if not self.gpus:
             logger.warning("No GPUs available for allocation")
             return []
@@ -427,34 +429,27 @@ class GPUAllocator:
         return new_slots
 
     def get_slot_for_model(self, model_id: str) -> GPUSlot | None:
-        """Get the slot assigned to a specific model.
-
-        Thread-safe: Protected by internal lock.
-        """
-        with self._lock:
-            for slot in self.slots:
-                if slot.assigned_model == model_id:
-                    return slot
-            return None
+        """Get the slot assigned to a specific model."""
+        for slot in self.slots:
+            if slot.assigned_model == model_id:
+                return slot
+        return None
 
     def release_gpus(self, gpu_ids: list[int]) -> None:
         """Release GPUs back to the available pool.
 
-        Thread-safe: Protected by internal lock.
-
         Args:
             gpu_ids: List of GPU IDs to release.
         """
-        with self._lock:
-            for gpu_id in gpu_ids:
-                self._used_gpus.discard(gpu_id)
-            # Remove slots that used these GPUs and release their ports
-            released_slots = [s for s in self.slots if any(g in gpu_ids for g in s.gpu_ids)]
-            for slot in released_slots:
-                if slot.port is not None:
-                    release_port(slot.port)
-            self.slots = [s for s in self.slots if not any(g in gpu_ids for g in s.gpu_ids)]
-            logger.info("Released GPUs %s, now used: %s", gpu_ids, self._used_gpus)
+        for gpu_id in gpu_ids:
+            self._used_gpus.discard(gpu_id)
+        # Remove slots that used these GPUs and release their ports
+        released_slots = [s for s in self.slots if any(g in gpu_ids for g in s.gpu_ids)]
+        for slot in released_slots:
+            if slot.port is not None:
+                release_port(slot.port)
+        self.slots = [s for s in self.slots if not any(g in gpu_ids for g in s.gpu_ids)]
+        logger.info("Released GPUs %s, now used: %s", gpu_ids, self._used_gpus)
 
     def release_slot(self, slot: GPUSlot) -> None:
         """Release a GPU slot back to the available pool.
@@ -467,27 +462,20 @@ class GPUAllocator:
     def available_gpus(self) -> list[int]:
         """Get list of available (unused) GPU IDs.
 
-        Thread-safe: Protected by internal lock.
-
         Returns:
             List of GPU IDs that are not currently allocated.
         """
-        with self._lock:
-            return [g.id for g in self.gpus if g.id not in self._used_gpus]
+        return [g.id for g in self.gpus if g.id not in self._used_gpus]
 
     def summary(self) -> str:
-        """Return a summary of GPU allocations.
-
-        Thread-safe: Protected by internal lock.
-        """
-        with self._lock:
-            lines = ["GPU Allocation Summary:"]
-            lines.append(f"  Total GPUs: {len(self.gpus)}")
-            lines.append(f"  Used GPUs: {sorted(self._used_gpus)}")
-            lines.append(f"  Allocated Slots: {len(self.slots)}")
-            for slot in self.slots:
-                lines.append(
-                    f"    - {slot.assigned_model}: GPUs {slot.gpu_ids} "
-                    f"({slot.total_memory_gb:.1f}GB) port={slot.port}"
-                )
-            return "\n".join(lines)
+        """Return a summary of GPU allocations."""
+        lines = ["GPU Allocation Summary:"]
+        lines.append(f"  Total GPUs: {len(self.gpus)}")
+        lines.append(f"  Used GPUs: {sorted(self._used_gpus)}")
+        lines.append(f"  Allocated Slots: {len(self.slots)}")
+        for slot in self.slots:
+            lines.append(
+                f"    - {slot.assigned_model}: GPUs {slot.gpu_ids} "
+                f"({slot.total_memory_gb:.1f}GB) port={slot.port}"
+            )
+        return "\n".join(lines)

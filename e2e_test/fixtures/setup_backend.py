@@ -1,13 +1,15 @@
 """Backend setup fixtures for E2E tests.
 
 This module provides fixtures for launching gateways/routers for different backends.
+
+Under pytest-xdist each worker is a separate process running one test at a
+time.  Caching is therefore per-process (no threading needed).
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import threading
 from typing import TYPE_CHECKING
 
 import anthropic
@@ -41,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 
 class _CachedBackend:
-    """A cached backend that can be reused across tests on the same thread."""
+    """A cached backend that can be reused across tests in the same process."""
 
     __slots__ = ("gen", "value", "cls", "param")
 
@@ -52,11 +54,9 @@ class _CachedBackend:
         self.param = param  # Fixture parameter (backend type)
 
 
-# Per-thread cache: maps thread_id -> _CachedBackend
-# Allows function-scoped fixture to reuse backends within the same class,
-# while correctly tearing down when the test class changes on a thread.
-_thread_cache: dict[int, _CachedBackend] = {}
-_cache_lock = threading.Lock()
+# Per-process cache: under xdist each worker runs one test at a time, so a
+# single cache slot is sufficient (no thread key needed).
+_process_cache: _CachedBackend | None = None
 
 
 def _release_workers(workers: list) -> None:
@@ -156,12 +156,11 @@ def _create_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
 
 @pytest.fixture(scope="function")
 def setup_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
-    """Function-scoped fixture with per-thread caching for class-level reuse.
+    """Function-scoped fixture with per-process caching for class-level reuse.
 
-    Under pytest-parallel's thread model (--tests-per-worker N), class-scoped
-    fixtures leak across class boundaries on the same thread. This fixture uses
-    function scope for correctness but manually caches backends per thread,
-    only tearing down and recreating when the test class or backend param changes.
+    Under xdist, each worker process runs one test at a time.  This fixture
+    uses function scope for correctness but manually caches the backend per
+    process, only tearing down when the test class or backend param changes.
 
     Same performance as class-scoped: gateway startup (~1-2s) only happens on
     class transitions, not for every test function.
@@ -186,55 +185,47 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
             def test_chat(self, setup_backend):
                 backend, model, client, gateway = setup_backend
     """
-    thread_id = threading.get_ident()
+    global _process_cache
+
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "main")
     cls = request.cls
     param = request.param
 
-    # Check thread-local cache
-    reuse_value = None
-    old_entry = None
-    with _cache_lock:
-        cached = _thread_cache.get(thread_id)
-        if cached is not None:
-            if cached.cls is cls and cached.param == param:
-                reuse_value = cached.value
-            else:
-                old_entry = _thread_cache.pop(thread_id)
-
-    if reuse_value is not None:
+    # Check process-level cache
+    cached = _process_cache
+    if cached is not None:
+        if cached.cls is cls and cached.param == param:
+            logger.info(
+                "[%s] reusing cached backend (class=%s, param=%s)",
+                worker_id,
+                cls.__name__ if cls else "N/A",
+                param,
+            )
+            yield cached.value
+            return
+        # Class or param changed — teardown old backend
         logger.info(
-            "Thread %s: reusing cached backend (class=%s, param=%s)",
-            threading.current_thread().name,
-            cls.__name__ if cls else "N/A",
-            param,
-        )
-        yield reuse_value
-        return
-
-    # Teardown old backend if class/param changed on this thread
-    if old_entry is not None:
-        logger.info(
-            "Thread %s: class changed %s -> %s, tearing down old backend",
-            threading.current_thread().name,
-            old_entry.cls.__name__ if old_entry.cls else "N/A",
+            "[%s] class changed %s -> %s, tearing down old backend",
+            worker_id,
+            cached.cls.__name__ if cached.cls else "N/A",
             cls.__name__ if cls else "N/A",
         )
-        old_entry.gen.close()
+        _process_cache = None
+        cached.gen.close()
 
     # Create new backend via the appropriate _setup_* generator
     gen = _create_backend(request, model_pool)
     value = next(gen)
 
     try:
-        with _cache_lock:
-            _thread_cache[thread_id] = _CachedBackend(gen=gen, value=value, cls=cls, param=param)
+        _process_cache = _CachedBackend(gen=gen, value=value, cls=cls, param=param)
     except Exception:
         gen.close()
         raise
 
     logger.info(
-        "Thread %s: created new backend (class=%s, param=%s)",
-        threading.current_thread().name,
+        "[%s] created new backend (class=%s, param=%s)",
+        worker_id,
         cls.__name__ if cls else "N/A",
         param,
     )
@@ -243,16 +234,15 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
 
 
 def cleanup_all_cached_backends() -> None:
-    """Cleanup all thread-cached backends.
+    """Cleanup the process-cached backend.
 
-    Called from pytest_sessionfinish hook to ensure it runs exactly once,
-    not per-test (which is what happens with session-scoped autouse fixtures
-    under pytest-parallel's thread model).
+    Called from pytest_sessionfinish hook to ensure it runs exactly once.
     """
-    with _cache_lock:
-        entries = list(_thread_cache.values())
-        _thread_cache.clear()
-    for entry in entries:
+    global _process_cache
+
+    entry = _process_cache
+    _process_cache = None
+    if entry is not None:
         try:
             logger.info(
                 "Session cleanup: tearing down cached backend (class=%s, param=%s)",

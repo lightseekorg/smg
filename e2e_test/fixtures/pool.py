@@ -2,6 +2,11 @@
 
 This module provides session-scoped fixtures for managing SGLang worker processes.
 Workers are expensive to start (~30-60s each), so they're kept running across tests.
+
+Under pytest-xdist, each worker is a separate process.  Worker ``gw0`` (the
+first xdist worker) performs the actual startup and writes a ``.ready``
+sentinel.  Other workers wait for the sentinel and then load model endpoints
+from the shared state file.
 """
 
 from __future__ import annotations
@@ -9,7 +14,6 @@ from __future__ import annotations
 import atexit
 import logging
 import os
-import threading
 from collections.abc import Generator
 from typing import TYPE_CHECKING
 
@@ -22,24 +26,37 @@ from .hooks import get_pool_requirements
 
 logger = logging.getLogger(__name__)
 
-# Global model pool instance with thread-safe initialization
+# Per-process model pool instance
 _model_pool: ModelPool | None = None
-_model_pool_lock = threading.Lock()
 _shutdown_registered = False
 
 
 def _shutdown_model_pool() -> None:
-    """Shutdown the global model pool at process exit.
-
-    This is registered with atexit to ensure cleanup happens after all tests
-    complete, which is important for pytest-parallel where multiple threads
-    share the session-scoped fixture.
-    """
+    """Shutdown the global model pool at process exit."""
     global _model_pool
     if _model_pool is not None:
         logger.info("Shutting down model pool at process exit")
         _model_pool.shutdown()
         _model_pool = None
+
+
+def _get_xdist_worker_id() -> str:
+    """Return the xdist worker id (e.g. 'gw0') or '' if not under xdist."""
+    return os.environ.get("PYTEST_XDIST_WORKER", "")
+
+
+def _get_shared_state_dir(request: pytest.FixtureRequest) -> str | None:
+    """Return a shared temp dir that all xdist workers can see.
+
+    ``tmp_path_factory.getbasetemp()`` returns a worker-private directory
+    (e.g. ``/tmp/pytest-of-user/pytest-NNN/popen-gw0``).  Its *parent*
+    (e.g. ``/tmp/pytest-of-user/pytest-NNN``) is shared across all workers.
+    """
+    try:
+        base = request.config._tmp_path_factory.getbasetemp()  # type: ignore[attr-defined]
+        return str(base.parent)
+    except Exception:
+        return None
 
 
 @pytest.fixture(scope="session")
@@ -50,6 +67,11 @@ def model_pool(request: pytest.FixtureRequest) -> ModelPool:
     model loading). This fixture starts them ONCE per session and keeps them
     running across all tests. The setup_backend fixture then launches cheap
     routers (~1-2s) pointing to these workers.
+
+    Under xdist:
+    - gw0 does the full startup and writes a ``.ready`` sentinel.
+    - Other workers wait for the sentinel and load endpoints from the
+      shared state file.
 
     Startup behavior:
     - Scans test markers to determine required workers (model, mode, type, count)
@@ -63,7 +85,7 @@ def model_pool(request: pytest.FixtureRequest) -> ModelPool:
     - @pytest.mark.workers(prefill=N, decode=N) for PD workers
 
     Environment variable overrides:
-    - E2E_MODELS: Comma-separated model IDs (e.g., "meta-llama/Llama-3.1-8B-Instruct,Qwen/Qwen2.5-7B-Instruct")
+    - E2E_MODELS: Comma-separated model IDs
     - E2E_BACKENDS: Comma-separated backends (e.g., "grpc,http")
     - SKIP_MODEL_POOL: Set to "1" to skip worker startup
     """
@@ -84,90 +106,109 @@ def model_pool(request: pytest.FixtureRequest) -> ModelPool:
         WorkerType,
     )
 
-    # Thread-safe initialization: use lock to ensure only one thread creates the pool
-    # This is critical for pytest-parallel which runs tests as concurrent threads
-    with _model_pool_lock:
-        if _model_pool is not None:
-            return _model_pool
+    if _model_pool is not None:
+        return _model_pool
 
-        # Check if we should skip model startup
-        if os.environ.get(ENV_SKIP_MODEL_POOL, "").lower() in ("1", "true", "yes"):
-            logger.info("%s is set, skipping model pool startup", ENV_SKIP_MODEL_POOL)
-            _model_pool = ModelPool(GPUAllocator(gpus=[]))
-            return _model_pool
+    worker_id = _get_xdist_worker_id()
+    state_dir = _get_shared_state_dir(request)
 
-        # Determine requirements from scanned tests or env vars
-        models_env = os.environ.get(ENV_MODELS, "")
-        backends_env = os.environ.get(ENV_BACKENDS, "")
+    # Check if we should skip model startup
+    if os.environ.get(ENV_SKIP_MODEL_POOL, "").lower() in ("1", "true", "yes"):
+        logger.info("%s is set, skipping model pool startup", ENV_SKIP_MODEL_POOL)
+        _model_pool = ModelPool(GPUAllocator(gpus=[]), state_dir=state_dir)
+        return _model_pool
 
-        if models_env or backends_env:
-            # Use env var overrides
-            models = (
-                {m.strip() for m in models_env.split(",") if m.strip()}
-                if models_env
-                else {DEFAULT_MODEL}
-            )
+    # Non-primary xdist workers: wait for gw0 to finish startup, then load state
+    if worker_id and worker_id != "gw0":
+        logger.info("[%s] Waiting for gw0 to finish model pool startup...", worker_id)
+        allocator = GPUAllocator(gpus=[])  # non-primary workers don't manage GPUs
+        _model_pool = ModelPool(allocator, state_dir=state_dir)
+        _model_pool.wait_for_startup_complete()
+        _model_pool.load_instances_from_state()
+        logger.info(
+            "[%s] Loaded %d model instances from shared state",
+            worker_id,
+            len(_model_pool.instances),
+        )
+        return _model_pool
 
-            # Parse backend strings to ConnectionMode enums
-            backend_modes: set[ConnectionMode] = set()
-            if backends_env:
-                for b in backends_env.split(","):
-                    b = b.strip()
-                    if b:
-                        try:
-                            mode = ConnectionMode(b)
-                            if mode in LOCAL_MODES:
-                                backend_modes.add(mode)
-                        except ValueError:
-                            logger.warning("Unknown backend '%s', skipping", b)
+    # Primary worker (gw0) or non-xdist: do the full startup
+    # Determine requirements from scanned tests or env vars
+    models_env = os.environ.get(ENV_MODELS, "")
+    backends_env = os.environ.get(ENV_BACKENDS, "")
 
-            # Default to HTTP if no valid backends
-            if not backend_modes:
-                backend_modes = {ConnectionMode.HTTP}
-
-            # Create WorkerIdentity objects (regular workers only from env vars)
-            requirements = [
-                WorkerIdentity(m, b, WorkerType.REGULAR, 0) for m in models for b in backend_modes
-            ]
-            logger.info("Using env var requirements: %s", [str(r) for r in requirements])
-        else:
-            # Use scanned requirements from test markers
-            requirements = get_pool_requirements()
-            logger.info("Using scanned requirements: %s", [str(r) for r in requirements])
-
-        # Filter to valid models
-        requirements = [r for r in requirements if r.model_id in MODEL_SPECS]
-
-        if not requirements:
-            logger.info(
-                "No pre-launch requirements, model pool will start empty (on-demand launches still available)"
-            )
-            _model_pool = ModelPool(GPUAllocator())
-            return _model_pool
-
-        # Create and start the pool
-        allocator = GPUAllocator()
-        log_dir = os.environ.get("E2E_LOG_DIR")
-        _model_pool = ModelPool(allocator, log_dir=log_dir)
-
-        startup_timeout = int(os.environ.get(ENV_STARTUP_TIMEOUT, "300"))
-        _model_pool.startup(
-            requirements=requirements,
-            startup_timeout=startup_timeout,
+    if models_env or backends_env:
+        # Use env var overrides
+        models = (
+            {m.strip() for m in models_env.split(",") if m.strip()}
+            if models_env
+            else {DEFAULT_MODEL}
         )
 
-        # Log final GPU allocation summary
-        logger.info(_model_pool.allocator.summary())
+        # Parse backend strings to ConnectionMode enums
+        backend_modes: set[ConnectionMode] = set()
+        if backends_env:
+            for b in backends_env.split(","):
+                b = b.strip()
+                if b:
+                    try:
+                        mode = ConnectionMode(b)
+                        if mode in LOCAL_MODES:
+                            backend_modes.add(mode)
+                    except ValueError:
+                        logger.warning("Unknown backend '%s', skipping", b)
 
-        # Register cleanup with atexit instead of request.addfinalizer
-        # This is critical for pytest-parallel where multiple threads share
-        # the session-scoped fixture - addfinalizer can fire too early
-        global _shutdown_registered
-        if not _shutdown_registered:
-            atexit.register(_shutdown_model_pool)
-            _shutdown_registered = True
+        # Default to HTTP if no valid backends
+        if not backend_modes:
+            backend_modes = {ConnectionMode.HTTP}
 
+        # Create WorkerIdentity objects (regular workers only from env vars)
+        requirements = [
+            WorkerIdentity(m, b, WorkerType.REGULAR, 0) for m in models for b in backend_modes
+        ]
+        logger.info("Using env var requirements: %s", [str(r) for r in requirements])
+    else:
+        # Use scanned requirements from test markers
+        requirements = get_pool_requirements()
+        logger.info("Using scanned requirements: %s", [str(r) for r in requirements])
+
+    # Filter to valid models
+    requirements = [r for r in requirements if r.model_id in MODEL_SPECS]
+
+    if not requirements:
+        logger.info(
+            "No pre-launch requirements, model pool will start empty (on-demand launches still available)"
+        )
+        _model_pool = ModelPool(GPUAllocator(), state_dir=state_dir)
+        if worker_id == "gw0":
+            _model_pool.mark_startup_complete()
         return _model_pool
+
+    # Create and start the pool
+    allocator = GPUAllocator()
+    log_dir = os.environ.get("E2E_LOG_DIR")
+    _model_pool = ModelPool(allocator, log_dir=log_dir, state_dir=state_dir)
+
+    startup_timeout = int(os.environ.get(ENV_STARTUP_TIMEOUT, "300"))
+    _model_pool.startup(
+        requirements=requirements,
+        startup_timeout=startup_timeout,
+    )
+
+    # Log final GPU allocation summary
+    logger.info(_model_pool.allocator.summary())
+
+    # Signal other xdist workers that startup is complete
+    if worker_id == "gw0":
+        _model_pool.mark_startup_complete()
+
+    # Register cleanup with atexit
+    global _shutdown_registered
+    if not _shutdown_registered:
+        atexit.register(_shutdown_model_pool)
+        _shutdown_registered = True
+
+    return _model_pool
 
 
 def _get_model_instance(
