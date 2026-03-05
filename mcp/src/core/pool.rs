@@ -3,7 +3,10 @@
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use lru::LruCache;
@@ -103,6 +106,8 @@ impl CachedConnection {
 /// Thread-safe LRU connection pool for dynamic MCP servers.
 pub struct McpConnectionPool {
     connections: Arc<Mutex<LruCache<PoolKey, CachedConnection>>>,
+    /// Lock-free connection count for fast `len()` / `is_empty()` / `stats()`.
+    connection_count: AtomicUsize,
     max_connections: usize,
     global_proxy: Option<McpProxyConfig>,
     eviction_callback: Option<EvictionCallback>,
@@ -113,26 +118,11 @@ impl McpConnectionPool {
 
     /// Create pool with defaults (200 connections, proxy from env).
     pub fn new() -> Self {
-        let cache_cap = std::num::NonZeroUsize::new(Self::DEFAULT_MAX_CONNECTIONS)
-            .unwrap_or(std::num::NonZeroUsize::MIN);
-        Self {
-            connections: Arc::new(Mutex::new(LruCache::new(cache_cap))),
-            max_connections: Self::DEFAULT_MAX_CONNECTIONS,
-            global_proxy: McpProxyConfig::from_env(),
-            eviction_callback: None,
-        }
+        Self::with_full_config(Self::DEFAULT_MAX_CONNECTIONS, McpProxyConfig::from_env())
     }
 
     pub fn with_capacity(max_connections: usize) -> Self {
-        let max_connections = max_connections.max(1);
-        let cache_cap =
-            std::num::NonZeroUsize::new(max_connections).unwrap_or(std::num::NonZeroUsize::MIN);
-        Self {
-            connections: Arc::new(Mutex::new(LruCache::new(cache_cap))),
-            max_connections,
-            global_proxy: McpProxyConfig::from_env(),
-            eviction_callback: None,
-        }
+        Self::with_full_config(max_connections, McpProxyConfig::from_env())
     }
 
     pub fn with_full_config(max_connections: usize, global_proxy: Option<McpProxyConfig>) -> Self {
@@ -141,6 +131,7 @@ impl McpConnectionPool {
             std::num::NonZeroUsize::new(max_connections).unwrap_or(std::num::NonZeroUsize::MIN);
         Self {
             connections: Arc::new(Mutex::new(LruCache::new(cache_cap))),
+            connection_count: AtomicUsize::new(0),
             max_connections,
             global_proxy,
             eviction_callback: None,
@@ -178,9 +169,16 @@ impl McpConnectionPool {
         let cached = CachedConnection::new(Arc::clone(&client_arc));
         {
             let mut connections = self.connections.lock();
-            if let Some((evicted_key, _)) = connections.push(key, cached) {
-                if let Some(callback) = &self.eviction_callback {
-                    callback(&evicted_key);
+            match connections.push(key, cached) {
+                Some((evicted_key, _)) => {
+                    // Eviction: count stays the same (replaced one entry).
+                    if let Some(callback) = &self.eviction_callback {
+                        callback(&evicted_key);
+                    }
+                }
+                None => {
+                    // New entry without eviction: count increases.
+                    self.connection_count.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -189,20 +187,22 @@ impl McpConnectionPool {
     }
 
     pub fn len(&self) -> usize {
-        self.connections.lock().len()
+        self.connection_count.load(Ordering::Relaxed)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.connections.lock().is_empty()
+        self.connection_count.load(Ordering::Relaxed) == 0
     }
 
     pub fn clear(&self) {
-        self.connections.lock().clear();
+        let mut connections = self.connections.lock();
+        connections.clear();
+        self.connection_count.store(0, Ordering::Relaxed);
     }
 
     pub fn stats(&self) -> PoolStats {
         PoolStats {
-            total_connections: self.connections.lock().len(),
+            total_connections: self.connection_count.load(Ordering::Relaxed),
             capacity: self.max_connections,
         }
     }
@@ -227,7 +227,11 @@ impl McpConnectionPool {
         self.connections.lock().contains(key)
     }
 
-    /// Get by URL only (backward compat). Prefer `get()` with full `PoolKey`.
+    /// Look up a connection by URL only (backward compatibility).
+    ///
+    /// **O(n)** — performs a linear scan of all pooled connections under the
+    /// lock. Callers on hot paths should prefer [`get()`](Self::get) with a
+    /// full [`PoolKey`] for O(1) lookup.
     pub fn get_by_url(&self, url: &str) -> Option<Arc<McpClient>> {
         self.connections
             .lock()
@@ -236,6 +240,12 @@ impl McpConnectionPool {
             .map(|(_, cached)| Arc::clone(&cached.client))
     }
 
+    /// Check whether a connection with the given URL exists (backward
+    /// compatibility).
+    ///
+    /// **O(n)** — performs a linear scan of all pooled connections under the
+    /// lock. Callers on hot paths should prefer [`contains()`](Self::contains)
+    /// with a full [`PoolKey`] for O(1) lookup.
     pub fn contains_url(&self, url: &str) -> bool {
         self.connections
             .lock()

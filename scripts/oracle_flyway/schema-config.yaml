@@ -3,7 +3,13 @@ version: 3
 auto_migrate: false
 
 conversations:
-  table: CONVERSATIONS_V2
+  table: CONVERSATIONS
+  columns:
+    id: CONVERSATION_ID
+  extra_columns:
+    EXPIRES_AT:
+      sql_type: "TIMESTAMP WITH TIME ZONE"
+      default_value: "31-DEC-99 11.59.59.000000 PM +00:00"
 
 responses:
   table: RESPONSES

@@ -33,7 +33,7 @@ pub use core::{
     McpServerConfig, McpToolSession, McpTransport, MetricsSnapshot, PolicyConfig,
     PolicyDecisionConfig, PoolKey, RefreshRequest, ResponseFormatConfig, ServerPolicyConfig,
     SmgClientHandler, Tool, ToolCallResult, ToolConfig, ToolExecutionInput, ToolExecutionOutput,
-    TrustLevelConfig,
+    TrustLevelConfig, DEFAULT_SERVER_LABEL,
 };
 
 // Re-export shared types

@@ -887,6 +887,7 @@ mod tests {
         use crate::{
             config::RouterConfig, core::WorkerService, middleware::TokenBucket,
             observability::inflight_tracker::InFlightRequestTracker,
+            routers::openai::realtime::RealtimeRegistry,
         };
 
         let router_config = RouterConfig::builder()
@@ -929,6 +930,7 @@ mod tests {
             )),
             inflight_tracker: InFlightRequestTracker::new(),
             kv_event_monitor: None,
+            realtime_registry: Arc::new(RealtimeRegistry::new()),
         })
     }
 
