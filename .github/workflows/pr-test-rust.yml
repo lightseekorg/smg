@@ -321,7 +321,6 @@ jobs:
               - 'e2e_test/router/test_pd_mmlu.py'
               - 'scripts/ci_install_vllm.sh'
               - 'scripts/ci_install_trtllm.sh'
-              - 'scripts/ci_install_sglang.sh'
             agentic:
               - 'mcp/**'
               - 'data_connector/**'
