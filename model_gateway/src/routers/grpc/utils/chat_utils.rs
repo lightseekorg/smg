@@ -1,10 +1,9 @@
-//! Shared utilities for gRPC routers
+//! Chat message processing, tool constraints, and shared utilities for gRPC routers.
 
 use std::{collections::HashMap, io, sync::Arc};
 
 use axum::response::Response;
 use bytes::Bytes;
-use http::StatusCode;
 use llm_tokenizer::{
     chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
     stop::StopSequenceDecoderBuilder,
@@ -13,36 +12,17 @@ use llm_tokenizer::{
 };
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatMessage},
-    common::{
-        ChatLogProbs, ChatLogProbsContent, FunctionCallResponse, StringOrArray, Tool, ToolCall,
-        ToolChoice, ToolChoiceValue, TopLogProb,
-    },
+    common::{FunctionCallResponse, StringOrArray, Tool, ToolCall, ToolChoice, ToolChoiceValue},
     generate::GenerateFinishReason,
-};
-use reasoning_parser::{
-    ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser, ReasoningParser,
 };
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
-use tool_parser::{
-    ParserFactory as ToolParserFactory, PooledParser as ToolPooledParser, ToolParser,
-};
-use tracing::{error, warn};
+use tracing::error;
 use uuid::Uuid;
 
-use super::{
-    client::GrpcClient,
-    context::RequestContext,
-    proto_wrapper::{ProtoGenerateComplete, ProtoInputLogProbs, ProtoOutputLogProbs, ProtoStream},
-    ProcessedMessages,
-};
-use crate::{
-    core::Worker,
-    observability::metrics::metrics_labels,
-    routers::{
-        error,
-        grpc::{proto_wrapper::ProtoResponseVariant, tonic_ext::TonicStatusExt},
-    },
+use crate::routers::{
+    error,
+    grpc::{context::RequestContext, ProcessedMessages},
 };
 
 /// Type alias for the SSE channel sender used across streaming endpoints.
@@ -107,39 +87,6 @@ pub(crate) fn resolve_tokenizer(
     ctx.state.tokenizer = Some(tokenizer.clone());
 
     Ok(tokenizer)
-}
-
-/// Get gRPC client from worker, returning appropriate error response on failure
-pub(crate) async fn get_grpc_client_from_worker(
-    worker: &Arc<dyn Worker>,
-) -> Result<GrpcClient, Response> {
-    // Get cached client from worker (or create one if not cached yet)
-    let client_arc = worker
-        .get_grpc_client()
-        .await
-        .map_err(|e| {
-            error!(
-                function = "get_grpc_client_from_worker",
-                error = %e,
-                "Failed to get gRPC client from worker"
-            );
-            error::internal_error(
-                "get_grpc_client_failed",
-                format!("Failed to get gRPC client: {e}"),
-            )
-        })?
-        .ok_or_else(|| {
-            error!(
-                function = "get_grpc_client_from_worker",
-                "Selected worker not configured for gRPC"
-            );
-            error::internal_error(
-                "worker_not_configured_for_grpc",
-                "Selected worker is not configured for gRPC",
-            )
-        })?;
-
-    Ok((*client_arc).clone())
 }
 
 /// Process tool call arguments in messages
@@ -639,63 +586,6 @@ pub(crate) fn parse_json_schema_response(
     }
 }
 
-/// Collect responses from a gRPC stream
-///
-/// This helper processes a gRPC GenerateResponse stream and collects all Complete responses.
-/// Used by both regular and PD routers for non-streaming requests.
-///
-/// # Arguments
-/// * `stream` - The gRPC response stream to consume
-/// * `worker_name` - Name for logging (e.g., "Prefill", "Decode", "Worker")
-///
-/// # Returns
-/// * `Ok(Vec<GenerateComplete>)` - All complete responses collected from the stream
-/// * `Err(Response)` - Error response if the stream fails or returns an error
-pub(crate) async fn collect_stream_responses(
-    stream: &mut ProtoStream,
-    worker_name: &str,
-) -> Result<Vec<ProtoGenerateComplete>, Response> {
-    let mut all_responses = Vec::new();
-
-    while let Some(response) = stream.next().await {
-        match response {
-            Ok(gen_response) => {
-                match gen_response.into_response() {
-                    ProtoResponseVariant::Complete(complete) => {
-                        all_responses.push(complete);
-                    }
-                    ProtoResponseVariant::Error(err) => {
-                        // In-band error (legacy): backends should use context.abort() instead.
-                        // Kept for backward compatibility during the transition.
-                        warn!(function = "collect_stream_responses", worker = %worker_name, error = %err.message(), "Worker sent in-band error (legacy path, backend should use context.abort)");
-                        // Don't mark as completed - let Drop send abort for error cases
-                        return Err(error::internal_error(
-                            "worker_generation_failed",
-                            format!("{} generation failed: {}", worker_name, err.message()),
-                        ));
-                    }
-                    ProtoResponseVariant::Chunk(_chunk) => {
-                        // Streaming chunk - no action needed
-                    }
-                    ProtoResponseVariant::None => {
-                        // Empty response - no action needed
-                    }
-                }
-            }
-            Err(e) => {
-                error!(function = "collect_stream_responses", worker = %worker_name, grpc_code = ?e.code(), error = ?e, "Worker stream error");
-                // Don't mark as completed - let Drop send abort for error cases
-                return Err(e.to_http_error(
-                    "worker_stream_failed",
-                    format!("{worker_name} stream failed: {e}"),
-                ));
-            }
-        }
-    }
-
-    Ok(all_responses)
-}
-
 /// Count the number of tool calls in the request message history
 /// This is used for KimiK2 format which needs globally unique indices
 pub(crate) fn get_history_tool_calls_count(request: &ChatCompletionRequest) -> usize {
@@ -743,234 +633,6 @@ pub(crate) fn generate_tool_call_id(
     }
 }
 
-/// Check if a reasoning parser is available for the given model
-pub(crate) fn check_reasoning_parser_availability(
-    reasoning_parser_factory: &ReasoningParserFactory,
-    configured_parser: Option<&str>,
-    model: &str,
-) -> bool {
-    if let Some(parser_name) = configured_parser {
-        reasoning_parser_factory.registry().has_parser(parser_name)
-    } else {
-        reasoning_parser_factory
-            .registry()
-            .has_parser_for_model(model)
-    }
-}
-
-/// Check if a tool parser is available for the given model
-pub(crate) fn check_tool_parser_availability(
-    tool_parser_factory: &ToolParserFactory,
-    configured_parser: Option<&str>,
-    model: &str,
-) -> bool {
-    if let Some(parser_name) = configured_parser {
-        tool_parser_factory.registry().has_parser(parser_name)
-    } else {
-        tool_parser_factory.registry().has_parser_for_model(model)
-    }
-}
-
-/// Get the appropriate reasoning parser for a model
-///
-/// If a parser name is explicitly configured, use that parser.
-/// Otherwise, auto-detect based on the model name.
-/// Get a pooled reasoning parser (for non-streaming where state doesn't matter)
-pub(crate) fn get_reasoning_parser(
-    reasoning_parser_factory: &ReasoningParserFactory,
-    configured_parser: Option<&str>,
-    model: &str,
-) -> ReasoningPooledParser {
-    if let Some(parser_name) = configured_parser {
-        // Use configured parser if specified
-        reasoning_parser_factory
-            .registry()
-            .get_pooled_parser(parser_name)
-            .unwrap_or_else(|| {
-                warn!(
-                    "Configured reasoning parser '{}' not found, falling back to model-based selection",
-                    parser_name
-                );
-                reasoning_parser_factory.get_pooled(model)
-            })
-    } else {
-        // Auto-detect based on model
-        reasoning_parser_factory.get_pooled(model)
-    }
-}
-
-/// Create a fresh reasoning parser instance (for streaming where state isolation is needed)
-pub(crate) fn create_reasoning_parser(
-    reasoning_parser_factory: &ReasoningParserFactory,
-    configured_parser: Option<&str>,
-    model: &str,
-) -> Option<Box<dyn ReasoningParser>> {
-    if let Some(parser_name) = configured_parser {
-        // Use configured parser if specified
-        reasoning_parser_factory
-            .registry()
-            .create_parser(parser_name)
-            .or_else(|| {
-                warn!(
-                    "Configured reasoning parser '{}' not found, falling back to model-based selection",
-                    parser_name
-                );
-                reasoning_parser_factory.registry().create_for_model(model)
-            })
-    } else {
-        // Auto-detect based on model
-        reasoning_parser_factory.registry().create_for_model(model)
-    }
-}
-
-/// Get the appropriate tool parser for a model
-///
-/// If a parser name is explicitly configured, use that parser.
-/// Otherwise, auto-detect based on the model name.
-/// Get a pooled tool parser (for non-streaming where state doesn't matter)
-pub(crate) fn get_tool_parser(
-    tool_parser_factory: &ToolParserFactory,
-    configured_parser: Option<&str>,
-    model: &str,
-) -> ToolPooledParser {
-    if let Some(parser_name) = configured_parser {
-        // Use configured parser if specified
-        tool_parser_factory
-            .registry()
-            .get_pooled_parser(parser_name)
-            .unwrap_or_else(|| {
-                warn!(
-                    "Configured tool parser '{}' not found, falling back to model-based selection",
-                    parser_name
-                );
-                tool_parser_factory.get_pooled(model)
-            })
-    } else {
-        // Auto-detect based on model
-        tool_parser_factory.get_pooled(model)
-    }
-}
-
-/// Create a fresh tool parser instance (for streaming where state isolation is needed)
-pub(crate) fn create_tool_parser(
-    tool_parser_factory: &ToolParserFactory,
-    configured_parser: Option<&str>,
-    model: &str,
-) -> Option<Box<dyn ToolParser>> {
-    if let Some(parser_name) = configured_parser {
-        // Use configured parser if specified
-        tool_parser_factory
-            .registry()
-            .create_parser(parser_name)
-            .or_else(|| {
-                warn!(
-                    "Configured tool parser '{}' not found, falling back to model-based selection",
-                    parser_name
-                );
-                tool_parser_factory.registry().create_for_model(model)
-            })
-    } else {
-        // Auto-detect based on model
-        tool_parser_factory.registry().create_for_model(model)
-    }
-}
-
-/// Convert OutputLogProbs to OpenAI ChatLogProbs format
-///
-/// Generic over the token decoding strategy. The `decode_token` closure maps a
-/// single token ID to its text representation.
-pub(crate) fn convert_proto_logprobs(
-    proto_logprobs: &ProtoOutputLogProbs,
-    decode_token: impl Fn(u32) -> String,
-) -> ChatLogProbs {
-    let mut content_items = Vec::with_capacity(proto_logprobs.token_logprobs.len());
-
-    for (i, &logprob) in proto_logprobs.token_logprobs.iter().enumerate() {
-        let token_id = proto_logprobs.token_ids.get(i).copied().unwrap_or(0);
-        let token_text = decode_token(token_id);
-        let bytes = Some(token_text.as_bytes().to_vec());
-
-        // Build top_logprobs for this position
-        let top_logprobs = if let Some(top_logprobs_entry) = proto_logprobs.top_logprobs.get(i) {
-            top_logprobs_entry
-                .values
-                .iter()
-                .enumerate()
-                .filter_map(|(j, &top_logprob)| {
-                    top_logprobs_entry.token_ids.get(j).map(|&tid| {
-                        let text = decode_token(tid);
-                        let bytes = Some(text.as_bytes().to_vec());
-                        TopLogProb {
-                            token: text,
-                            logprob: top_logprob,
-                            bytes,
-                        }
-                    })
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        content_items.push(ChatLogProbsContent {
-            token: token_text,
-            logprob,
-            bytes,
-            top_logprobs,
-        });
-    }
-
-    ChatLogProbs::Detailed {
-        content: (!content_items.is_empty()).then_some(content_items),
-    }
-}
-
-/// Convert OutputLogProbs to OpenAI ChatLogProbs format using a Tokenizer
-pub(crate) fn convert_proto_to_openai_logprobs(
-    proto_logprobs: &ProtoOutputLogProbs,
-    tokenizer: &Arc<dyn Tokenizer>,
-) -> ChatLogProbs {
-    convert_proto_logprobs(proto_logprobs, |token_id| {
-        tokenizer
-            .decode(&[token_id], false)
-            .unwrap_or_else(|_| format!("<token_{token_id}>"))
-    })
-}
-
-/// Convert OutputLogProbs to Generate format Vec<Vec<Option<f64>>>
-///
-/// Generate format: [[logprob, token_id, ...], [logprob, token_id, ...], ...]
-/// Each inner vec contains [logprob (f64), token_id (u32), ...]
-pub(crate) fn convert_generate_output_logprobs(
-    proto_logprobs: &ProtoOutputLogProbs,
-) -> Vec<Vec<Option<f64>>> {
-    proto_logprobs
-        .token_logprobs
-        .iter()
-        .zip(proto_logprobs.token_ids.iter())
-        .map(|(&logprob, &token_id)| vec![Some(logprob as f64), Some(token_id as f64)])
-        .collect()
-}
-
-/// Convert InputLogProbs to Generate format Vec<Vec<Option<f64>>>
-///
-/// Generate format: [[logprob, token_id, ...], [logprob, token_id, ...], ...]
-/// First token has null logprob: [[null, token_id], [logprob, token_id], ...]
-pub(crate) fn convert_generate_input_logprobs(
-    proto_logprobs: &ProtoInputLogProbs,
-) -> Vec<Vec<Option<f64>>> {
-    proto_logprobs
-        .token_logprobs
-        .iter()
-        .zip(proto_logprobs.token_ids.iter())
-        .map(|(&token_logprob, &token_id)| {
-            // token_logprob is Option<f32> in unified type
-            let logprob_value = token_logprob.map(|v| v as f64);
-            vec![logprob_value, Some(token_id as f64)]
-        })
-        .collect()
-}
-
 /// Parse finish_reason string into GenerateFinishReason enum
 ///
 /// Uses serde to deserialize the finish_reason, which handles all tagged variants automatically.
@@ -1004,33 +666,6 @@ pub(crate) fn parse_finish_reason(
             Ok(json_value) => GenerateFinishReason::Other(json_value),
             Err(_) => GenerateFinishReason::Other(Value::String(reason_str.to_string())),
         },
-    }
-}
-
-// ============================================================================
-// Metrics helper functions (shared by HTTP routers and gRPC pipeline)
-// ============================================================================
-
-/// Map route path to endpoint label for metrics
-pub(crate) fn route_to_endpoint(route: &str) -> &'static str {
-    match route {
-        "/v1/chat/completions" => metrics_labels::ENDPOINT_CHAT,
-        "/generate" => metrics_labels::ENDPOINT_GENERATE,
-        "/v1/completions" => metrics_labels::ENDPOINT_COMPLETIONS,
-        "/v1/rerank" => metrics_labels::ENDPOINT_RERANK,
-        "/v1/responses" => metrics_labels::ENDPOINT_RESPONSES,
-        _ => "other",
-    }
-}
-
-/// Map HTTP status code to error type label for metrics
-pub(crate) fn error_type_from_status(status: StatusCode) -> &'static str {
-    match status.as_u16() {
-        400 => metrics_labels::ERROR_VALIDATION,
-        404 => metrics_labels::ERROR_NO_WORKERS,
-        408 | 504 => metrics_labels::ERROR_TIMEOUT,
-        500..=599 => metrics_labels::ERROR_BACKEND,
-        _ => metrics_labels::ERROR_INTERNAL,
     }
 }
 

@@ -17,7 +17,7 @@ use crate::{
                 ProtoEmbedRequest, ProtoEmbedResponseVariant, ProtoGenerateRequest, ProtoRequest,
                 ProtoStream,
             },
-            tonic_ext::{TonicResultExt, TonicStatusExt},
+            utils::tonic_ext::{TonicResultExt, TonicStatusExt},
         },
     },
 };
