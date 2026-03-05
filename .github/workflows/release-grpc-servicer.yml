@@ -1,0 +1,62 @@
+name: Release smg-grpc-servicer to PyPI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - grpc_servicer/pyproject.toml  # Triggered when version bumped
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build smg-grpc-servicer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build deps
+        run: pip install build twine
+
+      - name: Build package
+        run: cd grpc_servicer && python -m build
+
+      - name: Check package
+        run: twine check --strict grpc_servicer/dist/*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: grpc-servicer-dist
+          path: grpc_servicer/dist/
+
+  upload:
+    name: Upload to PyPI
+    if: github.repository == 'lightseekorg/smg'
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: grpc-servicer-dist
+          path: dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Upload to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_SERVICER }}
+        run: |
+          pip install twine
+          twine upload dist/* --verbose --skip-existing
