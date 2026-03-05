@@ -321,12 +321,14 @@ jobs:
               - 'e2e_test/router/test_pd_mmlu.py'
               - 'scripts/ci_install_vllm.sh'
               - 'scripts/ci_install_trtllm.sh'
+              - 'scripts/ci_install_sglang.sh'
             agentic:
               - 'mcp/**'
               - 'data_connector/**'
               - 'e2e_test/responses/**'
               - 'e2e_test/messages/**'
               - 'scripts/ci_agentic_svc_deps.sh'
+              - 'scripts/oracle_flyway/**'
 
   # --- E2E jobs split by change scope ---
 
