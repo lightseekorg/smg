@@ -26,6 +26,7 @@ pub(crate) trait TonicStatusExt {
 impl TonicStatusExt for tonic::Status {
     fn http_status(&self) -> StatusCode {
         match self.code() {
+            Code::Ok => StatusCode::OK,
             Code::InvalidArgument
             | Code::FailedPrecondition
             | Code::OutOfRange
