@@ -2,21 +2,16 @@
 
 use std::{
     any::Any,
-    io,
     sync::{atomic::AtomicBool, Arc},
 };
 
 use async_trait::async_trait;
 use axum::{
-    body::Body,
-    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use bytes::Bytes;
 use openai_protocol::{chat::ChatCompletionRequest, interactions::InteractionsRequest};
 use smg_mcp::McpOrchestrator;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use super::{
     context::{RequestContext, SharedComponents},
@@ -56,17 +51,20 @@ impl GeminiRouter {
 
     /// Main handler for `POST /v1/interactions`.
     ///
-    /// Builds a `RequestContext`, then either:
-    /// - **Non-streaming**: awaits the driver inline and returns the `Response`.
-    /// - **Streaming**: creates an SSE channel, spawns the driver in a background
-    ///   task (events flow through `sse_tx`), and returns the SSE `Response` immediately.
+    /// Builds a `RequestContext` and runs the driver state machine.
+    ///
+    /// For **non-streaming** requests the driver returns the HTTP response directly.
+    ///
+    /// For **streaming** requests the terminal streaming step (`StreamRequest` or
+    /// `StreamRequestWithTool`) creates an SSE channel internally, spawns the
+    /// streaming work in a background task, and returns the SSE `Response` — the
+    /// same pattern as `process_streaming_response` in the gRPC router.
     pub async fn route_interactions(
         &self,
         headers: Option<HeaderMap>,
         body: InteractionsRequest,
         model_id: Option<String>,
     ) -> Response {
-        let stream = body.stream;
         let mut ctx = RequestContext::new(
             Arc::new(body),
             headers,
@@ -74,49 +72,7 @@ impl GeminiRouter {
             self.shared_components.clone(),
         );
 
-        if stream {
-            // Streaming: create SSE channel, spawn driver, return SSE response.
-            let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
-            let error_tx = tx.clone();
-            ctx.streaming.sse_tx = Some(tx);
-
-            // The driver's Response is intentionally discarded: for streaming,
-            // the real response flows through `sse_tx` events. The driver returns
-            // a dummy Response only to satisfy the state machine's return type.
-            // We log errors here so failures aren't completely silent.
-
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "fire-and-forget SSE streaming driver; gateway shutdown need not wait for individual streams"
-            )]
-            tokio::spawn(async move {
-                let response = driver::execute(&mut ctx).await;
-                if !response.status().is_success() {
-                    let status = response.status().as_u16();
-                    tracing::error!(
-                        "Streaming request processing failed with status: {}",
-                        status
-                    );
-                    // Send an SSE error event so the client sees the failure
-                    // before the stream closes.
-                    let error_event = format!(
-                        "event: error\ndata: {{\"status\":{status},\"message\":\"internal pipeline error\"}}\n\n"
-                    );
-                    let _ = error_tx.send(Ok(Bytes::from(error_event)));
-                }
-            });
-
-            let body_stream = UnboundedReceiverStream::new(rx);
-            let mut response = Response::new(Body::from_stream(body_stream));
-            *response.status_mut() = StatusCode::OK;
-            response
-                .headers_mut()
-                .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-            response
-        } else {
-            // Non-streaming: run driver synchronously, return the Response.
-            driver::execute(&mut ctx).await
-        }
+        driver::execute(&mut ctx).await
     }
 }
 
