@@ -24,6 +24,7 @@ use reasoning_parser::{
 };
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
+use tonic::Code;
 use tool_parser::{
     ParserFactory as ToolParserFactory, PooledParser as ToolPooledParser, ToolParser,
 };
@@ -662,7 +663,9 @@ pub(crate) async fn collect_stream_responses(
                         all_responses.push(complete);
                     }
                     ProtoResponseVariant::Error(err) => {
-                        error!(function = "collect_stream_responses", worker = %worker_name, error = %err.message(), "Worker generation error");
+                        // In-band error (legacy): backends should use context.abort() instead.
+                        // Kept for backward compatibility during the transition.
+                        warn!(function = "collect_stream_responses", worker = %worker_name, error = %err.message(), "Worker sent in-band error (legacy path, backend should use context.abort)");
                         // Don't mark as completed - let Drop send abort for error cases
                         return Err(error::internal_error(
                             "worker_generation_failed",
@@ -678,9 +681,11 @@ pub(crate) async fn collect_stream_responses(
                 }
             }
             Err(e) => {
-                error!(function = "collect_stream_responses", worker = %worker_name, error = ?e, "Worker stream error");
+                let http_status = grpc_to_http_status(e.code());
+                error!(function = "collect_stream_responses", worker = %worker_name, grpc_code = ?e.code(), http_status = %http_status, error = ?e, "Worker stream error");
                 // Don't mark as completed - let Drop send abort for error cases
-                return Err(error::internal_error(
+                return Err(error::create_error(
+                    http_status,
                     "worker_stream_failed",
                     format!("{worker_name} stream failed: {e}"),
                 ));
@@ -1027,6 +1032,37 @@ pub(crate) fn error_type_from_status(status: StatusCode) -> &'static str {
         500..=599 => metrics_labels::ERROR_BACKEND,
         _ => metrics_labels::ERROR_INTERNAL,
     }
+}
+
+/// Map gRPC status code to HTTP status code for error responses.
+pub(crate) fn grpc_to_http_status(code: Code) -> StatusCode {
+    match code {
+        Code::InvalidArgument | Code::FailedPrecondition | Code::OutOfRange => {
+            StatusCode::BAD_REQUEST
+        }
+        Code::Unauthenticated => StatusCode::UNAUTHORIZED,
+        Code::PermissionDenied => StatusCode::FORBIDDEN,
+        Code::NotFound => StatusCode::NOT_FOUND,
+        Code::AlreadyExists | Code::Aborted => StatusCode::CONFLICT,
+        Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
+        Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        Code::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
+        // Internal, Unknown, Unimplemented, DataLoss, Cancelled
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Returns true if the gRPC status code represents a server error
+/// (should trip the circuit breaker), false for client errors (should not).
+pub(crate) fn is_grpc_server_error(code: Code) -> bool {
+    matches!(
+        code,
+        Code::Internal
+            | Code::Unavailable
+            | Code::Unknown
+            | Code::DataLoss
+            | Code::DeadlineExceeded
+    )
 }
 
 #[cfg(test)]
