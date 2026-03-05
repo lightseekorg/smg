@@ -1,21 +1,5 @@
-#!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # mypy: ignore-errors
-"""
-vLLM gRPC Server
-
-Launches a gRPC server for vLLM using the VllmEngine protocol.
-
-Usage:
-    python -m smg_grpc_servicer.vllm.server --model <model_path>
-
-Example:
-    python -m smg_grpc_servicer.vllm.server \
-        --model meta-llama/Llama-2-7b-hf \
-        --host 0.0.0.0 \
-        --port 50051
-"""
+"""vLLM gRPC Server — launches a gRPC server backed by AsyncLLM."""
 
 import argparse
 import asyncio
@@ -26,7 +10,6 @@ import time
 import grpc
 import uvloop
 from grpc_reflection.v1alpha import reflection
-
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.utils import log_version_and_model
@@ -57,16 +40,14 @@ async def serve_grpc(args: argparse.Namespace):
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     # Build vLLM config
-    vllm_config = engine_args.create_engine_config(
-        usage_context=UsageContext.OPENAI_API_SERVER
-    )
+    vllm_config = engine_args.create_engine_config(usage_context=UsageContext.OPENAI_API_SERVER)
 
     # Create AsyncLLM
     async_llm = AsyncLLM.from_vllm_config(
         vllm_config=vllm_config,
         usage_context=UsageContext.OPENAI_API_SERVER,
         enable_log_requests=args.enable_log_requests,
-        disable_log_stats=args.disable_log_stats_server,
+        disable_log_stats=args.disable_log_stats,
     )
 
     # Create servicer
@@ -149,7 +130,7 @@ def main():
         help="Port to bind gRPC server to",
     )
     parser.add_argument(
-        "--disable-log-stats-server",
+        "--disable-log-stats",
         action="store_true",
         help="Disable stats logging on server side",
     )

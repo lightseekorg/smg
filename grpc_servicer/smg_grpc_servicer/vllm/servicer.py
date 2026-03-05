@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # mypy: ignore-errors
 """
 vLLM gRPC Servicer
@@ -15,9 +12,8 @@ from collections.abc import AsyncGenerator
 import grpc
 import numpy as np
 import torch
-from transformers import BatchFeature
-
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
+from transformers import BatchFeature
 from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
@@ -98,9 +94,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         request_id = request.request_id
         input_type = request.WhichOneof("input")
-        has_preprocessed_mm = request.HasField(
-            "mm_inputs"
-        ) and request.mm_inputs.HasField("pixel_values")
+        has_preprocessed_mm = request.HasField("mm_inputs") and request.mm_inputs.HasField(
+            "pixel_values"
+        )
         logger.info(
             "Generate request %s: input_type=%s, stream=%s, preprocessed_mm=%s",
             request_id,
@@ -114,23 +110,17 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 # Preprocessed multimodal from Rust router.
                 # Token IDs already have expanded placeholders; tensors are
                 # ready for the model. Bypass the renderer entirely.
-                prompt = self._build_preprocessed_mm_inputs(
-                    request.tokenized, request.mm_inputs
-                )
+                prompt = self._build_preprocessed_mm_inputs(request.tokenized, request.mm_inputs)
                 prompt["arrival_time"] = time.time()
             elif input_type == "tokenized":
-                prompt: TokensPrompt = {
-                    "prompt_token_ids": list(request.tokenized.input_ids)
-                }
+                prompt: TokensPrompt = {"prompt_token_ids": list(request.tokenized.input_ids)}
                 if request.tokenized.original_text:
                     prompt["prompt"] = request.tokenized.original_text
                 renderer = self.async_llm.input_processor.input_preprocessor.renderer
                 prompt = renderer.process_for_engine(prompt, arrival_time=time.time())
             else:
                 prompt: TextPrompt = {"prompt": request.text}
-                prompt = self.async_llm.input_processor.input_preprocessor.preprocess(
-                    prompt
-                )
+                prompt = self.async_llm.input_processor.input_preprocessor.preprocess(prompt)
 
             # Validate kv_transfer_params if present
             if request.HasField("kv_transfer_params"):
@@ -139,8 +129,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 if not remote_host or remote_port == 0:
                     await context.abort(
                         grpc.StatusCode.INVALID_ARGUMENT,
-                        "Invalid kv_transfer_params: "
-                        "remote_host and remote_port must be set.",
+                        "Invalid kv_transfer_params: remote_host and remote_port must be set.",
                     )
                 logger.info(
                     "Request %s: kv_transfer_params={remote_host=%s, remote_port=%d}",
@@ -157,9 +146,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 if request.HasField("kv_transfer_params")
                 else None,
             )
-            tokenization_kwargs = self._tokenization_kwargs_from_proto(
-                request.sampling_params
-            )
+            tokenization_kwargs = self._tokenization_kwargs_from_proto(request.sampling_params)
 
             # Extract logprobs configuration
             num_logprobs = sampling_params.logprobs
@@ -234,9 +221,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             EmbedResponse protobuf
         """
         logger.warning("Embed RPC not yet implemented")
-        await context.abort(
-            grpc.StatusCode.UNIMPLEMENTED, "Embed RPC not yet implemented"
-        )
+        await context.abort(grpc.StatusCode.UNIMPLEMENTED, "Embed RPC not yet implemented")
 
     async def HealthCheck(
         self,
@@ -382,9 +367,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         for key in hf_dict:
             on_cpu = key in cpu_keys
             if key in batched:
-                fields_config[key] = MultiModalFieldConfig.batched(
-                    "image", keep_on_cpu=on_cpu
-                )
+                fields_config[key] = MultiModalFieldConfig.batched("image", keep_on_cpu=on_cpu)
             elif key in flat:
                 sizes = hf_dict[flat[key]].flatten().to(torch.int64)
                 fields_config[key] = MultiModalFieldConfig.flat_from_sizes(
@@ -407,9 +390,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # encoder embeddings into patch-token positions (im_token_id).
         mm_placeholders: dict[str, list[PlaceholderRange]] = {}
         if mm_proto.mm_placeholders:
-            im_token_id = (
-                mm_proto.im_token_id if mm_proto.HasField("im_token_id") else None
-            )
+            im_token_id = mm_proto.im_token_id if mm_proto.HasField("im_token_id") else None
             placeholders = []
             for p in mm_proto.mm_placeholders:
                 is_embed = None
@@ -422,9 +403,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                     if not all(mask):
                         is_embed = torch.tensor(mask, dtype=torch.bool)
                 placeholders.append(
-                    PlaceholderRange(
-                        offset=p.offset, length=p.length, is_embed=is_embed
-                    )
+                    PlaceholderRange(offset=p.offset, length=p.length, is_embed=is_embed)
                 )
             mm_placeholders["image"] = placeholders
 
@@ -468,17 +447,11 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             elif constraint_field == "grammar":
                 structured_outputs = StructuredOutputsParams(grammar=params.grammar)
             elif constraint_field == "structural_tag":
-                structured_outputs = StructuredOutputsParams(
-                    structural_tag=params.structural_tag
-                )
+                structured_outputs = StructuredOutputsParams(structural_tag=params.structural_tag)
             elif constraint_field == "json_object":
-                structured_outputs = StructuredOutputsParams(
-                    json_object=params.json_object
-                )
+                structured_outputs = StructuredOutputsParams(json_object=params.json_object)
             elif constraint_field == "choice":
-                structured_outputs = StructuredOutputsParams(
-                    choice=list(params.choice.choices)
-                )
+                structured_outputs = StructuredOutputsParams(choice=list(params.choice.choices))
 
         # Build extra_args for kv_transfer_params (Mooncake PD)
         extra_args = None
@@ -511,9 +484,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             ignore_eos=params.ignore_eos,
             n=params.n if params.n > 0 else 1,
             logprobs=params.logprobs if params.HasField("logprobs") else None,
-            prompt_logprobs=params.prompt_logprobs
-            if params.HasField("prompt_logprobs")
-            else None,
+            prompt_logprobs=params.prompt_logprobs if params.HasField("prompt_logprobs") else None,
             seed=params.seed if params.HasField("seed") else None,
             include_stop_str_in_output=params.include_stop_str_in_output,
             logit_bias=dict(params.logit_bias) if params.logit_bias else None,
@@ -521,9 +492,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             extra_args=extra_args,
             # detokenize must be True if stop strings are used
             detokenize=bool(stop),
-            output_kind=RequestOutputKind.DELTA
-            if stream
-            else RequestOutputKind.FINAL_ONLY,
+            output_kind=RequestOutputKind.DELTA if stream else RequestOutputKind.FINAL_ONLY,
         )
 
     @staticmethod
@@ -573,9 +542,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
                 if num_top_logprobs:
                     proto.top_logprobs.append(
-                        VllmEngineServicer._build_top_logprobs(
-                            logprob_entry, num_top_logprobs
-                        )
+                        VllmEngineServicer._build_top_logprobs(logprob_entry, num_top_logprobs)
                     )
 
         return proto if proto.token_ids else None
@@ -688,9 +655,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         return vllm_engine_pb2.GenerateResponse(
             chunk=vllm_engine_pb2.GenerateStreamChunk(
                 token_ids=completion.token_ids,
-                prompt_tokens=len(output.prompt_token_ids)
-                if output.prompt_token_ids
-                else 0,
+                prompt_tokens=len(output.prompt_token_ids) if output.prompt_token_ids else 0,
                 completion_tokens=len(completion.token_ids),  # Delta count
                 cached_tokens=output.num_cached_tokens,
                 output_logprobs=output_logprobs,
@@ -777,9 +742,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             complete=vllm_engine_pb2.GenerateComplete(
                 output_ids=completion.token_ids,
                 finish_reason=completion.finish_reason or "stop",
-                prompt_tokens=len(output.prompt_token_ids)
-                if output.prompt_token_ids
-                else 0,
+                prompt_tokens=len(output.prompt_token_ids) if output.prompt_token_ids else 0,
                 completion_tokens=len(completion.token_ids),
                 cached_tokens=output.num_cached_tokens,
                 output_logprobs=output_logprobs,
