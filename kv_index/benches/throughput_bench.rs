@@ -444,7 +444,7 @@ async fn run_sweep(args: &Args, base_traces: &[Vec<TimedEntry>]) {
 
     println!("{}", "-".repeat(80));
     println!(
-        "Peak: {} blocks/sec at {peak_dur}ms duration",
+        "Peak: {} block ops/sec at {peak_dur}ms duration",
         format_throughput(peak_throughput),
     );
 }
@@ -606,12 +606,12 @@ fn print_results(result: &BenchmarkResults) {
         result.total_blocks,
     );
     println!(
-        "  Block throughput: {:.0} blocks/sec ({})",
+        "  Block throughput: {:.0} block ops/sec ({})",
         result.block_throughput,
         format_throughput(result.block_throughput),
     );
     println!(
-        "  Offered: {} blocks/sec | Latency p99: {:.1}us",
+        "  Offered: {} block ops/sec | Latency p99: {:.1}us",
         format_throughput(result.offered_block_throughput),
         result.latency_p99_us,
     );
