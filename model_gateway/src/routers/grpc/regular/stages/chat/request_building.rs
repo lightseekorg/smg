@@ -20,11 +20,15 @@ use crate::routers::{
 /// Extracts chat-specific request building logic from the old unified RequestBuildingStage.
 pub(crate) struct ChatRequestBuildingStage {
     inject_pd_metadata: bool,
+    epd_mode: bool,
 }
 
 impl ChatRequestBuildingStage {
-    pub fn new(inject_pd_metadata: bool) -> Self {
-        Self { inject_pd_metadata }
+    pub fn new(inject_pd_metadata: bool, epd_mode: bool) -> Self {
+        Self {
+            inject_pd_metadata,
+            epd_mode,
+        }
     }
 }
 
@@ -97,6 +101,12 @@ impl PipelineStage for ChatRequestBuildingStage {
         if self.inject_pd_metadata {
             if let Some(workers) = ctx.state.workers.as_ref() {
                 helpers::maybe_inject_pd_metadata(&mut proto_request, workers);
+            }
+        }
+
+        if self.epd_mode {
+            if let ProtoGenerateRequest::Sglang(ref mut req) = proto_request {
+                req.mm_inputs = utils::build_multimodal_inputs_from_messages(&body_ref.messages);
             }
         }
 

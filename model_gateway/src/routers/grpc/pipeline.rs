@@ -80,14 +80,14 @@ impl RequestPipeline {
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(PreparationStage::new()),
+            Box::new(PreparationStage::new(true)),
             Box::new(WorkerSelectionStage::new(
                 worker_registry,
                 policy_registry,
                 WorkerSelectionMode::Regular,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(RequestBuildingStage::new(false)), // No PD metadata
+            Box::new(RequestBuildingStage::new(false, false)), // No PD metadata
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
             Box::new(ResponseProcessingStage::new(processor, streaming_processor)),
@@ -183,14 +183,14 @@ impl RequestPipeline {
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(PreparationStage::new()),
+            Box::new(PreparationStage::new(true)),
             Box::new(WorkerSelectionStage::new(
                 worker_registry,
                 policy_registry,
                 WorkerSelectionMode::PrefillDecode,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(RequestBuildingStage::new(true)), // Inject PD metadata
+            Box::new(RequestBuildingStage::new(true, false)), // Inject PD metadata
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
             Box::new(ResponseProcessingStage::new(processor, streaming_processor)),
@@ -224,6 +224,50 @@ impl RequestPipeline {
         Self {
             stages: Arc::new(stages),
             backend_type: metrics_labels::BACKEND_REGULAR, // Embeddings are regular for now
+        }
+    }
+
+    /// Create a EPD (encode-prefill-decode) pipeline
+    pub fn new_epd(
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+        tool_parser_factory: ToolParserFactory,
+        reasoning_parser_factory: ReasoningParserFactory,
+        configured_tool_parser: Option<String>,
+        configured_reasoning_parser: Option<String>,
+    ) -> Self {
+        let processor = processor::ResponseProcessor::new(
+            tool_parser_factory.clone(),
+            reasoning_parser_factory.clone(),
+            configured_tool_parser.clone(),
+            configured_reasoning_parser.clone(),
+        );
+
+        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
+            tool_parser_factory,
+            reasoning_parser_factory,
+            configured_tool_parser,
+            configured_reasoning_parser,
+            metrics_labels::BACKEND_EPD,
+        ));
+
+        let stages: Vec<Box<dyn PipelineStage>> = vec![
+            Box::new(PreparationStage::new(false)),
+            Box::new(WorkerSelectionStage::new(
+                worker_registry,
+                policy_registry,
+                WorkerSelectionMode::PrefillDecode,
+            )),
+            Box::new(ClientAcquisitionStage),
+            Box::new(RequestBuildingStage::new(true, true)), // Inject PD metadata + EPD mm_inputs
+            Box::new(DispatchMetadataStage),
+            Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
+            Box::new(ResponseProcessingStage::new(processor, streaming_processor)),
+        ];
+
+        Self {
+            stages: Arc::new(stages),
+            backend_type: metrics_labels::BACKEND_EPD,
         }
     }
 

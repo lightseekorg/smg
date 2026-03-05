@@ -27,9 +27,9 @@ pub(crate) struct PreparationStage {
 }
 
 impl PreparationStage {
-    pub fn new() -> Self {
+    pub fn new(enable_multimodal_fetch: bool) -> Self {
         Self {
-            chat_stage: ChatPreparationStage,
+            chat_stage: ChatPreparationStage::new(enable_multimodal_fetch),
             generate_stage: GeneratePreparationStage,
             embedding_stage: EmbeddingPreparationStage::new(),
         }
@@ -38,7 +38,7 @@ impl PreparationStage {
 
 impl Default for PreparationStage {
     fn default() -> Self {
-        Self::new()
+        Self::new(true)
     }
 }
 

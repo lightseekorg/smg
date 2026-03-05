@@ -175,6 +175,18 @@ pub enum RoutingMode {
         #[serde(skip_serializing_if = "Option::is_none")]
         decode_policy: Option<PolicyConfig>,
     },
+    #[serde(rename = "encode_prefill_decode")]
+    EncodePrefillDecode {
+        /// Encode workers (optional bootstrap port)
+        #[serde(default)]
+        encode_urls: Vec<(String, Option<u16>)>,
+        prefill_urls: Vec<(String, Option<u16>)>,
+        decode_urls: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prefill_policy: Option<PolicyConfig>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        decode_policy: Option<PolicyConfig>,
+    },
     #[serde(rename = "openai")]
     OpenAI { worker_urls: Vec<String> },
     #[serde(rename = "anthropic")]
@@ -186,6 +198,10 @@ impl RoutingMode {
         matches!(self, RoutingMode::PrefillDecode { .. })
     }
 
+    pub fn is_epd_mode(&self) -> bool {
+        matches!(self, RoutingMode::EncodePrefillDecode { .. })
+    }
+
     pub fn worker_count(&self) -> usize {
         match self {
             RoutingMode::Regular { worker_urls } => worker_urls.len(),
@@ -194,6 +210,12 @@ impl RoutingMode {
                 decode_urls,
                 ..
             } => prefill_urls.len() + decode_urls.len(),
+            RoutingMode::EncodePrefillDecode {
+                encode_urls,
+                prefill_urls,
+                decode_urls,
+                ..
+            } => encode_urls.len() + prefill_urls.len() + decode_urls.len(),
             RoutingMode::OpenAI { worker_urls } => worker_urls.len(),
             RoutingMode::Anthropic { worker_urls } => worker_urls.len(),
         }
@@ -206,6 +228,9 @@ impl RoutingMode {
             RoutingMode::PrefillDecode { prefill_policy, .. } => {
                 prefill_policy.as_ref().unwrap_or(main_policy)
             }
+            RoutingMode::EncodePrefillDecode { prefill_policy, .. } => {
+                prefill_policy.as_ref().unwrap_or(main_policy)
+            }
             _ => main_policy,
         }
     }
@@ -215,6 +240,9 @@ impl RoutingMode {
     pub fn get_decode_policy<'a>(&'a self, main_policy: &'a PolicyConfig) -> &'a PolicyConfig {
         match self {
             RoutingMode::PrefillDecode { decode_policy, .. } => {
+                decode_policy.as_ref().unwrap_or(main_policy)
+            }
+            RoutingMode::EncodePrefillDecode { decode_policy, .. } => {
                 decode_policy.as_ref().unwrap_or(main_policy)
             }
             _ => main_policy,
@@ -360,6 +388,8 @@ pub struct DiscoveryConfig {
     pub prefill_selector: HashMap<String, String>,
     /// PD mode decode
     pub decode_selector: HashMap<String, String>,
+    /// EPD mode encode
+    pub encode_selector: HashMap<String, String>,
     pub bootstrap_port_annotation: String,
     /// Router node discovery for HA (Kubernetes label selector)
     #[serde(default)]
@@ -386,6 +416,7 @@ impl Default for DiscoveryConfig {
             selector: HashMap::new(),
             prefill_selector: HashMap::new(),
             decode_selector: HashMap::new(),
+            encode_selector: HashMap::new(),
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: default_router_mesh_port_annotation(),
@@ -585,6 +616,7 @@ impl RouterConfig {
         match self.mode {
             RoutingMode::Regular { .. } => "regular",
             RoutingMode::PrefillDecode { .. } => "prefill_decode",
+            RoutingMode::EncodePrefillDecode { .. } => "encode_prefill_decode",
             RoutingMode::OpenAI { .. } => "openai",
             RoutingMode::Anthropic { .. } => "anthropic",
         }
@@ -711,6 +743,7 @@ mod tests {
             worker_urls: vec!["http://worker1".to_string()],
         };
         assert!(!regular.is_pd_mode());
+        assert!(!regular.is_epd_mode());
 
         let pd = RoutingMode::PrefillDecode {
             prefill_urls: vec![("http://prefill1".to_string(), Some(8001))],
@@ -719,6 +752,17 @@ mod tests {
             decode_policy: None,
         };
         assert!(pd.is_pd_mode());
+        assert!(!pd.is_epd_mode());
+
+        let epd = RoutingMode::EncodePrefillDecode {
+            encode_urls: vec![("http://encode1".to_string(), Some(8002))],
+            prefill_urls: vec![("http://prefill1".to_string(), Some(8001))],
+            decode_urls: vec!["http://decode1".to_string()],
+            prefill_policy: None,
+            decode_policy: None,
+        };
+        assert!(!epd.is_pd_mode());
+        assert!(epd.is_epd_mode());
     }
 
     #[test]
@@ -747,6 +791,18 @@ mod tests {
         };
         assert_eq!(pd.worker_count(), 5);
 
+        let epd = RoutingMode::EncodePrefillDecode {
+            encode_urls: vec![
+                ("http://encode1".to_string(), Some(7001)),
+                ("http://encode2".to_string(), None),
+            ],
+            prefill_urls: vec![("http://prefill1".to_string(), Some(8001))],
+            decode_urls: vec!["http://decode1".to_string(), "http://decode2".to_string()],
+            prefill_policy: None,
+            decode_policy: None,
+        };
+        assert_eq!(epd.worker_count(), 5);
+
         let empty_regular = RoutingMode::Regular {
             worker_urls: vec![],
         };
@@ -770,6 +826,19 @@ mod tests {
         };
         let json = serde_json::to_string(&pd).unwrap();
         assert!(json.contains("\"type\":\"prefill_decode\""));
+        assert!(json.contains("\"prefill_urls\""));
+        assert!(json.contains("\"decode_urls\""));
+
+        let epd = RoutingMode::EncodePrefillDecode {
+            encode_urls: vec![("http://encode1".to_string(), Some(7001))],
+            prefill_urls: vec![("http://prefill1".to_string(), Some(8001))],
+            decode_urls: vec!["http://decode1".to_string()],
+            prefill_policy: None,
+            decode_policy: None,
+        };
+        let json = serde_json::to_string(&epd).unwrap();
+        assert!(json.contains("\"type\":\"encode_prefill_decode\""));
+        assert!(json.contains("\"encode_urls\""));
         assert!(json.contains("\"prefill_urls\""));
         assert!(json.contains("\"decode_urls\""));
     }
@@ -901,6 +970,7 @@ mod tests {
         assert!(config.selector.is_empty());
         assert!(config.prefill_selector.is_empty());
         assert!(config.decode_selector.is_empty());
+        assert!(config.encode_selector.is_empty());
         assert_eq!(config.bootstrap_port_annotation, "sglang.ai/bootstrap-port");
     }
 
@@ -918,6 +988,7 @@ mod tests {
             selector: selector.clone(),
             prefill_selector: selector.clone(),
             decode_selector: selector.clone(),
+            encode_selector: selector.clone(),
             bootstrap_port_annotation: "custom.io/port".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
@@ -995,6 +1066,11 @@ mod tests {
             .prefill_decode_mode(vec![], vec![])
             .build_unchecked();
         assert_eq!(config.mode_type(), "prefill_decode");
+
+        let config = RouterConfig::builder()
+            .encode_prefill_decode_mode(vec![], vec![], vec![], None, None)
+            .build_unchecked();
+        assert_eq!(config.mode_type(), "encode_prefill_decode");
     }
 
     #[test]
@@ -1196,7 +1272,8 @@ mod tests {
                 check_interval_secs: 120,
                 selector: selectors.clone(),
                 prefill_selector: selectors.clone(),
-                decode_selector: selectors,
+                decode_selector: selectors.clone(),
+                encode_selector: selectors,
                 bootstrap_port_annotation: "mycompany.io/bootstrap".to_string(),
                 router_selector: HashMap::new(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),

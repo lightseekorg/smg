@@ -17,6 +17,9 @@ use openai_protocol::{
     model_type::{Endpoint, ModelType},
     worker::{HealthCheckConfig, ProviderType, WorkerInfo, WorkerModels, WorkerSpec},
 };
+use smg_grpc_client::health::{
+    proto::health_check_response::ServingStatus as HealthServingStatus, HealthClient,
+};
 use tokio::{sync::OnceCell, time};
 
 use super::{CircuitBreaker, WorkerError, WorkerResult, UNKNOWN_MODEL_ID};
@@ -408,6 +411,7 @@ impl WorkerTypeExt for WorkerType {
             WorkerType::Regular => metrics_labels::WORKER_REGULAR,
             WorkerType::Prefill => metrics_labels::WORKER_PREFILL,
             WorkerType::Decode => metrics_labels::WORKER_DECODE,
+            WorkerType::Encode => metrics_labels::WORKER_ENCODE,
         }
     }
 }
@@ -725,34 +729,85 @@ impl Worker for BasicWorker {
 
     async fn grpc_health_check(&self) -> WorkerResult<bool> {
         let timeout = Duration::from_secs(self.metadata.health_config.timeout_secs);
-        let maybe = self.get_grpc_client().await?;
-        let Some(grpc_client) = maybe else {
-            tracing::error!(
-                "Worker {} is not a gRPC worker but connection mode is gRPC",
-                self.metadata.spec.url
-            );
-            return Ok(false);
-        };
+        if matches!(self.metadata.spec.worker_type, WorkerType::Encode) {
+            let health_client = match time::timeout(
+                timeout,
+                HealthClient::connect(&self.metadata.spec.url),
+            )
+            .await
+            {
+                Ok(Ok(client)) => client,
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        "Encoder gRPC health connect error for {}: {err:?}",
+                        self.metadata.spec.url
+                    );
+                    return Ok(false);
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "Encoder gRPC health connect timed out for {}",
+                        self.metadata.spec.url
+                    );
+                    return Ok(false);
+                }
+            };
 
-        match time::timeout(timeout, grpc_client.health_check()).await {
-            Ok(Ok(resp)) => {
-                tracing::debug!(
-                    "gRPC health OK for {}: healthy={}",
-                    self.metadata.spec.url,
-                    resp.healthy
-                );
-                Ok(resp.healthy)
+            match time::timeout(timeout, health_client.check("")).await {
+                Ok(Ok(resp)) => {
+                    let serving = resp.status == HealthServingStatus::Serving as i32;
+                    tracing::debug!(
+                        "Encoder gRPC health OK for {}: serving={}",
+                        self.metadata.spec.url,
+                        serving
+                    );
+                    Ok(serving)
+                }
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        "Encoder gRPC health RPC error for {}: {err:?}",
+                        self.metadata.spec.url
+                    );
+                    Ok(false)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "Encoder gRPC health timed out for {}",
+                        self.metadata.spec.url
+                    );
+                    Ok(false)
+                }
             }
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    "gRPC health RPC error for {}: {err:?}",
+        } else {
+            let maybe = self.get_grpc_client().await?;
+            let Some(grpc_client) = maybe else {
+                tracing::error!(
+                    "Worker {} is not a gRPC worker but connection mode is gRPC",
                     self.metadata.spec.url
                 );
-                Ok(false)
-            }
-            Err(_) => {
-                tracing::warn!("gRPC health timed out for {}", self.metadata.spec.url);
-                Ok(false)
+                return Ok(false);
+            };
+
+            match time::timeout(timeout, grpc_client.health_check()).await {
+                Ok(Ok(resp)) => {
+                    tracing::debug!(
+                        "gRPC health OK for {}: healthy={}",
+                        self.metadata.spec.url,
+                        resp.healthy
+                    );
+                    Ok(resp.healthy)
+                }
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        "gRPC health RPC error for {}: {err:?}",
+                        self.metadata.spec.url
+                    );
+                    Ok(false)
+                }
+                Err(_) => {
+                    tracing::warn!("gRPC health timed out for {}", self.metadata.spec.url);
+                    Ok(false)
+                }
             }
         }
     }
@@ -957,6 +1012,7 @@ mod tests {
         assert_eq!(WorkerType::Regular.to_string(), "regular");
         assert_eq!(WorkerType::Prefill.to_string(), "prefill");
         assert_eq!(WorkerType::Decode.to_string(), "decode");
+        assert_eq!(WorkerType::Encode.to_string(), "encode");
     }
 
     #[test]
@@ -964,6 +1020,7 @@ mod tests {
         assert_eq!(WorkerType::Regular, WorkerType::Regular);
         assert_ne!(WorkerType::Regular, WorkerType::Decode);
         assert_eq!(WorkerType::Prefill, WorkerType::Prefill);
+        assert_eq!(WorkerType::Encode, WorkerType::Encode);
     }
 
     #[test]
