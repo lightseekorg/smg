@@ -56,6 +56,16 @@ class _CachedBackend:
 _cached: _CachedBackend | None = None
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_cached_backend():
+    """Ensure the last cached backend is closed at session end."""
+    yield
+    global _cached
+    if _cached is not None:
+        _cached.gen.close()
+        _cached = None
+
+
 def _create_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
     """Extract configuration from request and return the appropriate backend generator.
 
@@ -332,11 +342,13 @@ def _setup_pd_backend_common(
         prefills = existing_prefills + new_prefills
         decodes = existing_decodes + new_decodes
 
-    if not prefills or not decodes:
+    if len(prefills) < num_prefill or len(decodes) < num_decode:
         pytest.fail(
             f"{runtime_label} PD setup incomplete: have {len(prefills)} prefill, "
             f"{len(decodes)} decode (need {num_prefill} prefill, {num_decode} decode)"
         )
+    prefills = prefills[:num_prefill]
+    decodes = decodes[:num_decode]
 
     model_path = prefills[0].model_path
 
@@ -506,8 +518,10 @@ def _setup_local_backend(
             new_instances = model_pool.launch_workers(workers_to_launch, startup_timeout=300)
             instances = existing_for_mode + new_instances
 
-        if not instances:
-            pytest.fail(f"Failed to get {num_workers} workers for {model_id}")
+        if len(instances) < num_workers:
+            pytest.fail(
+                f"Failed to get {num_workers} workers for {model_id} (got {len(instances)})"
+            )
         worker_urls = [inst.worker_url for inst in instances]
         model_path = instances[0].model_path
     else:

@@ -901,7 +901,13 @@ class ModelPool:
                     raise RuntimeError(f"Failed to allocate GPU slot for {model_id} after eviction")
                 gpu_slot = slots[0]
 
-                self._launch_model(model_id, mode, gpu_slot=gpu_slot)
+                self._launch_model(
+                    model_id,
+                    mode,
+                    gpu_slot=gpu_slot,
+                    worker_type=worker_type,
+                    instance_key=key,
+                )
                 self._wait_for_instance(key)
 
             instance = self.instances[key]
@@ -1412,16 +1418,20 @@ class ModelPool:
 
         gpu_slot = slots[0]
 
-        instance = self._launch_grpc_worker(
-            runtime=runtime,
-            model_id=model_id,
-            model_spec=spec,
-            gpu_slot=gpu_slot,
-            startup_timeout=self._startup_timeout,
-        )
+        try:
+            instance = self._launch_grpc_worker(
+                runtime=runtime,
+                model_id=model_id,
+                model_spec=spec,
+                gpu_slot=gpu_slot,
+                startup_timeout=self._startup_timeout,
+            )
+        except Exception:
+            self.allocator.release_slot(gpu_slot)
+            raise
 
         if instance is None:
-            self.allocator.release_slot(gpu_slot)
+            # _launch_grpc_worker already called _evict_instance which released the slot
             raise RuntimeError(f"Failed to launch {runtime_label} gRPC worker: {model_id}")
 
         instance.last_used = time.time()
@@ -1541,8 +1551,14 @@ class ModelPool:
             slots = self.allocator.allocate_slots(allocation_specs, preserve_order=True)
             slot_map = {s.assigned_model: s for s in slots}
 
-            if not slots:
-                raise RuntimeError(f"Failed to allocate GPU slots for {len(valid_workers)} workers")
+            if len(slots) != len(valid_workers):
+                # Partial allocation — release what we got and fail
+                for slot in slots:
+                    self.allocator.release_slot(slot)
+                raise RuntimeError(
+                    f"Partial GPU allocation: requested {len(valid_workers)} slots, "
+                    f"got {len(slots)}"
+                )
 
             # Detect IB device for PD workers
             has_pd = any(w.is_prefill or w.is_decode for w in valid_workers)

@@ -69,10 +69,18 @@ def model_pool(request: pytest.FixtureRequest) -> ModelPool:
     if _model_pool is not None:
         return _model_pool
 
+    def _shutdown() -> None:
+        global _model_pool
+        if _model_pool is not None:
+            logger.info("Shutting down model pool")
+            _model_pool.shutdown()
+            _model_pool = None
+
     # Check if we should skip model startup
     if os.environ.get(ENV_SKIP_MODEL_POOL, "").lower() in ("1", "true", "yes"):
         logger.info("%s is set, skipping model pool startup", ENV_SKIP_MODEL_POOL)
         _model_pool = ModelPool(GPUAllocator(gpus=[]))
+        request.addfinalizer(_shutdown)
         return _model_pool
 
     # Determine requirements from scanned tests or env vars
@@ -122,30 +130,27 @@ def model_pool(request: pytest.FixtureRequest) -> ModelPool:
             "No pre-launch requirements, model pool will start empty (on-demand launches still available)"
         )
         _model_pool = ModelPool(GPUAllocator())
+        request.addfinalizer(_shutdown)
         return _model_pool
 
     # Create and start the pool
     allocator = GPUAllocator()
     log_dir = os.environ.get("E2E_LOG_DIR")
     _model_pool = ModelPool(allocator, log_dir=log_dir)
+    request.addfinalizer(_shutdown)
 
     startup_timeout = int(os.environ.get(ENV_STARTUP_TIMEOUT, "300"))
-    _model_pool.startup(
-        requirements=requirements,
-        startup_timeout=startup_timeout,
-    )
+    try:
+        _model_pool.startup(
+            requirements=requirements,
+            startup_timeout=startup_timeout,
+        )
+    except Exception:
+        _shutdown()
+        raise
 
     # Log final GPU allocation summary
     logger.info(_model_pool.allocator.summary())
-
-    def _shutdown() -> None:
-        global _model_pool
-        if _model_pool is not None:
-            logger.info("Shutting down model pool")
-            _model_pool.shutdown()
-            _model_pool = None
-
-    request.addfinalizer(_shutdown)
 
     return _model_pool
 
