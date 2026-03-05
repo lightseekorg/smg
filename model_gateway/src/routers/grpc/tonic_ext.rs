@@ -22,9 +22,10 @@ pub(crate) trait TonicStatusExt {
 impl TonicStatusExt for tonic::Status {
     fn http_status(&self) -> StatusCode {
         match self.code() {
-            Code::InvalidArgument | Code::FailedPrecondition | Code::OutOfRange => {
-                StatusCode::BAD_REQUEST
-            }
+            Code::InvalidArgument
+            | Code::FailedPrecondition
+            | Code::OutOfRange
+            | Code::Cancelled => StatusCode::BAD_REQUEST,
             Code::Unauthenticated => StatusCode::UNAUTHORIZED,
             Code::PermissionDenied => StatusCode::FORBIDDEN,
             Code::NotFound => StatusCode::NOT_FOUND,
@@ -32,7 +33,8 @@ impl TonicStatusExt for tonic::Status {
             Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
             Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             Code::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
-            // Internal, Unknown, Unimplemented, DataLoss, Cancelled
+            Code::Unimplemented => StatusCode::NOT_IMPLEMENTED,
+            // Internal, Unknown, DataLoss
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -45,6 +47,7 @@ impl TonicStatusExt for tonic::Status {
                 | Code::Unknown
                 | Code::DataLoss
                 | Code::DeadlineExceeded
+                | Code::Unimplemented
         )
     }
 
