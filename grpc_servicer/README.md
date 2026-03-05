@@ -68,7 +68,7 @@ Bump only `grpc_servicer/pyproject.toml`. No proto release needed.
 ## Architecture
 
 ```
-smg-grpc-servicer  ──depends on──>  vllm            (runtime, not declared in pyproject.toml)
+smg-grpc-servicer  ──depends on──>  vllm            (hard dependency)
 smg-grpc-servicer  ──depends on──>  smg-grpc-proto  (hard dependency)
 vllm               ──optional──>    smg-grpc-servicer (lazy import via vllm serve --grpc)
 ```
