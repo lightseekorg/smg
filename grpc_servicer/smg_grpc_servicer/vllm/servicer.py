@@ -105,6 +105,23 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             has_preprocessed_mm,
         )
 
+        # Validate kv_transfer_params before entering the try block so
+        # context.abort() doesn't get caught by the broad except below.
+        if request.HasField("kv_transfer_params"):
+            remote_host = request.kv_transfer_params.remote_host
+            remote_port = request.kv_transfer_params.remote_port
+            if not remote_host or not (1 <= remote_port <= 65535):
+                await context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    "Invalid kv_transfer_params: remote_host must be set and remote_port must be in [1, 65535].",
+                )
+            logger.info(
+                "Request %s: kv_transfer_params={remote_host=%s, remote_port=%d}",
+                request_id,
+                remote_host,
+                remote_port,
+            )
+
         try:
             if has_preprocessed_mm and input_type == "tokenized":
                 # Preprocessed multimodal from Rust router.
@@ -121,22 +138,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             else:
                 prompt: TextPrompt = {"prompt": request.text}
                 prompt = self.async_llm.input_processor.input_preprocessor.preprocess(prompt)
-
-            # Validate kv_transfer_params if present
-            if request.HasField("kv_transfer_params"):
-                remote_host = request.kv_transfer_params.remote_host
-                remote_port = request.kv_transfer_params.remote_port
-                if not remote_host or not (1 <= remote_port <= 65535):
-                    await context.abort(
-                        grpc.StatusCode.INVALID_ARGUMENT,
-                        "Invalid kv_transfer_params: remote_host must be set and remote_port must be in [1, 65535].",
-                    )
-                logger.info(
-                    "Request %s: kv_transfer_params={remote_host=%s, remote_port=%d}",
-                    request_id,
-                    remote_host,
-                    remote_port,
-                )
 
             # Build sampling params with detokenize=False
             sampling_params = self._sampling_params_from_proto(
@@ -196,8 +197,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                             num_prompt_logprobs=num_prompt_logprobs,
                         )
 
-        except grpc.aio.AbortError:
-            raise
         except ValueError as e:
             # Invalid request error (equiv to 400).
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
