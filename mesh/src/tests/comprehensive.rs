@@ -12,26 +12,21 @@
 
 use std::{
     collections::BTreeMap,
-    net::SocketAddr,
     sync::{Arc, Once},
     time::Duration,
 };
 
-use tokio::net::TcpListener;
 use tracing as log;
 use tracing_subscriber::{
     filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
 };
 
-use super::test_utils;
+use super::test_utils::{self, bind_node, wait_for};
 // Internal crate imports - now can access private modules
 use crate::{
     node_state_machine::{ConvergenceConfig, NodeReadiness, NodeStateMachine},
     partition::{PartitionConfig, PartitionDetector, PartitionState},
-    service::{
-        gossip::{NodeState as GossipNodeState, NodeStatus},
-        MeshServerHandler,
-    },
+    service::gossip::{NodeState as GossipNodeState, NodeStatus},
     stores::{AppState, StateStores},
     sync::MeshSyncManager,
 };
@@ -56,33 +51,6 @@ fn init_test_logging() {
             )
             .try_init();
     });
-}
-
-/// Test utility: Find a free port for node binding
-async fn find_free_port() -> (TcpListener, u16) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    log::debug!("Found free port: {}", port);
-    (listener, port)
-}
-
-/// Test utility: Get a free socket address
-async fn get_node_addr() -> SocketAddr {
-    let (_listener, port) = find_free_port().await;
-    format!("127.0.0.1:{port}").parse().unwrap()
-}
-
-/// Test utility: Print cluster state for debugging
-fn print_cluster_state(handler: &MeshServerHandler) -> String {
-    let state = handler.state.read();
-    let mut res = vec![];
-    for (k, v) in state.iter() {
-        let status = NodeStatus::try_from(v.status)
-            .map(|s| format!("{s:?}"))
-            .unwrap_or_else(|_| format!("Unknown({})", v.status));
-        res.push(format!("{}: {} v={}", k, status, v.version));
-    }
-    res.join(", ")
 }
 
 #[test]
@@ -212,11 +180,7 @@ fn test_state_stores_basic_operations() {
         value: vec![1, 2, 3],
         version: 1,
     };
-    let _ = stores.app.insert(
-        "key1".to_string(),
-        app_state.clone(),
-        "test_node".to_string(),
-    );
+    let _ = stores.app.insert("key1".to_string(), app_state.clone());
     let value = stores.app.get("key1");
     assert!(value.is_some());
     assert_eq!(value.unwrap().value, vec![1, 2, 3]);
@@ -258,20 +222,16 @@ async fn test_single_node_creation_and_shutdown() {
     init_test_logging();
     log::info!("Starting test_single_node_creation_and_shutdown");
 
-    let addr = get_node_addr().await;
-    let handler = crate::mesh_run!("single_node", addr, None);
+    let (listener, addr) = bind_node().await;
+    let handler = crate::mesh_run!("single_node", listener, addr, None);
 
-    // Wait for node to initialize
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for(
+        || handler.state.read().contains_key("single_node"),
+        Duration::from_secs(5),
+        "single_node appears in cluster state",
+    )
+    .await;
 
-    // Verify node is in cluster state
-    {
-        let state = handler.state.read();
-        assert!(state.contains_key("single_node"));
-    } // Drop the read lock before shutdown
-
-    // Test graceful shutdown - must work for single node scenario
-    // as clusters may scale down to 1 node in production
     handler.graceful_shutdown().await.unwrap();
     log::info!("Single node shutdown completed");
 }
@@ -281,19 +241,21 @@ async fn test_single_node_data_operations() {
     init_test_logging();
     log::info!("Starting test_single_node_data_operations");
 
-    let addr = get_node_addr().await;
-    let handler = crate::mesh_run!("data_node", addr, None);
+    let (listener, addr) = bind_node().await;
+    let handler = crate::mesh_run!("data_node", listener, addr, None);
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for(
+        || handler.state.read().contains_key("data_node"),
+        Duration::from_secs(5),
+        "data_node appears in cluster state",
+    )
+    .await;
 
-    // Write data
     handler
         .write_data("test_key".into(), "test_value".into())
         .unwrap();
 
-    // Verify data was written
-    let value = handler.stores.app.get("test_key");
-    assert!(value.is_some());
+    assert!(handler.stores.app.get("test_key").is_some());
 
     handler.shutdown();
     log::info!("Data operations test completed");
@@ -304,12 +266,16 @@ async fn test_single_node_subsystems_initialized() {
     init_test_logging();
     log::info!("Starting test_single_node_subsystems_initialized");
 
-    let addr = get_node_addr().await;
-    let handler = crate::mesh_run!("subsystem_node", addr, None);
+    let (listener, addr) = bind_node().await;
+    let handler = crate::mesh_run!("subsystem_node", listener, addr, None);
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for(
+        || handler.state.read().contains_key("subsystem_node"),
+        Duration::from_secs(5),
+        "subsystem_node appears in cluster state",
+    )
+    .await;
 
-    // Now we can access private methods
     assert!(handler.partition_detector().is_some());
     assert!(handler.state_machine().is_some());
 
@@ -328,32 +294,23 @@ async fn test_two_node_cluster_formation() {
     init_test_logging();
     log::info!("Starting test_two_node_cluster_formation");
 
-    // Start node A
-    let addr_a = get_node_addr().await;
-    let handler_a = crate::mesh_run!("node_a", addr_a, None);
+    let (listener_a, addr_a) = bind_node().await;
+    let handler_a = crate::mesh_run!("node_a", listener_a, addr_a, None);
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (listener_b, addr_b) = bind_node().await;
+    let handler_b = crate::mesh_run!("node_b", listener_b, addr_b, Some(addr_a));
 
-    // Start node B, joining through A
-    let addr_b = get_node_addr().await;
-    let handler_b = crate::mesh_run!("node_b", addr_b, Some(addr_a));
+    wait_for(
+        || handler_a.state.read().len() == 2 && handler_b.state.read().len() == 2,
+        Duration::from_secs(15),
+        "both nodes see each other",
+    )
+    .await;
 
-    // Wait for cluster formation
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // Verify both nodes see each other
-    {
-        let state_a = handler_a.state.read();
-        let state_b = handler_b.state.read();
-
-        assert!(state_a.contains_key("node_a"));
-        assert!(state_a.contains_key("node_b"));
-        assert!(state_b.contains_key("node_a"));
-        assert!(state_b.contains_key("node_b"));
-
-        log::info!("State A: {:?}", print_cluster_state(&handler_a));
-        log::info!("State B: {:?}", print_cluster_state(&handler_b));
-    } // Drop locks before shutdown
+    let state_a = handler_a.state.read();
+    assert!(state_a.contains_key("node_a"));
+    assert!(state_a.contains_key("node_b"));
+    drop(state_a);
 
     handler_a.shutdown();
     handler_b.shutdown();
@@ -365,49 +322,66 @@ async fn test_two_node_data_synchronization() {
     init_test_logging();
     log::info!("Starting test_two_node_data_synchronization");
 
-    let addr_a = get_node_addr().await;
-    let handler_a = crate::mesh_run!("sync_node_a", addr_a, None);
+    let (listener_a, addr_a) = bind_node().await;
+    let handler_a = crate::mesh_run!("sync_node_a", listener_a, addr_a, None);
 
-    let addr_b = get_node_addr().await;
-    let handler_b = crate::mesh_run!("sync_node_b", addr_b, Some(addr_a));
+    let (listener_b, addr_b) = bind_node().await;
+    let handler_b = crate::mesh_run!("sync_node_b", listener_b, addr_b, Some(addr_a));
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait for cluster formation
+    wait_for(
+        || handler_a.state.read().len() == 2 && handler_b.state.read().len() == 2,
+        Duration::from_secs(15),
+        "both nodes see each other",
+    )
+    .await;
 
     // Write data on node A
     handler_a
         .write_data("shared_key".into(), "shared_value".into())
         .unwrap();
 
-    // Wait for automatic sync via sync_stream
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Poll until data syncs to B via incremental sync stream
+    wait_for(
+        || {
+            handler_b
+                .stores
+                .app
+                .get("shared_key")
+                .is_some_and(|v| v.value == b"shared_value")
+        },
+        Duration::from_secs(15),
+        "shared_key synced to node B",
+    )
+    .await;
 
-    // Verify data exists on both nodes
-    let value_a = handler_a.stores.app.get("shared_key");
-    let value_b = handler_b.stores.app.get("shared_key");
+    // Allow the sync cycle to settle before writing a second update.
+    // The incremental collector runs on a 1s interval and the mark_sent
+    // bookkeeping must complete before the next version can be detected.
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    log::info!("Value on A: {:?}", value_a);
-    log::info!("Value on B: {:?}", value_b);
-
-    // Update data on node A to see if it syncs again
+    // Update data on node A
     handler_a
         .write_data("shared_key".into(), "shared_value2".into())
         .unwrap();
 
-    // Wait for the second update to be synced (increased wait time)
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Poll until updated value syncs to B
+    wait_for(
+        || {
+            handler_b
+                .stores
+                .app
+                .get("shared_key")
+                .is_some_and(|v| v.value == b"shared_value2")
+        },
+        Duration::from_secs(30),
+        "updated shared_key synced to node B",
+    )
+    .await;
 
-    // Verify data exists on both nodes
-    let value_a = handler_a.stores.app.get("shared_key");
-    let value_b = handler_b.stores.app.get("shared_key");
-
-    log::info!("Value on A: {:?}", value_a);
-    log::info!("Value on B: {:?}", value_b);
-
-    assert!(value_a.is_some());
-    assert!(value_b.is_some());
-
-    // Verify values are the same
-    assert_eq!(value_a.unwrap().value, value_b.unwrap().value);
+    let value_a = handler_a.stores.app.get("shared_key").unwrap();
+    let value_b = handler_b.stores.app.get("shared_key").unwrap();
+    assert_eq!(value_a.value, value_b.value);
 
     handler_a.shutdown();
     handler_b.shutdown();
@@ -419,35 +393,46 @@ async fn test_two_node_heartbeat_monitoring() {
     init_test_logging();
     log::info!("Starting test_two_node_heartbeat_monitoring");
 
-    let addr_a = get_node_addr().await;
-    let handler_a = crate::mesh_run!("heartbeat_a", addr_a, None);
+    let (listener_a, addr_a) = bind_node().await;
+    let handler_a = crate::mesh_run!("heartbeat_a", listener_a, addr_a, None);
 
-    let addr_b = get_node_addr().await;
-    let handler_b = crate::mesh_run!("heartbeat_b", addr_b, Some(addr_a));
+    let (listener_b, addr_b) = bind_node().await;
+    let handler_b = crate::mesh_run!("heartbeat_b", listener_b, addr_b, Some(addr_a));
 
-    // Wait for cluster formation sync
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // Both nodes should be alive
-    {
-        let state_a = handler_a.state.read();
-        let node_b_status = state_a.get("heartbeat_b").map(|n| n.status);
-        assert_eq!(node_b_status, Some(NodeStatus::Alive as i32));
-    }
+    // Wait for cluster formation
+    wait_for(
+        || {
+            handler_a
+                .state
+                .read()
+                .get("heartbeat_b")
+                .is_some_and(|n| n.status == NodeStatus::Alive as i32)
+        },
+        Duration::from_secs(15),
+        "node A sees heartbeat_b as Alive",
+    )
+    .await;
 
     // Shutdown node B abruptly
     handler_b.shutdown();
 
-    // Wait for detection
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Poll until A detects B as no longer Alive
+    wait_for(
+        || {
+            handler_a
+                .state
+                .read()
+                .get("heartbeat_b")
+                .is_some_and(|n| n.status != NodeStatus::Alive as i32)
+        },
+        Duration::from_secs(30),
+        "node A detects heartbeat_b as not Alive",
+    )
+    .await;
 
-    // Node A should detect B as suspected or down
-    let state_a = handler_a.state.read();
-    let node_b_status = state_a.get("heartbeat_b").map(|n| n.status);
-    log::info!("Node B status after shutdown: {:?}", node_b_status);
+    let status = handler_a.state.read().get("heartbeat_b").map(|n| n.status);
+    log::info!("Node B status after shutdown: {:?}", status);
 
-    // Status should have changed from Alive
-    assert_ne!(node_b_status, Some(NodeStatus::Alive as i32));
     handler_a.shutdown();
     log::info!("Two-node heartbeat monitoring test completed");
 }
@@ -459,49 +444,35 @@ async fn test_two_node_heartbeat_monitoring() {
 //
 
 #[tokio::test]
-#[ignore = "Long-running test with complex state convergence"]
 async fn test_three_node_cluster_formation() {
     init_test_logging();
     log::info!("Starting test_three_node_cluster_formation");
 
-    // Start node A
-    let addr_a = get_node_addr().await;
-    let handler_a = crate::mesh_run!("cluster_a", addr_a, None);
+    let (listener_a, addr_a) = bind_node().await;
+    let handler_a = crate::mesh_run!("cluster_a", listener_a, addr_a, None);
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (listener_b, addr_b) = bind_node().await;
+    let handler_b = crate::mesh_run!("cluster_b", listener_b, addr_b, Some(addr_a));
 
-    // Start node B joining through A
-    let addr_b = get_node_addr().await;
-    let handler_b = crate::mesh_run!("cluster_b", addr_b, Some(addr_a));
+    let (listener_c, addr_c) = bind_node().await;
+    let handler_c = crate::mesh_run!("cluster_c", listener_c, addr_c, Some(addr_a));
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    wait_for(
+        || {
+            handler_a.state.read().len() == 3
+                && handler_b.state.read().len() == 3
+                && handler_c.state.read().len() == 3
+        },
+        Duration::from_secs(30),
+        "all 3 nodes see each other",
+    )
+    .await;
 
-    // Start node C joining through A
-    let addr_c = get_node_addr().await;
-    let handler_c = crate::mesh_run!("cluster_c", addr_c, Some(addr_a));
-
-    // Wait for full cluster formation
-    tokio::time::sleep(Duration::from_secs(6)).await;
-
-    // Verify all nodes see each other
-    {
-        let state_a = handler_a.state.read();
-        let state_b = handler_b.state.read();
-        let state_c = handler_c.state.read();
-
-        log::info!("State A: {}", print_cluster_state(&handler_a));
-        log::info!("State B: {}", print_cluster_state(&handler_b));
-        log::info!("State C: {}", print_cluster_state(&handler_c));
-
-        // All nodes should see all 3 nodes
-        assert_eq!(state_a.len(), 3);
-        assert_eq!(state_b.len(), 3);
-        assert_eq!(state_c.len(), 3);
-
-        assert!(state_a.contains_key("cluster_a"));
-        assert!(state_a.contains_key("cluster_b"));
-        assert!(state_a.contains_key("cluster_c"));
-    } // Drop locks before shutdown
+    let state_a = handler_a.state.read();
+    assert!(state_a.contains_key("cluster_a"));
+    assert!(state_a.contains_key("cluster_b"));
+    assert!(state_a.contains_key("cluster_c"));
+    drop(state_a);
 
     handler_a.shutdown();
     handler_b.shutdown();
@@ -510,73 +481,80 @@ async fn test_three_node_cluster_formation() {
 }
 
 #[tokio::test]
-#[ignore = "Long-running test with complex state convergence"]
 async fn test_multi_node_data_propagation() {
     init_test_logging();
     log::info!("Starting test_multi_node_data_propagation");
 
-    let addr_a = get_node_addr().await;
-    let handler_a = crate::mesh_run!("prop_a", addr_a, None);
+    let (listener_a, addr_a) = bind_node().await;
+    let handler_a = crate::mesh_run!("prop_a", listener_a, addr_a, None);
 
-    let addr_b = get_node_addr().await;
-    let handler_b = crate::mesh_run!("prop_b", addr_b, Some(addr_a));
+    let (listener_b, addr_b) = bind_node().await;
+    let handler_b = crate::mesh_run!("prop_b", listener_b, addr_b, Some(addr_a));
 
-    let addr_c = get_node_addr().await;
-    let handler_c = crate::mesh_run!("prop_c", addr_c, Some(addr_a));
+    let (listener_c, addr_c) = bind_node().await;
+    let handler_c = crate::mesh_run!("prop_c", listener_c, addr_c, Some(addr_a));
 
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Wait for 3-node cluster
+    wait_for(
+        || {
+            handler_a.state.read().len() == 3
+                && handler_b.state.read().len() == 3
+                && handler_c.state.read().len() == 3
+        },
+        Duration::from_secs(30),
+        "all 3 nodes see each other",
+    )
+    .await;
 
     // Write data on node A
     handler_a
         .write_data("propagated_key".into(), "propagated_value".into())
         .unwrap();
 
-    // Wait for automatic sync via sync_stream
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Poll until data reaches B and C
+    wait_for(
+        || {
+            handler_b.stores.app.get("propagated_key").is_some()
+                && handler_c.stores.app.get("propagated_key").is_some()
+        },
+        Duration::from_secs(30),
+        "propagated_key synced to B and C",
+    )
+    .await;
 
-    // Verify data reached all nodes
-    let value_a = handler_a.stores.app.get("propagated_key");
-    let value_b = handler_b.stores.app.get("propagated_key");
-    let value_c = handler_c.stores.app.get("propagated_key");
+    let val_a = handler_a.stores.app.get("propagated_key").unwrap().value;
+    assert_eq!(
+        val_a,
+        handler_b.stores.app.get("propagated_key").unwrap().value
+    );
+    assert_eq!(
+        val_a,
+        handler_c.stores.app.get("propagated_key").unwrap().value
+    );
 
-    log::info!("Value on A: {:?}", value_a);
-    log::info!("Value on B: {:?}", value_b);
-    log::info!("Value on C: {:?}", value_c);
-
-    assert!(value_a.is_some());
-    assert!(value_b.is_some());
-    assert!(value_c.is_some());
-
-    // Verify all values are the same
-    let val_a = value_a.unwrap().value;
-    assert_eq!(val_a, value_b.unwrap().value);
-    assert_eq!(val_a, value_c.unwrap().value);
-
-    // Write data on node B to verify continued propagation
+    // Write updated data on node B
     handler_b
-        .write_data("propagated_key".into(), "propagated_value".into())
+        .write_data("propagated_key".into(), "propagated_value2".into())
         .unwrap();
 
-    // Wait for automatic sync via sync_stream
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    // Verify data reached all nodes
-    let value_a = handler_a.stores.app.get("propagated_key");
-    let value_b = handler_b.stores.app.get("propagated_key");
-    let value_c = handler_c.stores.app.get("propagated_key");
-
-    log::info!("Value on A: {:?}", value_a);
-    log::info!("Value on B: {:?}", value_b);
-    log::info!("Value on C: {:?}", value_c);
-
-    assert!(value_a.is_some());
-    assert!(value_b.is_some());
-    assert!(value_c.is_some());
-
-    // Verify all values are the same
-    let val_a = value_a.unwrap().value;
-    assert_eq!(val_a, value_b.unwrap().value);
-    assert_eq!(val_a, value_c.unwrap().value);
+    // Poll until updated value reaches A and C
+    wait_for(
+        || {
+            handler_a
+                .stores
+                .app
+                .get("propagated_key")
+                .is_some_and(|v| v.value == b"propagated_value2")
+                && handler_c
+                    .stores
+                    .app
+                    .get("propagated_key")
+                    .is_some_and(|v| v.value == b"propagated_value2")
+        },
+        Duration::from_secs(30),
+        "updated propagated_key synced to A and C",
+    )
+    .await;
 
     handler_a.shutdown();
     handler_b.shutdown();
@@ -585,79 +563,104 @@ async fn test_multi_node_data_propagation() {
 }
 
 #[tokio::test]
-#[ignore = "Long-running test with complex state convergence"]
+#[ignore = "SWIM failure detection for hard-shutdown nodes needs many gossip rounds; flaky under parallel CI load"]
 async fn test_five_node_cluster_with_failure() {
     init_test_logging();
     log::info!("Starting test_five_node_cluster_with_failure");
 
-    // Setup initial cluster with nodes A and B
-    let addr_a = get_node_addr().await;
-    let handler_a = crate::mesh_run!("multi_a", addr_a, None);
+    let (listener_a, addr_a) = bind_node().await;
+    let handler_a = crate::mesh_run!("multi_a", listener_a, addr_a, None);
 
-    let addr_b = get_node_addr().await;
-    let handler_b = crate::mesh_run!("multi_b", addr_b, Some(addr_a));
+    let (listener_b, addr_b) = bind_node().await;
+    let handler_b = crate::mesh_run!("multi_b", listener_b, addr_b, Some(addr_a));
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait for A-B cluster
+    wait_for(
+        || handler_a.state.read().len() == 2,
+        Duration::from_secs(15),
+        "A-B cluster formed",
+    )
+    .await;
 
-    // Write some data
     handler_a
         .write_data("test_data".into(), "initial_value".into())
         .unwrap();
-    log::info!("Initial data written");
 
-    // Add nodes C and D
-    let addr_c = get_node_addr().await;
-    let handler_c = crate::mesh_run!("multi_c", addr_c, Some(addr_a));
+    // Add C and D
+    let (listener_c, addr_c) = bind_node().await;
+    let handler_c = crate::mesh_run!("multi_c", listener_c, addr_c, Some(addr_a));
 
-    let addr_d = get_node_addr().await;
-    let handler_d = crate::mesh_run!("multi_d", addr_d, Some(addr_c));
+    let (listener_d, addr_d) = bind_node().await;
+    let handler_d = crate::mesh_run!("multi_d", listener_d, addr_d, Some(addr_c));
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    log::info!("Nodes C and D joined");
+    wait_for(
+        || handler_a.state.read().len() == 4,
+        Duration::from_secs(30),
+        "4-node cluster formed",
+    )
+    .await;
 
-    // Add node E and then shut it down
+    // Add E, wait for it to join, then kill it
     {
-        let addr_e = get_node_addr().await;
-        let handler_e = crate::mesh_run!("multi_e", addr_e, Some(addr_d));
+        let (listener_e, addr_e) = bind_node().await;
+        let handler_e = crate::mesh_run!("multi_e", listener_e, addr_e, Some(addr_d));
 
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        log::info!("Node E joined, state: {}", print_cluster_state(&handler_e));
+        wait_for(
+            || handler_a.state.read().len() == 5,
+            Duration::from_secs(30),
+            "5-node cluster formed",
+        )
+        .await;
 
         handler_e.shutdown();
         log::info!("Node E shutdown");
     }
 
-    // Gracefully shutdown node D
+    // Gracefully shutdown D
     handler_d.graceful_shutdown().await.unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
     log::info!("Node D gracefully shutdown");
 
-    // Wait for state convergence
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    // Wait for D to be Leaving
+    wait_for(
+        || {
+            handler_a
+                .state
+                .read()
+                .get("multi_d")
+                .is_some_and(|n| n.status == NodeStatus::Leaving as i32)
+        },
+        Duration::from_secs(30),
+        "node D detected as Leaving",
+    )
+    .await;
 
-    log::info!("Final state A: {}", print_cluster_state(&handler_a));
-    log::info!("Final state B: {}", print_cluster_state(&handler_b));
-    log::info!("Final state C: {}", print_cluster_state(&handler_c));
+    // Wait for E to be detected as not Alive (Suspected or Down).
+    // SWIM failure detection requires multiple gossip rounds, so allow ample time
+    // especially when other tests are running in parallel.
+    wait_for(
+        || {
+            handler_a
+                .state
+                .read()
+                .get("multi_e")
+                .is_some_and(|n| n.status != NodeStatus::Alive as i32)
+        },
+        Duration::from_secs(60),
+        "node E detected as not Alive",
+    )
+    .await;
 
-    // Verify remaining nodes have consistent view
     let state_a = handler_a.state.read();
-    let _state_b = handler_b.state.read();
-    let _state_c = handler_c.state.read();
-
-    // All remaining nodes should see nodes A, B, C
     assert!(state_a.contains_key("multi_a"));
     assert!(state_a.contains_key("multi_b"));
     assert!(state_a.contains_key("multi_c"));
-
-    // D should be in Leaving state
     assert_eq!(
         state_a.get("multi_d").map(|n| n.status),
         Some(NodeStatus::Leaving as i32)
     );
-
-    // E should eventually be Down
     let e_status = state_a.get("multi_e").map(|n| n.status);
     log::info!("Node E final status: {:?}", e_status);
+    drop(state_a);
 
     handler_a.shutdown();
     handler_b.shutdown();
@@ -670,49 +673,31 @@ async fn test_cluster_formation_different_join_patterns() {
     init_test_logging();
     log::info!("Starting test_cluster_formation_different_join_patterns");
 
-    // Create initial node
-    let addr_a = get_node_addr().await;
-    let handler_a = crate::mesh_run!("pattern_a", addr_a, None);
+    let (listener_a, addr_a) = bind_node().await;
+    let handler_a = crate::mesh_run!("pattern_a", listener_a, addr_a, None);
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (listener_b, addr_b) = bind_node().await;
+    let handler_b = crate::mesh_run!("pattern_b", listener_b, addr_b, Some(addr_a));
 
-    // Node B joins through A
-    let addr_b = get_node_addr().await;
-    let handler_b = crate::mesh_run!("pattern_b", addr_b, Some(addr_a));
+    // Node C joins through B (chain topology)
+    let (listener_c, addr_c) = bind_node().await;
+    let handler_c = crate::mesh_run!("pattern_c", listener_c, addr_c, Some(addr_b));
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Node D joins through A (star topology)
+    let (listener_d, addr_d) = bind_node().await;
+    let handler_d = crate::mesh_run!("pattern_d", listener_d, addr_d, Some(addr_a));
 
-    // Node C joins through B (chain)
-    let addr_c = get_node_addr().await;
-    let handler_c = crate::mesh_run!("pattern_c", addr_c, Some(addr_b));
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    // Node D joins through A (star pattern)
-    let addr_d = get_node_addr().await;
-    let handler_d = crate::mesh_run!("pattern_d", addr_d, Some(addr_a));
-
-    // Wait for convergence - need more time for gossip to propagate through chain topology
-    // With 4 nodes in different join patterns (chain + star), state needs multiple rounds to converge
-    tokio::time::sleep(Duration::from_secs(8)).await;
-
-    // Verify all nodes see all 4 nodes regardless of join pattern
-    {
-        let state_a = handler_a.state.read();
-        let state_b = handler_b.state.read();
-        let state_c = handler_c.state.read();
-        let state_d = handler_d.state.read();
-
-        log::info!("State A: {}", print_cluster_state(&handler_a));
-        log::info!("State B: {}", print_cluster_state(&handler_b));
-        log::info!("State C: {}", print_cluster_state(&handler_c));
-        log::info!("State D: {}", print_cluster_state(&handler_d));
-
-        assert_eq!(state_a.len(), 4);
-        assert_eq!(state_b.len(), 4);
-        assert_eq!(state_c.len(), 4);
-        assert_eq!(state_d.len(), 4);
-    } // Drop locks before shutdown
+    wait_for(
+        || {
+            handler_a.state.read().len() == 4
+                && handler_b.state.read().len() == 4
+                && handler_c.state.read().len() == 4
+                && handler_d.state.read().len() == 4
+        },
+        Duration::from_secs(30),
+        "all 4 nodes see each other (chain + star topology)",
+    )
+    .await;
 
     handler_a.shutdown();
     handler_b.shutdown();

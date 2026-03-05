@@ -171,6 +171,11 @@ impl<D: WorkflowData> StepDefinition<D> {
         self.run_if = Some(Arc::new(condition));
         self
     }
+
+    /// Iterator over all dependencies (both `depends_on` and `depends_on_any`)
+    pub fn all_dependencies(&self) -> impl Iterator<Item = &StepId> {
+        self.depends_on.iter().chain(self.depends_on_any.iter())
+    }
 }
 
 /// Complete workflow definition
@@ -252,15 +257,7 @@ impl<D: WorkflowData> WorkflowDefinition<D> {
 
         // Check all dependencies exist (both depends_on and depends_on_any)
         for step in &self.steps {
-            for dep in &step.depends_on {
-                if !steps_map.contains_key(dep) {
-                    return Err(ValidationError::MissingDependency {
-                        step: step.id.clone(),
-                        dependency: dep.clone(),
-                    });
-                }
-            }
-            for dep in &step.depends_on_any {
+            for dep in step.all_dependencies() {
                 if !steps_map.contains_key(dep) {
                     return Err(ValidationError::MissingDependency {
                         step: step.id.clone(),
@@ -286,13 +283,7 @@ impl<D: WorkflowData> WorkflowDefinition<D> {
         // Include both depends_on and depends_on_any
         self.reverse_deps.clear();
         for (idx, step) in self.steps.iter().enumerate() {
-            for dep_id in &step.depends_on {
-                self.reverse_deps
-                    .entry(dep_id.clone())
-                    .or_default()
-                    .push(idx);
-            }
-            for dep_id in &step.depends_on_any {
+            for dep_id in step.all_dependencies() {
                 self.reverse_deps
                     .entry(dep_id.clone())
                     .or_default()
@@ -333,12 +324,7 @@ impl<D: WorkflowData> WorkflowDefinition<D> {
         // O(1) lookup instead of linear search
         // Check both depends_on and depends_on_any for cycles
         if let Some(step) = steps_map.get(step_id) {
-            for dep in &step.depends_on {
-                if Self::has_cycle(dep, steps_map, visited, rec_stack) {
-                    return true;
-                }
-            }
-            for dep in &step.depends_on_any {
+            for dep in step.all_dependencies() {
                 if Self::has_cycle(dep, steps_map, visited, rec_stack) {
                     return true;
                 }

@@ -91,7 +91,7 @@ impl IncrementalUpdateCollector {
     fn collect_serializable_updates<S>(
         &self,
         all_items: std::collections::BTreeMap<String, S>,
-        last_sent_map: &mut HashMap<String, u64>,
+        last_sent_map: &HashMap<String, u64>,
         store_name: &str,
         get_id: impl Fn(&S) -> String,
     ) -> Vec<StateUpdate>
@@ -129,14 +129,14 @@ impl IncrementalUpdateCollector {
     /// Collect incremental updates for a specific store type
     pub fn collect_updates_for_store(&self, store_type: StoreType) -> Vec<StateUpdate> {
         let mut updates = Vec::new();
-        let mut last_sent = self.last_sent.write();
+        let last_sent = self.last_sent.read();
 
         match store_type {
             StoreType::Worker => {
                 let all_workers = self.stores.worker.all();
                 updates = self.collect_serializable_updates(
                     all_workers,
-                    &mut last_sent.worker,
+                    &last_sent.worker,
                     "worker",
                     |state: &WorkerState| state.worker_id.clone(),
                 );
@@ -145,7 +145,7 @@ impl IncrementalUpdateCollector {
                 let all_policies = self.stores.policy.all();
                 updates = self.collect_serializable_updates(
                     all_policies,
-                    &mut last_sent.policy,
+                    &last_sent.policy,
                     "policy",
                     |state: &PolicyState| state.model_id.clone(),
                 );
@@ -154,7 +154,7 @@ impl IncrementalUpdateCollector {
                 let all_apps = self.stores.app.all();
                 updates = self.collect_serializable_updates(
                     all_apps,
-                    &mut last_sent.app,
+                    &last_sent.app,
                     "app",
                     |state: &AppState| state.key.clone(),
                 );
@@ -163,7 +163,7 @@ impl IncrementalUpdateCollector {
                 let all_members = self.stores.membership.all();
                 updates = self.collect_serializable_updates(
                     all_members,
-                    &mut last_sent.membership,
+                    &last_sent.membership,
                     "membership",
                     |state: &MembershipState| state.name.clone(),
                 );
@@ -288,7 +288,7 @@ mod tests {
             load: 0.5,
             version: 1,
         };
-        let _ = stores.worker.insert(key, worker_state, "node1".to_string());
+        let _ = stores.worker.insert(key, worker_state);
 
         // Collect updates
         let updates = collector.collect_updates_for_store(StoreType::Worker);
@@ -316,9 +316,7 @@ mod tests {
             load: 0.8,
             version: 2,
         };
-        let _ = stores
-            .worker
-            .insert(key2, worker_state2, "node1".to_string());
+        let _ = stores.worker.insert(key2, worker_state2);
 
         // Should collect new version
         let updates3 = collector.collect_updates_for_store(StoreType::Worker);
@@ -338,7 +336,7 @@ mod tests {
             config: b"config_data".to_vec(),
             version: 1,
         };
-        let _ = stores.policy.insert(key, policy_state, "node1".to_string());
+        let _ = stores.policy.insert(key, policy_state);
 
         let updates = collector.collect_updates_for_store(StoreType::Policy);
         assert_eq!(updates.len(), 1);
@@ -356,7 +354,7 @@ mod tests {
             value: b"app_value".to_vec(),
             version: 1,
         };
-        let _ = stores.app.insert(key, app_state, "node1".to_string());
+        let _ = stores.app.insert(key, app_state);
 
         let updates = collector.collect_updates_for_store(StoreType::App);
         assert_eq!(updates.len(), 1);
@@ -376,9 +374,7 @@ mod tests {
             version: 1,
             metadata: std::collections::BTreeMap::new(),
         };
-        let _ = stores
-            .membership
-            .insert(key, membership_state, "node1".to_string());
+        let _ = stores.membership.insert(key, membership_state);
 
         let updates = collector.collect_updates_for_store(StoreType::Membership);
         assert_eq!(updates.len(), 1);
@@ -402,7 +398,6 @@ mod tests {
                 load: 0.5,
                 version: 1,
             },
-            "node1".to_string(),
         );
 
         let policy_key = "policy:model1".to_string();
@@ -414,7 +409,6 @@ mod tests {
                 config: vec![],
                 version: 1,
             },
-            "node1".to_string(),
         );
 
         let all_updates = collector.collect_all_updates();
@@ -438,7 +432,6 @@ mod tests {
                 load: 0.5,
                 version: 1,
             },
-            "node1".to_string(),
         );
 
         let updates = collector.collect_updates_for_store(StoreType::Worker);
@@ -503,7 +496,6 @@ mod tests {
                 load: 0.5,
                 version: 1,
             },
-            "node1".to_string(),
         );
 
         let updates1 = collector.collect_updates_for_store(StoreType::Worker);
@@ -522,7 +514,6 @@ mod tests {
                 load: 0.8,
                 version: 2,
             },
-            "node1".to_string(),
         );
 
         let updates2 = collector.collect_updates_for_store(StoreType::Worker);
@@ -541,7 +532,6 @@ mod tests {
                 load: 0.3,
                 version: 3,
             },
-            "node1".to_string(),
         );
 
         let updates3 = collector.collect_updates_for_store(StoreType::Worker);

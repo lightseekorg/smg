@@ -9,7 +9,7 @@ use tracing::debug;
 use super::{
     service::gossip::NodeStatus,
     stores::{
-        tree_state_key, PolicyState, RateLimitConfig, StateStores, WorkerState,
+        policy_key, tree_state_key, PolicyState, RateLimitConfig, StateStores, WorkerState,
         GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
     },
     tree_ops::{TreeOperation, TreeState},
@@ -81,7 +81,7 @@ impl MeshSyncManager {
 
     /// Sync policy state to mesh stores
     pub fn sync_policy_state(&self, model_id: String, policy_type: String, config: Vec<u8>) {
-        let key = format!("policy:{model_id}");
+        let key = policy_key(&model_id);
         let model_id_for_update = model_id.clone();
 
         let updated_state = self.stores.policy.update(key, move |current| {
@@ -114,7 +114,7 @@ impl MeshSyncManager {
 
     /// Remove policy state from mesh stores
     pub fn remove_policy_state(&self, model_id: &str) {
-        let key = format!("policy:{model_id}");
+        let key = policy_key(model_id);
         self.stores.policy.remove(&key);
         debug!("Removed policy state from mesh model={}", model_id);
     }
@@ -131,7 +131,7 @@ impl MeshSyncManager {
 
     /// Get policy state from mesh stores
     pub fn get_policy_state(&self, model_id: &str) -> Option<PolicyState> {
-        let key = format!("policy:{model_id}");
+        let key = policy_key(model_id);
         self.stores.policy.get(&key)
     }
 
@@ -181,7 +181,7 @@ impl MeshSyncManager {
     /// Apply policy state update from remote node
     /// The actor should be extracted from the state update context (e.g., from StateUpdate message)
     pub fn apply_remote_policy_state(&self, state: PolicyState, actor: Option<String>) {
-        let key = format!("policy:{}", state.model_id);
+        let key = policy_key(&state.model_id);
         let actor = actor.unwrap_or_else(|| "remote".to_string());
         let mut current_version = 0;
 
@@ -420,8 +420,7 @@ impl MeshSyncManager {
             version: new_version,
         };
 
-        let actor = self.self_name.clone();
-        if let Err(err) = self.stores.policy.insert(key, state, actor) {
+        if let Err(err) = self.stores.policy.insert(key, state) {
             return Err(format!("Failed to persist tree state: {err}"));
         }
         debug!(
@@ -938,7 +937,6 @@ mod tests {
                 version: 1,
                 metadata: BTreeMap::new(),
             },
-            "node1".to_string(),
         );
 
         let _ = manager.stores.membership.insert(
@@ -950,7 +948,6 @@ mod tests {
                 version: 1,
                 metadata: BTreeMap::new(),
             },
-            "node1".to_string(),
         );
 
         manager.update_rate_limit_membership();
@@ -974,7 +971,6 @@ mod tests {
                 version: 1,
                 metadata: BTreeMap::new(),
             },
-            "node1".to_string(),
         );
 
         let _ = manager.stores.membership.insert(
@@ -986,7 +982,6 @@ mod tests {
                 version: 1,
                 metadata: BTreeMap::new(),
             },
-            "node1".to_string(),
         );
 
         manager.update_rate_limit_membership();
@@ -1056,7 +1051,6 @@ mod tests {
                 value: serialized,
                 version: 1,
             },
-            "node1".to_string(),
         );
 
         let retrieved = manager.get_global_rate_limit_config().unwrap();
@@ -1079,7 +1073,6 @@ mod tests {
                 value: serialized,
                 version: 1,
             },
-            "node1".to_string(),
         );
 
         // Setup membership

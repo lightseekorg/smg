@@ -234,11 +234,11 @@ fn test_operation_log_json_serialization() {
 
     let log = map.get_operation_log();
 
-    // Serialize to JSON
-    let json = log.to_json().unwrap();
+    // Serialize to bytes
+    let bytes = log.to_bytes().unwrap();
 
     // Deserialize
-    let deserialized_log = OperationLog::from_json(&json).unwrap();
+    let deserialized_log = OperationLog::from_bytes(&bytes).unwrap();
     assert_eq!(log.len(), deserialized_log.len());
 }
 

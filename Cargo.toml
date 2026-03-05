@@ -50,6 +50,8 @@ wasmtime = { version = "41.0", features = ["component-model", "async"] }
 wasmtime-wasi = "41.0"
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+webpki-roots = "1.0"
+multer = "3"
 scopeguard = "1.2"
 bitflags = "2.10.0"
 schemars = "0.8"

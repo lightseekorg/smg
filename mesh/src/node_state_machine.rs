@@ -384,7 +384,6 @@ mod tests {
                 version: 1,
                 metadata: Default::default(),
             },
-            "test".to_string(),
         );
 
         let _ = stores.worker.insert(
@@ -397,7 +396,6 @@ mod tests {
                 load: 0.5,
                 version: 1,
             },
-            "test".to_string(),
         );
 
         let _ = stores.policy.insert(
@@ -408,7 +406,6 @@ mod tests {
                 config: vec![],
                 version: 1,
             },
-            "test".to_string(),
         );
 
         // Now should not need snapshot
@@ -482,7 +479,6 @@ mod tests {
                 value: vec![1, 2, 3],
                 version: 1,
             },
-            "test".to_string(),
         );
 
         // Record update with changed state
@@ -533,7 +529,6 @@ mod tests {
                 value: vec![],
                 version: 1,
             },
-            "test".to_string(),
         );
 
         // Hash should change

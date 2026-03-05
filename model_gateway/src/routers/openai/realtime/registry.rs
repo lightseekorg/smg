@@ -1,16 +1,13 @@
 //! In-memory session and call registry for Realtime API connections.
 
 use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Connection state for a realtime session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,21 +42,14 @@ pub struct CallEntry {
     pub cancel_token: CancellationToken,
 }
 
-const DEFAULT_MAX_SESSIONS: usize = 10_000;
-const DEFAULT_MAX_CALLS: usize = 10_000;
-
 /// DashMap-backed registry for realtime sessions and WebRTC calls.
 ///
-/// Uses atomic counters for capacity enforcement to avoid TOCTOU races
-/// between the length check and the DashMap insert.
+/// No fixed capacity — DashMap grows dynamically. The reaper handles
+/// cleanup of stale entries.
 #[derive(Debug)]
 pub struct RealtimeRegistry {
     sessions: DashMap<String, SessionEntry>,
     calls: DashMap<String, CallEntry>,
-    session_count: AtomicUsize,
-    call_count: AtomicUsize,
-    max_sessions: usize,
-    max_calls: usize,
 }
 
 impl RealtimeRegistry {
@@ -67,21 +57,6 @@ impl RealtimeRegistry {
         Self {
             sessions: DashMap::new(),
             calls: DashMap::new(),
-            session_count: AtomicUsize::new(0),
-            call_count: AtomicUsize::new(0),
-            max_sessions: DEFAULT_MAX_SESSIONS,
-            max_calls: DEFAULT_MAX_CALLS,
-        }
-    }
-
-    pub fn with_capacity(max_sessions: usize, max_calls: usize) -> Self {
-        Self {
-            sessions: DashMap::new(),
-            calls: DashMap::new(),
-            session_count: AtomicUsize::new(0),
-            call_count: AtomicUsize::new(0),
-            max_sessions,
-            max_calls,
         }
     }
 
@@ -92,14 +67,7 @@ impl RealtimeRegistry {
         session_id: String,
         model: String,
         worker_url: String,
-    ) -> Option<SessionEntry> {
-        if !self.try_reserve_session() {
-            warn!(
-                max = self.max_sessions,
-                "Session registry at capacity, rejecting registration"
-            );
-            return None;
-        }
+    ) -> SessionEntry {
         let entry = SessionEntry {
             session_id: session_id.clone(),
             model,
@@ -109,12 +77,9 @@ impl RealtimeRegistry {
             cancel_token: CancellationToken::new(),
         };
         if let Some(old) = self.sessions.insert(session_id, entry.clone()) {
-            // Replaced an existing entry — cancel its token so awaiting tasks
-            // are notified, and undo the extra reservation.
             old.cancel_token.cancel();
-            self.session_count.fetch_sub(1, Ordering::Relaxed);
         }
-        Some(entry)
+        entry
     }
 
     pub fn set_session_state(&self, session_id: &str, state: ConnectionState) {
@@ -130,26 +95,13 @@ impl RealtimeRegistry {
     pub fn remove_session(&self, session_id: &str) -> Option<SessionEntry> {
         self.sessions.remove(session_id).map(|(_, e)| {
             e.cancel_token.cancel();
-            self.session_count.fetch_sub(1, Ordering::Relaxed);
             e
         })
     }
 
     // ---- Call methods ----
 
-    pub fn register_call(
-        &self,
-        call_id: String,
-        model: String,
-        worker_url: String,
-    ) -> Option<CallEntry> {
-        if !self.try_reserve_call() {
-            warn!(
-                max = self.max_calls,
-                "Call registry at capacity, rejecting registration"
-            );
-            return None;
-        }
+    pub fn register_call(&self, call_id: String, model: String, worker_url: String) -> CallEntry {
         let entry = CallEntry {
             call_id: call_id.clone(),
             model,
@@ -159,12 +111,9 @@ impl RealtimeRegistry {
             cancel_token: CancellationToken::new(),
         };
         if let Some(old) = self.calls.insert(call_id, entry.clone()) {
-            // Replaced an existing entry — cancel its token so awaiting tasks
-            // are notified, and undo the extra reservation.
             old.cancel_token.cancel();
-            self.call_count.fetch_sub(1, Ordering::Relaxed);
         }
-        Some(entry)
+        entry
     }
 
     pub fn get_call(&self, call_id: &str) -> Option<CallEntry> {
@@ -180,52 +129,23 @@ impl RealtimeRegistry {
     pub fn remove_call(&self, call_id: &str) -> Option<CallEntry> {
         self.calls.remove(call_id).map(|(_, e)| {
             e.cancel_token.cancel();
-            self.call_count.fetch_sub(1, Ordering::Relaxed);
             e
         })
-    }
-
-    // ---- Atomic reservation helpers ----
-
-    /// Atomically reserve a session slot. Returns `true` if a slot was
-    /// successfully claimed, `false` if at capacity.
-    fn try_reserve_session(&self) -> bool {
-        self.try_reserve(&self.session_count, self.max_sessions)
-    }
-
-    /// Atomically reserve a call slot.
-    fn try_reserve_call(&self) -> bool {
-        self.try_reserve(&self.call_count, self.max_calls)
-    }
-
-    /// CAS loop: increment `counter` only if it is below `max`.
-    #[expect(
-        clippy::unused_self,
-        reason = "method for API consistency with other registry methods"
-    )]
-    fn try_reserve(&self, counter: &AtomicUsize, max: usize) -> bool {
-        loop {
-            let current = counter.load(Ordering::Relaxed);
-            if current >= max {
-                return false;
-            }
-            if counter
-                .compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                return true;
-            }
-        }
     }
 
     // ---- Reaper ----
 
     /// Start a background task that evicts stale entries.
     ///
+    /// `pending_max_age` applies to `Pending` sessions (upgrade not completed).
+    /// `max_age` applies to `Disconnected` sessions (connection closed but not
+    /// yet removed). Active (`Connected`) sessions are never reaped.
+    ///
     /// Returns a `CancellationToken` that stops the reaper when cancelled.
     pub fn start_reaper(
         self: &Arc<Self>,
         max_age: Duration,
+        pending_max_age: Duration,
         interval: Duration,
     ) -> CancellationToken {
         let shutdown = CancellationToken::new();
@@ -247,25 +167,25 @@ impl RealtimeRegistry {
                 }
                 let now = Instant::now();
 
-                // Reap stale, non-active entries atomically using remove_if
-                // to avoid TOCTOU races with concurrent re-registration.
-                // Active (Connected) sessions are never reaped — they will
-                // be cleaned up when the connection closes normally.
+                let is_stale = |state: ConnectionState, age: Duration| -> bool {
+                    match state {
+                        ConnectionState::Connected => false,
+                        ConnectionState::Pending => age > pending_max_age,
+                        ConnectionState::Disconnected => age > max_age,
+                    }
+                };
+
                 let stale_session_ids: Vec<String> = registry
                     .sessions
                     .iter()
-                    .filter(|e| {
-                        e.state != ConnectionState::Connected
-                            && now.duration_since(e.created_at) > max_age
-                    })
+                    .filter(|e| is_stale(e.state, now.duration_since(e.created_at)))
                     .map(|e| e.session_id.clone())
                     .collect();
 
                 let mut sessions_reaped = 0usize;
                 for id in &stale_session_ids {
                     if let Some((_, entry)) = registry.sessions.remove_if(id, |_, e| {
-                        e.state != ConnectionState::Connected
-                            && now.duration_since(e.created_at) > max_age
+                        is_stale(e.state, now.duration_since(e.created_at))
                     }) {
                         entry.cancel_token.cancel();
                         sessions_reaped += 1;
@@ -275,34 +195,18 @@ impl RealtimeRegistry {
                 let stale_call_ids: Vec<String> = registry
                     .calls
                     .iter()
-                    .filter(|e| {
-                        e.state != ConnectionState::Connected
-                            && now.duration_since(e.created_at) > max_age
-                    })
+                    .filter(|e| is_stale(e.state, now.duration_since(e.created_at)))
                     .map(|e| e.call_id.clone())
                     .collect();
 
                 let mut calls_reaped = 0usize;
                 for id in &stale_call_ids {
                     if let Some((_, entry)) = registry.calls.remove_if(id, |_, e| {
-                        e.state != ConnectionState::Connected
-                            && now.duration_since(e.created_at) > max_age
+                        is_stale(e.state, now.duration_since(e.created_at))
                     }) {
                         entry.cancel_token.cancel();
                         calls_reaped += 1;
                     }
-                }
-
-                // Sync atomic counters with actual removal counts.
-                if sessions_reaped > 0 {
-                    registry
-                        .session_count
-                        .fetch_sub(sessions_reaped, Ordering::Relaxed);
-                }
-                if calls_reaped > 0 {
-                    registry
-                        .call_count
-                        .fetch_sub(calls_reaped, Ordering::Relaxed);
                 }
 
                 if sessions_reaped > 0 || calls_reaped > 0 {
@@ -319,11 +223,11 @@ impl RealtimeRegistry {
 
     /// Stats for observability.
     pub fn session_count(&self) -> usize {
-        self.session_count.load(Ordering::Relaxed)
+        self.sessions.len()
     }
 
     pub fn call_count(&self) -> usize {
-        self.call_count.load(Ordering::Relaxed)
+        self.calls.len()
     }
 }
 

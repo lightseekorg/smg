@@ -9,7 +9,10 @@ use anyhow::Result;
 use futures::Stream;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
-use tonic::{transport::Server, Response, Status};
+use tonic::{
+    transport::{server::TcpIncoming, Server},
+    Response, Status,
+};
 use tracing as log;
 use tracing::instrument;
 
@@ -69,13 +72,7 @@ impl GossipService {
             }
         };
 
-        let proto_store_type = match store_type {
-            LocalStoreType::Membership => gossip::StoreType::Membership as i32,
-            LocalStoreType::App => gossip::StoreType::App as i32,
-            LocalStoreType::Worker => gossip::StoreType::Worker as i32,
-            LocalStoreType::Policy => gossip::StoreType::Policy as i32,
-            LocalStoreType::RateLimit => gossip::StoreType::RateLimit as i32,
-        };
+        let proto_store_type = store_type.to_proto();
 
         // Get all entries from the store
         let entries: Vec<(String, Vec<u8>)> = match store_type {
@@ -293,6 +290,20 @@ impl GossipService {
         Ok(())
     }
 
+    pub async fn serve_ping_with_listener<F: std::future::Future<Output = ()>>(
+        self,
+        listener: tokio::net::TcpListener,
+        signal: F,
+    ) -> Result<()> {
+        let incoming = TcpIncoming::from(listener);
+        let service = GossipServer::new(self);
+        Server::builder()
+            .add_service(service)
+            .serve_with_incoming_shutdown(incoming, signal)
+            .await?;
+        Ok(())
+    }
+
     fn merge_state(&self, incoming_nodes: Vec<NodeState>) -> bool {
         let mut state = self.state.write();
         let mut updated = false;
@@ -404,13 +415,7 @@ impl Gossip for GossipService {
 
                     if !all_updates.is_empty() {
                         for (store_type, updates) in all_updates {
-                            let proto_store_type = match store_type {
-                                LocalStoreType::Membership => gossip::StoreType::Membership as i32,
-                                LocalStoreType::App => gossip::StoreType::App as i32,
-                                LocalStoreType::Worker => gossip::StoreType::Worker as i32,
-                                LocalStoreType::Policy => gossip::StoreType::Policy as i32,
-                                LocalStoreType::RateLimit => gossip::StoreType::RateLimit as i32,
-                            };
+                            let proto_store_type = store_type.to_proto();
 
                             sequence_counter += 1;
                             let batch_size: usize = updates.iter().map(|u| u.value.len()).sum();
@@ -516,13 +521,7 @@ impl Gossip for GossipService {
                             store_type,
                             peer_id
                         );
-                        let proto_store_type = match store_type {
-                            LocalStoreType::Membership => gossip::StoreType::Membership as i32,
-                            LocalStoreType::App => gossip::StoreType::App as i32,
-                            LocalStoreType::Worker => gossip::StoreType::Worker as i32,
-                            LocalStoreType::Policy => gossip::StoreType::Policy as i32,
-                            LocalStoreType::RateLimit => gossip::StoreType::RateLimit as i32,
-                        };
+                        let proto_store_type = store_type.to_proto();
 
                         let snapshot_request = StreamMessage {
                             message_type: StreamMessageType::SnapshotRequest as i32,
@@ -661,7 +660,6 @@ impl Gossip for GossipService {
                                                             if let Err(err) = stores.app.insert(
                                                                 app_state.key.clone(),
                                                                 app_state,
-                                                                state_update.actor.clone(),
                                                             ) {
                                                                 log::warn!(error = %err, "Failed to apply app state update");
                                                             }
@@ -683,7 +681,6 @@ impl Gossip for GossipService {
                                                                 stores.membership.insert(
                                                                     membership_state.name.clone(),
                                                                     membership_state,
-                                                                    state_update.actor.clone(),
                                                                 )
                                                             {
                                                                 log::warn!(error = %err, "Failed to apply membership state update");
@@ -914,17 +911,17 @@ impl Gossip for GossipService {
                                                         match store_type {
                                                             LocalStoreType::Membership => {
                                                                 if let Ok(membership_state) = serde_json::from_slice::<super::stores::MembershipState>(&entry.value) {
-                                                                    let _ = stores.membership.insert(key, membership_state, entry.actor.clone());
+                                                                    let _ = stores.membership.insert(key, membership_state);
                                                                 }
                                                             }
                                                             LocalStoreType::App => {
                                                                 if let Ok(app_state) = serde_json::from_slice::<super::stores::AppState>(&entry.value) {
-                                                                    let _ = stores.app.insert(key, app_state, entry.actor.clone());
+                                                                    let _ = stores.app.insert(key, app_state);
                                                                 }
                                                             }
                                                             LocalStoreType::Worker => {
                                                                 if let Ok(worker_state) = serde_json::from_slice::<super::stores::WorkerState>(&entry.value) {
-                                                                    let _ = stores.worker.insert(key, worker_state.clone(), entry.actor.clone());
+                                                                    let _ = stores.worker.insert(key, worker_state.clone());
                                                                     // Also update sync manager if available
                                                                     if let Some(ref sync_manager) = sync_manager {
                                                                         sync_manager.apply_remote_worker_state(worker_state, Some(entry.actor.clone()));
@@ -933,7 +930,7 @@ impl Gossip for GossipService {
                                                             }
                                                             LocalStoreType::Policy => {
                                                                 if let Ok(policy_state) = serde_json::from_slice::<super::stores::PolicyState>(&entry.value) {
-                                                                    let _ = stores.policy.insert(key, policy_state.clone(), entry.actor.clone());
+                                                                    let _ = stores.policy.insert(key, policy_state.clone());
                                                                     // Also update sync manager if available
                                                                     if let Some(ref sync_manager) = sync_manager {
                                                                         // Check if this is a tree state update

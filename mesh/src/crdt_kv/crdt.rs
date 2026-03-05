@@ -17,16 +17,14 @@ use super::{
 /// Value metadata for CRDT OR-Map
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ValueMetadata {
-    value: Vec<u8>,
     timestamp: u64,
     replica_id: ReplicaId,
     is_tombstone: bool, // Marks if this version is a tombstone (deletion)
 }
 
 impl ValueMetadata {
-    fn new(value: Vec<u8>, timestamp: u64, replica_id: ReplicaId) -> Self {
+    fn new(timestamp: u64, replica_id: ReplicaId) -> Self {
         Self {
-            value,
             timestamp,
             replica_id,
             is_tombstone: false,
@@ -35,7 +33,6 @@ impl ValueMetadata {
 
     fn tombstone(timestamp: u64, replica_id: ReplicaId) -> Self {
         Self {
-            value: Vec::new(),
             timestamp,
             replica_id,
             is_tombstone: true,
@@ -119,7 +116,7 @@ impl CrdtOrMap {
         let key_guard = key_lock.lock();
 
         let timestamp = self.clock.tick();
-        let result = if self.record_insert_metadata(&key, &value, timestamp, self.replica_id) {
+        let result = if self.record_insert_metadata(&key, timestamp, self.replica_id) {
             let mut prev = None;
             let value_for_operation = value.clone();
             let _ = self.store.upsert(key.clone(), |current| {
@@ -158,22 +155,21 @@ impl CrdtOrMap {
         let updated_value = updater(current_value.as_deref());
         let timestamp = self.clock.tick();
 
-        let result =
-            if self.record_insert_metadata(&key, &updated_value, timestamp, self.replica_id) {
-                let operation = Operation::insert(
-                    key.clone(),
-                    updated_value.clone(),
-                    timestamp,
-                    self.replica_id,
-                );
+        let result = if self.record_insert_metadata(&key, timestamp, self.replica_id) {
+            let operation = Operation::insert(
+                key.clone(),
+                updated_value.clone(),
+                timestamp,
+                self.replica_id,
+            );
 
-                self.store.insert(key.clone(), updated_value.clone());
-                self.operation_log.write().append(operation);
+            self.store.insert(key.clone(), updated_value.clone());
+            self.operation_log.write().append(operation);
 
-                updated_value
-            } else {
-                self.store.get(&key).unwrap_or_default()
-            };
+            updated_value
+        } else {
+            self.store.get(&key).unwrap_or_default()
+        };
 
         drop(key_guard);
         self.try_cleanup_key_lock(&key, &key_lock);
@@ -199,22 +195,21 @@ impl CrdtOrMap {
         };
         let timestamp = self.clock.tick();
 
-        let result =
-            if self.record_insert_metadata(&key, &updated_value, timestamp, self.replica_id) {
-                let operation = Operation::insert(
-                    key.clone(),
-                    updated_value.clone(),
-                    timestamp,
-                    self.replica_id,
-                );
+        let result = if self.record_insert_metadata(&key, timestamp, self.replica_id) {
+            let operation = Operation::insert(
+                key.clone(),
+                updated_value.clone(),
+                timestamp,
+                self.replica_id,
+            );
 
-                self.store.insert(key.clone(), updated_value.clone());
-                self.operation_log.write().append(operation);
+            self.store.insert(key.clone(), updated_value.clone());
+            self.operation_log.write().append(operation);
 
-                updated_value
-            } else {
-                self.store.get(&key).unwrap_or_default()
-            };
+            updated_value
+        } else {
+            self.store.get(&key).unwrap_or_default()
+        };
 
         drop(key_guard);
         self.try_cleanup_key_lock(&key, &key_lock);
@@ -241,7 +236,7 @@ impl CrdtOrMap {
 
         let (result, changed) = if let Some(updated_value) = maybe_updated_value {
             let timestamp = self.clock.tick();
-            if self.record_insert_metadata(&key, &updated_value, timestamp, self.replica_id) {
+            if self.record_insert_metadata(&key, timestamp, self.replica_id) {
                 let operation = Operation::insert(
                     key.clone(),
                     updated_value.clone(),
@@ -402,7 +397,7 @@ impl CrdtOrMap {
         let key_lock = self.key_lock_for(key);
         let key_guard = key_lock.lock();
 
-        if self.record_insert_metadata(key, &value, timestamp, replica_id) {
+        if self.record_insert_metadata(key, timestamp, replica_id) {
             self.store.insert(key.to_string(), value);
         }
 
@@ -421,14 +416,8 @@ impl CrdtOrMap {
         }
     }
 
-    fn record_insert_metadata(
-        &self,
-        key: &str,
-        value: &[u8],
-        timestamp: u64,
-        replica_id: ReplicaId,
-    ) -> bool {
-        let new_metadata = ValueMetadata::new(value.to_vec(), timestamp, replica_id);
+    fn record_insert_metadata(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> bool {
+        let new_metadata = ValueMetadata::new(timestamp, replica_id);
 
         match self.metadata.entry(key.to_string()) {
             MapEntry::Occupied(mut entry) => {
