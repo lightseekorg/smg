@@ -350,8 +350,8 @@ def get_pool_requirements() -> list[WorkerIdentity]:
 def _count_gpus_without_cuda() -> int:
     """Count available GPUs without initializing CUDA.
 
-    Uses nvidia-smi to avoid CUDA initialization, which is critical for
-    pytest-parallel compatibility. CUDA cannot be re-initialized after a fork.
+    Uses nvidia-smi to avoid CUDA initialization during test collection,
+    which would reserve GPU memory before tests actually need it.
     """
     import subprocess
 
@@ -371,9 +371,6 @@ def _count_gpus_without_cuda() -> int:
 
 def validate_gpu_requirements() -> tuple[int, int]:
     """Check if there are enough GPUs for any single test.
-
-    Uses nvidia-smi instead of torch.cuda to avoid CUDA initialization,
-    which would break pytest-parallel (CUDA cannot be re-initialized after fork).
 
     Returns:
         Tuple of (max_required_gpus, available_gpus).
@@ -458,10 +455,6 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
-        "thread_unsafe: mark test as incompatible with parallel thread execution",
-    )
-    config.addinivalue_line(
-        "markers",
         "storage(backend): mark test to use a specific history storage backend "
         "(memory, oracle, oracle-custom). Default is memory.",
     )
@@ -471,53 +464,10 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Parallel execution support
-# ---------------------------------------------------------------------------
-
-
-def is_parallel_execution(config: pytest.Config) -> bool:
-    """Check if tests are running in parallel mode (pytest-parallel).
-
-    Returns True if --tests-per-worker > 1, indicating concurrent thread execution.
-    """
-    # pytest-parallel adds the 'tests_per_worker' option
-    tests_per_worker = getattr(config.option, "tests_per_worker", None)
-    if tests_per_worker is None:
-        return False
-
-    if tests_per_worker == "auto":
-        return True
-
-    try:
-        return int(tests_per_worker) > 1
-    except (ValueError, TypeError):
-        return False
-
-
-def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Cleanup all thread-cached backends at session end.
-
-    This hook runs exactly once when the session ends, unlike session-scoped
-    autouse fixtures which fire per-test under pytest-parallel's thread model.
-    """
-    from .setup_backend import cleanup_all_cached_backends
-
-    cleanup_all_cached_backends()
-
-
 def pytest_runtest_setup(item: pytest.Item) -> None:
     """Skip tests based on markers and runtime configuration."""
     from infra import get_runtime
 
-    # Skip thread_unsafe tests when running in parallel mode
-    if is_parallel_execution(item.config):
-        marker = item.get_closest_marker("thread_unsafe")
-        if marker:
-            reason = marker.kwargs.get("reason", "Test is not thread-safe")
-            pytest.skip(f"Skipping in parallel mode: {reason}")
-
-    # Skip tests for specific runtimes
     marker = item.get_closest_marker("skip_for_runtime")
     if marker:
         current_runtime = get_runtime()

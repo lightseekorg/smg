@@ -123,7 +123,6 @@ class TestIGWMode:
             logger.info("Models available: %d", len(models))
         finally:
             gateway.shutdown()
-            http_instance.release()
 
     def test_igw_add_and_remove_worker(self, model_pool: ModelPool):
         """Test adding and removing workers dynamically."""
@@ -150,7 +149,6 @@ class TestIGWMode:
                 logger.warning("Remove worker not supported: %s", msg)
         finally:
             gateway.shutdown()
-            http_instance.release()
 
     def test_igw_multiple_workers(self, model_pool: ModelPool):
         """Test adding multiple workers (HTTP + gRPC) to IGW gateway."""
@@ -176,8 +174,6 @@ class TestIGWMode:
                 logger.info("Worker: id=%s, url=%s", w.id, w.url)
         finally:
             gateway.shutdown()
-            http_instance.release()
-            grpc_instance.release()
 
 
 @pytest.mark.e2e
@@ -221,7 +217,6 @@ class TestDisableHealthCheck:
                 )
         finally:
             gateway.shutdown()
-            http_instance.release()
 
     def test_disable_health_check_gateway_starts_without_health_checker(
         self, model_pool: ModelPool

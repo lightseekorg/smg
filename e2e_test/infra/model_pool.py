@@ -7,9 +7,8 @@ import os
 import select
 import signal
 import subprocess
-import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import IO, TYPE_CHECKING, Any
 
 import httpx
@@ -110,10 +109,6 @@ class ModelInstance:
     _healthy: bool = False  # Track if initial health check passed
     _skip_deep_health_check: bool = False  # vLLM HTTP doesn't serve /health_generate
 
-    # Reference counting for safe parallel test execution
-    _ref_count: int = 0
-    _ref_lock: threading.Lock = field(default_factory=threading.Lock)
-
     @property
     def identity(self) -> WorkerIdentity:
         """Get the identity (model_id, mode, worker_type) of this instance."""
@@ -122,40 +117,6 @@ class ModelInstance:
             mode=self.mode,
             worker_type=self.worker_type,
         )
-
-    @property
-    def is_in_use(self) -> bool:
-        """Check if this instance has active references (tests using it)."""
-        with self._ref_lock:
-            return self._ref_count > 0
-
-    def acquire(self) -> None:
-        """Acquire a reference to this instance.
-
-        Call this before using the instance in a test to prevent eviction.
-        Must be paired with a release() call when done.
-        Also updates last_used timestamp atomically with ref count.
-        """
-        with self._ref_lock:
-            self._ref_count += 1
-            self.last_used = time.time()
-            logger.debug("Acquired reference to %s (ref_count=%d)", self.key, self._ref_count)
-
-    def release(self) -> None:
-        """Release a reference to this instance.
-
-        Call this when done using the instance in a test.
-        """
-        with self._ref_lock:
-            if self._ref_count > 0:
-                self._ref_count -= 1
-                logger.debug(
-                    "Released reference to %s (ref_count=%d)",
-                    self.key,
-                    self._ref_count,
-                )
-            else:
-                logger.warning("Attempted to release reference to %s with ref_count=0", self.key)
 
     @property
     def worker_url(self) -> str:
@@ -342,7 +303,6 @@ class ModelPool:
         self.allocator = allocator or GPUAllocator()
         self.instances: dict[str, ModelInstance] = {}  # key = "model_id:mode"
         self._startup_timeout = DEFAULT_STARTUP_TIMEOUT
-        self._lock = threading.RLock()  # Protects instances dict
         self.log_dir = log_dir
         self._log_files: dict[str, IO[Any]] = {}  # instance key → open log file handle
 
@@ -361,22 +321,11 @@ class ModelPool:
         Each WorkerIdentity uniquely identifies a worker by (model_id, mode,
         worker_type, index).
 
-        Thread-safe: Protected by internal lock.
-
         Args:
             requirements: List of WorkerIdentity specifying what to start.
                          If None, starts default model in HTTP mode.
             startup_timeout: Timeout in seconds for all models to become healthy.
         """
-        with self._lock:
-            self._startup_unlocked(requirements, startup_timeout)
-
-    def _startup_unlocked(
-        self,
-        requirements: list[WorkerIdentity] | None = None,
-        startup_timeout: int = DEFAULT_STARTUP_TIMEOUT,
-    ) -> None:
-        """Internal startup logic. Caller must hold _lock."""
         self._startup_timeout = startup_timeout
 
         if requirements is None:
@@ -563,7 +512,7 @@ class ModelPool:
             spec = get_model_spec(model_id)
             if gpu_slot is None:
                 raise RuntimeError(f"GPU slot required for vLLM HTTP worker {model_id}")
-            # Ensure instance key matches the canonical format used by _get_unlocked
+            # Ensure instance key matches the canonical format used by get()
             effective_key = instance_key or f"{model_id}:{mode.value}"
             instance = self._launch_vllm_http_worker(
                 model_id=model_id,
@@ -589,7 +538,7 @@ class ModelPool:
                 spec = get_model_spec(model_id)
                 if gpu_slot is None:
                     raise RuntimeError(f"GPU slot required for gRPC worker {model_id}")
-                # Ensure instance key matches the canonical format used by _get_unlocked
+                # Ensure instance key matches the canonical format used by get()
                 effective_key = instance_key or f"{model_id}:{mode.value}"
                 instance = self._launch_grpc_worker(
                     runtime=get_runtime(),
@@ -878,76 +827,20 @@ class ModelPool:
         If the model is not running, it will be launched on-demand with MRU
         eviction if GPU resources are constrained.
 
-        Thread-safe: Protected by internal lock. The returned instance has its
-        reference count incremented (via acquire()) to prevent eviction.
-        Caller MUST call release() on the instance when done.
-
         Args:
             model_id: The model ID (e.g., "meta-llama/Llama-3.1-8B-Instruct")
             mode: The mode (ConnectionMode.HTTP or ConnectionMode.GRPC, or string)
             worker_type: The worker type (REGULAR, PREFILL, DECODE). Defaults to REGULAR.
             wait_for_gpus: If True, wait for GPUs to become available when all
-                are in use by other tests. Defaults to True.
+                are in use. Defaults to True.
             gpu_wait_timeout: Max seconds to wait for GPUs (default 5 min).
 
         Returns:
-            ModelInstance for the requested model/mode/worker_type (already acquired).
+            ModelInstance for the requested model/mode/worker_type.
 
         Raises:
             RuntimeError: If worker process died, failed health check, or
                 timeout waiting for GPUs.
-        """
-        deadline = time.time() + gpu_wait_timeout
-        # Exponential backoff: 1s, 2s, 4s, 8s, 16s, then cap at 16s
-        base_interval = 1.0
-        max_interval = 16.0
-        attempt = 0
-
-        while True:
-            with self._lock:
-                instance = self._get_unlocked(model_id, mode, worker_type)
-                if instance is not None:
-                    # Acquire while holding lock to prevent race with eviction
-                    instance.acquire()
-                    return instance
-
-                # _get_unlocked returns None when GPUs unavailable after eviction
-                if not wait_for_gpus:
-                    raise RuntimeError(
-                        f"Cannot get {model_id}: GPUs unavailable and waiting disabled"
-                    )
-
-                if time.time() >= deadline:
-                    raise RuntimeError(
-                        f"Timeout waiting for GPUs for {model_id} after {gpu_wait_timeout}s"
-                    )
-
-            # Exponential backoff with cap
-            poll_interval = min(base_interval * (2**attempt), max_interval)
-            attempt += 1
-
-            # Release lock while waiting so other tests can release workers
-            logger.info(
-                "All GPUs in use by other tests, waiting %.1fs for %s (attempt %d)...",
-                poll_interval,
-                model_id,
-                attempt,
-            )
-            time.sleep(poll_interval)
-
-    def _get_unlocked(
-        self,
-        model_id: str,
-        mode: ConnectionMode | str,
-        worker_type: WorkerType | str = WorkerType.REGULAR,
-    ) -> ModelInstance | None:
-        """Internal get logic. Caller must hold _lock.
-
-        Returns:
-            ModelInstance if successful, None if GPUs unavailable (signals retry).
-
-        Raises:
-            RuntimeError: If worker died or failed health check.
         """
         # Accept both enum and string for convenience
         if isinstance(mode, str):
@@ -960,50 +853,72 @@ class ModelPool:
         else:
             key = f"{model_id}:{mode.value}:{worker_type.value}"
 
-        # Check if instance exists - if not, launch on-demand with eviction
-        if key not in self.instances:
-            logger.info(
-                "Model %s not running, launching on-demand with MRU eviction if needed",
-                key,
-            )
-            if not self._ensure_gpu_available(model_id, mode):
-                # GPUs not available after eviction - signal retry
-                return None
+        deadline = time.time() + gpu_wait_timeout
+        # Exponential backoff: 1s, 2s, 4s, 8s, 16s, then cap at 16s
+        base_interval = 1.0
+        max_interval = 16.0
+        attempt = 0
 
-            # Allocate GPU slot for this model
-            spec = get_model_spec(model_id)
-            allocation_specs = {
-                key: {
-                    "model": spec["model"],
-                    "memory_gb": spec.get("memory_gb", 16),
-                    "tp": spec.get("tp", 1),
+        while True:
+            # Check if instance exists - if not, launch on-demand with eviction
+            if key not in self.instances:
+                logger.info(
+                    "Model %s not running, launching on-demand with MRU eviction if needed",
+                    key,
+                )
+                if not self._ensure_gpu_available(model_id, mode):
+                    # GPUs not available after eviction - wait and retry
+                    if not wait_for_gpus:
+                        raise RuntimeError(
+                            f"Cannot get {model_id}: GPUs unavailable and waiting disabled"
+                        )
+                    if time.time() >= deadline:
+                        raise RuntimeError(
+                            f"Timeout waiting for GPUs for {model_id} after {gpu_wait_timeout}s"
+                        )
+                    poll_interval = min(base_interval * (2**attempt), max_interval)
+                    attempt += 1
+                    logger.info(
+                        "All GPUs in use, waiting %.1fs for %s (attempt %d)...",
+                        poll_interval,
+                        model_id,
+                        attempt,
+                    )
+                    time.sleep(poll_interval)
+                    continue
+
+                # Allocate GPU slot for this model
+                spec = get_model_spec(model_id)
+                allocation_specs = {
+                    key: {
+                        "model": spec["model"],
+                        "memory_gb": spec.get("memory_gb", 16),
+                        "tp": spec.get("tp", 1),
+                    }
                 }
-            }
-            slots = self.allocator.allocate_slots(allocation_specs)
-            if not slots:
-                raise RuntimeError(f"Failed to allocate GPU slot for {model_id} after eviction")
-            gpu_slot = slots[0]
+                slots = self.allocator.allocate_slots(allocation_specs)
+                if not slots:
+                    raise RuntimeError(f"Failed to allocate GPU slot for {model_id} after eviction")
+                gpu_slot = slots[0]
 
-            self._launch_model(model_id, mode, gpu_slot=gpu_slot)
-            self._wait_for_instance(key)
+                self._launch_model(model_id, mode, gpu_slot=gpu_slot)
+                self._wait_for_instance(key)
 
-        instance = self.instances[key]
+            instance = self.instances[key]
 
-        # Note: last_used is updated in acquire() which should be called by fixtures
-        # to prevent eviction during test execution
+            # Verify worker is still alive and healthy
+            if not instance.is_alive():
+                raise RuntimeError(f"Worker {key} process died (was healthy at startup)")
 
-        # Verify worker is still alive and healthy
-        if not instance.is_alive():
-            raise RuntimeError(f"Worker {key} process died (was healthy at startup)")
+            if not instance.deep_health_check(timeout=30.0):
+                raise RuntimeError(
+                    f"Worker {key} failed deep health check (health_generate) - "
+                    "model may be stuck or crashed"
+                )
 
-        if not instance.deep_health_check(timeout=30.0):
-            raise RuntimeError(
-                f"Worker {key} failed deep health check (health_generate) - "
-                "model may be stuck or crashed"
-            )
-
-        logger.info("Worker %s passed deep health check", key)
-        return instance
+            logger.info("Worker %s passed deep health check", key)
+            instance.last_used = time.time()
+            return instance
 
     def _evict_for_gpus(
         self,
@@ -1034,10 +949,6 @@ class ModelPool:
         # Note: Make a copy of items to avoid RuntimeError if dict is modified during iteration
         evictable: list[tuple[str, ModelInstance]] = []
         for dict_key, inst in list(self.instances.items()):
-            # Skip instances with active references (tests using them)
-            if inst.is_in_use:
-                logger.debug("Skipping eviction of %s - has active references", dict_key)
-                continue
             if exclude_worker_types is not None:
                 # Precise matching with worker types
                 # Must match model_id AND worker_type, mode is optional
@@ -1075,7 +986,7 @@ class ModelPool:
             mode: Connection mode (HTTP or gRPC) being launched.
 
         Returns:
-            True if GPUs are available, False if not (all in use by other tests).
+            True if GPUs are available, False if not (all in use).
         """
         spec = get_model_spec(model_id)
         required_gpus = spec.get("tp", 1)
@@ -1093,8 +1004,7 @@ class ModelPool:
         available = self.allocator.available_gpus()
         if len(available) < required_gpus:
             logger.info(
-                "Cannot launch %s: need %d GPUs, only %d available after eviction "
-                "(all workers in use by other tests)",
+                "Cannot launch %s: need %d GPUs, only %d available after eviction",
                 model_id,
                 required_gpus,
                 len(available),
@@ -1157,30 +1067,30 @@ class ModelPool:
 
         raise TimeoutError(f"Instance {key} did not become healthy within {timeout}s")
 
-    def get_workers_by_type(self, model_id: str, worker_type: WorkerType) -> list[ModelInstance]:
+    def get_workers_by_type(
+        self,
+        model_id: str,
+        worker_type: WorkerType,
+        mode: ConnectionMode | None = None,
+    ) -> list[ModelInstance]:
         """Get all workers of a specific type for a model.
-
-        Thread-safe: Protected by internal lock. All returned instances have their
-        reference count incremented (via acquire()) to prevent eviction.
-        Caller MUST call release() on each instance when done.
 
         Args:
             model_id: The model ID.
             worker_type: The worker type to filter by.
+            mode: Optional connection mode to filter by.
 
         Returns:
-            List of matching ModelInstance objects (already acquired).
+            List of matching ModelInstance objects.
         """
-        with self._lock:
-            workers = [
-                inst
-                for inst in self.instances.values()
-                if inst.model_id == model_id and inst.worker_type == worker_type
-            ]
-            # Acquire all while holding lock to prevent race with eviction
-            for worker in workers:
-                worker.acquire()
-            return workers
+        workers = [
+            inst
+            for inst in self.instances.values()
+            if inst.model_id == model_id
+            and inst.worker_type == worker_type
+            and (mode is None or inst.mode == mode)
+        ]
+        return workers
 
     @staticmethod
     def _build_vllm_cmd(
@@ -1448,14 +1358,12 @@ class ModelPool:
     ) -> ModelInstance:
         """Get or launch a gRPC worker for the current runtime.
 
-        Thread-safe: Protected by internal lock.
-
         Args:
             model_id: The model ID to launch.
             runtime: Runtime name override. Defaults to get_runtime().
 
         Returns:
-            The acquired ModelInstance.
+            The ModelInstance.
 
         Raises:
             RuntimeError: If worker cannot be launched.
@@ -1465,61 +1373,59 @@ class ModelPool:
         runtime_label = RUNTIME_LABELS.get(runtime, runtime)
         key = f"{model_id}:{runtime}-grpc"
 
-        with self._lock:
-            if key in self.instances:
-                inst = self.instances[key]
-                inst.acquire()
-                inst.last_used = time.time()
-                return inst
+        if key in self.instances:
+            inst = self.instances[key]
+            inst.last_used = time.time()
+            return inst
 
-            spec = get_model_spec(model_id)
-            tp_size = spec.get("tp", 1)
+        spec = get_model_spec(model_id)
+        tp_size = spec.get("tp", 1)
 
+        available = self.allocator.available_gpus()
+        if len(available) < tp_size:
+            logger.info(
+                "Need %d GPUs for %s worker, only %d available. Evicting...",
+                tp_size,
+                runtime_label,
+                len(available),
+            )
+            self._evict_for_gpus(tp_size)
             available = self.allocator.available_gpus()
             if len(available) < tp_size:
-                logger.info(
-                    "Need %d GPUs for %s worker, only %d available. Evicting...",
-                    tp_size,
-                    runtime_label,
-                    len(available),
-                )
-                self._evict_for_gpus(tp_size)
-                available = self.allocator.available_gpus()
-                if len(available) < tp_size:
-                    raise RuntimeError(
-                        f"Insufficient GPUs for {runtime_label} worker: "
-                        f"need {tp_size}, only {len(available)} available"
-                    )
-
-            allocation_specs = {
-                key: {
-                    "model": spec["model"],
-                    "memory_gb": spec.get("memory_gb", 16),
-                    "tp": tp_size,
-                }
-            }
-            slots = self.allocator.allocate_slots(allocation_specs, preserve_order=True)
-            if not slots:
                 raise RuntimeError(
-                    f"Failed to allocate GPU slots for {runtime_label} worker: {model_id}"
+                    f"Insufficient GPUs for {runtime_label} worker: "
+                    f"need {tp_size}, only {len(available)} available"
                 )
 
-            gpu_slot = slots[0]
-
-            instance = self._launch_grpc_worker(
-                runtime=runtime,
-                model_id=model_id,
-                model_spec=spec,
-                gpu_slot=gpu_slot,
-                startup_timeout=self._startup_timeout,
+        allocation_specs = {
+            key: {
+                "model": spec["model"],
+                "memory_gb": spec.get("memory_gb", 16),
+                "tp": tp_size,
+            }
+        }
+        slots = self.allocator.allocate_slots(allocation_specs, preserve_order=True)
+        if not slots:
+            raise RuntimeError(
+                f"Failed to allocate GPU slots for {runtime_label} worker: {model_id}"
             )
 
-            if instance is None:
-                self.allocator.release_slot(gpu_slot)
-                raise RuntimeError(f"Failed to launch {runtime_label} gRPC worker: {model_id}")
+        gpu_slot = slots[0]
 
-            instance.acquire()
-            return instance
+        instance = self._launch_grpc_worker(
+            runtime=runtime,
+            model_id=model_id,
+            model_spec=spec,
+            gpu_slot=gpu_slot,
+            startup_timeout=self._startup_timeout,
+        )
+
+        if instance is None:
+            self.allocator.release_slot(gpu_slot)
+            raise RuntimeError(f"Failed to launch {runtime_label} gRPC worker: {model_id}")
+
+        instance.last_used = time.time()
+        return instance
 
     def launch_workers(
         self,
@@ -1534,66 +1440,16 @@ class ModelPool:
         This is the unified method for launching workers. It handles all worker
         types (regular, prefill, decode) uniformly.
 
-        Thread-safe: Protected by internal lock.
-
         Args:
             workers: List of WorkerIdentity objects specifying workers to launch.
             startup_timeout: Timeout for workers to become healthy.
             allow_eviction: If True, evict MRU models to free GPUs.
             wait_for_gpus: If True, wait for GPUs to become available when all
-                are in use by other tests (with eviction enabled).
+                are in use (with eviction enabled).
             gpu_wait_timeout: Max seconds to wait for GPUs (default 5 min).
 
         Returns:
             List of launched ModelInstance objects.
-        """
-        deadline = time.time() + gpu_wait_timeout
-        # Exponential backoff: 1s, 2s, 4s, 8s, 16s, then cap at 16s
-        base_interval = 1.0
-        max_interval = 16.0
-        attempt = 0
-
-        while True:
-            with self._lock:
-                result = self._launch_workers_unlocked(workers, startup_timeout, allow_eviction)
-                if result is not None:
-                    return result
-
-                # _launch_workers_unlocked returns None when GPUs unavailable
-                # after eviction attempt (all workers in use by other tests)
-                if not wait_for_gpus or not allow_eviction:
-                    return []
-
-                if time.time() >= deadline:
-                    logger.warning(
-                        "Timeout waiting for GPUs after %ds, giving up",
-                        gpu_wait_timeout,
-                    )
-                    return []
-
-            # Exponential backoff with cap
-            poll_interval = min(base_interval * (2**attempt), max_interval)
-            attempt += 1
-
-            # Release lock while waiting so other tests can release workers
-            logger.info(
-                "All GPUs in use by other tests, waiting %.1fs for availability (attempt %d)...",
-                poll_interval,
-                attempt,
-            )
-            time.sleep(poll_interval)
-
-    def _launch_workers_unlocked(
-        self,
-        workers: list[WorkerIdentity],
-        startup_timeout: int = DEFAULT_STARTUP_TIMEOUT,
-        allow_eviction: bool = True,
-    ) -> list[ModelInstance] | None:
-        """Internal launch logic. Caller must hold _lock.
-
-        Returns:
-            List of launched instances, empty list if no valid workers,
-            or None if GPUs unavailable (signals caller to wait and retry).
         """
         if not workers:
             return []
@@ -1620,77 +1476,96 @@ class ModelPool:
             spec = get_model_spec(w.model_id)
             total_gpus += spec.get("tp", 1)
 
-        # Check if we have enough GPUs
-        available = self.allocator.available_gpus()
-        if len(available) < total_gpus:
-            if allow_eviction:
-                logger.info(
-                    "Need %d GPUs for %d workers, only %d available. Evicting...",
-                    total_gpus,
-                    len(valid_workers),
-                    len(available),
-                )
-                self._evict_for_gpus(total_gpus)
+        deadline = time.time() + gpu_wait_timeout
+        # Exponential backoff: 1s, 2s, 4s, 8s, 16s, then cap at 16s
+        base_interval = 1.0
+        max_interval = 16.0
+        attempt = 0
 
-                # Check again after eviction
-                available = self.allocator.available_gpus()
-                if len(available) < total_gpus:
-                    # Still not enough - all workers are in use by other tests
-                    # Return None to signal caller to wait and retry
+        while True:
+            # Check if we have enough GPUs
+            available = self.allocator.available_gpus()
+            if len(available) < total_gpus:
+                if allow_eviction:
                     logger.info(
-                        "Still need %d GPUs, only %d available after eviction. "
-                        "All workers in use by other tests.",
+                        "Need %d GPUs for %d workers, only %d available. Evicting...",
+                        total_gpus,
+                        len(valid_workers),
+                        len(available),
+                    )
+                    self._evict_for_gpus(total_gpus)
+
+                    # Check again after eviction
+                    available = self.allocator.available_gpus()
+                    if len(available) < total_gpus:
+                        # Still not enough GPUs - wait and retry
+                        if not wait_for_gpus:
+                            return []
+                        if time.time() >= deadline:
+                            logger.warning(
+                                "Timeout waiting for GPUs after %ds, giving up",
+                                gpu_wait_timeout,
+                            )
+                            return []
+                        poll_interval = min(base_interval * (2**attempt), max_interval)
+                        attempt += 1
+                        logger.info(
+                            "Still need %d GPUs, only %d available after eviction. "
+                            "Waiting %.1fs (attempt %d)...",
+                            total_gpus,
+                            len(available),
+                            poll_interval,
+                            attempt,
+                        )
+                        time.sleep(poll_interval)
+                        continue
+                else:
+                    logger.warning(
+                        "Need %d GPUs, only %d available. Skipping launch.",
                         total_gpus,
                         len(available),
                     )
-                    return None
-            else:
-                logger.warning(
-                    "Need %d GPUs, only %d available. Skipping launch.",
-                    total_gpus,
-                    len(available),
+                    return []
+
+            # Build allocation specs
+            allocation_specs = {}
+            for w in valid_workers:
+                spec = get_model_spec(w.model_id)
+                allocation_specs[w.key] = {
+                    "model": spec["model"],
+                    "memory_gb": spec.get("memory_gb", 16),
+                    "tp": spec.get("tp", 1),
+                }
+
+            # Allocate GPU slots
+            slots = self.allocator.allocate_slots(allocation_specs, preserve_order=True)
+            slot_map = {s.assigned_model: s for s in slots}
+
+            if not slots:
+                raise RuntimeError(f"Failed to allocate GPU slots for {len(valid_workers)} workers")
+
+            # Detect IB device for PD workers
+            has_pd = any(w.is_prefill or w.is_decode for w in valid_workers)
+            ib_device = detect_ib_device() if has_pd else None
+
+            instances: list[ModelInstance] = []
+            for w in valid_workers:
+                # Each prefill worker needs its own bootstrap port for PD communication
+                bootstrap_port = get_open_port() if w.is_prefill else None
+
+                instance = self._launch_model(
+                    model_id=w.model_id,
+                    mode=w.mode,
+                    gpu_slot=slot_map.get(w.key),
+                    worker_type=w.worker_type,
+                    bootstrap_port=bootstrap_port,
+                    ib_device=ib_device if (w.is_prefill or w.is_decode) else None,
+                    instance_key=w.key,
                 )
-                return []
+                instances.append(instance)
 
-        # Build allocation specs
-        allocation_specs = {}
-        for w in valid_workers:
-            spec = get_model_spec(w.model_id)
-            allocation_specs[w.key] = {
-                "model": spec["model"],
-                "memory_gb": spec.get("memory_gb", 16),
-                "tp": spec.get("tp", 1),
-            }
-
-        # Allocate GPU slots
-        slots = self.allocator.allocate_slots(allocation_specs, preserve_order=True)
-        slot_map = {s.assigned_model: s for s in slots}
-
-        if not slots:
-            raise RuntimeError(f"Failed to allocate GPU slots for {len(valid_workers)} workers")
-
-        # Detect IB device for PD workers
-        has_pd = any(w.is_prefill or w.is_decode for w in valid_workers)
-        ib_device = detect_ib_device() if has_pd else None
-
-        instances: list[ModelInstance] = []
-        for w in valid_workers:
-            # Each prefill worker needs its own bootstrap port for PD communication
-            bootstrap_port = get_open_port() if w.is_prefill else None
-
-            instance = self._launch_model(
-                model_id=w.model_id,
-                mode=w.mode,
-                gpu_slot=slot_map.get(w.key),
-                worker_type=w.worker_type,
-                bootstrap_port=bootstrap_port,
-                ib_device=ib_device if (w.is_prefill or w.is_decode) else None,
-                instance_key=w.key,
-            )
-            instances.append(instance)
-
-        self._wait_all_healthy()
-        return instances
+            self._wait_all_healthy()
+            return instances
 
     def get_client(
         self, model_id: str, mode: ConnectionMode | str = ConnectionMode.HTTP
@@ -1717,26 +1592,22 @@ class ModelPool:
         return self.get(model_id, mode).base_url
 
     def shutdown(self) -> None:
-        """Tear down all models and release resources.
+        """Tear down all models and release resources."""
+        logger.info("Shutting down model pool (%d instances)", len(self.instances))
+        for instance in self.instances.values():
+            instance.terminate()
+            # Release GPU slot and port back to allocator
+            if instance.gpu_slot:
+                self.allocator.release_slot(instance.gpu_slot)
+        self.instances.clear()
 
-        Thread-safe: Protected by internal lock.
-        """
-        with self._lock:
-            logger.info("Shutting down model pool (%d instances)", len(self.instances))
-            for instance in self.instances.values():
-                instance.terminate()
-                # Release GPU slot and port back to allocator
-                if instance.gpu_slot:
-                    self.allocator.release_slot(instance.gpu_slot)
-            self.instances.clear()
-
-            # Close any open log files
-            for f in self._log_files.values():
-                try:
-                    f.close()
-                except Exception:
-                    pass
-            self._log_files.clear()
+        # Close any open log files
+        for f in self._log_files.values():
+            try:
+                f.close()
+            except Exception:
+                pass
+        self._log_files.clear()
 
     def __enter__(self) -> ModelPool:
         return self
