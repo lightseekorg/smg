@@ -76,38 +76,33 @@ async def serve_grpc(args: argparse.Namespace):
     address = f"{host}:{args.port}"
     server.add_insecure_port(address)
 
-    # Start server
-    await server.start()
-    logger.info("vLLM gRPC server started on %s", address)
-    logger.info("Server is ready to accept requests")
-
-    # Handle shutdown signals
-    loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
-
-    def signal_handler():
-        logger.info("Received shutdown signal")
-        stop_event.set()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    # Serve until shutdown signal
     try:
-        await stop_event.wait()
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
+        # Start server
+        await server.start()
+        logger.info("vLLM gRPC server started on %s", address)
+        logger.info("Server is ready to accept requests")
+
+        # Handle shutdown signals
+        loop = asyncio.get_running_loop()
+        stop_event = asyncio.Event()
+
+        def signal_handler():
+            logger.info("Received shutdown signal")
+            stop_event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, signal_handler)
+
+        try:
+            await stop_event.wait()
+        except KeyboardInterrupt:
+            logger.info("Interrupted by user")
     finally:
         logger.info("Shutting down vLLM gRPC server...")
-
-        # Stop gRPC server
         await server.stop(grace=5.0)
         logger.info("gRPC server stopped")
-
-        # Shutdown AsyncLLM
         async_llm.shutdown()
         logger.info("AsyncLLM engine stopped")
-
         logger.info("Shutdown complete")
 
 

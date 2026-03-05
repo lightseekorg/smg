@@ -126,10 +126,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if request.HasField("kv_transfer_params"):
                 remote_host = request.kv_transfer_params.remote_host
                 remote_port = request.kv_transfer_params.remote_port
-                if not remote_host or remote_port == 0:
+                if not remote_host or not (1 <= remote_port <= 65535):
                     await context.abort(
                         grpc.StatusCode.INVALID_ARGUMENT,
-                        "Invalid kv_transfer_params: remote_host and remote_port must be set.",
+                        "Invalid kv_transfer_params: remote_host must be set and remote_port must be in [1, 65535].",
                     )
                 logger.info(
                     "Request %s: kv_transfer_params={remote_host=%s, remote_port=%d}",
@@ -502,7 +502,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     ) -> vllm_engine_pb2.TopLogProbs:
         """Build TopLogProbs proto from a logprob entry dict."""
         top = vllm_engine_pb2.TopLogProbs()
-        if num_top_logprobs and logprob_entry:
+        if num_top_logprobs and num_top_logprobs > 0 and logprob_entry:
             sorted_entries = sorted(
                 logprob_entry.items(),
                 key=lambda x: x[1].logprob,

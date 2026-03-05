@@ -28,7 +28,7 @@ uv pip install nixl
 
 # Install gRPC packages from source (not PyPI) so PR changes are always tested
 echo "Installing smg-grpc-proto and smg-grpc-servicer from source..."
-pip install -e grpc_client/python/
-pip install -e grpc_servicer/
+uv pip install -e grpc_client/python/
+uv pip install -e grpc_servicer/
 
 echo "vLLM installation complete"
