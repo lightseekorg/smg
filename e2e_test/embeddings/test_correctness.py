@@ -167,7 +167,8 @@ def get_input_texts(test_json: dict) -> list[str]:
 def hf_reference_embeddings(request):
     """Pre-compute HuggingFace reference embeddings on CPU.
 
-    This is done once per session. Uses CPU to avoid GPU memory conflicts.
+    This is done once per session with thread-safe initialization to support
+    pytest-parallel execution. Uses CPU to avoid GPU memory conflicts.
     """
     global _hf_embeddings_cache
 

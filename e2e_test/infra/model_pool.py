@@ -1,39 +1,18 @@
-"""Model pool for managing pre-loaded models across GPUs.
-
-Coordination model
-------------------
-When running under pytest-xdist, each worker is a separate process.  Workers
-coordinate through a shared JSON state file protected by a ``FileLock``.
-
-* **State file** (``{state_dir}/.smg_pool/state.json``) tracks all running
-  model-worker processes (PID, port, GPU IDs, status, ref_count …).
-* **First writer wins**: the first xdist worker that needs a model writes
-  ``status: "launching"`` and actually starts the process; others poll until
-  the status becomes ``"running"``.
-* **Dead-process cleanup**: every ``_read_state()`` call verifies PIDs via
-  ``os.kill(pid, 0)`` and removes stale entries.
-* **Eviction**: ``os.kill(pid, SIGTERM)`` + cleanup state (works cross-process
-  because workers use ``start_new_session=True``).
-
-When running *without* xdist (single-process), the same code path works — the
-FileLock is a no-op contention-wise and the state file just has one writer.
-"""
+"""Model pool for managing pre-loaded models across GPUs."""
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import select
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
 import httpx
-from filelock import FileLock
 
 if TYPE_CHECKING:
     import openai
@@ -59,54 +38,6 @@ from .model_specs import MODEL_SPECS, get_model_spec
 from .process_utils import detect_ib_device
 
 logger = logging.getLogger(__name__)
-
-
-class _DummyProcess:
-    """Lightweight stand-in for ``subprocess.Popen``.
-
-    Used by non-primary xdist workers that load instance metadata from the
-    shared state file.  They don't own the real subprocess, but callers
-    (health checks, ``is_alive()``) need a process-like object.
-    """
-
-    def __init__(self, pid: int):
-        self.pid = pid
-        self.stderr = None
-        self.stdout = None
-
-    def poll(self) -> int | None:
-        """Return ``None`` if the process is alive, else exit code."""
-        try:
-            os.kill(self.pid, 0)
-            return None  # alive
-        except (ProcessLookupError, PermissionError):
-            return 1  # dead
-
-    def terminate(self) -> None:
-        """Attempt graceful termination via process group."""
-        try:
-            pgid = os.getpgid(self.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            try:
-                os.kill(self.pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass
-
-    def kill(self) -> None:
-        try:
-            os.kill(self.pid, signal.SIGKILL)
-        except (ProcessLookupError, OSError):
-            pass
-
-    def wait(self, timeout: float | None = None) -> int:
-        """Best-effort wait.  We don't own the process, so just poll."""
-        deadline = time.time() + (timeout or 10)
-        while time.time() < deadline:
-            if self.poll() is not None:
-                return 1
-            time.sleep(0.2)
-        return 1
 
 
 @dataclass(frozen=True)
@@ -179,12 +110,9 @@ class ModelInstance:
     _healthy: bool = False  # Track if initial health check passed
     _skip_deep_health_check: bool = False  # vLLM HTTP doesn't serve /health_generate
 
-    # Reference counting for safe parallel test execution.
-    # In xdist mode, ref_count is tracked in the shared state file.
-    # The in-process _ref_count is a local mirror used for the non-xdist
-    # (single-process) code path only.
+    # Reference counting for safe parallel test execution
     _ref_count: int = 0
-    _pool: ModelPool | None = field(default=None, repr=False)
+    _ref_lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
     def identity(self) -> WorkerIdentity:
@@ -198,14 +126,8 @@ class ModelInstance:
     @property
     def is_in_use(self) -> bool:
         """Check if this instance has active references (tests using it)."""
-        if self._pool is not None:
-            with self._pool._file_lock:
-                state = self._pool._read_state()
-                entry = state["instances"].get(self.key)
-                if entry is None:
-                    return False
-                return entry.get("ref_count", 0) > 0
-        return self._ref_count > 0
+        with self._ref_lock:
+            return self._ref_count > 0
 
     def acquire(self) -> None:
         """Acquire a reference to this instance.
@@ -214,58 +136,26 @@ class ModelInstance:
         Must be paired with a release() call when done.
         Also updates last_used timestamp atomically with ref count.
         """
-        if self._pool is not None:
-            with self._pool._file_lock:
-                state = self._pool._read_state()
-                entry = state["instances"].get(self.key)
-                if entry is not None:
-                    entry["ref_count"] = entry.get("ref_count", 0) + 1
-                    entry["last_used"] = time.time()
-                    self._pool._write_state(state)
-                    logger.debug(
-                        "Acquired reference to %s (ref_count=%d)",
-                        self.key,
-                        entry["ref_count"],
-                    )
-            return
-        self._ref_count += 1
-        self.last_used = time.time()
-        logger.debug("Acquired reference to %s (ref_count=%d)", self.key, self._ref_count)
+        with self._ref_lock:
+            self._ref_count += 1
+            self.last_used = time.time()
+            logger.debug("Acquired reference to %s (ref_count=%d)", self.key, self._ref_count)
 
     def release(self) -> None:
         """Release a reference to this instance.
 
         Call this when done using the instance in a test.
         """
-        if self._pool is not None:
-            with self._pool._file_lock:
-                state = self._pool._read_state()
-                entry = state["instances"].get(self.key)
-                if entry is not None:
-                    rc = entry.get("ref_count", 0)
-                    if rc > 0:
-                        entry["ref_count"] = rc - 1
-                        self._pool._write_state(state)
-                        logger.debug(
-                            "Released reference to %s (ref_count=%d)",
-                            self.key,
-                            entry["ref_count"],
-                        )
-                    else:
-                        logger.warning(
-                            "Attempted to release reference to %s with ref_count=0",
-                            self.key,
-                        )
-            return
-        if self._ref_count > 0:
-            self._ref_count -= 1
-            logger.debug(
-                "Released reference to %s (ref_count=%d)",
-                self.key,
-                self._ref_count,
-            )
-        else:
-            logger.warning("Attempted to release reference to %s with ref_count=0", self.key)
+        with self._ref_lock:
+            if self._ref_count > 0:
+                self._ref_count -= 1
+                logger.debug(
+                    "Released reference to %s (ref_count=%d)",
+                    self.key,
+                    self._ref_count,
+                )
+            else:
+                logger.warning("Attempted to release reference to %s with ref_count=0", self.key)
 
     @property
     def worker_url(self) -> str:
@@ -441,193 +331,20 @@ class ModelPool:
         instance = pool.get("meta-llama/Llama-3.1-8B-Instruct", "http")  # Pre-launched or on-demand
     """
 
-    def __init__(
-        self,
-        allocator: GPUAllocator | None = None,
-        log_dir: str | None = None,
-        state_dir: str | Path | None = None,
-    ):
+    def __init__(self, allocator: GPUAllocator | None = None, log_dir: str | None = None):
         """Initialize the model pool.
 
         Args:
             allocator: GPU allocator to use. If None, creates a new one.
             log_dir: Directory to store worker log files. If None, worker output
                      is discarded (DEVNULL).
-            state_dir: Directory for shared state file and FileLock.  Under
-                       xdist this should be ``tmp_path_factory.getbasetemp().parent``
-                       so all workers share the same state.  If None, a
-                       temporary directory is created (single-process mode).
         """
         self.allocator = allocator or GPUAllocator()
         self.instances: dict[str, ModelInstance] = {}  # key = "model_id:mode"
         self._startup_timeout = DEFAULT_STARTUP_TIMEOUT
+        self._lock = threading.RLock()  # Protects instances dict
         self.log_dir = log_dir
         self._log_files: dict[str, IO[Any]] = {}  # instance key → open log file handle
-
-        # --- File-based coordination ---
-        if state_dir is None:
-            import tempfile
-
-            state_dir = tempfile.mkdtemp(prefix="smg_pool_")
-        self._state_dir = Path(state_dir) / ".smg_pool"
-        self._state_dir.mkdir(parents=True, exist_ok=True)
-        self._state_path = self._state_dir / "state.json"
-        self._file_lock = FileLock(str(self._state_dir / "state.lock"))
-
-    # ------------------------------------------------------------------
-    # File-based state helpers
-    # ------------------------------------------------------------------
-
-    def _read_state(self) -> dict:
-        """Read the shared state file.  Caller must hold ``_file_lock``.
-
-        Automatically cleans up entries whose PIDs are no longer alive.
-        """
-        if not self._state_path.exists():
-            return {"instances": {}, "used_gpus": [], "reserved_ports": []}
-        try:
-            raw = self._state_path.read_text()
-            state = json.loads(raw) if raw.strip() else {}
-        except (json.JSONDecodeError, OSError):
-            state = {}
-
-        state.setdefault("instances", {})
-        state.setdefault("used_gpus", [])
-        state.setdefault("reserved_ports", [])
-
-        # Clean dead processes
-        dead_keys: list[str] = []
-        for key, entry in list(state["instances"].items()):
-            pid = entry.get("pid")
-            if pid is not None and not self._is_process_alive(pid):
-                logger.info("Cleaning stale entry %s (pid %d dead)", key, pid)
-                dead_keys.append(key)
-
-        if dead_keys:
-            for key in dead_keys:
-                entry = state["instances"].pop(key)
-                # Free GPU IDs and port
-                for gid in entry.get("gpu_ids", []):
-                    if gid in state["used_gpus"]:
-                        state["used_gpus"].remove(gid)
-                port = entry.get("port")
-                if port is not None and port in state["reserved_ports"]:
-                    state["reserved_ports"].remove(port)
-            self._write_state(state)
-
-        return state
-
-    def _write_state(self, state: dict) -> None:
-        """Write the shared state file.  Caller must hold ``_file_lock``."""
-        tmp = self._state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=2))
-        tmp.replace(self._state_path)
-
-    @staticmethod
-    def _is_process_alive(pid: int) -> bool:
-        """Check if a process is alive via ``os.kill(pid, 0)``."""
-        try:
-            os.kill(pid, 0)
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
-        except OSError:
-            return False
-
-    def _register_instance_in_state(self, instance: ModelInstance) -> None:
-        """Write a model instance into the shared state file.
-
-        Caller must hold ``_file_lock``.
-        """
-        state = self._read_state()
-        gpu_ids = instance.gpu_slot.gpu_ids if instance.gpu_slot else []
-        state["instances"][instance.key] = {
-            "status": "running",
-            "pid": instance.process.pid,
-            "port": instance.port,
-            "gpu_ids": gpu_ids,
-            "base_url": instance.base_url,
-            "model_id": instance.model_id,
-            "mode": instance.mode.value,
-            "worker_type": instance.worker_type.value,
-            "model_path": instance.model_path,
-            "last_used": instance.last_used,
-            "ref_count": 0,
-            "bootstrap_port": instance.bootstrap_port,
-        }
-        for gid in gpu_ids:
-            if gid not in state["used_gpus"]:
-                state["used_gpus"].append(gid)
-        if instance.port not in state["reserved_ports"]:
-            state["reserved_ports"].append(instance.port)
-        self._write_state(state)
-
-    def _unregister_instance_from_state(self, key: str) -> None:
-        """Remove a model instance from the shared state file.
-
-        Caller must hold ``_file_lock``.
-        """
-        state = self._read_state()
-        entry = state["instances"].pop(key, None)
-        if entry is not None:
-            for gid in entry.get("gpu_ids", []):
-                if gid in state["used_gpus"]:
-                    state["used_gpus"].remove(gid)
-            port = entry.get("port")
-            if port is not None and port in state["reserved_ports"]:
-                state["reserved_ports"].remove(port)
-            self._write_state(state)
-
-    def mark_startup_complete(self) -> None:
-        """Write a ``.ready`` sentinel so other xdist workers know startup is done."""
-        sentinel = self._state_dir / ".ready"
-        sentinel.write_text(str(os.getpid()))
-        logger.info("Startup complete — wrote .ready sentinel")
-
-    def wait_for_startup_complete(self, timeout: int = 600) -> None:
-        """Block until the ``.ready`` sentinel exists (written by gw0)."""
-        sentinel = self._state_dir / ".ready"
-        start = time.time()
-        while not sentinel.exists():
-            if time.time() - start > timeout:
-                raise TimeoutError(
-                    f"Timed out after {timeout}s waiting for model pool startup (.ready sentinel)"
-                )
-            time.sleep(1)
-        logger.info("Found .ready sentinel — model pool is ready")
-
-    def load_instances_from_state(self) -> None:
-        """Populate ``self.instances`` from the shared state file.
-
-        Called by non-primary xdist workers after ``wait_for_startup_complete``.
-        These workers don't own the subprocess handles but can still use the
-        model endpoints recorded in the state file.
-        """
-        with self._file_lock:
-            state = self._read_state()
-        for key, entry in state["instances"].items():
-            if key in self.instances:
-                continue
-            if entry.get("status") != "running":
-                continue
-            # Create a lightweight ModelInstance without a real subprocess handle.
-            # The process is owned by the primary worker; we just need the URL.
-            instance = ModelInstance(
-                model_id=entry["model_id"],
-                mode=ConnectionMode(entry["mode"]),
-                model_path=entry["model_path"],
-                base_url=entry["base_url"],
-                port=entry["port"],
-                process=_DummyProcess(entry.get("pid", 0)),  # type: ignore[arg-type]
-                gpu_slot=None,
-                key=key,
-                worker_type=WorkerType(entry.get("worker_type", "regular")),
-                bootstrap_port=entry.get("bootstrap_port"),
-                last_used=entry.get("last_used", 0.0),
-                _healthy=True,  # gw0 already verified health
-                _pool=self,
-            )
-            self.instances[key] = instance
 
     def startup(
         self,
@@ -644,14 +361,14 @@ class ModelPool:
         Each WorkerIdentity uniquely identifies a worker by (model_id, mode,
         worker_type, index).
 
-        Thread-safe: Protected by file lock.
+        Thread-safe: Protected by internal lock.
 
         Args:
             requirements: List of WorkerIdentity specifying what to start.
                          If None, starts default model in HTTP mode.
             startup_timeout: Timeout in seconds for all models to become healthy.
         """
-        with self._file_lock:
+        with self._lock:
             self._startup_unlocked(requirements, startup_timeout)
 
     def _startup_unlocked(
@@ -659,7 +376,7 @@ class ModelPool:
         requirements: list[WorkerIdentity] | None = None,
         startup_timeout: int = DEFAULT_STARTUP_TIMEOUT,
     ) -> None:
-        """Internal startup logic. Caller must hold _file_lock."""
+        """Internal startup logic. Caller must hold _lock."""
         self._startup_timeout = startup_timeout
 
         if requirements is None:
@@ -969,10 +686,8 @@ class ModelPool:
             worker_type=worker_type,
             bootstrap_port=bootstrap_port,
             last_used=time.time(),
-            _pool=self,
         )
         self.instances[key] = instance
-        self._register_instance_in_state(instance)
         return instance
 
     def _wait_all_healthy(self) -> None:
@@ -1163,7 +878,7 @@ class ModelPool:
         If the model is not running, it will be launched on-demand with MRU
         eviction if GPU resources are constrained.
 
-        Process-safe: Protected by file lock. The returned instance has its
+        Thread-safe: Protected by internal lock. The returned instance has its
         reference count incremented (via acquire()) to prevent eviction.
         Caller MUST call release() on the instance when done.
 
@@ -1189,7 +904,7 @@ class ModelPool:
         attempt = 0
 
         while True:
-            with self._file_lock:
+            with self._lock:
                 instance = self._get_unlocked(model_id, mode, worker_type)
                 if instance is not None:
                     # Acquire while holding lock to prevent race with eviction
@@ -1226,7 +941,7 @@ class ModelPool:
         mode: ConnectionMode | str,
         worker_type: WorkerType | str = WorkerType.REGULAR,
     ) -> ModelInstance | None:
-        """Internal get logic. Caller must hold _file_lock.
+        """Internal get logic. Caller must hold _lock.
 
         Returns:
             ModelInstance if successful, None if GPUs unavailable (signals retry).
@@ -1317,14 +1032,10 @@ class ModelPool:
         # Sort by last_used descending (MRU eviction) - evict most recently used first
         # Store (dict_key, instance) tuples to preserve the actual key for eviction
         # Note: Make a copy of items to avoid RuntimeError if dict is modified during iteration
-        #
-        # Read ref_counts from state file (we already hold _file_lock).
-        state = self._read_state()
         evictable: list[tuple[str, ModelInstance]] = []
         for dict_key, inst in list(self.instances.items()):
             # Skip instances with active references (tests using them)
-            entry = state["instances"].get(dict_key, {})
-            if entry.get("ref_count", 0) > 0:
+            if inst.is_in_use:
                 logger.debug("Skipping eviction of %s - has active references", dict_key)
                 continue
             if exclude_worker_types is not None:
@@ -1394,51 +1105,28 @@ class ModelPool:
     def _evict_instance(self, key: str) -> None:
         """Evict a model instance and free its resources.
 
-        Works cross-process: uses ``os.kill`` to terminate the worker
-        (which runs in its own session via ``start_new_session=True``).
-
         Args:
             key: Instance key to evict.
         """
-        instance = self.instances.get(key)
+        if key not in self.instances:
+            return
 
-        if instance is not None:
-            instance.terminate()
+        instance = self.instances[key]
+        instance.terminate()
 
-            # Close log file handle for this instance
-            log_file = self._log_files.pop(key, None)
-            if log_file is not None:
-                try:
-                    log_file.close()
-                except Exception:
-                    pass
+        # Close log file handle for this instance
+        log_file = self._log_files.pop(key, None)
+        if log_file is not None:
+            try:
+                log_file.close()
+            except Exception:
+                pass
 
-            # Release GPU slot back to allocator
-            if instance.gpu_slot:
-                self.allocator.release_slot(instance.gpu_slot)
+        # Release GPU slot back to allocator
+        if instance.gpu_slot:
+            self.allocator.release_slot(instance.gpu_slot)
 
-            del self.instances[key]
-        else:
-            # Cross-process eviction: instance not in our local dict but
-            # exists in the shared state.  Kill by PID from state file.
-            with self._file_lock:
-                state = self._read_state()
-                entry = state["instances"].get(key)
-                if entry is not None:
-                    pid = entry.get("pid")
-                    if pid is not None and self._is_process_alive(pid):
-                        logger.info("Cross-process eviction: killing %s (pid %d)", key, pid)
-                        try:
-                            pgid = os.getpgid(pid)
-                            os.killpg(pgid, signal.SIGTERM)
-                        except (ProcessLookupError, OSError):
-                            try:
-                                os.kill(pid, signal.SIGTERM)
-                            except (ProcessLookupError, OSError):
-                                pass
-
-        # Always clean up shared state
-        self._unregister_instance_from_state(key)
+        del self.instances[key]
         logger.info("Evicted instance %s", key)
 
     def _wait_for_instance(self, key: str, timeout: float | None = None) -> None:
@@ -1472,7 +1160,7 @@ class ModelPool:
     def get_workers_by_type(self, model_id: str, worker_type: WorkerType) -> list[ModelInstance]:
         """Get all workers of a specific type for a model.
 
-        Process-safe: Protected by file lock. All returned instances have their
+        Thread-safe: Protected by internal lock. All returned instances have their
         reference count incremented (via acquire()) to prevent eviction.
         Caller MUST call release() on each instance when done.
 
@@ -1483,7 +1171,7 @@ class ModelPool:
         Returns:
             List of matching ModelInstance objects (already acquired).
         """
-        with self._file_lock:
+        with self._lock:
             workers = [
                 inst
                 for inst in self.instances.values()
@@ -1670,10 +1358,8 @@ class ModelPool:
             worker_type=worker_type,
             bootstrap_port=None,  # vLLM PD uses NIXL, not bootstrap
             last_used=time.time(),
-            _pool=self,
         )
         self.instances[key] = instance
-        self._register_instance_in_state(instance)
 
         try:
             self._wait_worker_healthy(instance, startup_timeout)
@@ -1744,10 +1430,8 @@ class ModelPool:
             bootstrap_port=None,
             last_used=time.time(),
             _skip_deep_health_check=True,
-            _pool=self,
         )
         self.instances[key] = instance
-        self._register_instance_in_state(instance)
 
         try:
             self._wait_worker_healthy(instance, startup_timeout)
@@ -1764,7 +1448,7 @@ class ModelPool:
     ) -> ModelInstance:
         """Get or launch a gRPC worker for the current runtime.
 
-        Process-safe: Protected by file lock.
+        Thread-safe: Protected by internal lock.
 
         Args:
             model_id: The model ID to launch.
@@ -1781,7 +1465,7 @@ class ModelPool:
         runtime_label = RUNTIME_LABELS.get(runtime, runtime)
         key = f"{model_id}:{runtime}-grpc"
 
-        with self._file_lock:
+        with self._lock:
             if key in self.instances:
                 inst = self.instances[key]
                 inst.acquire()
@@ -1850,7 +1534,7 @@ class ModelPool:
         This is the unified method for launching workers. It handles all worker
         types (regular, prefill, decode) uniformly.
 
-        Process-safe: Protected by file lock.
+        Thread-safe: Protected by internal lock.
 
         Args:
             workers: List of WorkerIdentity objects specifying workers to launch.
@@ -1870,7 +1554,7 @@ class ModelPool:
         attempt = 0
 
         while True:
-            with self._file_lock:
+            with self._lock:
                 result = self._launch_workers_unlocked(workers, startup_timeout, allow_eviction)
                 if result is not None:
                     return result
@@ -1905,7 +1589,7 @@ class ModelPool:
         startup_timeout: int = DEFAULT_STARTUP_TIMEOUT,
         allow_eviction: bool = True,
     ) -> list[ModelInstance] | None:
-        """Internal launch logic. Caller must hold _file_lock.
+        """Internal launch logic. Caller must hold _lock.
 
         Returns:
             List of launched instances, empty list if no valid workers,
@@ -2035,17 +1719,15 @@ class ModelPool:
     def shutdown(self) -> None:
         """Tear down all models and release resources.
 
-        Thread-safe: Protected by file lock.
+        Thread-safe: Protected by internal lock.
         """
-        with self._file_lock:
+        with self._lock:
             logger.info("Shutting down model pool (%d instances)", len(self.instances))
             for instance in self.instances.values():
                 instance.terminate()
                 # Release GPU slot and port back to allocator
                 if instance.gpu_slot:
                     self.allocator.release_slot(instance.gpu_slot)
-                # Unregister from shared state
-                self._unregister_instance_from_state(instance.key)
             self.instances.clear()
 
             # Close any open log files

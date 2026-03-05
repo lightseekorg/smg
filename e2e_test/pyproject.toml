@@ -6,13 +6,13 @@ requires-python = ">=3.12"
 
 dependencies = [
   "anthropic",
-  "filelock",
   "grpcio",
   "grpcio-health-checking",
   "httpx",
   "openai",
+  "py",  # Required for pytest-parallel with newer pytest versions
   "pytest",
-  "pytest-xdist",
+  "pytest-parallel",
   "pytest-rerunfailures",
 ]
 
@@ -27,18 +27,21 @@ testpaths = ["."]
 markers = [
   "e2e: mark test as end-to-end test requiring GPU workers",
   "slow: mark test as slow-running",
-  "thread_unsafe: legacy marker, no-op under xdist (separate processes)",
+  "thread_unsafe: mark test as incompatible with parallel thread execution",
   "external: mark test as dependent on external third-party services (run with -m external)",
 ]
-addopts = "-v"
+addopts = "-v -s"
+# Explicitly disable live log to avoid "---- live log ----" dividers
+# We configure logging manually in conftest.py
 log_cli = false
 
 # Parallel execution configuration:
-# Use -n N --dist loadscope to run N xdist workers.
-# Workers share model servers via a file-based state file + FileLock.
+# Use --workers 1 --tests-per-worker N to run N tests concurrently as threads
+# within a single process. This enables true shared-worker parallelism where
+# the session-scoped model_pool fixture is shared across all threads.
 #
 # Example usage:
-#   pytest -n 4 --dist loadscope e2e_test/router/
+#   pytest --workers 1 --tests-per-worker 4 e2e_test/router/
 #
-# --dist loadscope groups tests by module/class so that tests sharing
-# the same model run on the same worker.
+# The thread-safe ModelPool and GPUAllocator classes enable safe concurrent
+# access from multiple test threads.
