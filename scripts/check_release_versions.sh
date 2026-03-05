@@ -58,19 +58,19 @@ escape_version() {
 # Use "-" for the main gateway crate (no workspace dep entry).
 # ---------------------------------------------------------------------------
 CRATES=(
-    "openai-protocol|protocols|openai-protocol"
-    "reasoning-parser|reasoning_parser|reasoning-parser"
-    "tool-parser|tool_parser|tool-parser"
-    "wfaas|workflow|wfaas"
-    "llm-tokenizer|tokenizer|llm-tokenizer"
-    "smg-auth|auth|smg-auth"
-    "smg-mcp|mcp|smg-mcp"
-    "kv-index|kv_index|kv-index"
-    "data-connector|data_connector|smg-data-connector"
-    "llm-multimodal|multimodal|llm-multimodal"
-    "smg-wasm|wasm|smg-wasm"
-    "smg-mesh|mesh|smg-mesh"
-    "smg-grpc-client|grpc_client|smg-grpc-client"
+    "openai-protocol|core/protocols|openai-protocol"
+    "reasoning-parser|core/reasoning_parser|reasoning-parser"
+    "tool-parser|core/tool_parser|tool-parser"
+    "wfaas|infra/workflow|wfaas"
+    "llm-tokenizer|core/tokenizer|llm-tokenizer"
+    "smg-auth|infra/auth|smg-auth"
+    "smg-mcp|core/mcp|smg-mcp"
+    "kv-index|core/kv_index|kv-index"
+    "data-connector|infra/data_connector|smg-data-connector"
+    "llm-multimodal|core/multimodal|llm-multimodal"
+    "smg-wasm|infra/wasm|smg-wasm"
+    "smg-mesh|infra/mesh|smg-mesh"
+    "smg-grpc-client|core/grpc_client|smg-grpc-client"
     "smg|model_gateway|-"
 )
 
@@ -80,7 +80,7 @@ CRATES=(
 # version_file is relative to REPO_ROOT.
 # ---------------------------------------------------------------------------
 PYTHON_PACKAGES=(
-    "smg-grpc-proto|grpc_client/python|grpc_client/python/smg_grpc_proto/__init__.py"
+    "smg-grpc-proto|core/grpc_client/python|core/grpc_client/python/smg_grpc_proto/__init__.py"
 )
 
 # ---------------------------------------------------------------------------

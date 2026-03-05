@@ -32,50 +32,50 @@ docker:
 grpc:
   - changed-files:
       - any-glob-to-any-file:
-          - 'grpc_client/**/*'
+          - 'core/grpc_client/**/*'
           - 'model_gateway/src/routers/grpc/**/*'
 
 mcp:
   - changed-files:
-      - any-glob-to-any-file: 'mcp/**/*'
+      - any-glob-to-any-file: 'core/mcp/**/*'
 
 tokenizer:
   - changed-files:
-      - any-glob-to-any-file: 'tokenizer/**/*'
+      - any-glob-to-any-file: 'core/tokenizer/**/*'
 
 tool-parser:
   - changed-files:
-      - any-glob-to-any-file: 'tool_parser/**/*'
+      - any-glob-to-any-file: 'core/tool_parser/**/*'
 
 reasoning-parser:
   - changed-files:
-      - any-glob-to-any-file: 'reasoning_parser/**/*'
+      - any-glob-to-any-file: 'core/reasoning_parser/**/*'
 
 wasm:
   - changed-files:
       - any-glob-to-any-file:
-          - 'wasm/**/*'
+          - 'infra/wasm/**/*'
           - 'model_gateway/src/wasm/**/*'
 
 auth:
   - changed-files:
-      - any-glob-to-any-file: 'auth/**/*'
+      - any-glob-to-any-file: 'infra/auth/**/*'
 
 data-connector:
   - changed-files:
-      - any-glob-to-any-file: 'data_connector/**/*'
+      - any-glob-to-any-file: 'infra/data_connector/**/*'
 
 multimodal:
   - changed-files:
-      - any-glob-to-any-file: 'multimodal/**/*'
+      - any-glob-to-any-file: 'core/multimodal/**/*'
 
 protocols:
   - changed-files:
-      - any-glob-to-any-file: 'protocols/**/*'
+      - any-glob-to-any-file: 'core/protocols/**/*'
 
 workflow:
   - changed-files:
-      - any-glob-to-any-file: 'workflow/**/*'
+      - any-glob-to-any-file: 'infra/workflow/**/*'
 
 model-gateway:
   - changed-files:
@@ -96,8 +96,8 @@ gemini:
 realtime-api:
   - changed-files:
       - any-glob-to-any-file:
-          - 'protocols/src/realtime_*'
-          - 'protocols/src/builders/realtime/**/*'
+          - 'core/protocols/src/realtime_*'
+          - 'core/protocols/src/builders/realtime/**/*'
           - 'model_gateway/src/routers/openai/realtime/**/*'
 
 benchmarks:

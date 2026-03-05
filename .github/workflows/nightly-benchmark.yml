@@ -46,7 +46,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: bindings/python/dist/*.whl
-          key: nightly-wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'auth/src/**', 'bindings/python/src/**', 'data_connector/src/**', 'grpc_client/src/**', 'kv_index/src/**', 'mcp/src/**', 'mesh/src/**', 'model_gateway/src/**', 'multimodal/src/**', 'protocols/src/**', 'reasoning_parser/src/**', 'tokenizer/src/**', 'tool_parser/src/**', 'wasm/src/**', 'workflow/src/**') }}
+          key: nightly-wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'infra/auth/src/**', 'bindings/python/src/**', 'infra/data_connector/src/**', 'core/grpc_client/src/**', 'core/kv_index/src/**', 'core/mcp/src/**', 'infra/mesh/src/**', 'model_gateway/src/**', 'core/multimodal/src/**', 'core/protocols/src/**', 'core/reasoning_parser/src/**', 'core/tokenizer/src/**', 'core/tool_parser/src/**', 'infra/wasm/src/**', 'infra/workflow/src/**') }}
           restore-keys: |
             nightly-wheel-${{ runner.os }}-
 
