@@ -66,11 +66,11 @@ jobs:
 
       - name: Download Mooncake traces
         run: |
-          mkdir -p traces
+          mkdir -p "$GITHUB_WORKSPACE/traces"
           for trace in conversation_trace synthetic_trace toolagent_trace; do
             curl -sL "https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/${trace}.jsonl" \
-              -o "traces/${trace}.jsonl"
-            echo "Downloaded ${trace}.jsonl ($(wc -l < traces/${trace}.jsonl) requests)"
+              -o "$GITHUB_WORKSPACE/traces/${trace}.jsonl"
+            echo "Downloaded ${trace}.jsonl ($(wc -l < "$GITHUB_WORKSPACE/traces/${trace}.jsonl") requests)"
           done
 
       - name: Run throughput benchmark (Mooncake traces)
@@ -80,7 +80,7 @@ jobs:
           for trace in conversation_trace synthetic_trace toolagent_trace; do
             echo "=== ${trace} ==="
             cargo bench -p kv-index --bench throughput_bench -- \
-              --trace-path "traces/${trace}.jsonl" \
+              --trace-path "$GITHUB_WORKSPACE/traces/${trace}.jsonl" \
               --trace-duplication-factor 20 \
               --num-workers 256 \
               --jump-size 8 \
