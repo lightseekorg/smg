@@ -315,7 +315,13 @@ impl WorkerRegistry {
     /// Reserve (or retrieve) a stable UUID for a worker URL.
     /// Uses atomic entry API to avoid race conditions between check and insert.
     pub fn reserve_id_for_url(&self, url: &str) -> WorkerId {
-        self.url_to_id.entry(url.to_string()).or_default().clone()
+        let id = self.url_to_id.entry(url.to_string()).or_default().clone();
+        // Mirror into the reverse map so get_url_by_id resolves pending IDs.
+        // or_insert_with avoids overwriting a value already set by register().
+        self.id_to_url
+            .entry(id.clone())
+            .or_insert_with(|| url.to_string());
+        id
     }
 
     /// O(1) lookup of the URL for a given worker ID.

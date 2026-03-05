@@ -30,8 +30,9 @@ fn setup_registry(count: usize) -> (Arc<WorkerRegistry>, WorkerId, WorkerId, Vec
         let id = registry.register(Arc::from(worker));
 
         if i == 0 {
-            first_id = Some(id);
-        } else if i == count - 1 {
+            first_id = Some(id.clone());
+        }
+        if i == count - 1 {
             last_id = Some(id);
         }
     }
@@ -44,7 +45,8 @@ fn setup_registry(count: usize) -> (Arc<WorkerRegistry>, WorkerId, WorkerId, Vec
     )
 }
 
-/// A WorkerId that will never be found in any registry (worst-case full scan).
+/// A WorkerId not present in any registry.
+/// Simulates a missing-ID lookup: exercises the `id_to_url` false-miss path (O(1)).
 fn unknown_id() -> WorkerId {
     WorkerId::from_string("00000000-0000-0000-0000-000000000000".to_string())
 }
@@ -80,9 +82,9 @@ fn bench_get_url_by_id(c: &mut Criterion) {
             },
         );
 
-        // missing: the WorkerId is not in the registry → always full scan
+        // missing: WorkerId absent from registry → exercises O(1) id_to_url miss path.
         group.bench_with_input(
-            BenchmarkId::new("missing (full scan, worst case)", size),
+            BenchmarkId::new("missing (O(1) miss)", size),
             &size,
             |b, _| {
                 b.iter(|| {
