@@ -5,7 +5,7 @@ use axum::response::Response;
 /// Unified request processing state.
 ///
 /// Covers both streaming and non-streaming flows in a single enum.
-/// The `RequestBuilding` step decides which branch to enter based on
+/// The `BuildRequest` step decides which branch to enter based on
 /// whether the request is streaming and whether it contains MCP tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RequestState {

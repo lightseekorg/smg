@@ -12,6 +12,8 @@ use crate::routers::gemini::{context::RequestContext, state::StepResult};
 
 /// POST the payload to the upstream worker and handle the response.
 ///
+/// **Not yet implemented** — currently returns 501. Planned behavior:
+///
 /// If the response contains function calls that correspond to MCP tools,
 /// execute them, append results to the conversation history, rebuild the
 /// payload, and **stay in `NonStreamRequest`** (the driver will call

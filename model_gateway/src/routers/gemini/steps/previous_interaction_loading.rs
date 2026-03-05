@@ -15,8 +15,9 @@ use crate::routers::gemini::{
 /// Load previous interactions if `previous_interaction_id` is set.
 ///
 /// If the request does not specify a `previous_interaction_id`, this step is
-/// a no-op and simply advances the state. Otherwise it loads the stored
-/// interaction chain and prepends the conversation history so that the model
+/// a no-op and simply advances the state. Otherwise, returns 501 until
+/// interaction storage is implemented. Planned behavior: load the stored
+/// interaction chain and prepend the conversation history so that the model
 /// sees the full context.
 ///
 /// ## Reads

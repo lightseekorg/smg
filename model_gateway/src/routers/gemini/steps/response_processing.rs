@@ -16,15 +16,15 @@ use crate::routers::gemini::{context::RequestContext, state::StepResult};
 /// The driver returns it directly — no `final_response` field on the context.
 ///
 /// ## Reads
-/// - `ctx.upstream_response` — the last upstream response JSON.
-/// - `ctx.original_request` — for metadata patching.
+/// - `ctx.processing.upstream_response` — the last upstream response JSON.
+/// - `ctx.input.original_request` — for metadata patching.
 ///
 /// ## Returns
 /// `Ok(StepResult::Response(response))` — the final HTTP response.
 pub(crate) async fn response_processing(ctx: &mut RequestContext) -> Result<StepResult, Response> {
     // TODO: implement response processing
     //
-    // 1. Take ctx.upstream_response (the last response from upstream).
+    // 1. Take ctx.processing.upstream_response (the last response from upstream).
     // 2. If an MCP session exists:
     //    a. Inject MCP metadata into the response:
     //       - mcp_list_tools items (one per MCP server, listing available tools).
@@ -32,8 +32,8 @@ pub(crate) async fn response_processing(ctx: &mut RequestContext) -> Result<Step
     //    b. Restore original tools in the response: convert function tools back
     //       to McpServer / built-in tool format matching the original request.
     // 3. Patch response with request metadata:
-    //    - Set store, previous_interaction_id, model from the original request.
-    // 4. Persist the interaction to ctx.shared.interaction_storage if store is true.
+    //    - Set store, previous_interaction_id, model from ctx.input.original_request.
+    // 4. Persist the interaction to interaction_storage if store is true.
     // 5. Return Ok(StepResult::Response((StatusCode::OK, Json(response_json)).into_response())).
 
     let Some(response_json) = ctx.processing.upstream_response.take() else {
