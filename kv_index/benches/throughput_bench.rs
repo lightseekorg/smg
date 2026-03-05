@@ -16,6 +16,8 @@
 #![expect(clippy::disallowed_methods)]
 
 use std::{
+    fs::File,
+    io::{BufRead, BufReader},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -101,6 +103,20 @@ struct Args {
     /// RNG seed for reproducibility.
     #[arg(long, default_value_t = 42)]
     seed: u64,
+
+    /// Path to a Mooncake JSONL trace file. When provided, replaces synthetic generation.
+    /// Format: one JSON object per line with at minimum a "hash_ids" array of u64.
+    /// Optional fields: "timestamp" (ms), "output_length".
+    #[arg(long)]
+    trace_path: Option<String>,
+
+    /// Factor to stretch each trace request's hash sequence length.
+    #[arg(long, default_value_t = 1)]
+    trace_length_factor: usize,
+
+    /// How many times to duplicate the raw trace with offset hash_ids.
+    #[arg(long, default_value_t = 1)]
+    trace_duplication_factor: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +299,175 @@ fn generate_traces(args: &Args) -> Vec<Vec<TimedEntry>> {
     worker_traces
 }
 
+// ---------------------------------------------------------------------------
+// Mooncake trace loading
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize, Clone)]
+struct MooncakeRequest {
+    #[serde(default)]
+    timestamp: u64,
+    hash_ids: Vec<u64>,
+    #[expect(dead_code)]
+    #[serde(default)]
+    output_length: u64,
+}
+
+/// Convert a Mooncake hash_id (u64) to our ContentHash.
+///
+/// Passes both halves of the u64 as two u32 tokens to avoid truncation
+/// when hash_ids exceed u32 range after expand/duplicate transforms.
+fn content_hash_from_id(id: u64) -> ContentHash {
+    compute_content_hash(&[id as u32, (id >> 32) as u32])
+}
+
+fn load_mooncake_trace(path: &str) -> Vec<MooncakeRequest> {
+    let file = File::open(path).expect("failed to open trace file");
+    let reader = BufReader::new(file);
+    let mut requests = Vec::new();
+    for line in reader.lines() {
+        let line = line.expect("failed to read trace line");
+        if line.trim().is_empty() {
+            continue;
+        }
+        let req: MooncakeRequest =
+            serde_json::from_str(&line).expect("failed to parse trace line");
+        requests.push(req);
+    }
+    requests
+}
+
+/// Stretch each request's hash sequence by the given factor.
+///
+/// Each hash `h` becomes `factor` consecutive hashes:
+/// `h * factor`, `h * factor + 1`, ..., `h * factor + (factor - 1)`.
+fn expand_trace_lengths(requests: Vec<MooncakeRequest>, factor: usize) -> Vec<MooncakeRequest> {
+    if factor <= 1 {
+        return requests;
+    }
+    requests
+        .into_iter()
+        .map(|mut req| {
+            req.hash_ids = req
+                .hash_ids
+                .iter()
+                .flat_map(|&h| {
+                    let base = h * factor as u64;
+                    (0..factor as u64).map(move |offset| base + offset)
+                })
+                .collect();
+            req
+        })
+        .collect()
+}
+
+/// Duplicate traces with offset hash_ids, creating `factor` structurally
+/// identical copies of the prefix tree with disjoint hash spaces.
+fn duplicate_traces(requests: Vec<MooncakeRequest>, factor: usize) -> Vec<MooncakeRequest> {
+    if factor <= 1 {
+        return requests;
+    }
+    let max_hash_id = requests
+        .iter()
+        .flat_map(|r| r.hash_ids.iter().copied())
+        .max()
+        .unwrap_or(0);
+    let offset_base = max_hash_id + 1;
+    let mut out = Vec::with_capacity(requests.len() * factor);
+    for r in &requests {
+        for d in 0..factor {
+            let offset = offset_base * d as u64;
+            out.push(MooncakeRequest {
+                hash_ids: r.hash_ids.iter().map(|&h| h + offset).collect(),
+                ..r.clone()
+            });
+        }
+    }
+    out
+}
+
+/// Randomly partition a flat request list across `num_workers` worker buckets.
+fn partition_trace(
+    requests: Vec<MooncakeRequest>,
+    num_workers: usize,
+    seed: u64,
+) -> Vec<Vec<MooncakeRequest>> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut traces: Vec<Vec<MooncakeRequest>> = (0..num_workers).map(|_| Vec::new()).collect();
+    for req in requests {
+        traces[rng.random_range(0..num_workers)].push(req);
+    }
+    traces
+}
+
+/// Convert Mooncake per-worker request traces into our TimedEntry format.
+///
+/// For each request:
+/// - Request entry: `find_matches` with content_hashes derived from hash_ids
+/// - Event entry: `apply_stored` with StoredBlocks matching those content_hashes,
+///   populating the cache so future requests with overlapping prefixes find matches
+fn convert_mooncake_traces(worker_traces: Vec<Vec<MooncakeRequest>>) -> Vec<Vec<TimedEntry>> {
+    let global_min_ts = worker_traces
+        .iter()
+        .flat_map(|t| t.iter())
+        .map(|r| r.timestamp)
+        .min()
+        .unwrap_or(0);
+
+    let mut result = Vec::with_capacity(worker_traces.len());
+
+    for (worker_idx, requests) in worker_traces.into_iter().enumerate() {
+        let mut entries = Vec::with_capacity(requests.len() * 2);
+        // Use worker_idx in high bits to ensure globally unique seq_hashes.
+        let mut seq_counter: u64 = (worker_idx as u64) << 40;
+        let mut prev_last_seq: Option<SequenceHash> = None;
+
+        for req in &requests {
+            // Mooncake timestamps are in milliseconds; convert to microseconds.
+            let timestamp_us = req.timestamp.saturating_sub(global_min_ts) * 1000;
+
+            let content_hashes: Vec<ContentHash> =
+                req.hash_ids.iter().map(|&id| content_hash_from_id(id)).collect();
+
+            // Request: find_matches
+            entries.push(TimedEntry {
+                timestamp_us,
+                entry: TraceEntry::Request {
+                    content_hashes: content_hashes.clone(),
+                },
+            });
+
+            // Event: apply_stored (populate cache for future prefix matches)
+            let blocks: Vec<StoredBlock> = content_hashes
+                .iter()
+                .map(|&ch| {
+                    seq_counter += 1;
+                    StoredBlock {
+                        seq_hash: SequenceHash(seq_counter),
+                        content_hash: ch,
+                    }
+                })
+                .collect();
+
+            let parent = prev_last_seq;
+            prev_last_seq = blocks.last().map(|b| b.seq_hash);
+
+            entries.push(TimedEntry {
+                timestamp_us: timestamp_us + 1,
+                entry: TraceEntry::Event {
+                    blocks,
+                    parent_seq_hash: parent,
+                },
+            });
+        }
+
+        entries.sort_by_key(|e| e.timestamp_us);
+        result.push(entries);
+    }
+
+    result
+}
+
 /// Rescale trace timestamps to fit within a target duration.
 fn rescale_traces(traces: &[Vec<TimedEntry>], target_duration_ms: u64) -> Vec<Vec<TimedEntry>> {
     let max_ts = traces
@@ -335,22 +520,46 @@ async fn main() {
     let sweep = !args.no_sweep;
 
     println!("=== Throughput Benchmark ===");
-    println!(
-        "Workers: {}, Jump: {}, Blocks/req: {}, Event blocks: {}, Duplication: {}x",
-        args.num_workers,
-        args.jump_size,
-        args.blocks_per_request,
-        args.event_blocks,
-        args.duplication_factor,
-    );
-    println!(
-        "Sessions: {}, Turns/session: {}, Seed: {}",
-        args.num_sessions, args.requests_per_session, args.seed,
-    );
+    if let Some(ref path) = args.trace_path {
+        println!(
+            "Trace: {path} | Workers: {}, Jump: {}, Seed: {}",
+            args.num_workers, args.jump_size, args.seed,
+        );
+        if args.trace_length_factor > 1 || args.trace_duplication_factor > 1 {
+            println!(
+                "Trace transforms: length {}x, duplication {}x",
+                args.trace_length_factor, args.trace_duplication_factor,
+            );
+        }
+    } else {
+        println!(
+            "Workers: {}, Jump: {}, Blocks/req: {}, Event blocks: {}, Duplication: {}x",
+            args.num_workers,
+            args.jump_size,
+            args.blocks_per_request,
+            args.event_blocks,
+            args.duplication_factor,
+        );
+        println!(
+            "Sessions: {}, Turns/session: {}, Seed: {}",
+            args.num_sessions, args.requests_per_session, args.seed,
+        );
+    }
 
-    println!("\nGenerating synthetic traces...");
     let gen_start = Instant::now();
-    let base_traces = generate_traces(&args);
+    let base_traces = if let Some(ref path) = args.trace_path {
+        let path = path.as_str();
+        println!("\nLoading Mooncake trace from {path}...");
+        let requests = load_mooncake_trace(path);
+        println!("  Loaded {} requests", requests.len());
+        let requests = expand_trace_lengths(requests, args.trace_length_factor);
+        let requests = duplicate_traces(requests, args.trace_duplication_factor);
+        let worker_traces = partition_trace(requests, args.num_workers, args.seed);
+        convert_mooncake_traces(worker_traces)
+    } else {
+        println!("\nGenerating synthetic traces...");
+        generate_traces(&args)
+    };
     let gen_elapsed = gen_start.elapsed();
 
     let total_entries: usize = base_traces.iter().map(|t| t.len()).sum();
