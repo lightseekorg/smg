@@ -39,7 +39,10 @@ use super::{
 use crate::{
     core::Worker,
     observability::metrics::metrics_labels,
-    routers::{error, grpc::proto_wrapper::ProtoResponseVariant},
+    routers::{
+        error,
+        grpc::{proto_wrapper::ProtoResponseVariant, tonic_ext::TonicStatusExt},
+    },
 };
 
 /// Type alias for the SSE channel sender used across streaming endpoints.
@@ -662,7 +665,9 @@ pub(crate) async fn collect_stream_responses(
                         all_responses.push(complete);
                     }
                     ProtoResponseVariant::Error(err) => {
-                        error!(function = "collect_stream_responses", worker = %worker_name, error = %err.message(), "Worker generation error");
+                        // In-band error (legacy): backends should use context.abort() instead.
+                        // Kept for backward compatibility during the transition.
+                        warn!(function = "collect_stream_responses", worker = %worker_name, error = %err.message(), "Worker sent in-band error (legacy path, backend should use context.abort)");
                         // Don't mark as completed - let Drop send abort for error cases
                         return Err(error::internal_error(
                             "worker_generation_failed",
@@ -678,9 +683,9 @@ pub(crate) async fn collect_stream_responses(
                 }
             }
             Err(e) => {
-                error!(function = "collect_stream_responses", worker = %worker_name, error = ?e, "Worker stream error");
+                error!(function = "collect_stream_responses", worker = %worker_name, grpc_code = ?e.code(), error = ?e, "Worker stream error");
                 // Don't mark as completed - let Drop send abort for error cases
-                return Err(error::internal_error(
+                return Err(e.to_http_error(
                     "worker_stream_failed",
                     format!("{worker_name} stream failed: {e}"),
                 ));

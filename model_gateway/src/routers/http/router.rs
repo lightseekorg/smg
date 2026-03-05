@@ -317,7 +317,7 @@ impl Router {
         events::RequestReceivedEvent {}.emit();
 
         let status = response.status();
-        worker.record_outcome(status.is_success());
+        worker.record_outcome(!is_retryable_status(status));
 
         // Record worker errors for server errors (5xx)
         if status.is_server_error() {

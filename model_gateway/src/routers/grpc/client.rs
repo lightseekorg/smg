@@ -224,22 +224,23 @@ impl GrpcClient {
 
     /// Generate streaming response from request
     ///
-    /// Dispatches to the appropriate backend client and wraps the result in ProtoStream
+    /// Dispatches to the appropriate backend client and wraps the result in ProtoStream.
+    /// Returns `tonic::Status` on error so callers can inspect the gRPC status code directly.
     pub async fn generate(
         &mut self,
         req: ProtoGenerateRequest,
-    ) -> Result<ProtoStream, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<ProtoStream, tonic::Status> {
         match (self, req) {
             (Self::Sglang(client), ProtoGenerateRequest::Sglang(boxed_req)) => {
-                let stream = client.generate(*boxed_req).await?;
+                let stream = client.generate(*boxed_req).await.map_err(into_status)?;
                 Ok(ProtoStream::Sglang(stream))
             }
             (Self::Vllm(client), ProtoGenerateRequest::Vllm(boxed_req)) => {
-                let stream = client.generate(*boxed_req).await?;
+                let stream = client.generate(*boxed_req).await.map_err(into_status)?;
                 Ok(ProtoStream::Vllm(stream))
             }
             (Self::Trtllm(client), ProtoGenerateRequest::Trtllm(boxed_req)) => {
-                let stream = client.generate(*boxed_req).await?;
+                let stream = client.generate(*boxed_req).await.map_err(into_status)?;
                 Ok(ProtoStream::Trtllm(stream))
             }
             #[expect(
@@ -253,10 +254,10 @@ impl GrpcClient {
     pub async fn embed(
         &mut self,
         req: ProtoEmbedRequest,
-    ) -> Result<ProtoEmbedResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<ProtoEmbedResponse, tonic::Status> {
         match (self, req) {
             (Self::Sglang(client), ProtoEmbedRequest::Sglang(boxed_req)) => {
-                let resp = client.embed(*boxed_req).await?;
+                let resp = client.embed(*boxed_req).await.map_err(into_status)?;
                 Ok(ProtoEmbedResponse::Sglang(resp))
             }
             #[expect(
@@ -365,6 +366,15 @@ impl GrpcClient {
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
         }
+    }
+}
+
+/// Downcast a boxed error to `tonic::Status`, falling back to `Status::internal`.
+/// The grpc_client crate returns `Box<dyn Error>` but the concrete type is always `tonic::Status`.
+fn into_status(err: Box<dyn std::error::Error + Send + Sync>) -> tonic::Status {
+    match err.downcast::<tonic::Status>() {
+        Ok(status) => *status,
+        Err(other) => tonic::Status::internal(other.to_string()),
     }
 }
 
