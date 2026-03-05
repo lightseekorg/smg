@@ -372,6 +372,12 @@ impl WorkerRegistry {
                     return Some(url.clone());
                 }
             }
+
+            // If we reach here, the forward mapping is gone (or points to a new ID).
+            // This means the id_to_url entry is an orphaned remnant of a concurrent
+            // remove_by_url + reserve_id_for_url interleaving. Clean it up to avert a memory leak.
+            drop(url); // drop the DashMap reference so we don't deadlock on remove
+            self.id_to_url.remove(worker_id);
         }
 
         None
