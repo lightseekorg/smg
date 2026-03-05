@@ -6,6 +6,10 @@ on:
       - main
     paths:
       - grpc_servicer/pyproject.toml  # Triggered when version bumped
+  workflow_run:
+    workflows: ["Release smg-grpc-proto to PyPI"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -14,6 +18,10 @@ permissions:
 jobs:
   build:
     name: Build smg-grpc-servicer
+    # Only run if triggered directly (push/dispatch) or if proto release succeeded
+    if: >-
+      github.event_name != 'workflow_run'
+      || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -56,7 +64,7 @@ jobs:
       - name: Upload to PyPI
         env:
           TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_SERVICER }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           pip install twine
           twine upload dist/* --verbose --skip-existing
