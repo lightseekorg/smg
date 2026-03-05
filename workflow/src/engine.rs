@@ -182,10 +182,9 @@ pub struct WorkflowEngine<D: WorkflowData, S: StateStore<D> = InMemoryStore<D>> 
     definitions: Arc<RwLock<HashMap<WorkflowId, Arc<WorkflowDefinition<D>>>>>,
     state_store: S,
     event_bus: Arc<EventBus>,
-    /// Shutdown signal sender - when true, engine is shutting down
+    /// Shutdown signal sender - when true, engine is shutting down.
+    /// Also used to derive receivers via `subscribe()` and check state via `borrow()`.
     shutdown_tx: Arc<watch::Sender<bool>>,
-    /// Shutdown signal receiver for cloning to tasks
-    shutdown_rx: watch::Receiver<bool>,
     /// Count of active workflow executions
     active_workflows: Arc<AtomicUsize>,
     _phantom: PhantomData<D>,
@@ -200,13 +199,12 @@ impl<D: WorkflowData> WorkflowEngine<D, InMemoryStore<D>> {
 impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
     /// Create a new workflow engine with a custom state store
     pub fn with_store(state_store: S) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (shutdown_tx, _) = watch::channel(false);
         Self {
             definitions: Arc::new(RwLock::new(HashMap::new())),
             state_store,
             event_bus: Arc::new(EventBus::new()),
             shutdown_tx: Arc::new(shutdown_tx),
-            shutdown_rx,
             active_workflows: Arc::new(AtomicUsize::new(0)),
             _phantom: PhantomData,
         }
@@ -214,7 +212,7 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
 
     /// Check if the engine is shutting down
     pub fn is_shutting_down(&self) -> bool {
-        *self.shutdown_rx.borrow()
+        *self.shutdown_tx.borrow()
     }
 
     /// Initiate graceful shutdown
@@ -364,7 +362,7 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
         let state_store = self.state_store.clone();
         let ttl = ttl.unwrap_or(Duration::from_secs(3600)); // 1 hour default
         let interval = interval.unwrap_or(Duration::from_secs(300)); // 5 minutes default
-        let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         #[expect(
             clippy::disallowed_methods,
@@ -440,6 +438,7 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
         let mut state = WorkflowState::new(instance_id, definition_id.clone(), data);
         state.status = WorkflowStatus::Running;
 
+        state.step_states.reserve(definition.steps.len());
         for step in &definition.steps {
             state
                 .step_states
@@ -1176,7 +1175,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
             state_store: self.state_store.clone(),
             event_bus: Arc::clone(&self.event_bus),
             shutdown_tx: Arc::clone(&self.shutdown_tx),
-            shutdown_rx: self.shutdown_rx.clone(),
             active_workflows: Arc::clone(&self.active_workflows),
             _phantom: PhantomData,
         }
