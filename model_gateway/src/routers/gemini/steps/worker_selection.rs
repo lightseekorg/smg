@@ -1,6 +1,6 @@
 //! WorkerSelection step.
 //!
-//! Transition: SelectWorker → LoadPreviousInteraction
+//! Planned transition: SelectWorker → LoadPreviousInteraction
 
 use axum::{
     http::StatusCode,
@@ -11,12 +11,14 @@ use crate::routers::gemini::{context::RequestContext, state::StepResult};
 
 /// Select a healthy upstream worker for the requested model.
 ///
+/// **Not yet implemented** — currently returns 501. Planned behavior:
+///
 /// ## Reads
 /// - `ctx.input.original_request.model` — the model identifier.
 /// - `ctx.components.worker_registry` — the pool of registered workers.
 /// - `ctx.input.headers` — forwarded headers (auth extraction).
 ///
-/// ## Writes
+/// ## Writes (planned)
 /// - `ctx.processing.worker` — the selected `Arc<dyn Worker>`.
 /// - `ctx.processing.upstream_url` — `{worker.url()}/v1/interactions`.
 /// - `ctx.state` → `LoadPreviousInteraction`.

@@ -27,8 +27,9 @@ use crate::routers::gemini::{context::RequestContext, state::StepResult};
 /// - `ctx.processing.upstream_url` — the worker endpoint.
 /// - `ctx.input.headers` — forwarded headers.
 ///
-/// ## Returns
+/// ## Returns (planned)
 /// `Ok(StepResult::Response(sse_response))` — the SSE response for the client.
+/// Currently returns `Err(501 Not Implemented)`.
 pub(crate) async fn stream_request_execution(
     _ctx: &mut RequestContext,
 ) -> Result<StepResult, Response> {

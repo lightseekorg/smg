@@ -1,7 +1,7 @@
 //! NonStreamRequestExecution step.
 //!
-//! Transition: NonStreamRequest → NonStreamRequest (tool loop)
-//!                               | ProcessResponse (no tool calls)
+//! Planned transition: NonStreamRequest → NonStreamRequest (tool loop)
+//!                                      | ProcessResponse (no tool calls)
 
 use axum::{
     http::StatusCode,

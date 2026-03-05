@@ -25,16 +25,17 @@ use crate::routers::gemini::{
 ///   - `StreamRequestWithTool` — streaming request with MCP tools.
 ///   - `StreamRequest` — streaming request without MCP tools.
 ///
-/// ## MCP handling
-/// When the request contains `InteractionsTool::McpServer` tools, this step:
-/// 1. Validates MCP server connectivity via `ensure_request_mcp_client()`.
-/// 2. Creates an `McpToolSession` for the request lifetime.
-/// 3. Converts MCP tool definitions to function tool definitions in the payload
+/// ## MCP handling (planned)
+/// When the request contains `InteractionsTool::McpServer` tools, this step will:
+/// 1. Validate MCP server connectivity via `ensure_request_mcp_client()`.
+/// 2. Create an `McpToolSession` for the request lifetime.
+/// 3. Convert MCP tool definitions to function tool definitions in the payload
 ///    (via `prepare_mcp_tools_as_functions`), so the upstream worker sees only
 ///    function tools.
 ///
-/// These MCP-related fields would be stored on `RequestContext` once the
-/// MCP context fields are added in a later phase.
+/// MCP-related fields will be stored on `RequestContext` once the MCP context
+/// fields are added in a later phase. Currently, MCP tools are not detected
+/// and the payload is forwarded as-is.
 pub(crate) async fn request_building(ctx: &mut RequestContext) -> Result<StepResult, Response> {
     // TODO: implement request building
     //

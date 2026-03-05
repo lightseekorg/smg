@@ -15,9 +15,13 @@ use crate::routers::gemini::{context::RequestContext, state::StepResult};
 /// This step produces the terminal HTTP `Response` via `StepResult::Response`.
 /// The driver returns it directly — no `final_response` field on the context.
 ///
+/// Currently returns the upstream response as-is, or 502 if no upstream
+/// response was received. MCP metadata injection and interaction persistence
+/// are planned for a later phase.
+///
 /// ## Reads
 /// - `ctx.processing.upstream_response` — the last upstream response JSON.
-/// - `ctx.input.original_request` — for metadata patching.
+/// - `ctx.input.original_request` — for metadata patching (planned).
 ///
 /// ## Returns
 /// `Ok(StepResult::Response(response))` — the final HTTP response.
