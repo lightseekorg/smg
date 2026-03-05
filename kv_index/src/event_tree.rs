@@ -1,7 +1,7 @@
 //! Positional indexer for cache-aware routing.
 //!
 //! Uses a single `DashMap<(usize, ContentHash), SeqEntry>` keyed by (position, content_hash).
-//! No capacity limit — the map grows unboundedly as blocks are stored (matching Dynamo).
+//! No capacity limit — the map grows unboundedly as blocks are stored.
 //! Jump search skips positions in strides, yielding amortized O(D/J + W) complexity.
 //!
 //! **Dual-hash scheme**: backends send a position-aware `block_hash` (SequenceHash)
@@ -253,10 +253,10 @@ pub type WorkerBlockMap = FxHashMap<SequenceHash, (usize, ContentHash, SequenceH
 ///
 /// Write-path methods take a caller-owned `&mut WorkerBlockMap` (one per worker).
 /// This gives direct HashMap access (~5ns) instead of DashMap hash+shard locking
-/// (~25ns), matching Dynamo's zero-contention design for single-writer-per-worker.
+/// (~25ns), achieving zero-contention for single-writer-per-worker.
 pub struct PositionalIndexer {
     /// Single flat index: (position, content_hash) → SeqEntry.
-    /// No capacity limit — grows as blocks are stored (matching Dynamo's design).
+    /// No capacity limit — grows as blocks are stored.
     index: DashMap<(usize, ContentHash), SeqEntry, FxBuildHasher>,
     /// Per-worker block counts, tracked atomically for O(1) reads during queries.
     /// Flat Vec indexed by worker_id — lock-free reads on the query hot path
@@ -458,7 +458,7 @@ impl PositionalIndexer {
     //
     // The router computes its own rolling hash from ContentHashes (XXH3).
     // This hash is stored in SeqEntry during apply_stored and recomputed
-    // at query time for precise filtering — matching Dynamo's semantics.
+    // at query time for precise filtering.
     // The backend's SequenceHash (from proto block_hash) stays in
     // worker_blocks only, used for apply_removed reverse lookup.
     // -----------------------------------------------------------------------
@@ -567,7 +567,7 @@ impl PositionalIndexer {
     /// Scan positions sequentially, draining workers that stop matching.
     /// Accesses DashMap entries directly — no set cloning.
     /// Skips rolling hash computation for Single entries (unambiguous match).
-    /// Uses Dynamo's retain guard: skips retain when workers.len() >= active.len()
+    /// Uses retain guard: skips retain when workers.len() >= active.len()
     /// (all active workers are still present, no work to do).
     #[expect(clippy::too_many_arguments)]
     fn linear_scan_drain(
@@ -596,7 +596,7 @@ impl PositionalIndexer {
 
             // Fast path: Single entry — skip rolling hash, use workers directly.
             if let Some(workers) = entry.value().workers_if_single() {
-                // Retain guard (Dynamo optimization): only retain when some workers
+                // Retain guard: only retain when some workers
                 // have dropped off. When workers.len() >= active.len(), all active
                 // workers are still present — skip the O(active) iteration.
                 if workers.len() < active.len() {

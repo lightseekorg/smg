@@ -1,6 +1,6 @@
 //! Trace-driven throughput benchmark for PositionalIndexer.
 //!
-//! Measures block throughput (blocks/sec) using Dynamo-compatible methodology:
+//! Measures block throughput (blocks/sec):
 //! - Synthetic trace generation with shared prefixes and multi-turn sessions
 //! - Concurrent tokio task replay with timing-accurate pacing
 //! - Block throughput metric: total_blocks = request_blocks + event_blocks
