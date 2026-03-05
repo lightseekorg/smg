@@ -357,7 +357,7 @@ impl RequestExecutionStage {
             .generate(prefill_request)
             .await
             .map_err(|e| {
-                workers.record_outcome_prefill(!e.is_server_error());
+                workers.record_outcome_prefill(!e.is_cb_failure());
                 error!(function = "execute_sequential_pd", error = %e, "Prefill worker failed to start");
                 e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {e}"))
             })?;
@@ -369,7 +369,7 @@ impl RequestExecutionStage {
                     // Just consume the response, we use bootstrap info from worker metadata
                 }
                 Err(e) => {
-                    workers.record_outcome_prefill(!e.is_server_error());
+                    workers.record_outcome_prefill(!e.is_cb_failure());
                     error!(function = "execute_sequential_pd", error = %e, "Prefill stream error");
                     return Err(e.to_http_error(
                         "prefill_stream_error",
@@ -396,7 +396,7 @@ impl RequestExecutionStage {
 
         // Send request to decode
         let decode_stream = decode_client.generate(decode_request).await.map_err(|e| {
-            workers.record_outcome_decode(!e.is_server_error());
+            workers.record_outcome_decode(!e.is_cb_failure());
             error!(function = "execute_sequential_pd", error = %e, "Decode worker failed to start");
             e.to_http_error(
                 "decode_worker_failed_to_start",

@@ -4,16 +4,20 @@ use axum::response::Response;
 use http::StatusCode;
 use tonic::Code;
 
-use crate::routers::error;
+use crate::{core::is_retryable_status, routers::error};
 
 /// Extension methods for `tonic::Status`.
 pub(crate) trait TonicStatusExt {
     /// Map gRPC status code to the corresponding HTTP status code.
     fn http_status(&self) -> StatusCode;
 
-    /// Returns `true` if this is a server-side error (should trip the circuit breaker).
-    /// Client errors (InvalidArgument, NotFound, etc.) return `false`.
-    fn is_server_error(&self) -> bool;
+    /// Returns `true` if this error should trip the circuit breaker.
+    ///
+    /// Delegates to `is_retryable_status(http_status())` so the circuit breaker
+    /// uses the same predicate for both HTTP and gRPC paths. This covers
+    /// 408, 429, 500, 502, 503, 504 (i.e. ResourceExhausted, DeadlineExceeded,
+    /// Internal, Unavailable, Unknown, DataLoss, etc.).
+    fn is_cb_failure(&self) -> bool;
 
     /// Convert this gRPC error into an HTTP error response with the appropriate status code.
     fn to_http_error(&self, code: &str, msg: String) -> Response;
@@ -39,16 +43,8 @@ impl TonicStatusExt for tonic::Status {
         }
     }
 
-    fn is_server_error(&self) -> bool {
-        matches!(
-            self.code(),
-            Code::Internal
-                | Code::Unavailable
-                | Code::Unknown
-                | Code::DataLoss
-                | Code::DeadlineExceeded
-                | Code::Unimplemented
-        )
+    fn is_cb_failure(&self) -> bool {
+        is_retryable_status(self.http_status())
     }
 
     fn to_http_error(&self, code: &str, msg: String) -> Response {
@@ -59,13 +55,12 @@ impl TonicStatusExt for tonic::Status {
 /// Extension for `Result<T, tonic::Status>` to check circuit breaker health.
 pub(crate) trait TonicResultExt {
     /// Returns `true` if the result is healthy for the circuit breaker.
-    /// `Ok` and client-error results are healthy; only server errors are failures.
+    /// `Ok` and client-error results are healthy; only retryable errors are failures.
     fn is_healthy(&self) -> bool;
 }
 
 impl<T> TonicResultExt for Result<T, tonic::Status> {
     fn is_healthy(&self) -> bool {
-        self.as_ref()
-            .map_or_else(|e| !e.is_server_error(), |_| true)
+        self.as_ref().map_or_else(|e| !e.is_cb_failure(), |_| true)
     }
 }
