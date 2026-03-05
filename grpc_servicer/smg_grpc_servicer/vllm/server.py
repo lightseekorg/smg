@@ -72,7 +72,8 @@ async def serve_grpc(args: argparse.Namespace):
     reflection.enable_server_reflection(service_names, server)
 
     # Bind to address
-    address = f"{args.host}:{args.port}"
+    host = args.host or "0.0.0.0"
+    address = f"{host}:{args.port}"
     server.add_insecure_port(address)
 
     # Start server
