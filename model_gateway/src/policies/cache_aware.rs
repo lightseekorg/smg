@@ -734,7 +734,7 @@ impl Default for CacheAwarePolicy {
 
 #[cfg(test)]
 mod tests {
-    use kv_index::{compute_content_hash, SequenceHash, StoredBlock};
+    use kv_index::{compute_content_hash, SequenceHash, StoredBlock, WorkerBlockMap};
 
     use super::*;
     use crate::core::{BasicWorkerBuilder, WorkerType};
@@ -1103,6 +1103,8 @@ mod tests {
         jump_size: usize,
     ) -> Arc<PositionalIndexer> {
         let indexer = Arc::new(PositionalIndexer::new(jump_size));
+        let worker_id = indexer.intern_worker(worker_url);
+        let mut wb = WorkerBlockMap::default();
         let blocks: Vec<StoredBlock> = token_chunks
             .iter()
             .enumerate()
@@ -1111,7 +1113,9 @@ mod tests {
                 content_hash: compute_content_hash(tokens),
             })
             .collect();
-        indexer.apply_stored(worker_url, &blocks, None).unwrap();
+        indexer
+            .apply_stored(worker_id, &blocks, None, &mut wb)
+            .unwrap();
         indexer
     }
 
@@ -1210,19 +1214,23 @@ mod tests {
 
         // Store same blocks for both workers (equal overlap)
         let indexer = Arc::new(PositionalIndexer::new(4));
+        let w1_id = indexer.intern_worker("http://w1:8000");
+        let w2_id = indexer.intern_worker("http://w2:8000");
+        let mut wb1 = WorkerBlockMap::default();
+        let mut wb2 = WorkerBlockMap::default();
         let blocks = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
         }];
         indexer
-            .apply_stored("http://w1:8000", &blocks, None)
+            .apply_stored(w1_id, &blocks, None, &mut wb1)
             .unwrap();
         let blocks2 = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
         }];
         indexer
-            .apply_stored("http://w2:8000", &blocks2, None)
+            .apply_stored(w2_id, &blocks2, None, &mut wb2)
             .unwrap();
 
         // Equal overlap → tie-break by load → w2 wins (lower load)
@@ -1248,15 +1256,17 @@ mod tests {
         policy.init_workers(&workers);
 
         let indexer = Arc::new(PositionalIndexer::new(4));
+        let w1_id = indexer.intern_worker("http://w1:8000");
+        let w2_id = indexer.intern_worker("http://w2:8000");
+        let mut wb1 = WorkerBlockMap::default();
+        let mut wb2 = WorkerBlockMap::default();
 
         // Both workers have block [1,2,3,4] (equal overlap, equal load)
         let block = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
         }];
-        indexer
-            .apply_stored("http://w1:8000", &block, None)
-            .unwrap();
+        indexer.apply_stored(w1_id, &block, None, &mut wb1).unwrap();
 
         // w2 has the same block plus extra blocks → larger tree
         let block2 = vec![StoredBlock {
@@ -1264,14 +1274,14 @@ mod tests {
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
         }];
         indexer
-            .apply_stored("http://w2:8000", &block2, None)
+            .apply_stored(w2_id, &block2, None, &mut wb2)
             .unwrap();
         let extra = vec![StoredBlock {
             seq_hash: SequenceHash(2),
             content_hash: compute_content_hash(&[5, 6, 7, 8]),
         }];
         indexer
-            .apply_stored("http://w2:8000", &extra, Some(SequenceHash(1)))
+            .apply_stored(w2_id, &extra, Some(SequenceHash(1)), &mut wb2)
             .unwrap();
 
         // Equal overlap, equal load → tie-break by tree size → w1 wins (smaller)
@@ -1312,6 +1322,10 @@ mod tests {
         policy.init_workers(&workers);
 
         let indexer = Arc::new(PositionalIndexer::new(4));
+        let w1_id = indexer.intern_worker("http://w1:8000");
+        let w2_id = indexer.intern_worker("http://w2:8000");
+        let mut wb1 = WorkerBlockMap::default();
+        let mut wb2 = WorkerBlockMap::default();
 
         // w1 has 4 blocks cached
         let blocks_w1: Vec<StoredBlock> = (0..4)
@@ -1326,7 +1340,7 @@ mod tests {
             })
             .collect();
         indexer
-            .apply_stored("http://w1:8000", &blocks_w1, None)
+            .apply_stored(w1_id, &blocks_w1, None, &mut wb1)
             .unwrap();
 
         // w2 has only the first 2 blocks (partial overlap with same request)
@@ -1342,7 +1356,7 @@ mod tests {
             })
             .collect();
         indexer
-            .apply_stored("http://w2:8000", &blocks_w2, None)
+            .apply_stored(w2_id, &blocks_w2, None, &mut wb2)
             .unwrap();
 
         // Query with all 4 blocks worth of tokens → w1 wins (higher overlap: 4 vs 2)
@@ -1548,13 +1562,13 @@ mod tests {
 
         // Store blocks using block_size=8 (tokens chunked in groups of 8)
         let indexer = Arc::new(PositionalIndexer::new(4));
+        let w1_id = indexer.intern_worker("http://w1:8000");
+        let mut wb = WorkerBlockMap::default();
         let block = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4, 5, 6, 7, 8]),
         }];
-        indexer
-            .apply_stored("http://w1:8000", &block, None)
-            .unwrap();
+        indexer.apply_stored(w1_id, &block, None, &mut wb).unwrap();
         monitor
             .indexers
             .insert("unknown".to_string(), indexer.clone());

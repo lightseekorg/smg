@@ -47,11 +47,47 @@ jobs:
         with:
           sccache-version: 'v0.10.0'
 
-      - name: Run benchmark
+      - name: Run criterion benchmark
         timeout-minutes: 40
         run: |
           source "$HOME/.cargo/env"
           cargo bench --bench radix_tree_benchmark -- benchmark_summary 2>&1 | tee benchmark_output.txt
+
+      - name: Run throughput benchmark (synthetic)
+        timeout-minutes: 10
+        run: |
+          source "$HOME/.cargo/env"
+          cargo bench -p kv-index --bench throughput_bench -- \
+            --num-sessions 200000 \
+            --num-workers 256 \
+            --jump-size 8 \
+            --sweep-min-ms 10 \
+            --sweep-steps 20 2>&1 | tee throughput_output.txt
+
+      - name: Download Mooncake traces
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/traces"
+          for trace in conversation_trace synthetic_trace toolagent_trace; do
+            curl -sL "https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/${trace}.jsonl" \
+              -o "$GITHUB_WORKSPACE/traces/${trace}.jsonl"
+            echo "Downloaded ${trace}.jsonl ($(wc -l < "$GITHUB_WORKSPACE/traces/${trace}.jsonl") requests)"
+          done
+
+      - name: Run throughput benchmark (Mooncake traces)
+        timeout-minutes: 15
+        run: |
+          source "$HOME/.cargo/env"
+          for trace in conversation_trace synthetic_trace toolagent_trace; do
+            echo "=== ${trace} ==="
+            cargo bench -p kv-index --bench throughput_bench -- \
+              --trace-path "$GITHUB_WORKSPACE/traces/${trace}.jsonl" \
+              --trace-duplication-factor 20 \
+              --num-workers 256 \
+              --jump-size 8 \
+              --sweep-min-ms 10 \
+              --sweep-steps 20 2>&1 | tee -a mooncake_output.txt
+            echo "" >> mooncake_output.txt
+          done
 
       - name: Upload benchmark results
         if: always()
@@ -61,6 +97,8 @@ jobs:
           path: |
             target/criterion/benchmark_summary/
             benchmark_output.txt
+            throughput_output.txt
+            mooncake_output.txt
           retention-days: 30
 
       - name: Show sccache stats
@@ -74,5 +112,19 @@ jobs:
           if [ -f benchmark_output.txt ]; then
             echo '```' >> $GITHUB_STEP_SUMMARY
             tail -50 benchmark_output.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Throughput Benchmark — Synthetic (Block ops/sec)" >> $GITHUB_STEP_SUMMARY
+          if [ -f throughput_output.txt ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -30 throughput_output.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Throughput Benchmark — Mooncake Traces (Block ops/sec)" >> $GITHUB_STEP_SUMMARY
+          if [ -f mooncake_output.txt ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -80 mooncake_output.txt >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi

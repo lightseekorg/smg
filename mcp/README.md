@@ -489,8 +489,6 @@ let session = McpToolSession::new(&orchestrator, vec![binding], "req-123");
 - `ToolExecutionInput`: Tool call ID, name, and arguments
 - `ToolExecutionOutput`: Full result including raw output, transformed item, duration, and error info
   - `tool_name`: Name used in transformed output items
-  - `invoked_tool_name`: Name originally provided by the caller/model (when available)
-  - `resolved_tool_name`: Canonical MCP tool name used for execution (when available)
 - `server_label`: User-facing label for API responses (distinct from internal `server_key`)
 
 Router code should use `McpToolSession` so exposed tool names are collision-safe and execution always resolves through session mapping (exposed name -> `{server_key, tool_name}`).

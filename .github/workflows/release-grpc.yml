@@ -1,0 +1,162 @@
+name: Release gRPC packages to PyPI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - grpc_client/python/pyproject.toml
+      - grpc_servicer/pyproject.toml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Detect which packages changed ──
+  detect:
+    name: Detect changed packages
+    runs-on: ubuntu-latest
+    outputs:
+      proto: ${{ steps.changes.outputs.proto }}
+      servicer: ${{ steps.changes.outputs.servicer }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect changes
+        id: changes
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "proto=true" >> "$GITHUB_OUTPUT"
+            echo "servicer=true" >> "$GITHUB_OUTPUT"
+          else
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+            changed="$(git diff --name-only "$base" "$head")"
+            proto=$(echo "$changed" | grep -q '^grpc_client/python/pyproject.toml$' && echo true || echo false)
+            servicer=$(echo "$changed" | grep -q '^grpc_servicer/pyproject.toml$' && echo true || echo false)
+            echo "proto=$proto" >> "$GITHUB_OUTPUT"
+            echo "servicer=$servicer" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Tier 1: Proto (no dependencies) ──
+  build-proto:
+    name: Build smg-grpc-proto
+    needs: [detect]
+    if: needs.detect.outputs.proto == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build deps
+        run: pip install build twine grpcio-tools
+
+      - name: Copy proto files (replace symlink with real files)
+        run: |
+          rm -f grpc_client/python/smg_grpc_proto/proto
+          mkdir -p grpc_client/python/smg_grpc_proto/proto
+          cp grpc_client/proto/*.proto grpc_client/python/smg_grpc_proto/proto/
+
+      - name: Build package
+        run: cd grpc_client/python && python -m build
+
+      - name: Check package
+        run: twine check --strict grpc_client/python/dist/*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: grpc-proto-dist
+          path: grpc_client/python/dist/
+
+  upload-proto:
+    name: Upload proto to PyPI
+    if: github.repository == 'lightseekorg/smg'
+    needs: [build-proto]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: grpc-proto-dist
+          path: dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Upload to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_PROTO }}
+        run: |
+          pip install twine
+          twine upload dist/* --verbose --skip-existing
+
+  # ── Tier 2: Servicer (waits for Tier 1 if proto changed) ──
+  build-servicer:
+    name: Build smg-grpc-servicer
+    needs: [detect, build-proto, upload-proto]
+    # Run if: proto wasn't needed (skipped) OR proto built and uploaded successfully
+    if: >-
+      always()
+      && needs.detect.outputs.servicer == 'true'
+      && (
+        needs.detect.outputs.proto != 'true'
+        || (
+          needs.build-proto.result == 'success'
+          && needs.upload-proto.result != 'failure'
+        )
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build deps
+        run: pip install build twine
+
+      - name: Build package
+        run: cd grpc_servicer && python -m build
+
+      - name: Check package
+        run: twine check --strict grpc_servicer/dist/*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: grpc-servicer-dist
+          path: grpc_servicer/dist/
+
+  upload-servicer:
+    name: Upload servicer to PyPI
+    if: github.repository == 'lightseekorg/smg'
+    needs: [build-servicer]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: grpc-servicer-dist
+          path: dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Upload to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_SERVICER }}
+        run: |
+          pip install twine
+          twine upload dist/* --verbose --skip-existing

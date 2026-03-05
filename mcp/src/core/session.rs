@@ -11,8 +11,9 @@ use std::collections::{HashMap, HashSet};
 use futures::stream::{self, StreamExt};
 use openai_protocol::responses::ResponseTool;
 
-use super::orchestrator::{
-    McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput,
+use super::{
+    orchestrator::{McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput},
+    UNKNOWN_SERVER_KEY,
 };
 use crate::{
     approval::ApprovalMode,
@@ -204,23 +205,20 @@ impl<'a> McpToolSession<'a> {
                 )
                 .await;
 
-            output.invoked_tool_name = Some(invoked_name.clone());
-            output.resolved_tool_name = Some(resolved_tool_name);
             output.tool_name = invoked_name;
             output
         } else {
             let fallback_label = self
                 .all_mcp_servers
                 .first()
-                .map(|b| b.label.clone())
-                .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
+                .map(|b| b.label.as_str())
+                .unwrap_or(DEFAULT_SERVER_LABEL)
+                .to_string();
             let err = format!("Tool '{invoked_name}' is not in this session's exposed tool map");
             ToolExecutionOutput {
                 call_id: input.call_id,
                 tool_name: invoked_name.clone(),
-                invoked_tool_name: Some(invoked_name),
-                resolved_tool_name: None,
-                server_key: "unknown".to_string(),
+                server_key: UNKNOWN_SERVER_KEY.to_string(),
                 server_label: fallback_label,
                 arguments_str: input.arguments.to_string(),
                 output: serde_json::json!({ "error": &err }),
@@ -236,7 +234,7 @@ impl<'a> McpToolSession<'a> {
     ///
     /// Uses the orchestrator inventory to find the tool's server key, then maps
     /// it to the request's MCP server label. Falls back to the first server
-    /// label (or "mcp").
+    /// label (or [`DEFAULT_SERVER_LABEL`]).
     pub fn resolve_tool_server_label(&self, tool_name: &str) -> String {
         let fallback_label = self
             .all_mcp_servers
@@ -318,22 +316,21 @@ impl<'a> McpToolSession<'a> {
         output: &mut Vec<openai_protocol::responses::ResponseOutputItem>,
         tool_call_items: Vec<openai_protocol::responses::ResponseOutputItem>,
     ) {
-        let num_servers = self.mcp_servers.len();
+        // Modify the vector in-place: take existing items, then rebuild
+        // with the correct ordering without allocating a temporary Vec.
+        let existing = std::mem::take(output);
+        output.reserve(self.mcp_servers.len() + tool_call_items.len() + existing.len());
 
-        // 1. Prepend mcp_list_tools for each non-builtin server
-        for binding in self.mcp_servers.iter().rev() {
-            output.insert(
-                0,
-                self.build_mcp_list_tools_item(&binding.label, &binding.server_key),
-            );
+        // 1. mcp_list_tools items (one per server)
+        for binding in &self.mcp_servers {
+            output.push(self.build_mcp_list_tools_item(&binding.label, &binding.server_key));
         }
 
-        // 2. Insert tool call items right after mcp_list_tools
-        let mut insert_pos = num_servers;
-        for item in tool_call_items {
-            output.insert(insert_pos, item);
-            insert_pos += 1;
-        }
+        // 2. Tool call items (mcp_call / web_search_call / etc.)
+        output.extend(tool_call_items);
+
+        // 3. Existing items (messages, etc.)
+        output.extend(existing);
     }
 
     fn build_exposed_function_tools(
@@ -750,6 +747,120 @@ mod tests {
         let listed = session.list_tools_for_server("server1");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].tool_name(), "brave_web_search");
+    }
+
+    /// Verify that `inject_mcp_output_items` produces the exact ordering:
+    ///   1. mcp_list_tools items (one per server, in server order)
+    ///   2. tool_call_items (in their original order)
+    ///   3. existing output items (in their original order)
+    ///
+    /// This is a regression test so future perf refactors cannot
+    /// accidentally change the output ordering contract.
+    #[test]
+    fn test_inject_mcp_output_items_ordering() {
+        use openai_protocol::responses::ResponseOutputItem;
+
+        let orchestrator = McpOrchestrator::new_test();
+
+        // Register one tool per server so build_mcp_list_tools_item has
+        // something to return.
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "srv_a",
+                create_test_tool("tool_a"),
+            ));
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "srv_b",
+                create_test_tool("tool_b"),
+            ));
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![
+                McpServerBinding {
+                    label: "Server A".to_string(),
+                    server_key: "srv_a".to_string(),
+                    allowed_tools: None,
+                },
+                McpServerBinding {
+                    label: "Server B".to_string(),
+                    server_key: "srv_b".to_string(),
+                    allowed_tools: None,
+                },
+            ],
+            "test-ordering",
+        );
+
+        // Pre-existing output items (e.g. assistant message).
+        let existing_1 = ResponseOutputItem::Message {
+            id: "msg_existing_1".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            status: "completed".to_string(),
+        };
+        let existing_2 = ResponseOutputItem::Message {
+            id: "msg_existing_2".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            status: "completed".to_string(),
+        };
+
+        // Tool call items injected by the router.
+        let call_1 = ResponseOutputItem::McpCall {
+            id: "call_1".to_string(),
+            status: "completed".to_string(),
+            approval_request_id: None,
+            arguments: "{}".to_string(),
+            error: None,
+            name: "tool_a".to_string(),
+            output: "result_a".to_string(),
+            server_label: "Server A".to_string(),
+        };
+        let call_2 = ResponseOutputItem::McpCall {
+            id: "call_2".to_string(),
+            status: "completed".to_string(),
+            approval_request_id: None,
+            arguments: "{}".to_string(),
+            error: None,
+            name: "tool_b".to_string(),
+            output: "result_b".to_string(),
+            server_label: "Server B".to_string(),
+        };
+
+        let mut output = vec![existing_1, existing_2];
+        let tool_call_items = vec![call_1, call_2];
+
+        session.inject_mcp_output_items(&mut output, tool_call_items);
+
+        // Expected ordering: 2 mcp_list_tools + 2 mcp_call + 2 messages = 6
+        assert_eq!(output.len(), 6, "expected 6 items in output");
+
+        // Serialize to JSON values for easier field-level assertions.
+        let items: Vec<serde_json::Value> = output
+            .iter()
+            .map(|item| serde_json::to_value(item).expect("serialization failed"))
+            .collect();
+
+        // [0..2] mcp_list_tools — one per server, in server order
+        assert_eq!(items[0]["type"], "mcp_list_tools");
+        assert_eq!(items[0]["server_label"], "Server A");
+        assert_eq!(items[1]["type"], "mcp_list_tools");
+        assert_eq!(items[1]["server_label"], "Server B");
+
+        // [2..4] tool call items in original order
+        assert_eq!(items[2]["type"], "mcp_call");
+        assert_eq!(items[2]["id"], "call_1");
+        assert_eq!(items[3]["type"], "mcp_call");
+        assert_eq!(items[3]["id"], "call_2");
+
+        // [4..6] existing items in original order
+        assert_eq!(items[4]["type"], "message");
+        assert_eq!(items[4]["id"], "msg_existing_1");
+        assert_eq!(items[5]["type"], "message");
+        assert_eq!(items[5]["id"], "msg_existing_2");
     }
 
     #[test]

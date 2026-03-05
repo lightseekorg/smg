@@ -219,6 +219,18 @@ impl StoreType {
         }
     }
 
+    /// Convert to proto StoreType (i32)
+    pub fn to_proto(self) -> i32 {
+        use super::service::gossip::StoreType as ProtoStoreType;
+        match self {
+            StoreType::Membership => ProtoStoreType::Membership as i32,
+            StoreType::App => ProtoStoreType::App as i32,
+            StoreType::Worker => ProtoStoreType::Worker as i32,
+            StoreType::Policy => ProtoStoreType::Policy as i32,
+            StoreType::RateLimit => ProtoStoreType::RateLimit as i32,
+        }
+    }
+
     /// Convert from proto StoreType (i32) to local StoreType
     pub fn from_proto(proto_value: i32) -> Self {
         match proto_value {
@@ -303,6 +315,11 @@ pub struct PolicyState {
     pub version: u64,
 }
 
+/// Helper function to get policy state key for a model
+pub fn policy_key(model_id: &str) -> String {
+    format!("policy:{model_id}")
+}
+
 /// Helper function to get tree state key for a model
 pub fn tree_state_key(model_id: &str) -> String {
     format!("tree:{model_id}")
@@ -326,12 +343,10 @@ macro_rules! define_state_store {
                 self.inner.get(key)
             }
 
-            // Backward-compatible actor parameter; the CRDT OR-Map no longer needs it.
             pub fn insert(
                 &self,
                 key: String,
                 value: $value_type,
-                _actor: String,
             ) -> Result<Option<$value_type>, serde_json::Error> {
                 self.inner.insert(key, value)
             }
@@ -714,7 +729,7 @@ mod tests {
             metadata: BTreeMap::new(),
         };
 
-        let _ = store.insert(key.clone(), state.clone(), "node1".to_string());
+        let _ = store.insert(key.clone(), state.clone());
         assert_eq!(store.get(&key).unwrap().name, "node1");
 
         store.remove(&key);
@@ -731,7 +746,7 @@ mod tests {
             version: 1,
         };
 
-        let _ = store.insert(key.clone(), state.clone(), "node1".to_string());
+        let _ = store.insert(key.clone(), state.clone());
         assert_eq!(store.get(&key).unwrap().key, "app_key1");
     }
 
@@ -748,7 +763,7 @@ mod tests {
             version: 1,
         };
 
-        let _ = store.insert(key.clone(), state.clone(), "node1".to_string());
+        let _ = store.insert(key.clone(), state.clone());
         assert_eq!(store.get(&key).unwrap().worker_id, "worker1");
     }
 
@@ -763,7 +778,7 @@ mod tests {
             version: 1,
         };
 
-        let _ = store.insert(key.clone(), state.clone(), "node1".to_string());
+        let _ = store.insert(key.clone(), state.clone());
         assert_eq!(store.get(&key).unwrap().model_id, "model1");
     }
 
