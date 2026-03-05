@@ -361,8 +361,20 @@ impl WorkerRegistry {
         if let Some(worker) = self.get(worker_id) {
             return Some(worker.url().to_string());
         }
-        // Reverse index lookup  O(1) for removed/stale IDs.
-        self.id_to_url.get(worker_id).map(|url| url.clone())
+
+        // Reverse index lookup O(1) for removed/stale IDs.
+        if let Some(url) = self.id_to_url.get(worker_id) {
+            // Verify forward mapping still matches to prevent stale ID resolution
+            // during concurrent add/remove where url_to_id was cleared but
+            // id_to_url insertion was delayed.
+            if let Some(current_id) = self.url_to_id.get(url.value()) {
+                if current_id.value() == worker_id {
+                    return Some(url.clone());
+                }
+            }
+        }
+
+        None
     }
 
     /// Remove a worker by ID
