@@ -10,13 +10,6 @@ run-name: >
   by @${{ github.actor }}
 
 on:
-  pull_request:
-    paths:
-      - .github/workflows/release-sglang-docker.yml
-      - docker/Dockerfile.engine
-      - scripts/installation/install-sglang.sh
-      - scripts/installation/install-smg.sh
-
   workflow_dispatch:
     inputs:
       base_image_ref:
@@ -71,8 +64,6 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -84,9 +75,9 @@ jobs:
       - name: Resolve image tag
         id: resolve-tag
         env:
-          BASE_IMAGE_REF: ${{ inputs.base_image_ref || 'lmsysorg/sglang:v0.5.9' }}
-          SGLANG_REPO: ${{ inputs.sglang_repo || '' }}
-          SGLANG_COMMIT: ${{ inputs.sglang_commit || 'latest' }}
+          BASE_IMAGE_REF: ${{ inputs.base_image_ref }}
+          SGLANG_REPO: ${{ inputs.sglang_repo }}
+          SGLANG_COMMIT: ${{ inputs.sglang_commit }}
         run: |
           SMG_VERSION=$(grep -m1 '^version = ' bindings/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')
           if [ -n "${{ inputs.tag }}" ]; then
@@ -114,11 +105,13 @@ jobs:
           load: true
           build-args: |
             BASE_IMAGE_REF=${{ inputs.base_image_ref || 'lmsysorg/sglang:v0.5.9' }}
-            ENGINE_REPO=${{ inputs.sglang_repo || '' }}
-            ENGINE_COMMIT=${{ inputs.sglang_commit || 'latest' }}
-            SMG_REPO=${{ inputs.smg_repo || 'https://github.com/lightseekorg/smg' }}
-            SMG_COMMIT=${{ inputs.smg_commit || 'v1.1.0' }}
+            ENGINE_REPO=${{ inputs.sglang_repo }}
+            ENGINE_COMMIT=${{ inputs.sglang_commit }}
+            SMG_REPO=${{ inputs.smg_repo }}
+            SMG_COMMIT=${{ inputs.smg_commit }}
           tags: smg-build:${{ steps.resolve-tag.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Push image to GHCR
         id: push-ghcr

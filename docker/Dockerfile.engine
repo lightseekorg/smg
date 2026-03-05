@@ -10,10 +10,10 @@ ARG SMG_REPO
 ARG SMG_COMMIT
 RUN apk add --no-cache git \
     && if [ -n "${ENGINE_REPO}" ] && [ -n "${ENGINE_COMMIT}" ]; then \
-         git clone "${ENGINE_REPO}" /opt/engine-src \
+         git clone --depth 1 "${ENGINE_REPO}" /opt/engine-sr \
          && ( cd /opt/engine-src && ( [ "${ENGINE_COMMIT}" = "latest" ] || git checkout "${ENGINE_COMMIT}" ) ); \
        else mkdir -p /opt/engine-src; fi \
-    && git clone "${SMG_REPO}" /tmp/smg-src \
+    && git clone --depth 1 "${SMG_REPO}" /tmp/smg-src \
     && ( cd /tmp/smg-src && ( [ "${SMG_COMMIT}" = "latest" ] || git checkout "${SMG_COMMIT}" ) )
 COPY scripts/installation/install-vllm.sh /tmp/install-vllm.sh
 COPY scripts/installation/install-sglang.sh /tmp/install-sglang.sh

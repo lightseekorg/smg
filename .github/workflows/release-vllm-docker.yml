@@ -10,14 +10,6 @@ run-name: >
   by @${{ github.actor }}
 
 on:
-  # Test on PR when workflow or related files change
-  pull_request:
-      paths:
-        - .github/workflows/release-vllm-docker.yml
-        - docker/Dockerfile.engine
-        - scripts/installation/install-vllm.sh
-        - scripts/installation/install-smg.sh
-
   workflow_dispatch:
     inputs:
       base_image_ref:
@@ -59,12 +51,12 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| base_image_ref | \`${{ inputs.base_image_ref || 'vllm/vllm-openai:v0.16.0-cu130' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| vllm_repo | \`${{ inputs.vllm_repo || '' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| vllm_commit | \`${{ inputs.vllm_commit || 'latest' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| smg_repo | \`${{ inputs.smg_repo || 'https://github.com/lightseekorg/smg' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| smg_commit | \`${{ inputs.smg_commit || 'v1.1.0' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| tag | \`${{ inputs.tag || '(auto)' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| base_image_ref | \`${{ inputs.base_image_ref }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| vllm_repo | \`${{ inputs.vllm_repo }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| vllm_commit | \`${{ inputs.vllm_commit }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| smg_repo | \`${{ inputs.smg_repo }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| smg_commit | \`${{ inputs.smg_commit }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| tag | \`${{ inputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -79,11 +71,11 @@ jobs:
       - name: Build and push image
         id: push-ghcr
         env:
-          BASE_IMAGE_REF: ${{ inputs.base_image_ref || 'vllm/vllm-openai:v0.16.0-cu130' }}
-          VLLM_REPO: ${{ inputs.vllm_repo || '' }}
-          VLLM_COMMIT: ${{ inputs.vllm_commit || 'latest' }}
-          SMG_REPO: ${{ inputs.smg_repo || 'https://github.com/lightseekorg/smg' }}
-          SMG_COMMIT: ${{ inputs.smg_commit || 'v1.1.0' }}
+          BASE_IMAGE_REF: ${{ inputs.base_image_ref }}
+          VLLM_REPO: ${{ inputs.vllm_repo }}
+          VLLM_COMMIT: ${{ inputs.vllm_commit }}
+          SMG_REPO: ${{ inputs.smg_repo }}
+          SMG_COMMIT: ${{ inputs.smg_commit }}
         run: |
           SMG_VERSION=$(grep -m1 '^version = ' bindings/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')
           if [ -n "${{ inputs.tag }}" ]; then
