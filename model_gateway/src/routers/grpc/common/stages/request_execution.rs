@@ -17,7 +17,7 @@ use crate::{
                 ProtoEmbedRequest, ProtoEmbedResponseVariant, ProtoGenerateRequest, ProtoRequest,
                 ProtoStream,
             },
-            utils::{grpc_to_http_status, is_grpc_server_error},
+            utils::{grpc_err, is_grpc_result_healthy, is_grpc_server_error},
         },
     },
 };
@@ -81,18 +81,9 @@ impl PipelineStage for RequestExecutionStage {
         ctx.state.load_guards = Some(LoadGuards::new(workers, ctx.input.headers.as_ref()));
 
         // Extract dispatch metadata for tracing span
-        let request_id = ctx
-            .state
-            .dispatch
-            .as_ref()
-            .map(|d| d.request_id.as_str())
-            .unwrap_or("unknown");
-        let model = ctx
-            .state
-            .dispatch
-            .as_ref()
-            .map(|d| d.model.as_str())
-            .unwrap_or("unknown");
+        let dispatch = ctx.state.dispatch.as_ref();
+        let request_id = dispatch.map(|d| d.request_id.as_str()).unwrap_or("unknown");
+        let model = dispatch.map(|d| d.model.as_str()).unwrap_or("unknown");
 
         // Create OTEL span for gRPC request execution
         let span = info_span!(
@@ -111,7 +102,8 @@ impl PipelineStage for RequestExecutionStage {
                         // Dispatch based on runtime type:
                         // - SGLang: parallel dual dispatch with bootstrap metadata
                         // - vLLM: sequential prefill-then-decode (NIXL handles KV transfer)
-                        match workers.pd_runtime_type() {
+                        let runtime_type = workers.pd_runtime_type();
+                        match runtime_type {
                             Some(RuntimeType::Vllm) => {
                                 self.execute_sequential_pd(req, clients, workers).await
                             }
@@ -121,7 +113,7 @@ impl PipelineStage for RequestExecutionStage {
                             Some(RuntimeType::Trtllm) | Some(RuntimeType::External) => {
                                 error!(
                                     function = "RequestExecutionStage::execute",
-                                    runtime_type = ?workers.pd_runtime_type(),
+                                    runtime_type = ?runtime_type,
                                     "Runtime does not support PD disaggregated mode"
                                 );
                                 Err(error::bad_request(
@@ -158,11 +150,6 @@ impl PipelineStage for RequestExecutionStage {
     }
 }
 
-/// Map a `tonic::Status` to an HTTP error response with the appropriate status code.
-fn grpc_err(status: &tonic::Status, code: &str, msg: String) -> Response {
-    error::create_error(grpc_to_http_status(status.code()), code, msg)
-}
-
 impl RequestExecutionStage {
     async fn execute_single(
         &self,
@@ -182,11 +169,7 @@ impl RequestExecutionStage {
         })?;
 
         let result = client.generate(proto_request).await;
-        workers.record_outcome(
-            result
-                .as_ref()
-                .map_or_else(|e| !is_grpc_server_error(e.code()), |_| true),
-        );
+        workers.record_outcome(is_grpc_result_healthy(&result));
 
         let stream = result.map_err(|e| {
             error!(function = "execute_single", error = %e, "Failed to start generation");
@@ -279,13 +262,10 @@ impl RequestExecutionStage {
         );
 
         // Record circuit breaker outcomes (client errors don't count as failures)
-        let prefill_ok = prefill_result
-            .as_ref()
-            .map_or_else(|e| !is_grpc_server_error(e.code()), |_| true);
-        let decode_ok = decode_result
-            .as_ref()
-            .map_or_else(|e| !is_grpc_server_error(e.code()), |_| true);
-        workers.record_dual_outcomes(prefill_ok, decode_ok);
+        workers.record_dual_outcomes(
+            is_grpc_result_healthy(&prefill_result),
+            is_grpc_result_healthy(&decode_result),
+        );
 
         // Handle prefill result
         let prefill_stream = prefill_result.map_err(|e| {
@@ -397,8 +377,8 @@ impl RequestExecutionStage {
                 Err(e) => {
                     workers.record_outcome_prefill(!is_grpc_server_error(e.code()));
                     error!(function = "execute_sequential_pd", error = %e, "Prefill stream error");
-                    return Err(error::create_error(
-                        grpc_to_http_status(e.code()),
+                    return Err(grpc_err(
+                        &e,
                         "prefill_stream_error",
                         format!("Prefill stream error: {e}"),
                     ));

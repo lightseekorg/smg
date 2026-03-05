@@ -681,11 +681,10 @@ pub(crate) async fn collect_stream_responses(
                 }
             }
             Err(e) => {
-                let http_status = grpc_to_http_status(e.code());
-                error!(function = "collect_stream_responses", worker = %worker_name, grpc_code = ?e.code(), http_status = %http_status, error = ?e, "Worker stream error");
+                error!(function = "collect_stream_responses", worker = %worker_name, grpc_code = ?e.code(), error = ?e, "Worker stream error");
                 // Don't mark as completed - let Drop send abort for error cases
-                return Err(error::create_error(
-                    http_status,
+                return Err(grpc_err(
+                    &e,
                     "worker_stream_failed",
                     format!("{worker_name} stream failed: {e}"),
                 ));
@@ -1063,6 +1062,19 @@ pub(crate) fn is_grpc_server_error(code: Code) -> bool {
             | Code::DataLoss
             | Code::DeadlineExceeded
     )
+}
+
+/// Map a `tonic::Status` to an HTTP error response with the appropriate status code.
+pub(crate) fn grpc_err(status: &tonic::Status, code: &str, msg: String) -> Response {
+    error::create_error(grpc_to_http_status(status.code()), code, msg)
+}
+
+/// Returns `true` if a gRPC `Result` should count as healthy for the circuit breaker.
+/// `Ok` and client-error results are healthy; only server errors are failures.
+pub(crate) fn is_grpc_result_healthy<T>(result: &Result<T, tonic::Status>) -> bool {
+    result
+        .as_ref()
+        .map_or_else(|e| !is_grpc_server_error(e.code()), |_| true)
 }
 
 #[cfg(test)]
