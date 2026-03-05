@@ -5,7 +5,7 @@ vLLM gRPC Servicer
 Implements the VllmEngine gRPC service on top of vLLM's AsyncLLM.
 """
 
-import functools
+import itertools
 import time
 from collections.abc import AsyncGenerator
 
@@ -508,7 +508,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 key=lambda x: x[1].logprob,
                 reverse=True,
             )
-            for tid, lp in functools.islice(sorted_entries, num_top_logprobs):
+            for tid, lp in itertools.islice(sorted_entries, num_top_logprobs):
                 top.token_ids.append(tid)
                 top.values.append(lp.logprob)
         return top
