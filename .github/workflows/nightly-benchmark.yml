@@ -188,7 +188,7 @@ jobs:
     name: "${{ matrix.model.id }} / multi-${{ matrix.variant.id }}"
     needs: build-wheel
     if: ${{ !cancelled() }}
-    runs-on: 4-gpu-h100"
+    runs-on: 4-gpu-h100
     timeout-minutes: 1440
     strategy:
       fail-fast: false
