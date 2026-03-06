@@ -10,7 +10,7 @@ ARG SMG_REPO
 ARG SMG_COMMIT
 RUN apk add --no-cache git \
     && if [ -n "${ENGINE_REPO}" ] && [ -n "${ENGINE_COMMIT}" ]; then \
-         git clone --depth 1 "${ENGINE_REPO}" /opt/engine-sr \
+         git clone --depth 1 "${ENGINE_REPO}" /opt/engine-src \
          && ( cd /opt/engine-src && ( [ "${ENGINE_COMMIT}" = "latest" ] || git checkout "${ENGINE_COMMIT}" ) ); \
        else mkdir -p /opt/engine-src; fi \
     && git clone --depth 1 "${SMG_REPO}" /tmp/smg-src \
