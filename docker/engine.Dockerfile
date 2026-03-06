@@ -25,6 +25,8 @@ ARG ENGINE_COMMIT
 ARG SMG_REPO
 ARG SMG_COMMIT
 RUN apk add --no-cache git \
+    && if [ -z "${SMG_REPO}" ] || [ -z "${SMG_COMMIT}" ]; then \
+         echo "ERROR: SMG_REPO and SMG_COMMIT must be set" >&2; exit 1; fi \
     && if [ -n "${ENGINE_REPO}" ] && [ -n "${ENGINE_COMMIT}" ]; then \
          if [ "${ENGINE_COMMIT}" = "latest" ]; then \
            git clone --depth 1 "${ENGINE_REPO}" /opt/engine-src; \
@@ -56,6 +58,10 @@ COPY --from=sources /tmp/scripts/     /tmp/scripts/
 
 RUN bash /tmp/scripts/install-smg.sh /opt/smg-src
 
-RUN if [ -n "${ENGINE_REPO}" ]; then \
-      bash /tmp/scripts/install-${ENGINE}.sh /opt/engine-src; \
-    fi
+RUN case "${ENGINE}" in \
+      vllm|sglang|trtllm|tgl) ;; \
+      *) echo "ERROR: Unknown ENGINE '${ENGINE}'" >&2; exit 1 ;; \
+    esac \
+    && if [ -n "${ENGINE_REPO}" ]; then \
+         bash /tmp/scripts/install-${ENGINE}.sh /opt/engine-src; \
+       fi

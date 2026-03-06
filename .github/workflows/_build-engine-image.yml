@@ -89,10 +89,19 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate inputs
-        if: inputs.engine == 'trtllm' && inputs.base_image_ref == '' && inputs.source_build_repo == ''
+        env:
+          ENGINE: ${{ inputs.engine }}
+          BASE_IMAGE_REF: ${{ inputs.base_image_ref }}
+          SOURCE_BUILD_REPO: ${{ inputs.source_build_repo }}
         run: |
-          echo "ERROR: For trtllm, either base_image_ref or source_build_repo must be set." >&2
-          exit 1
+          case "${ENGINE}" in
+            vllm|sglang|trtllm|tgl) ;;
+            *) echo "ERROR: Unknown engine '${ENGINE}'. Must be one of: vllm, sglang, trtllm, tgl." >&2; exit 1 ;;
+          esac
+          if [ "${ENGINE}" = "trtllm" ] && [ -z "${BASE_IMAGE_REF}" ] && [ -z "${SOURCE_BUILD_REPO}" ]; then
+            echo "ERROR: For trtllm, either base_image_ref or source_build_repo must be set." >&2
+            exit 1
+          fi
 
       # ── TRT-LLM source build (conditional) ──────────────────────────────────
 
@@ -134,6 +143,7 @@ jobs:
           driver: docker
 
       - name: Login to GitHub Container Registry
+        if: ${{ !inputs.dry_run }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
