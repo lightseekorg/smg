@@ -173,6 +173,48 @@ impl Normalizable for GenerateRequest {
     // Use default no-op implementation - no normalization needed for GenerateRequest
 }
 
+impl Default for GenerateRequest {
+    fn default() -> Self {
+        Self {
+            text: None,
+            model: None,
+            input_ids: None,
+            input_embeds: None,
+            image_data: None,
+            video_data: None,
+            audio_data: None,
+            sampling_params: None,
+            return_logprob: None,
+            logprob_start_len: None,
+            top_logprobs_num: None,
+            token_ids_logprob: None,
+            return_text_in_logprobs: false,
+            stream: false,
+            log_metrics: true,
+            return_hidden_states: false,
+            modalities: None,
+            session_params: None,
+            lora_path: None,
+            lora_id: None,
+            custom_logit_processor: None,
+            bootstrap_host: None,
+            bootstrap_port: None,
+            bootstrap_room: None,
+            bootstrap_pair_key: None,
+            data_parallel_rank: None,
+            background: false,
+            conversation_id: None,
+            priority: None,
+            extra_key: None,
+            no_logs: false,
+            custom_labels: None,
+            return_bytes: false,
+            return_entropy: false,
+            rid: None,
+        }
+    }
+}
+
 /// Validation function for GenerateRequest - ensure exactly one input type is provided
 fn validate_generate_request(req: &GenerateRequest) -> Result<(), validator::ValidationError> {
     // Exactly one of text or input_ids must be provided

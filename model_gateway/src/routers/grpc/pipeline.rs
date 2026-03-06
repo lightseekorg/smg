@@ -664,6 +664,72 @@ impl RequestPipeline {
         }
     }
 
+    /// Execute the generate pipeline and return typed results
+    ///
+    /// Used by route_completion to get typed Vec<GenerateResponse> without
+    /// serializing to JSON and re-parsing. Follows the same pattern as
+    /// execute_chat_for_responses.
+    pub async fn execute_generate_typed(
+        &self,
+        request: Arc<GenerateRequest>,
+        headers: Option<http::HeaderMap>,
+        model_id: Option<String>,
+        components: Arc<SharedComponents>,
+    ) -> Result<Vec<openai_protocol::generate::GenerateResponse>, Response> {
+        let mut ctx = RequestContext::for_generate(request, headers, model_id, components);
+
+        for (idx, stage) in self.stages.iter().enumerate() {
+            match stage.execute(&mut ctx).await {
+                Ok(Some(_response)) => {
+                    error!(
+                        function = "execute_generate_typed",
+                        "Streaming attempted in typed context"
+                    );
+                    return Err(error::bad_request(
+                        "streaming_not_supported",
+                        "Streaming is not supported in this context".to_string(),
+                    ));
+                }
+                Ok(None) => continue,
+                Err(response) => {
+                    error!(
+                        "Stage {} ({}) failed with status {}",
+                        idx + 1,
+                        stage.name(),
+                        response.status()
+                    );
+                    return Err(response);
+                }
+            }
+        }
+
+        match ctx.state.response.final_response {
+            Some(FinalResponse::Generate(response)) => Ok(response),
+            Some(FinalResponse::Chat(_))
+            | Some(FinalResponse::Embedding(_))
+            | Some(FinalResponse::Classify(_)) => {
+                error!(
+                    function = "execute_generate_typed",
+                    "Wrong response type: expected Generate"
+                );
+                Err(error::internal_error(
+                    "wrong_response_type",
+                    "Internal error: wrong response type",
+                ))
+            }
+            None => {
+                error!(
+                    function = "execute_generate_typed",
+                    "No response produced by pipeline"
+                );
+                Err(error::internal_error(
+                    "no_response_produced",
+                    "No response produced",
+                ))
+            }
+        }
+    }
+
     /// Execute chat pipeline for responses endpoint
     ///
     /// Used by ALL non-streaming /v1/responses requests.
