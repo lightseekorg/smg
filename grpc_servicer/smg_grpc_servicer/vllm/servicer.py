@@ -579,7 +579,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
             proto.token_logprobs.append(token_logprob)
             proto.token_ids.append(token_id)
-            if num_top_logprobs and num_top_logprobs > 0:
+            if num_top_logprobs:
                 proto.top_logprobs.append(
                     VllmEngineServicer._build_top_logprobs(logprob_entry, num_top_logprobs)
                 )
