@@ -12,6 +12,7 @@ dependencies = [
   "openai",
   "pytest",
   "pytest-rerunfailures",
+  "websockets",
 ]
 
 [project.optional-dependencies]

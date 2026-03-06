@@ -601,6 +601,11 @@ jobs:
             timeout: 30
             setup_agentic_deps: true
 
+          - name: openai-realtime
+            vendor: openai
+            test_path: e2e_test/realtime
+            timeout: 20
+
           - name: xai-responses
             vendor: xai
             test_path: e2e_test/responses
