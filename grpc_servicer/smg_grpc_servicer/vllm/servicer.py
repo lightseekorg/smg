@@ -504,12 +504,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """Build TopLogProbs proto from a logprob entry dict."""
         top = vllm_engine_pb2.TopLogProbs()
         if num_top_logprobs and num_top_logprobs > 0 and logprob_entry:
-            sorted_entries = sorted(
-                logprob_entry.items(),
-                key=lambda x: x[1].logprob,
-                reverse=True,
-            )
-            for tid, lp in itertools.islice(sorted_entries, num_top_logprobs):
+            for tid, lp in itertools.islice(logprob_entry.items(), num_top_logprobs):
                 top.token_ids.append(tid)
                 top.values.append(lp.logprob)
         return top
