@@ -11,7 +11,7 @@ use crate::{
         BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser,
         MiniMaxParser, NanoV3Parser, Qwen3Parser, QwenThinkingParser, Step3Parser,
     },
-    traits::{ParserConfig, ReasoningParser},
+    traits::{ParserConfig, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
 };
 
 /// Type alias for pooled parser instances.
@@ -247,7 +247,7 @@ impl ParserFactory {
                         think_start_token: String::new(),
                         think_end_token: String::new(),
                         stream_reasoning: true,
-                        max_buffer_size: 65536,
+                        max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
                         initial_in_reasoning: false,
                     };
                     Box::new(
@@ -274,7 +274,7 @@ impl ParserFactory {
             think_start_token: String::new(),
             think_end_token: String::new(),
             stream_reasoning: true,
-            max_buffer_size: 65536,
+            max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
             initial_in_reasoning: false,
         };
         Box::new(BaseReasoningParser::new(config).with_model_type("passthrough".to_string()))

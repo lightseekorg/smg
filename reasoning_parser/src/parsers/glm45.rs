@@ -3,7 +3,7 @@
 
 use crate::{
     parsers::BaseReasoningParser,
-    traits::{ParseError, ParserConfig, ParserResult, ReasoningParser},
+    traits::{ParseError, ParserConfig, ParserResult, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
 };
 
 /// GLM45 reasoning parser.
@@ -21,7 +21,7 @@ impl Glm45Parser {
             think_start_token: "<think>".to_string(),
             think_end_token: "</think>".to_string(),
             stream_reasoning: true,
-            max_buffer_size: 65536,
+            max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
             initial_in_reasoning: false, // Requires explicit start token like Qwen3
         };
 

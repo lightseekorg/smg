@@ -92,6 +92,9 @@ pub enum ParseError {
     ConfigError(String),
 }
 
+/// Default maximum buffer size for reasoning parsers (4MB).
+pub const DEFAULT_MAX_BUFFER_SIZE: usize = 4 * 1024 * 1024;
+
 /// Configuration for parser behavior.
 #[derive(Debug, Clone)]
 pub struct ParserConfig {
@@ -117,7 +120,7 @@ impl Default for ParserConfig {
             think_start_token: "<think>".to_string(),
             think_end_token: "</think>".to_string(),
             stream_reasoning: true,
-            max_buffer_size: 65536,      // 64KB default
+            max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
             initial_in_reasoning: false, // Default to false (explicit reasoning)
         }
     }
