@@ -103,23 +103,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             has_preprocessed_mm,
         )
 
-        # Validate kv_transfer_params before entering the try block so
-        # context.abort() doesn't get caught by the broad except below.
-        if request.HasField("kv_transfer_params"):
-            remote_host = request.kv_transfer_params.remote_host
-            remote_port = request.kv_transfer_params.remote_port
-            if not remote_host or not (1 <= remote_port <= 65535):
-                await context.abort(
-                    grpc.StatusCode.INVALID_ARGUMENT,
-                    "Invalid kv_transfer_params: remote_host must be set and remote_port must be in [1, 65535].",
-                )
-            logger.info(
-                "Request %s: kv_transfer_params={remote_host=%s, remote_port=%d}",
-                request_id,
-                remote_host,
-                remote_port,
-            )
-
         try:
             if has_preprocessed_mm and input_type == "tokenized":
                 # Preprocessed multimodal from Rust router.
@@ -463,10 +446,21 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # Build extra_args for kv_transfer_params (Mooncake PD)
         extra_args = None
         if kv_transfer_params:
+            remote_host = kv_transfer_params.remote_host
+            remote_port = kv_transfer_params.remote_port
+            if not remote_host or not (1 <= remote_port <= 65535):
+                raise ValueError(
+                    "Invalid kv_transfer_params: remote_host must be set and remote_port must be in [1, 65535]."
+                )
+            logger.info(
+                "kv_transfer_params={remote_host=%s, remote_port=%d}",
+                remote_host,
+                remote_port,
+            )
             extra_args = {
                 "kv_transfer_params": {
-                    "remote_host": kv_transfer_params.remote_host,
-                    "remote_port": kv_transfer_params.remote_port,
+                    "remote_host": remote_host,
+                    "remote_port": remote_port,
                 }
             }
 
