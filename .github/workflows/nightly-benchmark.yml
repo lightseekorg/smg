@@ -45,7 +45,9 @@ jobs:
         id: cache-wheel
         uses: actions/cache@v5
         with:
-          path: bindings/python/dist/*.whl
+          path: |
+            bindings/python/dist/*.whl
+            clients/python/smg_client/types/_generated.py
           key: nightly-wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'auth/src/**', 'bindings/python/src/**', 'data_connector/src/**', 'grpc_client/src/**', 'kv_index/src/**', 'mcp/src/**', 'mesh/src/**', 'model_gateway/src/**', 'multimodal/src/**', 'protocols/src/**', 'reasoning_parser/src/**', 'tokenizer/src/**', 'tool_parser/src/**', 'wasm/src/**', 'workflow/src/**') }}
           restore-keys: |
             nightly-wheel-${{ runner.os }}-
@@ -62,11 +64,38 @@ jobs:
         if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: bash scripts/ci_build_wheel.sh
 
+      - name: Generate Python client types
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
+        run: |
+          source "$HOME/.cargo/env"
+          mkdir -p clients/openapi
+          cargo run -p openapi-gen -- clients/openapi/smg-openapi.yaml
+          pip install 'datamodel-code-generator==0.54.0'
+          datamodel-codegen \
+            --input clients/openapi/smg-openapi.yaml \
+            --input-file-type openapi \
+            --output clients/python/smg_client/types/_generated.py \
+            --output-model-type pydantic_v2.BaseModel \
+            --use-annotated \
+            --field-constraints \
+            --target-python-version 3.10 \
+            --collapse-root-models \
+            --use-standard-collections \
+            --use-union-operator
+          sed -i 's/class \(.*\)(Enum):/class \1(str, Enum):/' clients/python/smg_client/types/_generated.py
+
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7
         with:
           name: smg-wheel
           path: bindings/python/dist/*.whl
+          retention-days: 7
+
+      - name: Upload Python client types
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-client-types
+          path: clients/python/smg_client/types/_generated.py
           retention-days: 7
 
       - name: Show sccache stats
@@ -133,6 +162,13 @@ jobs:
         with:
           name: smg-wheel
           path: wheel/
+
+      - name: Download Python client types
+        if: steps.filter.outputs.skip != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: python-client-types
+          path: clients/python/smg_client/types/
 
       - name: Install wheel and test dependencies
         if: steps.filter.outputs.skip != 'true'
@@ -240,6 +276,13 @@ jobs:
         with:
           name: smg-wheel
           path: wheel/
+
+      - name: Download Python client types
+        if: steps.filter.outputs.skip != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: python-client-types
+          path: clients/python/smg_client/types/
 
       - name: Install wheel and test dependencies
         if: steps.filter.outputs.skip != 'true'
@@ -351,6 +394,13 @@ jobs:
         with:
           name: smg-wheel
           path: wheel/
+
+      - name: Download Python client types
+        if: steps.filter.outputs.skip != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: python-client-types
+          path: clients/python/smg_client/types/
 
       - name: Install wheel and test dependencies
         if: steps.filter.outputs.skip != 'true'
