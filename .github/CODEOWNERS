@@ -24,6 +24,9 @@
 /auth @slin1237
 /data_connector @key4ng
 /grpc_client @CatherineSue @slin1237
+/grpc_client/proto/vllm_engine.proto @njhill @CatherineSue @slin1237
+/grpc_client/proto/common.proto @njhill @CatherineSue @slin1237
+/grpc_servicer @njhill @CatherineSue
 /kv_index @slin1237
 /mcp @key4ng @CatherineSue @slin1237
 /mesh @slin1237 @tonyluj
