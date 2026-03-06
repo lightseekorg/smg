@@ -85,22 +85,16 @@ impl ConnectionMap {
     /// Remove stale entries and cancel their tokens. Returns count of reaped entries.
     fn reap_stale(&self, is_stale: impl Fn(ConnectionState, Duration) -> bool) -> usize {
         let now = Instant::now();
-        let stale_ids: Vec<String> = self
-            .0
-            .iter()
-            .filter(|e| is_stale(e.state, now.duration_since(e.created_at)))
-            .map(|e| e.id.clone())
-            .collect();
-
         let mut reaped = 0;
-        for id in &stale_ids {
-            if let Some((_, entry)) = self.0.remove_if(id, |_, e| {
-                is_stale(e.state, now.duration_since(e.created_at))
-            }) {
+        self.0.retain(|_, entry| {
+            if is_stale(entry.state, now.duration_since(entry.created_at)) {
                 entry.cancel_token.cancel();
                 reaped += 1;
+                false
+            } else {
+                true
             }
-        }
+        });
         reaped
     }
 

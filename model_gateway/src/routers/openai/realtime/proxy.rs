@@ -1,6 +1,6 @@
 //! Bidirectional WebSocket proxy between client (axum) and upstream (tungstenite).
 
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use axum::extract::ws::{Message as AxumMessage, WebSocket};
 use futures::{
@@ -21,10 +21,13 @@ type UpstreamWs = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// realtime event JSON payload. Avoids the cost of fully deserializing
 /// `ClientEvent`/`ServerEvent` (which box large variants like `SessionConfig`
 /// at 624 B) on every frame — critical for high-frequency audio streams.
+///
+/// Uses `Cow<str>` so serde can borrow zero-copy for plain strings while
+/// still handling JSON escape sequences (e.g. `\u002E`) that require allocation.
 #[derive(Deserialize)]
 struct EventTypeOnly<'a> {
-    #[serde(rename = "type")]
-    event_type: &'a str,
+    #[serde(rename = "type", borrow)]
+    event_type: Cow<'a, str>,
 }
 
 /// Run a bidirectional WebSocket proxy between a client and upstream.
@@ -135,12 +138,13 @@ async fn forward_client_to_upstream(
                         let tungstenite_msg = match axum_msg {
                             AxumMessage::Text(text) => {
                                 if let Ok(ev) = serde_json::from_str::<EventTypeOnly>(&text) {
-                                    match ev.event_type {
+                                    let et: &str = &ev.event_type;
+                                    match et {
                                         "input_audio_buffer.append" => {
-                                            trace!(session_id, event_type = ev.event_type, "Client→Upstream");
+                                            trace!(session_id, event_type = et, "Client→Upstream");
                                         }
                                         _ => {
-                                            debug!(session_id, event_type = ev.event_type, "Client→Upstream");
+                                            debug!(session_id, event_type = et, "Client→Upstream");
                                         }
                                     }
                                 }
@@ -191,21 +195,22 @@ async fn forward_upstream_to_client(
                         match tungstenite_msg {
                             TungsteniteMessage::Text(text) => {
                                 if let Ok(ev) = serde_json::from_str::<EventTypeOnly>(&text) {
-                                    match ev.event_type {
+                                    let et: &str = &ev.event_type;
+                                    match et {
                                         "response.output_audio.delta"
                                         | "response.output_text.delta"
                                         | "response.output_audio_transcript.delta"
                                         | "response.function_call_arguments.delta" => {
-                                            trace!(session_id, event_type = ev.event_type, "Upstream→Client");
+                                            trace!(session_id, event_type = et, "Upstream→Client");
                                         }
                                         "session.created" | "session.updated"
                                         | "response.created" | "response.done"
                                         | "response.function_call_arguments.done"
                                         | "error" => {
-                                            info!(session_id, event_type = ev.event_type, "Upstream→Client");
+                                            info!(session_id, event_type = et, "Upstream→Client");
                                         }
                                         _ => {
-                                            debug!(session_id, event_type = ev.event_type, "Upstream→Client");
+                                            debug!(session_id, event_type = et, "Upstream→Client");
                                         }
                                     }
                                 }
@@ -272,12 +277,19 @@ fn get_tls_connector() -> tokio_tungstenite::Connector {
         let root_store = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
-        // Safety: ring always supports default TLS protocol versions.
-        #[expect(clippy::expect_used, reason = "ring infallibly supports default TLS versions")]
+        // INVARIANT: `ring::default_provider()` supports rustls default TLS protocol versions.
+        #[expect(
+            clippy::expect_used,
+            reason = "ring infallibly supports default TLS versions"
+        )]
         let builder = ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
             .with_safe_default_protocol_versions()
             .expect("ring supports default TLS protocol versions");
-        Arc::new(builder.with_root_certificates(root_store).with_no_client_auth())
+        Arc::new(
+            builder
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        )
     });
 
     tokio_tungstenite::Connector::Rustls(Arc::clone(config))
