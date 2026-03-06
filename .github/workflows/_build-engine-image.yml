@@ -71,18 +71,20 @@ jobs:
           SOURCE_BUILD_REPO: ${{ inputs.source_build_repo }}
           SOURCE_BUILD_REF: ${{ inputs.source_build_ref }}
         run: |
+          # Strip credentials from repo URLs for safe summary output
+          sanitize() { local v="$1"; v="${v#https://}"; v="${v#http://}"; v="${v##*@}"; v="${v%.git}"; printf '%s' "$v"; }
           echo "## Inputs" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| engine | \`${ENGINE}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| base_image_ref | \`${BASE_IMAGE_REF}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| engine_repo | \`${ENGINE_REPO}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| engine_repo | \`$(sanitize "${ENGINE_REPO}")\` |" >> $GITHUB_STEP_SUMMARY
           echo "| engine_commit | \`${ENGINE_COMMIT}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| smg_repo | \`${SMG_REPO}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| smg_repo | \`$(sanitize "${SMG_REPO}")\` |" >> $GITHUB_STEP_SUMMARY
           echo "| smg_commit | \`${SMG_COMMIT}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| tag | \`${TAG}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| source_build_repo | \`${SOURCE_BUILD_REPO}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| source_build_repo | \`$(sanitize "${SOURCE_BUILD_REPO}")\` |" >> $GITHUB_STEP_SUMMARY
           echo "| source_build_ref | \`${SOURCE_BUILD_REF}\` |" >> $GITHUB_STEP_SUMMARY
 
       - name: Checkout SMG
@@ -102,12 +104,16 @@ jobs:
             echo "ERROR: For trtllm, either base_image_ref or source_build_repo must be set." >&2
             exit 1
           fi
+          if [ "${ENGINE}" != "trtllm" ] && [ -n "${SOURCE_BUILD_REPO}" ]; then
+            echo "ERROR: source_build_repo is only supported for engine=trtllm." >&2
+            exit 1
+          fi
 
       # ── TRT-LLM source build (conditional) ──────────────────────────────────
 
       - name: Resolve source build checkout ref
         id: source-ref
-        if: inputs.base_image_ref == '' && inputs.source_build_repo != ''
+        if: inputs.engine == 'trtllm' && inputs.base_image_ref == '' && inputs.source_build_repo != ''
         env:
           SOURCE_BUILD_REF: ${{ inputs.source_build_ref }}
           SOURCE_BUILD_REPO: ${{ inputs.source_build_repo }}
@@ -124,7 +130,7 @@ jobs:
           echo "repo=${repo}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout source build repo
-        if: inputs.base_image_ref == '' && inputs.source_build_repo != ''
+        if: inputs.engine == 'trtllm' && inputs.base_image_ref == '' && inputs.source_build_repo != ''
         uses: actions/checkout@v4
         with:
           repository: ${{ steps.source-ref.outputs.repo }}
@@ -193,7 +199,7 @@ jobs:
       # ── TRT-LLM: build base image from source (conditional) ─────────────────
 
       - name: Build base image from source
-        if: inputs.base_image_ref == '' && inputs.source_build_repo != ''
+        if: inputs.engine == 'trtllm' && inputs.base_image_ref == '' && inputs.source_build_repo != ''
         env:
           IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
         run: |
