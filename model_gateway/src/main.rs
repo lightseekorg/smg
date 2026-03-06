@@ -620,6 +620,13 @@ struct CliArgs {
 
     #[arg(long, num_args = 0..)]
     mesh_peer_urls: Vec<String>,
+
+    // ==================== WebRTC ====================
+    /// Bind address for WebRTC UDP sockets (client-facing ICE candidate IP).
+    /// Default: 0.0.0.0 (auto-detect via routing table).
+    /// Set to 127.0.0.1 for local development on the same machine.
+    #[arg(long, help_heading = "WebRTC")]
+    webrtc_bind_addr: Option<std::net::IpAddr>,
 }
 
 enum OracleConnectSource {
@@ -1237,6 +1244,7 @@ impl CliArgs {
             shutdown_grace_period_secs: self.shutdown_grace_period_secs,
             control_plane_auth,
             mesh_server_config,
+            webrtc_bind_addr: self.webrtc_bind_addr,
         })
     }
 }

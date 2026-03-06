@@ -91,7 +91,7 @@ pub async fn ws_handler(
     );
 
     ws.on_upgrade(move |socket: WebSocket| async move {
-        if let Err(e) = proxy::run_ws_proxy(
+        let success = match proxy::run_ws_proxy(
             socket,
             &upstream_ws_url,
             &auth_str,
@@ -101,10 +101,14 @@ pub async fn ws_handler(
         )
         .await
         {
-            error!(session_id, error = %e, "Realtime WebSocket proxy error");
-        }
+            Ok(()) => true,
+            Err(e) => {
+                error!(session_id, error = %e, "Realtime WebSocket proxy error");
+                false
+            }
+        };
 
-        // Cleanup: remove session on disconnect
+        worker.record_outcome(success);
         registry.remove_session(&session_id);
         debug!(session_id, "Realtime session cleaned up");
     })

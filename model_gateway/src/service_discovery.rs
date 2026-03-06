@@ -931,6 +931,7 @@ mod tests {
             inflight_tracker: InFlightRequestTracker::new(),
             kv_event_monitor: None,
             realtime_registry: Arc::new(RealtimeRegistry::new()),
+            webrtc_bind_addr: None,
         })
     }
 

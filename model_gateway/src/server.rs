@@ -59,7 +59,7 @@ use crate::{
             get_mesh_health, get_policy_state, get_policy_states, get_worker_state,
             get_worker_states, set_global_rate_limit, trigger_graceful_shutdown, update_app_config,
         },
-        openai::realtime::{rest as realtime_rest, ws as realtime_ws},
+        openai::realtime::{rest as realtime_rest, webrtc as realtime_webrtc, ws as realtime_ws},
         parse,
         router_manager::RouterManager,
         tokenize, RouterTrait,
@@ -553,6 +553,9 @@ pub struct ServerConfig {
     /// Control plane authentication configuration
     pub control_plane_auth: Option<smg_auth::ControlPlaneAuthConfig>,
     pub mesh_server_config: Option<MeshServerConfig>,
+    /// Bind address for WebRTC UDP sockets.
+    /// `None` means use the default (0.0.0.0, auto-detect candidate IP).
+    pub webrtc_bind_addr: Option<std::net::IpAddr>,
 }
 
 pub fn build_app(
@@ -632,6 +635,11 @@ pub fn build_app(
         .route(
             "/v1/realtime/transcription_sessions",
             post(realtime_rest::create_transcription_session),
+        )
+        .route("/v1/realtime/calls", post(realtime_webrtc::create_call))
+        .route(
+            "/v1/realtime/calls/{call_id}/hangup",
+            post(realtime_webrtc::hangup_call),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
@@ -812,9 +820,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         config.max_payload_size / (1024 * 1024)
     );
 
-    let app_context = Arc::new(
-        AppContext::from_config(config.router_config.clone(), config.request_timeout_secs).await?,
-    );
+    let mut app_context =
+        AppContext::from_config(config.router_config.clone(), config.request_timeout_secs).await?;
+    app_context.webrtc_bind_addr = config.webrtc_bind_addr;
+    let app_context = Arc::new(app_context);
 
     if config.prometheus_config.is_some() {
         app_context.inflight_tracker.start_sampler(20);

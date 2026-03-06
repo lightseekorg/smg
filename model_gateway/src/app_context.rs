@@ -64,6 +64,8 @@ pub struct AppContext {
     pub inflight_tracker: Arc<InFlightRequestTracker>,
     pub kv_event_monitor: Option<Arc<KvEventMonitor>>,
     pub realtime_registry: Arc<RealtimeRegistry>,
+    /// Bind address for WebRTC UDP sockets (`None` = `0.0.0.0`, auto-detect).
+    pub webrtc_bind_addr: Option<std::net::IpAddr>,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -303,6 +305,7 @@ impl AppContextBuilder {
             inflight_tracker: InFlightRequestTracker::new(),
             kv_event_monitor: self.kv_event_monitor,
             realtime_registry: Arc::new(RealtimeRegistry::new()),
+            webrtc_bind_addr: None,
         })
     }
 
