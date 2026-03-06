@@ -12,9 +12,6 @@ maxRunners: 6
 ## name of the runner scale set to create.  Defaults to the helm release name
 runnerScaleSetName: "1-gpu-h100"
 
-## name of runner group
-runnerGroup: "k8s-runner-gpu"
-
 resourceMeta: {}
 keyVault: {}
 
