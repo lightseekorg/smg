@@ -452,7 +452,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 raise ValueError(
                     "Invalid kv_transfer_params: remote_host must be set and remote_port must be in [1, 65535]."
                 )
-            logger.info(
+            logger.debug(
                 "kv_transfer_params={remote_host=%s, remote_port=%d}",
                 remote_host,
                 remote_port,
