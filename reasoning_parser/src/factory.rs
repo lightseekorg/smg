@@ -247,7 +247,7 @@ impl ParserFactory {
                         think_start_token: String::new(),
                         think_end_token: String::new(),
                         stream_reasoning: true,
-                        max_buffer_size: 65536,
+                        max_buffer_size: 4 * 1024 * 1024,
                         initial_in_reasoning: false,
                     };
                     Box::new(
@@ -274,7 +274,7 @@ impl ParserFactory {
             think_start_token: String::new(),
             think_end_token: String::new(),
             stream_reasoning: true,
-            max_buffer_size: 65536,
+            max_buffer_size: 4 * 1024 * 1024,
             initial_in_reasoning: false,
         };
         Box::new(BaseReasoningParser::new(config).with_model_type("passthrough".to_string()))

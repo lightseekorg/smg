@@ -21,7 +21,7 @@ impl Glm45Parser {
             think_start_token: "<think>".to_string(),
             think_end_token: "</think>".to_string(),
             stream_reasoning: true,
-            max_buffer_size: 65536,
+            max_buffer_size: 4 * 1024 * 1024,
             initial_in_reasoning: false, // Requires explicit start token like Qwen3
         };
 
