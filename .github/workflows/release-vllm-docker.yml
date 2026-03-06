@@ -13,8 +13,8 @@ on:
   workflow_dispatch:
     inputs:
       base_image_ref:
-        description: 'Base image (full image:tag, e.g. vllm/vllm-openai:v0.16.0-cu130)'
-        default: 'vllm/vllm-openai:v0.16.0-cu130'
+        description: 'Base image (full image:tag, e.g. vllm/vllm-openai:v0.16.0)'
+        default: 'vllm/vllm-openai:v0.16.0'
         required: true
         type: string
       vllm_repo:
@@ -37,7 +37,7 @@ on:
         default: 'v1.1.0'
         type: string
       tag:
-        description: 'Override image tag (e.g. v1.2.0-vllm-v0.16.0). If empty, tag is auto-generated.'
+        description: 'Override image tag (e.g. v1.1.0-vllm-v0.16.0). If empty, tag is auto-generated.'
         required: false
         type: string
 
@@ -61,21 +61,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push image
-        id: push-ghcr
+      - name: Resolve image tag
+        id: resolve-tag
         env:
           BASE_IMAGE_REF: ${{ inputs.base_image_ref }}
           VLLM_REPO: ${{ inputs.vllm_repo }}
           VLLM_COMMIT: ${{ inputs.vllm_commit }}
-          SMG_REPO: ${{ inputs.smg_repo }}
-          SMG_COMMIT: ${{ inputs.smg_commit }}
         run: |
           SMG_VERSION=$(grep -m1 '^version = ' bindings/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')
           if [ -n "${{ inputs.tag }}" ]; then
@@ -91,22 +82,62 @@ jobs:
             fi
             IMAGE_TAG="${SMG_VERSION}-vllm-${VLLM_TAG}"
           fi
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "**Image tag:** \`${IMAGE_TAG}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.engine
+          target: custom-vllm
+          push: false
+          load: true
+          build-args: |
+            BASE_IMAGE_REF=${{ inputs.base_image_ref }}
+            ENGINE_REPO=${{ inputs.vllm_repo }}
+            ENGINE_COMMIT=${{ inputs.vllm_commit }}
+            SMG_REPO=${{ inputs.smg_repo }}
+            SMG_COMMIT=${{ inputs.smg_commit }}
+          tags: smg-build:${{ steps.resolve-tag.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Push image to GHCR
+        id: push-ghcr
+        env:
+          IMAGE_TAG: ${{ steps.resolve-tag.outputs.image_tag }}
+          BASE_IMAGE_TAG: smg-build:${{ steps.resolve-tag.outputs.image_tag }}
+        run: |
+          echo "**Build image:** done" >> $GITHUB_STEP_SUMMARY
           TARGET_IMAGE="ghcr.io/${{ github.repository_owner }}/smg:${IMAGE_TAG}"
           echo "image_name=${TARGET_IMAGE}" >> "$GITHUB_OUTPUT"
-          docker build \
-            --build-arg BASE_IMAGE_REF="${BASE_IMAGE_REF}" \
-            --build-arg ENGINE_REPO="${VLLM_REPO}" \
-            --build-arg ENGINE_COMMIT="${VLLM_COMMIT}" \
-            --build-arg SMG_REPO="${SMG_REPO}" \
-            --build-arg SMG_COMMIT="${SMG_COMMIT}" \
-            --file docker/Dockerfile.engine \
-            --target custom-vllm \
-            --tag "${TARGET_IMAGE}" \
-            .
-          docker push "${TARGET_IMAGE}"
+          docker tag "$BASE_IMAGE_TAG" "$TARGET_IMAGE"
+          docker push "$TARGET_IMAGE"
+          echo "**Push image:** \`${TARGET_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Clean up local images
+        if: always()
+        env:
+          IMAGE_TAG: ${{ steps.resolve-tag.outputs.image_tag }}
+        run: |
+          docker rmi "smg-build:${IMAGE_TAG}" || true
+          docker rmi "${{ steps.push-ghcr.outputs.image_name }}" || true
+          if [ -n "${{ inputs.base_image_ref }}" ]; then
+            docker rmi "${{ inputs.base_image_ref }}" || true
+          fi
 
       - name: Summary
+        if: always()
         run: |
           echo "## Image" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image tag:** \`${{ steps.push-ghcr.outputs.image_tag }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Image name:** \`${{ steps.push-ghcr.outputs.image_name }}\`" >> $GITHUB_STEP_SUMMARY

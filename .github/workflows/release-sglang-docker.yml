@@ -34,10 +34,10 @@ on:
       smg_commit:
         description: 'SMG commit SHA or ref (use "latest" for HEAD)'
         required: false
-        default: 'latest'
+        default: 'v1.1.0'
         type: string
       tag:
-        description: 'Override image tag (e.g. v1.2.0-sglang-v0.5.9). If empty, tag is auto-generated.'
+        description: 'Override image tag (e.g. v1.1.0-sglang-v0.5.9). If empty, tag is auto-generated.'
         required: false
         type: string
 
@@ -57,7 +57,7 @@ jobs:
           echo "| sglang_commit | \`${{ inputs.sglang_commit }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| smg_repo | \`${{ inputs.smg_repo }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| smg_commit | \`${{ inputs.smg_commit }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| tag | \`${{ inputs.tag || '(auto)' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| tag | \`${{ inputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -94,6 +94,7 @@ jobs:
             IMAGE_TAG="${SMG_VERSION}-sglang-${SGLANG_COMMIT}"
           fi
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "**Image tag:** \`${IMAGE_TAG}\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Build image
         uses: docker/build-push-action@v6
@@ -104,7 +105,7 @@ jobs:
           push: false
           load: true
           build-args: |
-            BASE_IMAGE_REF=${{ inputs.base_image_ref || 'lmsysorg/sglang:v0.5.9' }}
+            BASE_IMAGE_REF=${{ inputs.base_image_ref }}
             ENGINE_REPO=${{ inputs.sglang_repo }}
             ENGINE_COMMIT=${{ inputs.sglang_commit }}
             SMG_REPO=${{ inputs.smg_repo }}
@@ -119,13 +120,28 @@ jobs:
           IMAGE_TAG: ${{ steps.resolve-tag.outputs.image_tag }}
           BASE_IMAGE_TAG: smg-build:${{ steps.resolve-tag.outputs.image_tag }}
         run: |
+          echo "**Build image:** done" >> $GITHUB_STEP_SUMMARY
           TARGET_IMAGE="ghcr.io/${{ github.repository_owner }}/smg:${IMAGE_TAG}"
           echo "image_name=${TARGET_IMAGE}" >> "$GITHUB_OUTPUT"
           docker tag "$BASE_IMAGE_TAG" "$TARGET_IMAGE"
           docker push "$TARGET_IMAGE"
+          echo "**Push image:** \`${TARGET_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Clean up local images
+        if: always()
+        env:
+          IMAGE_TAG: ${{ steps.resolve-tag.outputs.image_tag }}
+        run: |
+          docker rmi "smg-build:${IMAGE_TAG}" || true
+          docker rmi "${{ steps.push-ghcr.outputs.image_name }}" || true
+          if [ -n "${{ inputs.base_image_ref }}" ]; then
+            docker rmi "${{ inputs.base_image_ref }}" || true
+          fi
 
       - name: Summary
+        if: always()
         run: |
           echo "## Image" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image tag:** \`${{ steps.resolve-tag.outputs.image_tag }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Image name:** \`${{ steps.push-ghcr.outputs.image_name }}\`" >> $GITHUB_STEP_SUMMARY
