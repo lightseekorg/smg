@@ -1,0 +1,68 @@
+# Multi-stage: each base has its own tag. Build with --target vllm|sglang|trtllm|tgl
+# Build args: BASE_IMAGE_REF (full image:tag); ENGINE_REPO, ENGINE_COMMIT; SMG_REPO, SMG_COMMIT
+ARG BASE_IMAGE_REF
+
+# Shared sources: clone engine and smg from GitHub, copy scripts
+FROM alpine:3.19 AS sources
+ARG ENGINE_REPO
+ARG ENGINE_COMMIT
+ARG SMG_REPO
+ARG SMG_COMMIT
+RUN apk add --no-cache git \
+    && if [ -n "${ENGINE_REPO}" ] && [ -n "${ENGINE_COMMIT}" ]; then \
+         git clone --depth 1 "${ENGINE_REPO}" /opt/engine-sr \
+         && ( cd /opt/engine-src && ( [ "${ENGINE_COMMIT}" = "latest" ] || git checkout "${ENGINE_COMMIT}" ) ); \
+       else mkdir -p /opt/engine-src; fi \
+    && git clone --depth 1 "${SMG_REPO}" /tmp/smg-src \
+    && ( cd /tmp/smg-src && ( [ "${SMG_COMMIT}" = "latest" ] || git checkout "${SMG_COMMIT}" ) )
+COPY scripts/installation/install-vllm.sh /tmp/install-vllm.sh
+COPY scripts/installation/install-sglang.sh /tmp/install-sglang.sh
+COPY scripts/installation/install-tgl.sh /tmp/install-tgl.sh
+COPY scripts/installation/install-trtllm.sh /tmp/install-trtllm.sh
+COPY scripts/installation/install-smg.sh /tmp/install-smg.sh
+
+
+# custom base (override with BASE_IMAGE_REF, e.g. vllm/vllm-openai:nightly)
+FROM ${BASE_IMAGE_REF} AS custom-vllm
+
+ARG ENGINE_REPO
+ENV SMG_DEFAULT_BACKEND=vllm
+COPY --from=sources /opt/engine-src /opt/vllm-src
+COPY --from=sources /tmp/smg-src /opt/smg-src
+COPY --from=sources /tmp/install-vllm.sh /tmp/install-vllm.sh
+COPY --from=sources /tmp/install-smg.sh /tmp/install-smg.sh
+RUN bash /tmp/install-smg.sh /opt/smg-src
+RUN if [ -n "${ENGINE_REPO}" ]; then bash /tmp/install-vllm.sh /opt/vllm-src; fi
+
+FROM ${BASE_IMAGE_REF} AS custom-sglang
+
+ARG ENGINE_REPO
+ENV SMG_DEFAULT_BACKEND=sglang
+COPY --from=sources /opt/engine-src /opt/sglang-src
+COPY --from=sources /tmp/smg-src /opt/smg-src
+COPY --from=sources /tmp/install-sglang.sh /tmp/install-sglang.sh
+COPY --from=sources /tmp/install-smg.sh /tmp/install-smg.sh
+RUN bash /tmp/install-smg.sh /opt/smg-src
+RUN if [ -n "${ENGINE_REPO}" ]; then bash /tmp/install-sglang.sh /opt/sglang-src; fi
+
+FROM ${BASE_IMAGE_REF} AS custom-trtllm
+
+ARG ENGINE_REPO
+ENV SMG_DEFAULT_BACKEND=trtllm
+COPY --from=sources /opt/engine-src /opt/trtllm-src
+COPY --from=sources /tmp/smg-src /opt/smg-src
+COPY --from=sources /tmp/install-trtllm.sh /tmp/install-trtllm.sh
+COPY --from=sources /tmp/install-smg.sh /tmp/install-smg.sh
+RUN bash /tmp/install-smg.sh /opt/smg-src
+RUN if [ -n "${ENGINE_REPO}" ]; then bash /tmp/install-trtllm.sh /opt/trtllm-src; fi
+
+FROM ${BASE_IMAGE_REF} AS custom-tgl
+
+ARG ENGINE_REPO
+ENV SMG_DEFAULT_BACKEND=sglang
+COPY --from=sources /opt/engine-src /opt/tgl-src
+COPY --from=sources /tmp/smg-src /opt/smg-src
+COPY --from=sources /tmp/install-tgl.sh /tmp/install-tgl.sh
+COPY --from=sources /tmp/install-smg.sh /tmp/install-smg.sh
+RUN bash /tmp/install-smg.sh /opt/smg-src
+RUN if [ -n "${ENGINE_REPO}" ]; then bash /tmp/install-tgl.sh /opt/tgl-src; fi

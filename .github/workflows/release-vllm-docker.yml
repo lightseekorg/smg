@@ -1,0 +1,112 @@
+name: Release SMG_vLLM Docker Image
+
+run-name: >
+  Release SMG_vLLM  image |
+  base_image_ref=${{ github.event.inputs.base_image_ref }} |
+  vllm_repo=${{ github.event.inputs.vllm_repo }} |
+  vllm_commit=${{ github.event.inputs.vllm_commit }} |
+  smg_repo=${{ github.event.inputs.smg_repo }} |
+  smg_commit=${{ github.event.inputs.smg_commit }} |
+  by @${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_image_ref:
+        description: 'Base image (full image:tag, e.g. vllm/vllm-openai:v0.16.0-cu130)'
+        default: 'vllm/vllm-openai:v0.16.0-cu130'
+        required: true
+        type: string
+      vllm_repo:
+        description: 'vLLM repo URL, official: https://github.com/vllm-project/vllm.git, if empty, will not refresh engine code and use the one in base image'
+        required: false
+        type: string
+      vllm_commit:
+        description: 'vLLM commit SHA or ref (use "latest" for HEAD)'
+        required: false
+        default: 'latest'
+        type: string
+      smg_repo:
+        description: 'SMG repo URL'
+        required: false
+        default: 'https://github.com/lightseekorg/smg'
+        type: string
+      smg_commit:
+        description: 'SMG commit SHA or ref (use "latest" for HEAD)'
+        required: false
+        default: 'v1.1.0'
+        type: string
+      tag:
+        description: 'Override image tag (e.g. v1.2.0-vllm-v0.16.0). If empty, tag is auto-generated.'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: ["8-gpu-h200"]
+    steps:
+      - name: Print inputs to summary
+        run: |
+          echo "## Inputs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| base_image_ref | \`${{ inputs.base_image_ref }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| vllm_repo | \`${{ inputs.vllm_repo }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| vllm_commit | \`${{ inputs.vllm_commit }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| smg_repo | \`${{ inputs.smg_repo }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| smg_commit | \`${{ inputs.smg_commit }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| tag | \`${{ inputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: push-ghcr
+        env:
+          BASE_IMAGE_REF: ${{ inputs.base_image_ref }}
+          VLLM_REPO: ${{ inputs.vllm_repo }}
+          VLLM_COMMIT: ${{ inputs.vllm_commit }}
+          SMG_REPO: ${{ inputs.smg_repo }}
+          SMG_COMMIT: ${{ inputs.smg_commit }}
+        run: |
+          SMG_VERSION=$(grep -m1 '^version = ' bindings/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          if [ -n "${{ inputs.tag }}" ]; then
+            IMAGE_TAG="${{ inputs.tag }}"
+          else
+            if [ -n "${VLLM_REPO}" ]; then
+              VLLM_TAG="${VLLM_COMMIT//\//-}"
+              VLLM_TAG="${VLLM_TAG// /}"
+            else
+              # No engine repo: use the base image tag as the engine version identifier
+              VLLM_TAG="${BASE_IMAGE_REF##*:}"
+              VLLM_TAG="${VLLM_TAG//\//-}"
+            fi
+            IMAGE_TAG="${SMG_VERSION}-vllm-${VLLM_TAG}"
+          fi
+          TARGET_IMAGE="ghcr.io/${{ github.repository_owner }}/smg:${IMAGE_TAG}"
+          echo "image_name=${TARGET_IMAGE}" >> "$GITHUB_OUTPUT"
+          docker build \
+            --build-arg BASE_IMAGE_REF="${BASE_IMAGE_REF}" \
+            --build-arg ENGINE_REPO="${VLLM_REPO}" \
+            --build-arg ENGINE_COMMIT="${VLLM_COMMIT}" \
+            --build-arg SMG_REPO="${SMG_REPO}" \
+            --build-arg SMG_COMMIT="${SMG_COMMIT}" \
+            --file docker/Dockerfile.engine \
+            --target custom-vllm \
+            --tag "${TARGET_IMAGE}" \
+            .
+          docker push "${TARGET_IMAGE}"
+
+      - name: Summary
+        run: |
+          echo "## Image" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image name:** \`${{ steps.push-ghcr.outputs.image_name }}\`" >> $GITHUB_STEP_SUMMARY
