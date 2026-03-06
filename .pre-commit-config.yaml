@@ -78,6 +78,21 @@ repos:
         stages: [commit-msg]
         always_run: true
 
+      - id: no-ai-co-author
+        name: No AI co-author or sign-off
+        description: Reject Co-authored-by or Signed-off-by lines referencing Claude or noreply@anthropic.com
+        entry: |
+          bash -c '
+            if grep -iE "^(Co-authored-by|Signed-off-by):.*(Claude|noreply@anthropic\.com)" "$1"; then
+              echo ""
+              echo "ERROR: Commit message must not reference Claude or noreply@anthropic.com in Co-authored-by/Signed-off-by lines."
+              exit 1
+            fi
+          ' --
+        language: system
+        stages: [commit-msg]
+        always_run: true
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.0
     hooks:

@@ -1,18 +1,19 @@
-name: PR Title Check
+name: PR Validation
 
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
 concurrency:
-  group: pr-title-check-${{ github.event.pull_request.number }}
+  group: pr-validation-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  check-pr-title:
-    name: Conventional Commit Title
+  pr-validation:
+    name: PR Title & Commit Messages
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: read
     steps:
       - name: Validate PR title format
@@ -43,3 +44,23 @@ jobs:
           fi
 
           echo "✅ PR title is valid: '$PR_TITLE'"
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check commit messages for forbidden AI co-authors
+        run: |
+          FORBIDDEN=$(git log --format='%B' origin/${{ github.base_ref }}..HEAD | \
+            grep -iE "^(Co-authored-by|Signed-off-by):.*(Claude|noreply@anthropic\.com)" || true)
+          if [ -n "$FORBIDDEN" ]; then
+            echo "::error::Commit messages must not reference Claude or noreply@anthropic.com in Co-authored-by/Signed-off-by lines."
+            echo ""
+            echo "Offending lines:"
+            echo "$FORBIDDEN"
+            echo ""
+            echo "Please amend the offending commits to remove these lines."
+            exit 1
+          fi
+
+          echo "✅ No forbidden AI co-author/sign-off lines found."

@@ -46,7 +46,7 @@ jobs:
 
       - name: Run pre-commit checks
         env:
-          SKIP: rustfmt,clippy,no-commit-to-branch,branch-name-check,dco-check
+          SKIP: rustfmt,clippy,no-commit-to-branch,branch-name-check,dco-check,no-ai-co-author
         run: pre-commit run --all-files --show-diff-on-failure
 
   python-lint:
