@@ -1,0 +1,126 @@
+## GitHub config URL for the runner scale set
+githubConfigUrl: "https://github.com/lightseekorg/smg"
+
+## Name of the Kubernetes secret containing GitHub credentials
+## The secret should contain either a PAT (github_token) or GitHub App credentials
+githubConfigSecret: github-arc-secret
+
+## Runner scaling configuration
+minRunners: 4
+maxRunners: 8
+
+## name of the runner scale set to create.  Defaults to the helm release name
+runnerScaleSetName: "4-gpu-h100"
+
+resourceMeta: {}
+keyVault: {}
+
+## Runner pod template
+template:
+  spec:
+    nodeSelector:
+      nvidia.com/gpu: "true"
+      node.kubernetes.io/instance-type: BM.GPU.H100.8
+
+    tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+
+    affinity:
+      podAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                  - key: actions.github.com/scale-set-name
+                    operator: In
+                    values:
+                      - 4-gpu-h100
+              topologyKey: kubernetes.io/hostname
+
+    volumes:
+      - name: work
+        emptyDir: {}
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+      - name: dind-sock
+        emptyDir: {}
+      - name: dind-externals
+        emptyDir: {}
+      - name: docker-storage
+        emptyDir: {}
+
+    containers:
+      - name: runner
+        image: fra.ocir.io/idqj093njucb/action-runner:v0.0.2
+        command:
+          - /home/runner/run.sh
+        env:
+          - name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: '120'
+        resources:
+          limits:
+            nvidia.com/gpu: 4
+        volumeMounts:
+          - name: model-cache
+            mountPath: /models
+          - name: dshm
+            mountPath: /dev/shm
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+          - name: docker-storage
+            mountPath: /var/lib/docker
+
+    initContainers:
+      - name: init-dind-externals
+        args:
+          - '-r'
+          - /home/runner/externals/.
+          - /home/runner/tmpDir/
+        command:
+          - cp
+        image: fra.ocir.io/idqj093njucb/action-runner:v0.0.2
+        volumeMounts:
+          - mountPath: /home/runner/tmpDir
+            name: dind-externals
+      - name: dind
+        args:
+          - dockerd
+          - '--host=unix:///var/run/docker.sock'
+          - '--group=$(DOCKER_GROUP_GID)'
+        env:
+          - name: DOCKER_GROUP_GID
+            value: '123'
+        image: fra.ocir.io/idqj093njucb/docker:dind
+        restartPolicy: Always
+        securityContext:
+          privileged: true
+        startupProbe:
+          exec:
+            command:
+              - docker
+              - info
+          failureThreshold: 24
+          initialDelaySeconds: 0
+          periodSeconds: 5
+        volumeMounts:
+          - mountPath: /home/runner/_work
+            name: work
+          - mountPath: /var/run
+            name: dind-sock
+          - mountPath: /home/runner/externals
+            name: dind-externals
+          - name: docker-storage
+            mountPath: /var/lib/docker
