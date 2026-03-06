@@ -44,7 +44,7 @@ def _tensor_from_proto(td: vllm_engine_pb2.TensorData) -> torch.Tensor:
     torch_dtype = _PROTO_DTYPE_MAP.get(td.dtype)
     if torch_dtype is None:
         raise ValueError(f"Unsupported proto tensor dtype: {td.dtype!r}")
-    return torch.frombuffer(bytearray(td.data), dtype=torch_dtype).reshape(list(td.shape))
+    return torch.frombuffer(bytearray(td.data), dtype=torch_dtype).reshape(*td.shape)
 
 
 class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
