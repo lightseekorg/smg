@@ -10,7 +10,6 @@ import time
 from collections.abc import AsyncGenerator
 
 import grpc
-import numpy as np
 import torch
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from transformers import BatchFeature
@@ -32,21 +31,20 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 logger = init_logger(__name__)
 
-# Proto dtype string → (numpy dtype, element size in bytes)
-_PROTO_DTYPE_MAP: dict[str, np.dtype] = {
-    "float32": np.dtype("float32"),
-    "int64": np.dtype("int64"),
-    "uint32": np.dtype("uint32"),
+# Proto dtype string → torch dtype
+_PROTO_DTYPE_MAP: dict[str, torch.dtype] = {
+    "float32": torch.float32,
+    "int64": torch.int64,
+    "uint32": torch.uint32,
 }
 
 
 def _tensor_from_proto(td: vllm_engine_pb2.TensorData) -> torch.Tensor:
     """Deserialize a TensorData proto message into a torch.Tensor."""
-    np_dtype = _PROTO_DTYPE_MAP.get(td.dtype)
-    if np_dtype is None:
+    torch_dtype = _PROTO_DTYPE_MAP.get(td.dtype)
+    if torch_dtype is None:
         raise ValueError(f"Unsupported proto tensor dtype: {td.dtype!r}")
-    arr = np.frombuffer(td.data, dtype=np_dtype).reshape(list(td.shape))
-    return torch.from_numpy(arr.copy())
+    return torch.frombuffer(bytearray(td.data), dtype=torch_dtype).reshape(list(td.shape))
 
 
 class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
@@ -365,14 +363,17 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         batched = set(mm_proto.batched_keys)
         flat = dict(mm_proto.flat_keys)
         fields_config: dict[str, MultiModalFieldConfig] = {}
+        flat_sizes_cache: dict[str, torch.Tensor] = {}
         for key in hf_dict:
             on_cpu = key in cpu_keys
             if key in batched:
                 fields_config[key] = MultiModalFieldConfig.batched("image", keep_on_cpu=on_cpu)
             elif key in flat:
-                sizes = hf_dict[flat[key]].flatten().to(torch.int64)
+                sizes_key = flat[key]
+                if sizes_key not in flat_sizes_cache:
+                    flat_sizes_cache[sizes_key] = hf_dict[sizes_key].flatten().to(torch.int64)
                 fields_config[key] = MultiModalFieldConfig.flat_from_sizes(
-                    "image", sizes, keep_on_cpu=on_cpu
+                    "image", flat_sizes_cache[sizes_key], keep_on_cpu=on_cpu
                 )
             else:
                 fields_config[key] = MultiModalFieldConfig.shared("image", num_images)
@@ -392,17 +393,22 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         mm_placeholders: dict[str, list[PlaceholderRange]] = {}
         if mm_proto.mm_placeholders:
             im_token_id = mm_proto.im_token_id if mm_proto.HasField("im_token_id") else None
+            # Pre-convert to tensor for vectorized mask building
+            prompt_ids_tensor = (
+                torch.tensor(prompt_token_ids, dtype=torch.int64)
+                if im_token_id is not None
+                else None
+            )
             placeholders = []
             for p in mm_proto.mm_placeholders:
                 is_embed = None
-                if im_token_id is not None:
-                    token_slice = prompt_token_ids[p.offset : p.offset + p.length]
-                    mask = [t == im_token_id for t in token_slice]
+                if prompt_ids_tensor is not None:
+                    mask = prompt_ids_tensor[p.offset : p.offset + p.length] == im_token_id
                     # Only set is_embed when there are non-embed positions,
                     # otherwise None means "all positions are embeds" which is
                     # both correct and avoids unnecessary overhead.
-                    if not all(mask):
-                        is_embed = torch.tensor(mask, dtype=torch.bool)
+                    if not mask.all():
+                        is_embed = mask
                 placeholders.append(
                     PlaceholderRange(offset=p.offset, length=p.length, is_embed=is_embed)
                 )
@@ -579,9 +585,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
             proto.token_logprobs.append(token_logprob)
             proto.token_ids.append(token_id)
-            proto.top_logprobs.append(
-                VllmEngineServicer._build_top_logprobs(logprob_entry, num_top_logprobs)
-            )
+            if num_top_logprobs and num_top_logprobs > 0:
+                proto.top_logprobs.append(
+                    VllmEngineServicer._build_top_logprobs(logprob_entry, num_top_logprobs)
+                )
 
         return proto if proto.token_ids else None
 
