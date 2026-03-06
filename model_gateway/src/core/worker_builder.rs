@@ -26,6 +26,7 @@ pub struct BasicWorkerBuilder {
     health_endpoint: String,
     circuit_breaker_config: CircuitBreakerConfig,
     grpc_client: Option<GrpcClient>,
+    lora_state: Option<std::sync::Arc<crate::core::lora::WorkerLoraState>>,
 }
 
 impl BasicWorkerBuilder {
@@ -37,6 +38,7 @@ impl BasicWorkerBuilder {
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            lora_state: None,
         }
     }
 
@@ -48,6 +50,7 @@ impl BasicWorkerBuilder {
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            lora_state: None,
         }
     }
 
@@ -61,7 +64,17 @@ impl BasicWorkerBuilder {
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            lora_state: None,
         }
+    }
+
+    /// Attach a per-worker LoRA state (built from `RuntimeType` and a shared HTTP client).
+    pub fn lora_state(
+        mut self,
+        state: Option<std::sync::Arc<crate::core::lora::WorkerLoraState>>,
+    ) -> Self {
+        self.lora_state = state;
+        self
     }
 
     /// Set the bootstrap port (for prefill workers in PD disaggregation)
@@ -232,6 +245,7 @@ impl BasicWorkerBuilder {
             metadata,
             grpc_client,
             models_override: Arc::new(ArcSwap::from_pointee(WorkerModels::Wildcard)),
+            lora_state: self.lora_state,
         }
     }
 }

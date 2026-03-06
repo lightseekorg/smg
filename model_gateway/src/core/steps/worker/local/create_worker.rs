@@ -9,6 +9,7 @@ use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, Wo
 
 use crate::core::{
     circuit_breaker::CircuitBreakerConfig,
+    lora::WorkerLoraState,
     steps::workflow_data::{WorkerKind, WorkerWorkflowData},
     worker::RuntimeType,
     BasicWorkerBuilder, ConnectionMode, Worker, UNKNOWN_MODEL_ID,
@@ -105,6 +106,14 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
             vec![None] // single worker, no DP
         };
 
+        // Every local worker gets a LoRA state — it's zero-cost when no
+        // request carries a `lora_path`, and activates automatically when one does.
+        let lora_state = Some(Arc::new(WorkerLoraState::new(
+            app_context.client.clone(),
+            runtime_type,
+            url.clone(),
+        )));
+
         let workers: Vec<Arc<dyn Worker>> = dp_ranks
             .into_iter()
             .map(|dp| {
@@ -118,7 +127,8 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
                     .health_endpoint(health_endpoint)
                     .bootstrap_port(config.bootstrap_port)
                     .priority(config.priority)
-                    .cost(config.cost);
+                    .cost(config.cost)
+                    .lora_state(lora_state.clone());
 
                 if let Some((rank, size)) = dp {
                     builder = builder.dp_config(rank, size);
