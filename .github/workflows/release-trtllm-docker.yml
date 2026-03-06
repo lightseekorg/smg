@@ -1,27 +1,25 @@
-name: Release SMG_TRTLLM Docker Image
+name: Release SMG+TRTLLM Docker Image
 
-run-name: >
-  Release SMG_TRTLLM  image |
-  base_image_ref=${{ github.event.inputs.base_image_ref }} |
-  trtllm_repo=${{ github.event.inputs.trtllm_repo }} |
-  trtllm_commit=${{ github.event.inputs.trtllm_commit }} |
-  smg_repo=${{ github.event.inputs.smg_repo }} |
-  smg_commit=${{ github.event.inputs.smg_commit }} |
+run-name: >-
+  SMG+TRTLLM |
+  base=${{ inputs.base_image_ref }} |
+  engine=${{ inputs.trtllm_commit }} |
+  smg=${{ inputs.smg_commit }} |
   by @${{ github.actor }}
 
 on:
   workflow_dispatch:
     inputs:
       base_image_ref:
-        description: 'Base image (full image:tag, e.g. nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc6). If empty, base image will be built from trtllm_repo (engine code will NOT be refreshed in that case).'
+        description: 'Base image (e.g. nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc6). Empty = build from source.'
         required: false
         type: string
       trtllm_repo:
-        description: 'TRTLLM repo URL (required when base_image_ref is empty to build base image), e.g. https://github.com/NVIDIA/TensorRT-LLM.git'
+        description: 'TRTLLM repo URL (required when base_image_ref is empty to build from source)'
         required: false
         type: string
       trtllm_commit:
-        description: 'TRTLLM commit SHA or ref (use "latest" for HEAD; only used when building base image)'
+        description: 'TRTLLM commit/ref ("latest" for HEAD)'
         required: false
         default: 'latest'
         type: string
@@ -31,182 +29,26 @@ on:
         default: 'https://github.com/lightseekorg/smg'
         type: string
       smg_commit:
-        description: 'SMG commit SHA or ref (use "latest" for HEAD)'
+        description: 'SMG commit/ref ("latest" for HEAD)'
         required: false
         default: 'v1.1.0'
         type: string
       tag:
-        description: 'Override image tag (e.g. v1.1.0-trtllm-1.3.0). If empty, tag is auto-generated.'
+        description: 'Override image tag (e.g. v1.1.0-trtllm-1.3.0)'
         required: false
         type: string
-env:
-  GITHUB_TOKEN: ${{ secrets.ROBOT_GITHUB_TOKEN }}
 
 jobs:
-  build-and-push:
-    if: github.repository == 'lightseekorg/smg'
-    runs-on: ["8-gpu-h200"]
-    steps:
-      - name: Print inputs to summary
-        run: |
-          echo "## Inputs" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| base_image_ref | \`${{ inputs.base_image_ref }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| trtllm_repo | \`${{ inputs.trtllm_repo }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| trtllm_commit | \`${{ inputs.trtllm_commit }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| smg_repo | \`${{ inputs.smg_repo }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| smg_commit | \`${{ inputs.smg_commit }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| tag | \`${{ inputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
-
-      - name: Checkout current repo
-        uses: actions/checkout@v4
-
-      - name: Validate inputs
-        env:
-          INPUT_BASE_IMAGE_REF: ${{ inputs.base_image_ref }}
-          TRTLLM_REPO: ${{ inputs.trtllm_repo }}
-        run: |
-          if [ -z "${INPUT_BASE_IMAGE_REF}" ] && [ -z "${TRTLLM_REPO}" ]; then
-            echo "ERROR: Either base_image_ref or trtllm_repo must be set." >&2
-            exit 1
-          fi
-
-      # Only check out the TensorRT-LLM repo when base_image_ref is empty,
-      # so we can build the base image from source.
-      - name: Resolve trtllm checkout ref
-        id: trtllm-ref
-        if: ${{ github.event.inputs.base_image_ref == '' }}
-        run: |
-          if [ "${{ github.event.inputs.trtllm_commit }}" = "latest" ]; then
-            echo "ref=" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=${{ github.event.inputs.trtllm_commit }}" >> "$GITHUB_OUTPUT"
-          fi
-          # Strip protocol and host to get owner/repo (e.g. https://github.com/NVIDIA/TensorRT-LLM.git → NVIDIA/TensorRT-LLM)
-          repo="${{ github.event.inputs.trtllm_repo }}"
-          repo="${repo#https://github.com/}"
-          repo="${repo%.git}"
-          repo="${repo%/}"
-          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout TensorRT-LLM repo (build base image)
-        if: ${{ github.event.inputs.base_image_ref == '' && github.event.inputs.trtllm_repo != '' }}
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ steps.trtllm-ref.outputs.repo }}
-          ref: ${{ steps.trtllm-ref.outputs.ref }}
-          token: ${{ secrets.GH_SYNC_TOKEN }}
-          fetch-depth: 0
-          submodules: recursive
-          lfs: true
-          path: tensorrt-llm
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Resolve the effective base image reference and compute the final image tag.
-      #   base_image_ref: provided → use as-is; empty → use image built from source below
-      #   image_tag convention: <smg_commit>-trtllm-<trtllm_commit>
-      - name: Resolve image refs and tag
-        id: resolve-base
-        env:
-          INPUT_BASE_IMAGE_REF: ${{ inputs.base_image_ref }}
-          TRTLLM_REPO: ${{ inputs.trtllm_repo }}
-          TRTLLM_COMMIT: ${{ inputs.trtllm_commit }}
-        run: |
-          SMG_VERSION=$(grep -m1 '^version = ' bindings/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')
-          if [ -n "${{ inputs.tag }}" ]; then
-            IMAGE_TAG="${{ inputs.tag }}"
-          else
-            if [ -n "${TRTLLM_REPO}" ]; then
-              TRTLLM_COMMIT="${TRTLLM_COMMIT//\//-}"
-              TRTLLM_COMMIT="${TRTLLM_COMMIT// /}"
-            else
-              # No engine repo: use the base image tag as the engine version identifier
-              TRTLLM_COMMIT="${INPUT_BASE_IMAGE_REF##*:}"
-              TRTLLM_COMMIT="${TRTLLM_COMMIT//\//-}"
-            fi
-            IMAGE_TAG="${SMG_VERSION}-trtllm-${TRTLLM_COMMIT}"
-          fi
-          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          if [ -n "${INPUT_BASE_IMAGE_REF}" ]; then
-            echo "base_image_ref=${INPUT_BASE_IMAGE_REF}" >> "$GITHUB_OUTPUT"
-            echo "engine_repo=${TRTLLM_REPO}" >> "$GITHUB_OUTPUT"
-          else
-            echo "base_image_ref=smg-build/release:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-            echo "engine_repo=" >> "$GITHUB_OUTPUT"
-          fi
-          echo "=== Outputs ==="
-          cat "$GITHUB_OUTPUT"
-          echo "**Image tag:** \`${IMAGE_TAG}\`" >> $GITHUB_STEP_SUMMARY
-
-      # Build the TensorRT-LLM base image from source when no base_image_ref is given.
-      # Engine code IS baked into the base image in this path.
-      - name: Build base image from source
-        if: ${{ github.event.inputs.base_image_ref == '' && github.event.inputs.trtllm_repo != '' }}
-        run: |
-          make -C tensorrt-llm/docker release_build CUDA_ARCHS="100-real" IMAGE_TAG="${{ steps.resolve-base.outputs.image_tag }}" IMAGE_NAME="smg-build"
-          echo "**Build base image:** done" >> $GITHUB_STEP_SUMMARY
-
-      - name: Build image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.engine
-          target: custom-trtllm
-          push: false
-          load: true
-          build-args: |
-            BASE_IMAGE_REF=${{ steps.resolve-base.outputs.base_image_ref }}
-            ENGINE_REPO=${{ steps.resolve-base.outputs.engine_repo }}
-            ENGINE_COMMIT=${{ inputs.trtllm_commit }}
-            SMG_REPO=${{ inputs.smg_repo }}
-            SMG_COMMIT=${{ inputs.smg_commit }}
-          tags: smg-build:${{ steps.resolve-base.outputs.image_tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Push image to GHCR
-        id: push-ghcr
-        env:
-          IMAGE_TAG: ${{ steps.resolve-base.outputs.image_tag }}
-          BASE_IMAGE_TAG: smg-build:${{ steps.resolve-base.outputs.image_tag }}
-        run: |
-          echo "**Build image:** done" >> $GITHUB_STEP_SUMMARY
-          TARGET_IMAGE="ghcr.io/${{ github.repository_owner }}/smg:${IMAGE_TAG}"
-          echo "image_name=${TARGET_IMAGE}" >> "$GITHUB_OUTPUT"
-          cat "$GITHUB_OUTPUT"
-
-          docker tag "${BASE_IMAGE_TAG}" "${TARGET_IMAGE}"
-          docker push "${TARGET_IMAGE}"
-          echo "**Push image:** \`${TARGET_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
-
-      - name: Clean up local images
-        if: always()
-        env:
-          IMAGE_TAG: ${{ steps.resolve-base.outputs.image_tag }}
-        run: |
-          docker rmi "smg-build:${IMAGE_TAG}" || true
-          docker rmi "${{ steps.push-ghcr.outputs.image_name }}" || true
-          if [ -n "${{ inputs.base_image_ref }}" ]; then
-            docker rmi "${{ inputs.base_image_ref }}" || true
-          fi
-
-      - name: Summary
-        if: always()
-        run: |
-          echo "## Image" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Image tag:** \`${{ steps.resolve-base.outputs.image_tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Image name:** \`${{ steps.push-ghcr.outputs.image_name }}\`" >> $GITHUB_STEP_SUMMARY
+  build:
+    uses: ./.github/workflows/_build-engine-image.yml
+    with:
+      engine: trtllm
+      base_image_ref: ${{ inputs.base_image_ref }}
+      engine_repo: ${{ inputs.trtllm_repo }}
+      engine_commit: ${{ inputs.trtllm_commit }}
+      smg_repo: ${{ inputs.smg_repo }}
+      smg_commit: ${{ inputs.smg_commit }}
+      tag: ${{ inputs.tag }}
+      source_build_repo: ${{ inputs.trtllm_repo }}
+      source_build_ref: ${{ inputs.trtllm_commit }}
+    secrets: inherit
