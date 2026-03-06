@@ -317,6 +317,7 @@ jobs:
               - 'reasoning_parser/**'
               - 'multimodal/**'
               - 'grpc_client/**'
+              - 'grpc_servicer/**'
               - 'e2e_test/chat_completions/**'
               - 'e2e_test/router/test_pd_mmlu.py'
               - 'scripts/ci_install_vllm.sh'
