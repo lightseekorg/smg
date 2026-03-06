@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use smg_mesh::{
     gossip::NodeStatus, AppState, MembershipState, MeshSyncManager, RateLimitConfig, StateStores,
-    TreeInsertOp, TreeOperation, WorkerState, GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
+    TreeInsertOp, TreeKey, TreeOperation, WorkerState, GLOBAL_RATE_LIMIT_COUNTER_KEY,
+    GLOBAL_RATE_LIMIT_KEY,
 };
 
 /// Create test stores for a node
@@ -232,7 +233,7 @@ async fn test_cache_aware_tree_synchronization() {
 
     // Node1 syncs tree operations
     let op1 = TreeOperation::Insert(TreeInsertOp {
-        text: "request1".to_string(),
+        key: TreeKey::Text("request1".to_string()),
         tenant: "http://worker1:8000".to_string(),
     });
     manager1
@@ -240,7 +241,7 @@ async fn test_cache_aware_tree_synchronization() {
         .unwrap();
 
     let op2 = TreeOperation::Insert(TreeInsertOp {
-        text: "request2".to_string(),
+        key: TreeKey::Text("request2".to_string()),
         tenant: "http://worker2:8000".to_string(),
     });
     manager1
