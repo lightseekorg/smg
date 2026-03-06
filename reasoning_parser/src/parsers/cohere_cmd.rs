@@ -5,7 +5,7 @@
 
 use crate::{
     parsers::BaseReasoningParser,
-    traits::{ParseError, ParserConfig, ParserResult, ReasoningParser},
+    traits::{ParseError, ParserConfig, ParserResult, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
 };
 
 /// Cohere Command model reasoning parser.
@@ -23,7 +23,7 @@ impl CohereCmdParser {
             think_start_token: "<|START_THINKING|>".to_string(),
             think_end_token: "<|END_THINKING|>".to_string(),
             stream_reasoning: true,
-            max_buffer_size: 65536,
+            max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
             initial_in_reasoning: false, // Requires explicit start token
         };
 

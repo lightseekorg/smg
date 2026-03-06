@@ -156,7 +156,7 @@ impl HarmonyStreamingProcessor {
         let mut cached_tokens: HashMap<u32, u32> = HashMap::new();
 
         while let Some(result) = prefill_stream.next().await {
-            let response = result.map_err(|e| format!("Prefill stream error: {e}"))?;
+            let response = result.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
 
             if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
                 prompt_tokens.insert(complete_wrapper.index(), complete_wrapper.prompt_tokens());
@@ -209,7 +209,7 @@ impl HarmonyStreamingProcessor {
 
         // Process stream
         while let Some(result) = decode_stream.next().await {
-            let response = result.map_err(|e| format!("Stream error: {e}"))?;
+            let response = result.map_err(|e| format!("Stream error: {}", e.message()))?;
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
@@ -504,7 +504,7 @@ impl HarmonyStreamingProcessor {
         // Phase 1: Drain prefill stream, collecting cached_tokens from Complete messages
         let mut prefill_cached_tokens_by_index: HashMap<u32, u32> = HashMap::new();
         while let Some(result) = prefill_stream.next().await {
-            let response = result.map_err(|e| format!("Prefill stream error: {e}"))?;
+            let response = result.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
             if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
                 prefill_cached_tokens_by_index
                     .insert(complete_wrapper.index(), complete_wrapper.cached_tokens());
@@ -557,7 +557,7 @@ impl HarmonyStreamingProcessor {
         let mut chunk_count = 0;
         while let Some(result) = decode_stream.next().await {
             chunk_count += 1;
-            let response = result.map_err(|e| format!("Decode stream error: {e}"))?;
+            let response = result.map_err(|e| format!("Decode stream error: {}", e.message()))?;
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {

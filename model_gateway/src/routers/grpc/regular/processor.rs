@@ -16,7 +16,7 @@ use openai_protocol::{
 };
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use tool_parser::ParserFactory as ToolParserFactory;
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::routers::{
     error,
@@ -110,7 +110,7 @@ impl ResponseProcessor {
                     processed_text = result.normal_text;
                 }
                 Err(e) => {
-                    return Err(format!("Reasoning parsing error: {e}"));
+                    warn!("Reasoning parsing error, skipping parsing: {e}");
                 }
             }
         }

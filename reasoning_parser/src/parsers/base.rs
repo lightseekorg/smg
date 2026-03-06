@@ -168,6 +168,7 @@ impl ReasoningParser for BaseReasoningParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::DEFAULT_MAX_BUFFER_SIZE;
 
     fn create_test_parser(
         initial_in_reasoning: bool,
@@ -177,7 +178,7 @@ mod tests {
             think_start_token: "<think>".to_string(),
             think_end_token: "</think>".to_string(),
             stream_reasoning,
-            max_buffer_size: 65536,
+            max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
             initial_in_reasoning,
         };
         BaseReasoningParser::new(config)
