@@ -2,9 +2,10 @@
 //!
 //! Handles synchronization of worker and policy states across mesh cluster nodes
 
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 
-use tracing::debug;
+use parking_lot::RwLock;
+use tracing::{debug, warn};
 
 use super::{
     service::gossip::NodeStatus,
@@ -15,16 +16,35 @@ use super::{
     tree_ops::{TreeOperation, TreeState},
 };
 
+pub trait TreeStateSubscriber: Send + Sync + Debug {
+    fn apply_remote_tree_state(&self, model_id: &str, tree_state: &TreeState);
+}
+
 /// Mesh sync manager for coordinating state synchronization
 #[derive(Clone, Debug)]
 pub struct MeshSyncManager {
     pub(crate) stores: Arc<StateStores>,
     self_name: String,
+    tree_state_subscribers: Arc<RwLock<Vec<Arc<dyn TreeStateSubscriber>>>>,
 }
 
 impl MeshSyncManager {
     pub fn new(stores: Arc<StateStores>, self_name: String) -> Self {
-        Self { stores, self_name }
+        Self {
+            stores,
+            self_name,
+            tree_state_subscribers: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub fn register_tree_state_subscriber(&self, subscriber: Arc<dyn TreeStateSubscriber>) {
+        self.tree_state_subscribers.write().push(subscriber);
+    }
+
+    fn notify_tree_state_subscribers(&self, model_id: &str, tree_state: &TreeState) {
+        for subscriber in self.tree_state_subscribers.read().iter() {
+            subscriber.apply_remote_tree_state(model_id, tree_state);
+        }
     }
 
     /// Get the node name (actor) for this sync manager
@@ -440,6 +460,27 @@ impl MeshSyncManager {
             .and_then(|policy_state| serde_json::from_slice::<TreeState>(&policy_state.config).ok())
     }
 
+    pub fn get_all_tree_states(&self) -> Vec<TreeState> {
+        self.stores
+            .policy
+            .all()
+            .into_iter()
+            .filter_map(|(key, state)| {
+                if state.policy_type != "tree_state" {
+                    return None;
+                }
+
+                match serde_json::from_slice::<TreeState>(&state.config) {
+                    Ok(tree_state) => Some(tree_state),
+                    Err(error) => {
+                        warn!(error = %error, store_key = %key, model_id = %state.model_id, "Failed to deserialize tree state from mesh store");
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
+
     /// Apply remote tree operation to local policy
     /// This is called when receiving tree state updates from other nodes
     pub fn apply_remote_tree_operation(
@@ -483,6 +524,7 @@ impl MeshSyncManager {
                     "Applied remote tree state update: model={} (version: {} -> {})",
                     model_id, current_version, tree_state.version
                 );
+                self.notify_tree_state_subscribers(&model_id, &tree_state);
             }
             Ok((_, false)) => {
                 debug!(
@@ -1128,10 +1170,10 @@ mod tests {
     fn test_sync_tree_operation() {
         let manager = create_test_manager("node1".to_string());
 
-        use crate::tree_ops::{TreeInsertOp, TreeOperation};
+        use crate::tree_ops::{TreeInsertOp, TreeKey, TreeOperation};
 
         let op = TreeOperation::Insert(TreeInsertOp {
-            text: "test_text".to_string(),
+            key: TreeKey::Text("test_text".to_string()),
             tenant: "http://localhost:8000".to_string(),
         });
 
@@ -1154,9 +1196,9 @@ mod tests {
         assert!(manager.get_tree_state("model1").is_none());
 
         // Sync an operation
-        use crate::tree_ops::{TreeInsertOp, TreeOperation};
+        use crate::tree_ops::{TreeInsertOp, TreeKey, TreeOperation};
         let op = TreeOperation::Insert(TreeInsertOp {
-            text: "test_text".to_string(),
+            key: TreeKey::Text("test_text".to_string()),
             tenant: "http://localhost:8000".to_string(),
         });
         manager
@@ -1171,12 +1213,12 @@ mod tests {
     fn test_apply_remote_tree_operation() {
         let manager = create_test_manager("node1".to_string());
 
-        use crate::tree_ops::{TreeInsertOp, TreeOperation, TreeState};
+        use crate::tree_ops::{TreeInsertOp, TreeKey, TreeOperation, TreeState};
 
         let mut tree_state = TreeState::new("model1".to_string());
         tree_state.version = 5;
         tree_state.add_operation(TreeOperation::Insert(TreeInsertOp {
-            text: "remote_text".to_string(),
+            key: TreeKey::Text("remote_text".to_string()),
             tenant: "http://localhost:8001".to_string(),
         }));
         // add_operation increments version, so version is now 6
@@ -1190,6 +1232,39 @@ mod tests {
         let retrieved = manager.get_tree_state("model1").unwrap();
         assert_eq!(retrieved.version, 6); // add_operation increments version from 5 to 6
         assert_eq!(retrieved.operations.len(), 1);
+    }
+
+    #[test]
+    fn test_get_all_tree_states() {
+        let manager = create_test_manager("node1".to_string());
+
+        use crate::tree_ops::{TreeInsertOp, TreeKey, TreeOperation};
+
+        manager
+            .sync_tree_operation(
+                "model1".to_string(),
+                TreeOperation::Insert(TreeInsertOp {
+                    key: TreeKey::Text("alpha".to_string()),
+                    tenant: "http://localhost:8000".to_string(),
+                }),
+            )
+            .unwrap();
+        manager
+            .sync_tree_operation(
+                "model2".to_string(),
+                TreeOperation::Insert(TreeInsertOp {
+                    key: TreeKey::Tokens(vec![1, 2, 3, 4]),
+                    tenant: "http://localhost:8001".to_string(),
+                }),
+            )
+            .unwrap();
+
+        let mut states = manager.get_all_tree_states();
+        states.sort_by(|left, right| left.model_id.cmp(&right.model_id));
+
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0].model_id, "model1");
+        assert_eq!(states[1].model_id, "model2");
     }
 
     #[test]
