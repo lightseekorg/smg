@@ -42,7 +42,8 @@ impl MeshSyncManager {
     }
 
     fn notify_tree_state_subscribers(&self, model_id: &str, tree_state: &TreeState) {
-        for subscriber in self.tree_state_subscribers.read().iter() {
+        let subscribers = self.tree_state_subscribers.read().clone();
+        for subscriber in subscribers {
             subscriber.apply_remote_tree_state(model_id, tree_state);
         }
     }
@@ -544,7 +545,13 @@ pub type OptionalMeshSyncManager = Option<Arc<MeshSyncManager>>;
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+    };
 
     use super::*;
     use crate::stores::{
@@ -560,6 +567,20 @@ mod tests {
     fn create_test_manager(self_name: String) -> MeshSyncManager {
         let stores = Arc::new(StateStores::with_self_name(self_name.clone()));
         MeshSyncManager::new(stores, self_name)
+    }
+
+    #[derive(Debug)]
+    struct LockCheckingSubscriber {
+        manager: Arc<MeshSyncManager>,
+        can_acquire_write_lock: Arc<AtomicBool>,
+    }
+
+    impl TreeStateSubscriber for LockCheckingSubscriber {
+        fn apply_remote_tree_state(&self, _model_id: &str, _tree_state: &TreeState) {
+            let can_acquire_write_lock = self.manager.tree_state_subscribers.try_write().is_some();
+            self.can_acquire_write_lock
+                .store(can_acquire_write_lock, Ordering::SeqCst);
+        }
     }
 
     #[test]
@@ -1232,6 +1253,21 @@ mod tests {
         let retrieved = manager.get_tree_state("model1").unwrap();
         assert_eq!(retrieved.version, 6); // add_operation increments version from 5 to 6
         assert_eq!(retrieved.operations.len(), 1);
+    }
+
+    #[test]
+    fn test_notify_tree_state_subscribers_drops_lock_before_callback() {
+        let manager = Arc::new(create_test_manager("node1".to_string()));
+        let can_acquire_write_lock = Arc::new(AtomicBool::new(false));
+        let subscriber = Arc::new(LockCheckingSubscriber {
+            manager: manager.clone(),
+            can_acquire_write_lock: can_acquire_write_lock.clone(),
+        });
+
+        manager.register_tree_state_subscriber(subscriber);
+        manager.notify_tree_state_subscribers("model1", &TreeState::new("model1".to_string()));
+
+        assert!(can_acquire_write_lock.load(Ordering::SeqCst));
     }
 
     #[test]

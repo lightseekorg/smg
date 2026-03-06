@@ -2,7 +2,7 @@
 //!
 //! Defines serializable tree operations that can be synchronized across mesh cluster nodes
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum TreeKey {
@@ -11,10 +11,37 @@ pub enum TreeKey {
 }
 
 /// Tree insert operation
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
 pub struct TreeInsertOp {
     pub key: TreeKey,
     pub tenant: String, // worker URL
+}
+
+impl<'de> Deserialize<'de> for TreeInsertOp {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct TreeInsertOpCompat {
+            #[serde(default)]
+            key: Option<TreeKey>,
+            #[serde(default)]
+            text: Option<String>,
+            tenant: String,
+        }
+
+        let compat = TreeInsertOpCompat::deserialize(deserializer)?;
+        let key = compat
+            .key
+            .or_else(|| compat.text.map(TreeKey::Text))
+            .ok_or_else(|| serde::de::Error::missing_field("key"))?;
+
+        Ok(Self {
+            key,
+            tenant: compat.tenant,
+        })
+    }
 }
 
 /// Tree remove operation
@@ -145,6 +172,35 @@ mod tests {
                 assert_eq!(a.tenant, b.tenant);
             }
             _ => panic!("Operations should match"),
+        }
+    }
+
+    #[test]
+    fn test_tree_insert_op_deserializes_legacy_text_field() {
+        let deserialized: TreeInsertOp =
+            serde_json::from_str(r#"{"text":"legacy_text","tenant":"http://worker1:8000"}"#)
+                .unwrap();
+
+        assert_eq!(deserialized.key, TreeKey::Text("legacy_text".to_string()));
+        assert_eq!(deserialized.tenant, "http://worker1:8000");
+    }
+
+    #[test]
+    fn test_tree_state_deserializes_legacy_insert_payload() {
+        let deserialized: TreeState = serde_json::from_str(
+            r#"{"model_id":"model1","operations":[{"Insert":{"text":"legacy_text","tenant":"http://worker1:8000"}}],"version":1}"#,
+        )
+        .unwrap();
+
+        assert_eq!(deserialized.model_id, "model1");
+        assert_eq!(deserialized.version, 1);
+        assert_eq!(deserialized.operations.len(), 1);
+        match &deserialized.operations[0] {
+            TreeOperation::Insert(op) => {
+                assert_eq!(op.key, TreeKey::Text("legacy_text".to_string()));
+                assert_eq!(op.tenant, "http://worker1:8000");
+            }
+            TreeOperation::Remove(_) => panic!("Expected Insert operation"),
         }
     }
 
