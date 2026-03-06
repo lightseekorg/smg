@@ -10,11 +10,19 @@ ARG SMG_REPO
 ARG SMG_COMMIT
 RUN apk add --no-cache git \
     && if [ -n "${ENGINE_REPO}" ] && [ -n "${ENGINE_COMMIT}" ]; then \
-         git clone --depth 1 "${ENGINE_REPO}" /opt/engine-src \
-         && ( cd /opt/engine-src && ( [ "${ENGINE_COMMIT}" = "latest" ] || git checkout "${ENGINE_COMMIT}" ) ); \
+         if [ "${ENGINE_COMMIT}" = "latest" ]; then \
+           git clone --depth 1 "${ENGINE_REPO}" /opt/engine-src; \
+         else \
+           git clone "${ENGINE_REPO}" /opt/engine-src \
+           && ( cd /opt/engine-src && git checkout "${ENGINE_COMMIT}" ); \
+         fi; \
        else mkdir -p /opt/engine-src; fi \
-    && git clone --depth 1 "${SMG_REPO}" /tmp/smg-src \
-    && ( cd /tmp/smg-src && ( [ "${SMG_COMMIT}" = "latest" ] || git checkout "${SMG_COMMIT}" ) )
+    && if [ "${SMG_COMMIT}" = "latest" ]; then \
+         git clone --depth 1 "${SMG_REPO}" /tmp/smg-src; \
+       else \
+         git clone "${SMG_REPO}" /tmp/smg-src \
+         && ( cd /tmp/smg-src && git checkout "${SMG_COMMIT}" ); \
+       fi
 COPY scripts/installation/install-vllm.sh /tmp/install-vllm.sh
 COPY scripts/installation/install-sglang.sh /tmp/install-sglang.sh
 COPY scripts/installation/install-tgl.sh /tmp/install-tgl.sh
