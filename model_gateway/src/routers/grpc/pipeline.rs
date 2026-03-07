@@ -208,7 +208,7 @@ impl RequestPipeline {
         policy_registry: Arc<PolicyRegistry>,
     ) -> Self {
         let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(EmbeddingPreparationStage::new()),
+            Box::new(EmbeddingPreparationStage),
             Box::new(WorkerSelectionStage::new(
                 worker_registry,
                 policy_registry,
@@ -236,7 +236,7 @@ impl RequestPipeline {
         policy_registry: Arc<PolicyRegistry>,
     ) -> Self {
         let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(EmbeddingPreparationStage::new()),
+            Box::new(EmbeddingPreparationStage),
             Box::new(WorkerSelectionStage::new(
                 worker_registry,
                 policy_registry,

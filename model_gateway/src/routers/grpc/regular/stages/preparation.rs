@@ -31,7 +31,7 @@ impl PreparationStage {
         Self {
             chat_stage: ChatPreparationStage,
             generate_stage: GeneratePreparationStage,
-            embedding_stage: EmbeddingPreparationStage::new(),
+            embedding_stage: EmbeddingPreparationStage,
         }
     }
 }
