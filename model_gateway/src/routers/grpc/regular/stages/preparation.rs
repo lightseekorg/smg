@@ -8,8 +8,8 @@ use axum::response::Response;
 use tracing::error;
 
 use super::{
-    chat::ChatPreparationStage, embedding::preparation::EmbeddingPreparationStage,
-    generate::GeneratePreparationStage,
+    chat::ChatPreparationStage, completion::CompletionPreparationStage,
+    embedding::preparation::EmbeddingPreparationStage, generate::GeneratePreparationStage,
 };
 use crate::routers::{
     error as grpc_error,
@@ -23,6 +23,7 @@ use crate::routers::{
 pub(crate) struct PreparationStage {
     chat_stage: ChatPreparationStage,
     generate_stage: GeneratePreparationStage,
+    completion_stage: CompletionPreparationStage,
     embedding_stage: EmbeddingPreparationStage,
 }
 
@@ -31,6 +32,7 @@ impl PreparationStage {
         Self {
             chat_stage: ChatPreparationStage,
             generate_stage: GeneratePreparationStage,
+            completion_stage: CompletionPreparationStage::new(),
             embedding_stage: EmbeddingPreparationStage::new(),
         }
     }
@@ -48,6 +50,7 @@ impl PipelineStage for PreparationStage {
         match &ctx.input.request_type {
             RequestType::Chat(_) => self.chat_stage.execute(ctx).await,
             RequestType::Generate(_) => self.generate_stage.execute(ctx).await,
+            RequestType::Completion(_) => self.completion_stage.execute(ctx).await,
             RequestType::Embedding(_) => self.embedding_stage.execute(ctx).await,
             // Classify reuses the embedding preparation (tokenization)
             RequestType::Classify(_) => self.embedding_stage.execute(ctx).await,

@@ -8,6 +8,7 @@ use tracing::error;
 
 use super::{
     chat::ChatResponseProcessingStage, classify::ClassifyResponseProcessingStage,
+    completion::CompletionResponseProcessingStage,
     embedding::response_processing::EmbeddingResponseProcessingStage,
     generate::GenerateResponseProcessingStage,
 };
@@ -24,6 +25,7 @@ use crate::routers::{
 pub(crate) struct ResponseProcessingStage {
     chat_stage: ChatResponseProcessingStage,
     generate_stage: GenerateResponseProcessingStage,
+    completion_stage: CompletionResponseProcessingStage,
     embedding_stage: EmbeddingResponseProcessingStage,
     classify_stage: ClassifyResponseProcessingStage,
 }
@@ -38,6 +40,10 @@ impl ResponseProcessingStage {
                 processor.clone(),
                 streaming_processor.clone(),
             ),
+            completion_stage: CompletionResponseProcessingStage::new(
+                processor.clone(),
+                streaming_processor.clone(),
+            ),
             generate_stage: GenerateResponseProcessingStage::new(processor, streaming_processor),
             embedding_stage: EmbeddingResponseProcessingStage::new(),
             classify_stage: ClassifyResponseProcessingStage::new(),
@@ -48,9 +54,16 @@ impl ResponseProcessingStage {
 #[async_trait]
 impl PipelineStage for ResponseProcessingStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
+        // Completion requests are converted to Generate in the preparation stage,
+        // so we check original_completion_request to route to the correct handler.
+        if ctx.state.original_completion_request.is_some() {
+            return self.completion_stage.execute(ctx).await;
+        }
+
         match &ctx.input.request_type {
             RequestType::Chat(_) => self.chat_stage.execute(ctx).await,
             RequestType::Generate(_) => self.generate_stage.execute(ctx).await,
+            RequestType::Completion(_) => self.completion_stage.execute(ctx).await,
             RequestType::Embedding(_) => self.embedding_stage.execute(ctx).await,
             RequestType::Classify(_) => self.classify_stage.execute(ctx).await,
             RequestType::Responses(_) => {
