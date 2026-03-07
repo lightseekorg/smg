@@ -19,7 +19,7 @@ use openai_protocol::{
 };
 use tokio::{sync::OnceCell, time};
 
-use super::{CircuitBreaker, WorkerError, WorkerResult, UNKNOWN_MODEL_ID};
+use super::{lora::WorkerLoraState, CircuitBreaker, WorkerError, WorkerResult, UNKNOWN_MODEL_ID};
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::grpc::client::GrpcClient,
@@ -492,7 +492,7 @@ pub struct BasicWorker {
     pub models_override: Arc<ArcSwap<WorkerModels>>,
     /// Per-worker LoRA adapter lifecycle state.
     /// Present only when `RouterConfig.lora` is configured.
-    pub lora_state: Option<Arc<crate::core::lora::WorkerLoraState>>,
+    pub lora_state: Option<Arc<WorkerLoraState>>,
 }
 
 impl fmt::Debug for BasicWorker {
@@ -548,7 +548,7 @@ impl Worker for BasicWorker {
                     serde_json::json!(rank),
                 );
             } else {
-                return Err(crate::core::WorkerError::InvalidConfiguration {
+                return Err(WorkerError::InvalidConfiguration {
                     message: "Request must be a JSON object for DP-aware routing".to_string(),
                 });
             }
@@ -557,23 +557,15 @@ impl Worker for BasicWorker {
         // 2. LoRA: if `lora_path` is present, resolve it and rewrite JSON fields.
         if let Some(lora) = &self.lora_state {
             if let Some(path) = req.get("lora_path").and_then(|v| v.as_str()).map(str::to_owned) {
-                lora.resolve(&path, &mut req).await.map_err(|e| {
-                    use crate::core::lora::LoraStateError;
-                    match e {
-                        LoraStateError::UnsupportedUri(inner) => {
-                            crate::core::WorkerError::LoraUnsupportedUri {
-                                message: inner.to_string(),
-                            }
-                        }
-                        LoraStateError::UnsupportedRuntime(rt) => {
-                            crate::core::WorkerError::InvalidConfiguration {
-                                message: format!("runtime {rt:?} does not support LoRA"),
-                            }
-                        }
-                        LoraStateError::EngineLoad(msg) => {
-                            crate::core::WorkerError::LoraLoadFailed { message: msg }
-                        }
-                    }
+                use super::lora::LoraStateError;
+                lora.resolve(&path, &mut req).await.map_err(|e| match e {
+                    LoraStateError::UnsupportedUri(inner) => WorkerError::LoraUnsupportedUri {
+                        message: inner.to_string(),
+                    },
+                    LoraStateError::UnsupportedRuntime(rt) => WorkerError::InvalidConfiguration {
+                        message: format!("runtime {rt:?} does not support LoRA"),
+                    },
+                    LoraStateError::EngineLoad(msg) => WorkerError::LoraLoadFailed { message: msg },
                 })?;
             }
         }

@@ -148,7 +148,6 @@ impl WorkerLoraState {
     /// # TODO
     /// Not yet wired to a call site.  Intended for a future LRU eviction policy
     /// or graceful worker shutdown hook that unloads adapters to free GPU memory.
-    #[allow(dead_code)]
     pub async fn unload(&self, local_path: &str) -> Result<(), LoraStateError> {
         if let Some((_, adapter_name)) = self.loaded.remove(local_path) {
             info!(
@@ -165,7 +164,7 @@ impl WorkerLoraState {
     // ── Private HTTP helpers ──────────────────────────────────────────────────
 
     async fn load_adapter(&self, adapter_name: &str, local_path: &str) -> Result<(), LoraStateError> {
-        let endpoint = self.load_endpoint();
+        let endpoint = self.load_endpoint()?;
         let body = json!({
             "lora_name": adapter_name,
             "lora_path": local_path,
@@ -187,7 +186,7 @@ impl WorkerLoraState {
     }
 
     async fn unload_adapter(&self, adapter_name: &str) -> Result<(), LoraStateError> {
-        let endpoint = self.unload_endpoint();
+        let endpoint = self.unload_endpoint()?;
         let body = json!({ "lora_name": adapter_name });
 
         let resp = self
@@ -205,23 +204,23 @@ impl WorkerLoraState {
         Ok(())
     }
 
-    fn load_endpoint(&self) -> String {
+    fn load_endpoint(&self) -> Result<String, LoraStateError> {
         match self.runtime_type {
             RuntimeType::Vllm | RuntimeType::Trtllm => {
-                format!("{}/v1/load_lora_adapter", self.worker_url)
+                Ok(format!("{}/v1/load_lora_adapter", self.worker_url))
             }
-            RuntimeType::Sglang => format!("{}/load_lora_adapter", self.worker_url),
-            RuntimeType::External => unreachable!("External runtime checked before reaching load_endpoint"),
+            RuntimeType::Sglang => Ok(format!("{}/load_lora_adapter", self.worker_url)),
+            RuntimeType::External => Err(LoraStateError::UnsupportedRuntime(self.runtime_type)),
         }
     }
 
-    fn unload_endpoint(&self) -> String {
+    fn unload_endpoint(&self) -> Result<String, LoraStateError> {
         match self.runtime_type {
             RuntimeType::Vllm | RuntimeType::Trtllm => {
-                format!("{}/v1/unload_lora_adapter", self.worker_url)
+                Ok(format!("{}/v1/unload_lora_adapter", self.worker_url))
             }
-            RuntimeType::Sglang => format!("{}/unload_lora_adapter", self.worker_url),
-            RuntimeType::External => unreachable!("External runtime checked before reaching unload_endpoint"),
+            RuntimeType::Sglang => Ok(format!("{}/unload_lora_adapter", self.worker_url)),
+            RuntimeType::External => Err(LoraStateError::UnsupportedRuntime(self.runtime_type)),
         }
     }
 }
@@ -243,7 +242,8 @@ fn rewrite_request(json: &mut Value, adapter_name: &str, runtime: RuntimeType) {
         RuntimeType::Sglang => {
             json["lora_path"] = Value::String(adapter_name.to_string());
         }
-        RuntimeType::External => unreachable!("External runtime checked before reaching rewrite_request"),
+        // Guarded upstream in resolve(); this branch is never reached in practice.
+        RuntimeType::External => {}
     }
 }
 

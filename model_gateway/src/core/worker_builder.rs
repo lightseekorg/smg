@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
 use openai_protocol::{
@@ -8,6 +8,7 @@ use openai_protocol::{
 
 use super::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
+    lora::WorkerLoraState,
     worker::{
         BasicWorker, ConnectionMode, RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad, WorkerType,
     },
@@ -26,7 +27,7 @@ pub struct BasicWorkerBuilder {
     health_endpoint: String,
     circuit_breaker_config: CircuitBreakerConfig,
     grpc_client: Option<GrpcClient>,
-    lora_state: Option<std::sync::Arc<crate::core::lora::WorkerLoraState>>,
+    lora_state: Option<Arc<WorkerLoraState>>,
 }
 
 impl BasicWorkerBuilder {
@@ -69,10 +70,7 @@ impl BasicWorkerBuilder {
     }
 
     /// Attach a per-worker LoRA state (built from `RuntimeType` and a shared HTTP client).
-    pub fn lora_state(
-        mut self,
-        state: Option<std::sync::Arc<crate::core::lora::WorkerLoraState>>,
-    ) -> Self {
+    pub fn lora_state(mut self, state: Option<Arc<WorkerLoraState>>) -> Self {
         self.lora_state = state;
         self
     }
@@ -195,10 +193,7 @@ impl BasicWorkerBuilder {
 
     /// Build the BasicWorker instance
     pub fn build(mut self) -> BasicWorker {
-        use std::sync::{
-            atomic::{AtomicBool, AtomicUsize},
-            Arc,
-        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
 
         use tokio::sync::OnceCell;
 
