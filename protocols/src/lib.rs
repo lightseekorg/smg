@@ -16,6 +16,7 @@ pub mod embedding;
 pub mod event_types;
 pub mod generate;
 pub mod interactions;
+pub mod lora;
 pub mod messages;
 pub mod model_card;
 pub mod model_type;

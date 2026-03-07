@@ -472,12 +472,18 @@ impl Router {
             }
         };
 
+        // prepare_request handles DP-aware rank injection and LoRA rewriting.
+        // WorkerError::is_client_error() / error_code() distinguish 4xx from 5xx
+        // and provide a stable per-variant code without hardcoding strings here.
         let json_val = match worker.prepare_request(json_val).await {
             Ok(prepared) => prepared,
+            Err(e) if e.is_client_error() => {
+                return error::bad_request(e.error_code(), format!("Request rejected: {e}"));
+            }
             Err(e) => {
-                return error::bad_request(
-                    "request_preparation_failed",
-                    format!("Failed to prepare request: {e}"),
+                return error::internal_error(
+                    e.error_code(),
+                    format!("Request preparation failed: {e}"),
                 );
             }
         };

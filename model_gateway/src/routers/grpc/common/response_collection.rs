@@ -138,7 +138,7 @@ async fn collect_stream_responses(
                 // Don't mark as completed - let Drop send abort for error cases
                 return Err(e.to_http_error(
                     "worker_stream_failed",
-                    format!("{worker_name} stream failed: {}", e.message()),
+                    format!("{worker_name} stream failed: {e}"),
                 ));
             }
         }
