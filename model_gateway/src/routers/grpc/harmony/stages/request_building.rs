@@ -82,14 +82,14 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                     "Embedding requests are not supported with Harmony models".to_string(),
                 ));
             }
-            RequestType::Classify(_) => {
+            RequestType::Classify(_) | RequestType::Completion(_) => {
                 error!(
                     function = "HarmonyRequestBuildingStage::execute",
-                    "Classify requests not supported for Harmony models"
+                    "Classify/Completion requests not supported for Harmony models"
                 );
                 return Err(error::bad_request(
-                    "harmony_classify_not_supported",
-                    "Classify requests are not supported with Harmony models".to_string(),
+                    "harmony_not_supported",
+                    "This request type is not supported with Harmony models".to_string(),
                 ));
             }
         };
