@@ -265,7 +265,7 @@ impl JobQueue {
         job: Job,
         context: Weak<AppContext>,
         status_map: Arc<DashMap<String, JobStatus>>,
-        _permit: tokio::sync::OwnedSemaphorePermit,
+        permit: tokio::sync::OwnedSemaphorePermit,
     ) {
         let job_type = job.job_type();
         let worker_url = job.worker_url().to_string();
@@ -278,6 +278,12 @@ impl JobQueue {
         );
 
         debug!("Processing job: type={}, worker={}", job_type, worker_url);
+
+        // Release concurrency slot immediately. The semaphore bounds how many
+        // jobs can be dequeued concurrently (preventing thundering herd), but
+        // long-running waits (e.g. 30-min worker health checks) must not hold
+        // a slot or they starve the queue for all other job types.
+        drop(permit);
 
         // Execute job
         match context.upgrade() {
@@ -298,8 +304,6 @@ impl JobQueue {
                 );
             }
         }
-
-        // Permit automatically released when dropped
     }
 
     /// Execute a specific job
