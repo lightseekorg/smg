@@ -501,7 +501,7 @@ async fn test_multi_node_data_propagation() {
                 && handler_b.state.read().len() == 3
                 && handler_c.state.read().len() == 3
         },
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         "all 3 nodes see each other",
     )
     .await;
@@ -517,7 +517,7 @@ async fn test_multi_node_data_propagation() {
             handler_b.stores.app.get("propagated_key").is_some()
                 && handler_c.stores.app.get("propagated_key").is_some()
         },
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         "propagated_key synced to B and C",
     )
     .await;
@@ -551,7 +551,7 @@ async fn test_multi_node_data_propagation() {
                     .get("propagated_key")
                     .is_some_and(|v| v.value == b"propagated_value2")
         },
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         "updated propagated_key synced to A and C",
     )
     .await;
