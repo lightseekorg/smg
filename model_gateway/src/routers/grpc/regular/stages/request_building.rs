@@ -41,14 +41,14 @@ impl PipelineStage for RequestBuildingStage {
             RequestType::Generate(_) => self.generate_stage.execute(ctx).await,
             RequestType::Embedding(_) => self.embedding_stage.execute(ctx).await,
             RequestType::Classify(_) => self.embedding_stage.execute(ctx).await,
-            RequestType::Responses(_request) => {
+            RequestType::Completion(_) | RequestType::Responses(_) => {
                 error!(
                     function = "RequestBuildingStage::execute",
-                    "RequestType::Responses reached regular request building stage"
+                    "Unsupported request type reached regular request building stage"
                 );
                 Err(grpc_error::internal_error(
-                    "responses_in_wrong_pipeline",
-                    "RequestType::Responses reached regular request building stage",
+                    "unsupported_in_request_building",
+                    "Unsupported request type reached regular request building stage",
                 ))
             }
         }
