@@ -345,9 +345,18 @@ class TestWorkerLauncherGpuEnv:
     )
     def test_sglang_tp_from_cli(self, backend, cli_flag, tp_value, expected_devices):
         """CLI --tp-size / --tensor-parallel-size flows through to CUDA_VISIBLE_DEVICES."""
-        _, args, _ = parse_serve_args(
-            ["--backend", backend, "--model-path", "/tmp/m", cli_flag, tp_value]
-        )
+
+        def _mock_sglang_args(b, parser):
+            if b == "sglang":
+                parser.add_argument("--tensor-parallel-size", "--tp-size", type=int, default=1)
+                parser.add_argument("--model-path", type=str)
+            else:
+                _import_backend_args(b, parser)
+
+        with patch("smg.serve._import_backend_args", side_effect=_mock_sglang_args):
+            _, args, _ = parse_serve_args(
+                ["--backend", backend, "--model-path", "/tmp/m", cli_flag, tp_value]
+            )
         launcher = SglangWorkerLauncher()
         env = launcher.gpu_env(args, dp_rank=0, env={})
         assert env["CUDA_VISIBLE_DEVICES"] == expected_devices
@@ -360,9 +369,18 @@ class TestWorkerLauncherGpuEnv:
     )
     def test_vllm_tp_from_cli(self, cli_flag, tp_value, expected_devices):
         """CLI --tensor-parallel-size flows through to CUDA_VISIBLE_DEVICES for vllm."""
-        _, args, _ = parse_serve_args(
-            ["--backend", "vllm", "--model", "/tmp/m", cli_flag, tp_value]
-        )
+
+        def _mock_vllm_args(b, parser):
+            if b == "vllm":
+                parser.add_argument("--tensor-parallel-size", type=int, default=1)
+                parser.add_argument("--model", type=str)
+            else:
+                _import_backend_args(b, parser)
+
+        with patch("smg.serve._import_backend_args", side_effect=_mock_vllm_args):
+            _, args, _ = parse_serve_args(
+                ["--backend", "vllm", "--model", "/tmp/m", cli_flag, tp_value]
+            )
         launcher = VllmWorkerLauncher()
         env = launcher.gpu_env(args, dp_rank=0, env={})
         assert env["CUDA_VISIBLE_DEVICES"] == expected_devices
