@@ -426,12 +426,6 @@ async fn flush_cache(State(state): State<Arc<AppState>>, _req: Request) -> Respo
         .into_response()
 }
 
-async fn get_loads(State(state): State<Arc<AppState>>, _req: Request) -> Response {
-    WorkerManager::get_all_worker_loads(&state.context.worker_registry, &state.context.client)
-        .await
-        .into_response()
-}
-
 async fn create_worker(
     State(state): State<Arc<AppState>>,
     Json(config): Json<WorkerSpec>,
@@ -655,7 +649,6 @@ pub fn build_app(
     // Build admin routes with control plane auth if configured, otherwise use simple API key auth
     let admin_routes = Router::new()
         .route("/flush_cache", post(flush_cache))
-        .route("/get_loads", get(get_loads))
         .route("/parse/function_call", post(parse_function_call))
         .route("/parse/reasoning", post(parse_reasoning))
         .route("/wasm", post(add_wasm_module))
@@ -956,11 +949,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         Some(hc)
     };
 
-    // LoadMonitor groups are started dynamically when workers are registered.
-    // No explicit start() needed — see RegisterWorkersStep.
-    if app_context.load_monitor.is_some() {
-        debug!("LoadMonitor initialized (groups start on worker registration)");
-    }
+    // Load monitor has been removed in favor of event-driven metrics sync
 
     let (limiter, processor) = middleware::ConcurrencyLimiter::new(
         app_context.rate_limiter.clone(),

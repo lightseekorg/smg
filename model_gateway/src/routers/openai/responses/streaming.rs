@@ -46,7 +46,9 @@ use crate::{
     observability::metrics::Metrics,
     routers::{
         error,
-        header_utils::{apply_request_headers, preserve_response_headers},
+        header_utils::{
+            apply_request_headers, extract_piggyback_metrics, preserve_response_headers,
+        },
         mcp_utils::DEFAULT_MAX_ITERATIONS,
         openai::context::{RequestContext, StreamingEventContext, StreamingRequest},
         persistence_utils::persist_conversation_items,
@@ -550,6 +552,12 @@ pub(super) async fn handle_simple_streaming_passthrough(
 
     circuit_breaker.record_success();
 
+    if let Some(metrics_store) = req.storage.metrics_store.as_ref() {
+        if let Some(snapshot) = extract_piggyback_metrics(response.headers(), &req.worker_url) {
+            metrics_store.update(snapshot);
+        }
+    }
+
     let preserved_headers = preserve_response_headers(response.headers());
     let mut upstream_stream = response.bytes_stream();
 
@@ -680,9 +688,11 @@ pub(super) fn handle_streaming_with_tool_interception(
     let previous_response_id = req.previous_response_id;
     let url = req.url;
     let storage = req.storage;
+    let worker_url = req.worker_url;
 
     let client_clone = client.clone();
     let url_clone = url.clone();
+    let worker_url_clone = worker_url.clone();
     let headers_opt = headers.cloned();
     let payload_clone = payload.clone();
     let orchestrator_clone = Arc::clone(orchestrator);
@@ -745,6 +755,14 @@ pub(super) fn handle_streaming_with_tool_interception(
                     &json!({"error": {"message": format!("Upstream error {}: {}", status, body)}}),
                 );
                 return;
+            }
+
+            if let Some(metrics_store) = storage.metrics_store.as_ref() {
+                if let Some(snapshot) =
+                    extract_piggyback_metrics(response.headers(), &worker_url_clone)
+                {
+                    metrics_store.update(snapshot);
+                }
             }
 
             let mut upstream_stream = response.bytes_stream();

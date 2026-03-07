@@ -212,9 +212,7 @@ mod pd_routing_unit_tests {
                 use std::sync::{Arc, OnceLock};
 
                 use smg::{
-                    core::{LoadMonitor, WorkerRegistry},
-                    middleware::TokenBucket,
-                    policies::PolicyRegistry,
+                    core::WorkerRegistry, middleware::TokenBucket, policies::PolicyRegistry,
                 };
                 use smg_data_connector::{
                     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
@@ -234,13 +232,12 @@ mod pd_routing_unit_tests {
                 let conversation_storage = Arc::new(MemoryConversationStorage::new());
                 let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
-                // Initialize load monitor
-                let load_monitor = Some(Arc::new(LoadMonitor::new(
-                    worker_registry.clone(),
-                    policy_registry.clone(),
-                    client.clone(),
-                    config.worker_startup_check_interval_secs,
-                )));
+                // Create a minimal MetricsStore (no scrapers needed in tests)
+                let bus = Arc::new(metrics_service::EventBus::new(64));
+                let metrics_store = Arc::new(metrics_service::MetricsStore::new(
+                    bus,
+                    std::time::Duration::from_secs(60),
+                ));
 
                 // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
                 let worker_job_queue = Arc::new(OnceLock::new());
@@ -260,7 +257,7 @@ mod pd_routing_unit_tests {
                         .response_storage(response_storage)
                         .conversation_storage(conversation_storage)
                         .conversation_item_storage(conversation_item_storage)
-                        .load_monitor(load_monitor)
+                        .metrics_store(metrics_store)
                         .worker_job_queue(worker_job_queue)
                         .workflow_engines(workflow_engines)
                         .mcp_orchestrator(mcp_orchestrator)

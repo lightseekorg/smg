@@ -49,7 +49,19 @@ pub struct PolicyRegistry {
 impl PolicyRegistry {
     /// Create a new PolicyRegistry with a default policy
     pub fn new(default_policy_config: PolicyConfig) -> Self {
-        let default_policy = Self::create_policy_from_config(&default_policy_config);
+        Self::new_with_store(default_policy_config, None)
+    }
+
+    /// Create a new PolicyRegistry with an optional MetricsStore.
+    ///
+    /// The `metrics_store` is required when using the `MetricsDriven` policy;
+    /// it is ignored for all other policy types.
+    pub fn new_with_store(
+        default_policy_config: PolicyConfig,
+        metrics_store: Option<Arc<metrics_service::MetricsStore>>,
+    ) -> Self {
+        let default_policy =
+            PolicyFactory::create_from_config_with_store(&default_policy_config, metrics_store);
 
         Self {
             model_policies: Arc::new(DashMap::new()),
@@ -256,11 +268,6 @@ impl PolicyRegistry {
                 Arc::clone(&self.default_policy)
             })
         }
-    }
-
-    /// Create a policy from a PolicyConfig (delegates to PolicyFactory)
-    fn create_policy_from_config(config: &PolicyConfig) -> Arc<dyn LoadBalancingPolicy> {
-        PolicyFactory::create_from_config(config)
     }
 
     /// Get current model->policy mappings (for debugging/monitoring)

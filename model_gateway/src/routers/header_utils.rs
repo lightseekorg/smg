@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, HeaderValue},
 };
 use http::header::HeaderName;
+use metrics_service::{MetricSource, WorkerSnapshot};
 
 static HEADER_TARGET_WORKER: HeaderName = HeaderName::from_static("x-smg-target-worker");
 static HEADER_ROUTING_KEY: HeaderName = HeaderName::from_static("x-smg-routing-key");
@@ -222,6 +223,52 @@ pub fn should_forward_request_header(name: &str) -> bool {
         || name
             .get(..REQUEST_ID_PREFIX.len())
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case(REQUEST_ID_PREFIX))
+}
+
+pub fn extract_piggyback_metrics(headers: &HeaderMap, worker_url: &str) -> Option<WorkerSnapshot> {
+    let mut snapshot = WorkerSnapshot::new(worker_url.to_string(), MetricSource::Piggyback);
+    let mut found = false;
+
+    for (name, value) in headers {
+        let key_str = name.as_str();
+        if key_str.eq_ignore_ascii_case("x-sglang-kv-cache-tokens") {
+            if let Ok(v_str) = value.to_str() {
+                if let Ok(val) = v_str.parse::<isize>() {
+                    snapshot.kv_cache_tokens = Some(val);
+                    found = true;
+                }
+            }
+        } else if key_str.eq_ignore_ascii_case("x-sglang-in-flight-requests") {
+            if let Ok(v_str) = value.to_str() {
+                if let Ok(val) = v_str.parse::<isize>() {
+                    snapshot.in_flight_requests = val;
+                    found = true;
+                }
+            }
+        } else if key_str.eq_ignore_ascii_case("x-sglang-avg-tokens-per-req") {
+            if let Ok(v_str) = value.to_str() {
+                if let Ok(val) = v_str.parse::<isize>() {
+                    snapshot.avg_tokens_per_req = val;
+                    found = true;
+                }
+            }
+        } else if key_str.to_lowercase().starts_with("x-sglang-") {
+            if let Ok(v_str) = value.to_str() {
+                if let Ok(val) = v_str.parse::<f64>() {
+                    let metric_name = key_str[9..].to_string(); // strip "x-sglang-"
+                    let safe_name = metric_name.replace("-", "_");
+                    snapshot.custom_metrics.insert(safe_name, val);
+                    found = true;
+                }
+            }
+        }
+    }
+
+    if found {
+        Some(snapshot)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

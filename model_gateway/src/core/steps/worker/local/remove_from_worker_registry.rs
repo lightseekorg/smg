@@ -10,7 +10,6 @@ use crate::{
     core::{
         steps::workflow_data::WorkerRemovalWorkflowData,
         worker::{ConnectionModeExt, WorkerTypeExt},
-        WorkerGroupKey,
     },
     observability::metrics::Metrics,
 };
@@ -107,22 +106,6 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
                 model_id,
                 pool_size,
             );
-
-            // If the group is now empty, stop its load monitor and clean up entries
-            if pool_size == 0 {
-                if let Some(ref load_monitor) = app_context.load_monitor {
-                    let key = WorkerGroupKey {
-                        model_id: model_id.clone(),
-                        worker_type: *worker_type,
-                        connection_mode: *connection_mode,
-                    };
-                    let removed_urls = urls_by_group
-                        .get(&(*worker_type, *connection_mode, model_id.clone()))
-                        .map(|v| v.as_slice())
-                        .unwrap_or_default();
-                    load_monitor.on_group_removed(&key, removed_urls).await;
-                }
-            }
         }
 
         Ok(StepResult::Success)

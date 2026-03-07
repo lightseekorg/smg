@@ -9,6 +9,7 @@ use dashmap::DashMap;
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use once_cell::sync::Lazy;
+use tokio::sync::broadcast::error::RecvError;
 
 // =============================================================================
 // STRING INTERNING
@@ -1197,6 +1198,10 @@ impl Metrics {
     }
 }
 
+#[expect(
+    clippy::items_after_test_module,
+    reason = "production helpers follow the unit tests; restructuring the file would be disruptive"
+)]
 #[cfg(test)]
 mod tests {
     use std::net::TcpListener;
@@ -1516,5 +1521,319 @@ mod tests {
         assert_eq!(method_to_static_str("GET"), "GET");
         assert_eq!(method_to_static_str("POST"), "POST");
         assert_eq!(method_to_static_str("UNKNOWN"), "OTHER");
+    }
+}
+
+// =============================================================================
+// EVENTBUS OBSERVABILITY EXPORTER
+// =============================================================================
+
+/// Start a background subscriber that listens to the [`metrics_service::EventBus`] and
+/// automatically updates standard `smg_worker_*` Prometheus gauges on every new snapshot.
+///
+/// # How to use
+/// Call once at startup from `AppContext::from_config`:
+/// ```ignore
+/// start_metrics_observability_exporter(metrics_store);
+/// ```
+pub fn start_metrics_observability_exporter(metrics_store: Arc<metrics_service::MetricsStore>) {
+    // Core SMG worker fields
+    describe_gauge!(
+        "smg_worker_kv_cache_tokens",
+        "KV cache tokens currently used by the worker"
+    );
+    describe_gauge!(
+        "smg_worker_in_flight_requests",
+        "Number of in-flight requests on the worker"
+    );
+    describe_gauge!(
+        "smg_worker_avg_tokens_per_req",
+        "Rolling average of tokens per request"
+    );
+
+    // SGLang standard metrics
+    // Names verified against: github.com/sgl-project/sglang/blob/main/python/sglang/srt/observability/metrics_collector.py
+    // These flow in via `WorkerSnapshot.custom_metrics` and are re-emitted as `smg_worker_<name>` gauges.
+    //
+    // SchedulerMetricsCollector Gauges:
+    describe_gauge!(
+        "smg_worker_sglang:num_running_reqs",
+        "SGLang: number of running requests (routed to in_flight_requests)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:num_used_tokens",
+        "SGLang: number of tokens used in KV cache (routed to kv_cache_tokens)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:token_usage",
+        "SGLang: KV cache usage fraction 0-1 (routed to kv_cache_tokens×1000)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:cache_hit_rate",
+        "SGLang: prefix cache hit rate (0-1)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:num_queue_reqs",
+        "SGLang: number of requests in the waiting queue"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:gen_throughput",
+        "SGLang: generation throughput (token/s)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:max_total_num_tokens",
+        "SGLang: maximum total number of tokens in the KV cache pool"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:utilization",
+        "SGLang: engine utilization fraction (0-1)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:decode_sum_seq_lens",
+        "SGLang: sum of all sequence lengths in decode phase"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:spec_accept_length",
+        "SGLang: average acceptance length in speculative decoding"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:spec_accept_rate",
+        "SGLang: acceptance rate in speculative decoding (0-1)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:lora_pool_utilization",
+        "SGLang: LoRA pool utilization ratio used/total (1.0 = full)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:kv_transfer_speed_gb_s",
+        "SGLang: KV cache transfer speed GB/s (PD disaggregation)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:kv_transfer_latency_ms",
+        "SGLang: KV cache transfer latency ms (PD disaggregation)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:num_grammar_queue_reqs",
+        "SGLang: number of requests in the grammar waiting queue"
+    );
+    // TokenizerMetricsCollector Counters (emitted as gauge snapshots):
+    describe_gauge!(
+        "smg_worker_sglang:prompt_tokens_total",
+        "SGLang: total prompt tokens processed (counter snapshot)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:generation_tokens_total",
+        "SGLang: total generation tokens processed (counter snapshot)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:num_requests_total",
+        "SGLang: total requests processed (counter snapshot)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:num_aborted_requests_total",
+        "SGLang: total aborted requests (counter snapshot)"
+    );
+    // TokenizerMetricsCollector Histograms (last sampled value):
+    describe_gauge!(
+        "smg_worker_sglang:time_to_first_token_seconds",
+        "SGLang: TTFT histogram (last sampled value in seconds)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:inter_token_latency_seconds",
+        "SGLang: inter-token latency histogram (last sampled value in seconds)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:e2e_request_latency_seconds",
+        "SGLang: end-to-end request latency histogram (last sampled value in seconds)"
+    );
+
+    // vLLM standard metrics
+    // Names verified against: github.com/vllm-project/vllm/blob/main/vllm/v1/metrics/loggers.py
+    //
+    // Gauges:
+    describe_gauge!(
+        "smg_worker_vllm:num_requests_running",
+        "vLLM: number of requests currently running in model execution batches"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:num_requests_waiting",
+        "vLLM: number of requests waiting to be processed"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:kv_cache_usage_perc",
+        "vLLM: KV cache usage fraction 0-1; mapped to kv_cache_tokens×1000 for routing"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:engine_sleep_state",
+        "vLLM: engine sleep state (awake=0/1, weights_offloaded, discard_all)"
+    );
+    // Counters (emitted as gauge snapshots via custom_metrics):
+    describe_gauge!(
+        "smg_worker_vllm:prefix_cache_queries",
+        "vLLM: prefix cache queries — number of queried tokens (counter snapshot)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:prefix_cache_hits",
+        "vLLM: prefix cache hits — number of cached tokens (counter snapshot)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:prompt_tokens",
+        "vLLM: total prompt tokens processed (counter snapshot; NOT prompt_tokens_total)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:generation_tokens",
+        "vLLM: total generation tokens processed (counter snapshot; NOT generation_tokens_total)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:request_success",
+        "vLLM: successfully processed requests count (counter snapshot; NOT request_success_total)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:num_preemptions",
+        "vLLM: cumulative preemptions from the engine (counter snapshot)"
+    );
+    // Histograms (last sampled value exposed as gauge):
+    describe_gauge!(
+        "smg_worker_vllm:request_prompt_tokens",
+        "vLLM: histogram of prompt token counts per request (last sampled value)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:request_generation_tokens",
+        "vLLM: histogram of generation token counts per request (last sampled value)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:iteration_tokens_total",
+        "vLLM: histogram of tokens per engine step (last sampled value)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:time_to_first_token_seconds",
+        "vLLM: TTFT histogram (last sampled value in seconds)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:inter_token_latency_seconds",
+        "vLLM: inter-token latency / TPOT histogram (last sampled value in seconds)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:e2e_request_latency_seconds",
+        "vLLM: end-to-end request latency histogram (last sampled value in seconds)"
+    );
+
+    //  TensorRT-LLM standard metrics
+    // Names verified against: github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py
+    //
+    // Real Prometheus gauges (from trtllm MetricsCollector):
+    describe_gauge!(
+        "smg_worker_trtllm_kv_cache_utilization",
+        "TRT-LLM: KV cache utilization usedBlocks/maxBlocks (0-1); routed to kv_cache_tokens×1000"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_kv_cache_hit_rate",
+        "TRT-LLM: KV cache hit rate (0-1) from kvCacheStats.cacheHitRate"
+    );
+    // Real Prometheus histograms/counters (also from trtllm MetricsCollector):
+    describe_gauge!(
+        "smg_worker_trtllm_request_success_total",
+        "TRT-LLM: cumulative successfully processed requests (counter snapshot)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_e2e_request_latency_seconds",
+        "TRT-LLM: end-to-end request latency histogram (last sampled value in seconds)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_time_to_first_token_seconds",
+        "TRT-LLM: TTFT histogram (last sampled value in seconds)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_time_per_output_token_seconds",
+        "TRT-LLM: TPOT histogram (last sampled value in seconds)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_request_queue_time_seconds",
+        "TRT-LLM: request queue wait time histogram (last sampled value in seconds)"
+    );
+    // JSON-sourced: extracted by apply_trtllm_json() from the /metrics JSON response.
+    // The JSON endpoint returns raw iteration stats that are NOT in the Prometheus output.
+    describe_gauge!(
+        "smg_worker_trtllm_gpu_mem_usage_bytes",
+        "TRT-LLM: GPU memory usage in bytes (JSON /metrics gpuMemUsage field)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_freeNumBlocks",
+        "TRT-LLM: free KV cache blocks (JSON /metrics kvCacheStats.freeNumBlocks)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_usedNumBlocks",
+        "TRT-LLM: used KV cache blocks (JSON /metrics kvCacheStats.usedNumBlocks)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_maxNumBlocks",
+        "TRT-LLM: total KV cache block capacity (JSON /metrics kvCacheStats.maxNumBlocks)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_iter_latency_ms",
+        "TRT-LLM: per-iteration latency ms (JSON /metrics iterLatencyMS)"
+    );
+    // Forward-compatible: expected once TRT-LLM ships inflight batcher Prometheus gauges.
+    describe_gauge!(
+        "smg_worker_trtllm_inflight_reqs",
+        "TRT-LLM: in-flight requests — routed to in_flight_requests (forward-compatible)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_request_count_active",
+        "TRT-LLM: active request count alias — routed to in_flight_requests (forward-compatible)"
+    );
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "observability exporter: fire-and-forget background task tied to gateway lifetime"
+    )]
+    tokio::spawn(async move {
+        let (mut rx, initial) = metrics_store.subscribe();
+
+        // Export the initial batch of snapshots immediately
+        for snap in &initial {
+            export_snapshot(snap);
+        }
+
+        // Listen for updates — lag is logged but does not crash the exporter
+        loop {
+            match rx.recv().await {
+                Ok(snap) => export_snapshot(&snap),
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        missed = n,
+                        "metrics_observability_exporter: lagged by {} snapshot event(s); \
+                         Prometheus gauges may lag real state briefly",
+                        n
+                    );
+                }
+                Err(RecvError::Closed) => {
+                    tracing::warn!(
+                        "metrics_observability_exporter: EventBus closed — exporter stopping"
+                    );
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Export a single [`metrics_service::WorkerSnapshot`] as Prometheus gauges.
+fn export_snapshot(snap: &metrics_service::WorkerSnapshot) {
+    let worker = snap.url.as_str();
+
+    if let Some(v) = snap.kv_cache_tokens {
+        metrics::gauge!("smg_worker_kv_cache_tokens", "worker" => worker.to_string()).set(v as f64);
+    }
+    metrics::gauge!("smg_worker_in_flight_requests", "worker" => worker.to_string())
+        .set(snap.in_flight_requests as f64);
+    metrics::gauge!("smg_worker_avg_tokens_per_req", "worker" => worker.to_string())
+        .set(snap.avg_tokens_per_req as f64);
+
+    // Export all custom metrics (SGLang, vLLM, or user-defined)
+    // Name sanitization: colons → underscores, hyphens → underscores
+    for (key, val) in &snap.custom_metrics {
+        let metric_name = format!("smg_worker_{}", key.replace([':', '-'], "_"));
+        metrics::gauge!(metric_name, "worker" => worker.to_string()).set(*val);
     }
 }

@@ -17,7 +17,7 @@ use super::{
 };
 use crate::routers::{
     error,
-    header_utils::{apply_provider_headers, extract_auth_header},
+    header_utils::{apply_provider_headers, extract_auth_header, extract_piggyback_metrics},
     mcp_utils::ensure_request_mcp_client,
     openai::context::{PayloadState, RequestContext},
     persistence_utils::persist_conversation_items,
@@ -121,6 +121,12 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             let body = response.text().await.unwrap_or_default();
             let body = error::sanitize_error_body(&body);
             return (status, body).into_response();
+        }
+
+        if let Some(metrics_store) = ctx.components.metrics_store() {
+            if let Some(snapshot) = extract_piggyback_metrics(response.headers(), worker.url()) {
+                metrics_store.update(snapshot);
+            }
         }
 
         response_json = match response.json::<Value>().await {

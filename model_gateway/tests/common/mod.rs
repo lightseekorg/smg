@@ -17,6 +17,7 @@ use std::{
     path::PathBuf,
     pin::Pin,
     sync::{Arc, Mutex, OnceLock},
+    time::Duration,
 };
 
 use llm_tokenizer::registry::TokenizerRegistry;
@@ -27,10 +28,7 @@ use serde_json::json;
 use smg::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
-    core::{
-        BasicWorkerBuilder, Job, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry,
-        WorkerType,
-    },
+    core::{BasicWorkerBuilder, Job, ModelCard, RuntimeType, Worker, WorkerRegistry, WorkerType},
     middleware::TokenBucket,
     policies::PolicyRegistry,
     routers::{RouterFactory, RouterTrait},
@@ -65,7 +63,7 @@ impl WorkerTestContext {
         }
 
         if !workers.is_empty() {
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
         Self {
@@ -156,11 +154,11 @@ impl WorkerTestContext {
     }
 
     pub async fn shutdown(mut self) {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         for worker in &mut self.workers {
             worker.stop().await;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -215,7 +213,7 @@ impl AppTestContext {
             }
 
             if !workers.is_empty() {
-                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
 
             match &mut config.mode {
@@ -253,7 +251,7 @@ impl AppTestContext {
 
                 let expected_count = worker_urls.len();
                 let start = tokio::time::Instant::now();
-                let timeout_duration = tokio::time::Duration::from_secs(10);
+                let timeout_duration = Duration::from_secs(10);
                 loop {
                     let healthy_workers = app_context
                         .worker_registry
@@ -271,7 +269,7 @@ impl AppTestContext {
                         "Timeout waiting for {expected_count} workers to become healthy (only {healthy_workers} ready)"
                     );
 
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
 
@@ -337,13 +335,12 @@ pub fn create_test_context(
         let conversation_storage = Arc::new(MemoryConversationStorage::new());
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
-        // Initialize load monitor
-        let load_monitor = Some(Arc::new(LoadMonitor::new(
-            worker_registry.clone(),
-            policy_registry.clone(),
-            client.clone(),
-            config.worker_startup_check_interval_secs,
-        )));
+        // Create a minimal MetricsStore (no scrapers needed in tests)
+        let bus = Arc::new(metrics_service::EventBus::new(64));
+        let metrics_store = Arc::new(metrics_service::MetricsStore::new(
+            bus,
+            Duration::from_secs(60),
+        ));
 
         // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
         let worker_job_queue = Arc::new(OnceLock::new());
@@ -363,7 +360,7 @@ pub fn create_test_context(
                 .response_storage(response_storage)
                 .conversation_storage(conversation_storage)
                 .conversation_item_storage(conversation_item_storage)
-                .load_monitor(load_monitor)
+                .metrics_store(metrics_store)
                 .worker_job_queue(worker_job_queue)
                 .workflow_engines(workflow_engines)
                 .mcp_orchestrator(mcp_orchestrator_lock)
@@ -468,13 +465,12 @@ pub fn create_test_context_with_parsers(
         let conversation_storage = Arc::new(MemoryConversationStorage::new());
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
-        // Initialize load monitor
-        let load_monitor = Some(Arc::new(LoadMonitor::new(
-            worker_registry.clone(),
-            policy_registry.clone(),
-            client.clone(),
-            config.worker_startup_check_interval_secs,
-        )));
+        // Create a minimal MetricsStore (no scrapers needed in tests)
+        let bus = Arc::new(metrics_service::EventBus::new(64));
+        let metrics_store = Arc::new(metrics_service::MetricsStore::new(
+            bus,
+            Duration::from_secs(60),
+        ));
 
         // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
         let worker_job_queue = Arc::new(OnceLock::new());
@@ -498,7 +494,7 @@ pub fn create_test_context_with_parsers(
                 .response_storage(response_storage)
                 .conversation_storage(conversation_storage)
                 .conversation_item_storage(conversation_item_storage)
-                .load_monitor(load_monitor)
+                .metrics_store(metrics_store)
                 .worker_job_queue(worker_job_queue)
                 .workflow_engines(workflow_engines)
                 .mcp_orchestrator(mcp_orchestrator_lock)
@@ -606,13 +602,12 @@ pub fn create_test_context_with_mcp_config(
         let conversation_storage = Arc::new(MemoryConversationStorage::new());
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
-        // Initialize load monitor
-        let load_monitor = Some(Arc::new(LoadMonitor::new(
-            worker_registry.clone(),
-            policy_registry.clone(),
-            client.clone(),
-            config.worker_startup_check_interval_secs,
-        )));
+        // Create a minimal MetricsStore (no scrapers needed in tests)
+        let bus = Arc::new(metrics_service::EventBus::new(64));
+        let metrics_store = Arc::new(metrics_service::MetricsStore::new(
+            bus,
+            Duration::from_secs(60),
+        ));
 
         // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
         let worker_job_queue = Arc::new(OnceLock::new());
@@ -632,7 +627,7 @@ pub fn create_test_context_with_mcp_config(
                 .response_storage(response_storage)
                 .conversation_storage(conversation_storage)
                 .conversation_item_storage(conversation_item_storage)
-                .load_monitor(load_monitor)
+                .metrics_store(metrics_store)
                 .worker_job_queue(worker_job_queue)
                 .workflow_engines(workflow_engines)
                 .mcp_orchestrator(mcp_orchestrator_lock)

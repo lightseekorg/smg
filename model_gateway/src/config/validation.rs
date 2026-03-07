@@ -274,6 +274,26 @@ impl ConfigValidator {
                     });
                 }
             }
+            PolicyConfig::MetricsDriven {
+                fresh_threshold_secs,
+                stale_threshold_secs,
+                ..
+            } => {
+                if *stale_threshold_secs == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "stale_threshold_secs".to_string(),
+                        value: stale_threshold_secs.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+                if *fresh_threshold_secs >= *stale_threshold_secs {
+                    return Err(ConfigError::InvalidValue {
+                        field: "fresh_threshold_secs".to_string(),
+                        value: fresh_threshold_secs.to_string(),
+                        reason: "Must be less than stale_threshold_secs".to_string(),
+                    });
+                }
+            }
         }
         Ok(())
     }

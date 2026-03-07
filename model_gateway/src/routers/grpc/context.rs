@@ -63,6 +63,8 @@ pub(crate) struct SharedComponents {
     pub reasoning_parser_factory: ReasoningParserFactory,
     /// Multimodal processing components (initialized at router creation)
     pub multimodal: Option<Arc<MultimodalComponents>>,
+    /// Metrics store for publishing piggybacked metrics from gRPC responses
+    pub metrics_store: Option<Arc<metrics_service::MetricsStore>>,
 }
 
 /// Mutable processing state (evolves through pipeline stages)
@@ -370,6 +372,14 @@ impl RequestContext {
     /// The tokenizer is resolved once in the preparation stage and cached for reuse.
     pub fn tokenizer_arc(&self) -> Option<Arc<dyn Tokenizer>> {
         self.state.tokenizer.clone()
+    }
+
+    /// Get the primary worker URL for metrics attribution
+    pub fn primary_worker_url(&self) -> Option<String> {
+        self.state.workers.as_ref().map(|w| match w {
+            WorkerSelection::Single { worker } => worker.url().to_string(),
+            WorkerSelection::Dual { decode, .. } => decode.url().to_string(),
+        })
     }
 }
 

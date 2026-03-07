@@ -1224,49 +1224,6 @@ mod cache_tests {
     }
 
     #[tokio::test]
-    async fn test_get_loads() {
-        let ctx = AppTestContext::new(vec![
-            MockWorkerConfig {
-                port: 18502,
-                worker_type: WorkerType::Regular,
-                health_status: HealthStatus::Healthy,
-                response_delay_ms: 0,
-                fail_rate: 0.0,
-            },
-            MockWorkerConfig {
-                port: 18503,
-                worker_type: WorkerType::Regular,
-                health_status: HealthStatus::Healthy,
-                response_delay_ms: 0,
-                fail_rate: 0.0,
-            },
-        ])
-        .await;
-
-        let app = ctx.create_app();
-
-        let req = Request::builder()
-            .method("GET")
-            .uri("/get_loads")
-            .body(Body::empty())
-            .unwrap();
-
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-        assert!(body_json.is_object());
-        // The exact structure depends on the implementation
-        // but should contain worker load information
-
-        ctx.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn test_flush_cache_no_workers() {
         let ctx = AppTestContext::new(vec![]).await;
 

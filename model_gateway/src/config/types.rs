@@ -95,6 +95,9 @@ pub struct RouterConfig {
     /// When set, wraps all storage backends with hook-based interceptors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_hook_wasm_path: Option<String>,
+    /// Worker metrics scraper configuration
+    #[serde(default)]
+    pub metrics_scraper: MetricsScraperConfig,
 }
 
 /// Tokenizer cache configuration
@@ -309,6 +312,41 @@ pub enum PolicyConfig {
         #[serde(default = "default_load_factor")]
         load_factor: f64,
     },
+
+    /// Metrics-driven routing policy.
+    ///
+    /// Uses the `MetricsStore` (fed by piggyback, direct scrape, and Prometheus
+    /// scraper) to select the worker with the best live metrics. Implements a
+    /// tiered fallback: Fresh → Stale → Round-Robin → 503.
+    ///
+    /// Strategy options (case-insensitive):
+    /// - `"min_kv_cache_tokens"` — prefer fewest KV-cache tokens (default)
+    /// - `"min_in_flight"` — prefer fewest in-flight requests
+    /// - any CEL expression string — e.g. `"in_flight_requests * avg_tokens_per_req"`
+    #[serde(rename = "metrics_driven")]
+    MetricsDriven {
+        /// Routing strategy expression or named strategy (default: min_kv_cache_tokens)
+        #[serde(default = "default_metrics_driven_strategy")]
+        strategy: String,
+        /// Seconds a snapshot stays "fresh" (default: 10)
+        #[serde(default = "default_fresh_threshold_secs")]
+        fresh_threshold_secs: u64,
+        /// Seconds a snapshot stays "stale" before falling back to round-robin (default: 60)
+        #[serde(default = "default_stale_threshold_secs")]
+        stale_threshold_secs: u64,
+    },
+}
+
+fn default_metrics_driven_strategy() -> String {
+    "min_kv_cache_tokens".to_string()
+}
+
+fn default_fresh_threshold_secs() -> u64 {
+    10
+}
+
+fn default_stale_threshold_secs() -> u64 {
+    60
 }
 
 fn default_block_size() -> usize {
@@ -342,6 +380,7 @@ impl PolicyConfig {
             PolicyConfig::Manual { .. } => "manual",
             PolicyConfig::ConsistentHashing => "consistent_hashing",
             PolicyConfig::PrefixHash { .. } => "prefix_hash",
+            PolicyConfig::MetricsDriven { .. } => "metrics_driven",
         }
     }
 }
@@ -486,6 +525,54 @@ pub struct MetricsConfig {
     pub host: String,
 }
 
+/// Worker metrics scraper configuration
+///
+/// Controls how the `metrics_service` scrapers collect data from workers
+/// and from a Prometheus server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsScraperConfig {
+    /// How often (in seconds) to poll each worker's `/metrics` and `/get_load`
+    /// endpoints via the direct scraper. Defaults to 5 seconds.
+    #[serde(default = "default_scrape_interval_secs")]
+    pub scrape_interval_secs: u64,
+    /// Optional Prometheus base URL (e.g. `http://prometheus:9090`).
+    /// When `None` the Prometheus scraper is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prometheus_url: Option<String>,
+    /// How often (in seconds) to query Prometheus for custom metrics.
+    /// Only relevant when `prometheus_url` is set. Defaults to 15 seconds.
+    #[serde(default = "default_prometheus_scrape_interval_secs")]
+    pub prometheus_scrape_interval_secs: u64,
+    /// How long (in seconds) a snapshot can be before it is considered stale.
+    /// The metrics store rejects lower-priority updates while a higher-priority
+    /// snapshot is still within this window. Defaults to 60 seconds.
+    #[serde(default = "default_staleness_threshold_secs")]
+    pub staleness_threshold_secs: u64,
+}
+
+fn default_scrape_interval_secs() -> u64 {
+    5
+}
+
+fn default_prometheus_scrape_interval_secs() -> u64 {
+    15
+}
+
+fn default_staleness_threshold_secs() -> u64 {
+    60
+}
+
+impl Default for MetricsScraperConfig {
+    fn default() -> Self {
+        Self {
+            scrape_interval_secs: default_scrape_interval_secs(),
+            prometheus_url: None,
+            prometheus_scrape_interval_secs: default_prometheus_scrape_interval_secs(),
+            staleness_threshold_secs: default_staleness_threshold_secs(),
+        }
+    }
+}
+
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
@@ -561,6 +648,7 @@ impl Default for RouterConfig {
             storage_hook_wasm_path: None,
             server_cert: None,
             server_key: None,
+            metrics_scraper: MetricsScraperConfig::default(),
         }
     }
 }
