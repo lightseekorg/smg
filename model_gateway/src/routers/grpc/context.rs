@@ -11,6 +11,7 @@ use llm_tokenizer::{stop::StopSequenceDecoder, traits::Tokenizer, TokenizerRegis
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatCompletionResponse},
     classify::{ClassifyRequest, ClassifyResponse},
+    completion::{CompletionRequest, CompletionResponse},
     embedding::{EmbeddingRequest, EmbeddingResponse},
     generate::{GenerateRequest, GenerateResponse},
     responses::ResponsesRequest,
@@ -49,6 +50,7 @@ pub(crate) struct RequestInput {
 pub(crate) enum RequestType {
     Chat(Arc<ChatCompletionRequest>),
     Generate(Arc<GenerateRequest>),
+    Completion(Arc<CompletionRequest>),
     Responses(Arc<ResponsesRequest>),
     Embedding(Arc<EmbeddingRequest>),
     Classify(Arc<ClassifyRequest>),
@@ -92,6 +94,10 @@ pub(crate) struct ProcessingState {
 
     // Stage 6: Response processing state
     pub response: ResponseState,
+
+    /// Original completion request, preserved when CompletionPreparationStage
+    /// converts the request type to Generate for pipeline compatibility.
+    pub original_completion_request: Option<Arc<CompletionRequest>>,
 }
 
 /// Output from preparation stage (Step 1)
@@ -275,6 +281,24 @@ impl RequestContext {
         }
     }
 
+    /// Create context for completion request
+    pub fn for_completion(
+        request: Arc<CompletionRequest>,
+        headers: Option<HeaderMap>,
+        model_id: Option<String>,
+        components: Arc<SharedComponents>,
+    ) -> Self {
+        Self {
+            input: RequestInput {
+                request_type: RequestType::Completion(request),
+                headers,
+                model_id,
+            },
+            components,
+            state: ProcessingState::default(),
+        }
+    }
+
     /// Create context for classify request
     pub fn for_classify(
         request: Arc<ClassifyRequest>,
@@ -341,6 +365,31 @@ impl RequestContext {
         }
     }
 
+    /// Get completion request (panics if not completion)
+    #[expect(
+        dead_code,
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via RequestType construction"
+    )]
+    pub fn completion_request(&self) -> &CompletionRequest {
+        match &self.input.request_type {
+            RequestType::Completion(req) => req.as_ref(),
+            _ => panic!("Expected completion request"),
+        }
+    }
+
+    /// Get Arc clone of completion request (panics if not completion)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via RequestType construction"
+    )]
+    pub fn completion_request_arc(&self) -> Arc<CompletionRequest> {
+        match &self.input.request_type {
+            RequestType::Completion(req) => Arc::clone(req),
+            _ => panic!("Expected completion request"),
+        }
+    }
+
     /// Get Arc clone of responses request (panics if not responses)
     #[expect(
         clippy::panic,
@@ -358,9 +407,10 @@ impl RequestContext {
         match &self.input.request_type {
             RequestType::Chat(req) => req.stream,
             RequestType::Generate(req) => req.stream,
+            RequestType::Completion(req) => req.stream,
             RequestType::Responses(req) => req.stream.unwrap_or(false),
-            RequestType::Embedding(_) => false, // Embeddings are never streaming
-            RequestType::Classify(_) => false,  // Classification is never streaming
+            RequestType::Embedding(_) => false,
+            RequestType::Classify(_) => false,
         }
     }
 
@@ -539,6 +589,8 @@ pub(crate) enum FinalResponse {
     Chat(ChatCompletionResponse),
     /// Generate response is a Vec of GenerateResponse (n=1 returns single item, n>1 returns multiple)
     Generate(Vec<GenerateResponse>),
+    /// Completion response (OpenAI /v1/completions format)
+    Completion(CompletionResponse),
     /// Embedding response
     Embedding(EmbeddingResponse),
     /// Classification response
