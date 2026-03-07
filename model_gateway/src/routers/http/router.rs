@@ -478,10 +478,7 @@ impl Router {
         let json_val = match worker.prepare_request(json_val).await {
             Ok(prepared) => prepared,
             Err(e) if e.is_client_error() => {
-                return error::bad_request(
-                    e.error_code(),
-                    format!("Request rejected: {e}"),
-                );
+                return error::bad_request(e.error_code(), format!("Request rejected: {e}"));
             }
             Err(e) => {
                 return error::internal_error(

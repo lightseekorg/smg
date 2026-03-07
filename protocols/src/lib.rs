@@ -9,7 +9,6 @@ pub const UNKNOWN_MODEL_ID: &str = "unknown";
 
 pub mod builders;
 pub mod chat;
-pub mod lora;
 pub mod classify;
 pub mod common;
 pub mod completion;
@@ -17,6 +16,7 @@ pub mod embedding;
 pub mod event_types;
 pub mod generate;
 pub mod interactions;
+pub mod lora;
 pub mod messages;
 pub mod model_card;
 pub mod model_type;

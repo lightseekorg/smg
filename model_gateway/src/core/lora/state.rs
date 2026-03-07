@@ -131,7 +131,8 @@ impl WorkerLoraState {
         // By inserting first, any concurrent task will hit the `loaded` fast
         // path and return immediately — even before we finish the cleanup.
         if load_result.is_ok() {
-            self.loaded.insert(lora_path.to_string(), adapter_name.clone());
+            self.loaded
+                .insert(lora_path.to_string(), adapter_name.clone());
         }
         self.inflight.remove(lora_path);
         load_result?;
@@ -163,7 +164,11 @@ impl WorkerLoraState {
 
     // ── Private HTTP helpers ──────────────────────────────────────────────────
 
-    async fn load_adapter(&self, adapter_name: &str, local_path: &str) -> Result<(), LoraStateError> {
+    async fn load_adapter(
+        &self,
+        adapter_name: &str,
+        local_path: &str,
+    ) -> Result<(), LoraStateError> {
         let endpoint = self.load_endpoint()?;
         let body = json!({
             "lora_name": adapter_name,
