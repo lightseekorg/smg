@@ -16,6 +16,12 @@ use crate::routers::{
 
 pub(crate) struct EmbeddingPreparationStage;
 
+impl EmbeddingPreparationStage {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 #[async_trait]
 impl PipelineStage for EmbeddingPreparationStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
