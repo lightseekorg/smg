@@ -114,57 +114,56 @@ impl Sequence {
         Ok(())
     }
 
-    /// Append a single token to the sequence and return newly decoded text
-    /// Based on HuggingFace TGI incremental decoding
+    /// Append a single token to the sequence and return newly decoded text.
+    ///
+    /// Uses a bounded sliding window for incremental decoding: the decode
+    /// window is capped at `OVERLAP` tokens so that each call is O(1) in
+    /// tokenizer work regardless of total sequence length.
     #[inline]
     pub fn append_token(&mut self, token_id: TokenIdType) -> Result<String> {
-        // Store the old read offset before adding the new token
-        let old_read_offset = self.read_offset;
+        const OVERLAP: usize = 5;
 
         self.token_ids.push(token_id);
-        self.read_offset = self.token_ids.len();
 
-        // If this is the first token or we're at the beginning, decode everything
-        if self.prefix_offset == 0 && old_read_offset == 0 {
+        let len = self.token_ids.len();
+        let prefix_start = len.saturating_sub(OVERLAP + 1);
+
+        if len == 1 {
             let text = self
                 .tokenizer
                 .decode(&self.token_ids, self.skip_special_tokens)?;
             if text.ends_with("�") {
-                // Incomplete UTF-8 sequence, wait for more tokens
                 return Ok(String::new());
             }
             self.prefix_offset = 0;
+            self.read_offset = 1;
             return Ok(text);
         }
 
-        // Decode the text up to the previous position
+        let old_end = len - 1;
         let prefix_text = self.tokenizer.decode(
-            &self.token_ids[self.prefix_offset..old_read_offset],
+            &self.token_ids[prefix_start..old_end],
             self.skip_special_tokens,
         )?;
 
-        // Decode the text including the new token
-        let new_text = self.tokenizer.decode(
-            &self.token_ids[self.prefix_offset..],
-            self.skip_special_tokens,
-        )?;
+        let new_text = self
+            .tokenizer
+            .decode(&self.token_ids[prefix_start..len], self.skip_special_tokens)?;
 
-        // Handle multi-byte character boundaries
+        self.prefix_offset = old_end;
+        self.read_offset = len;
+
         let mut prefix_text_len = prefix_text.len();
         while !new_text.is_char_boundary(prefix_text_len) && prefix_text_len > 0 {
             prefix_text_len -= 1;
         }
 
-        if new_text.len() > prefix_text.len() {
+        if new_text.len() > prefix_text_len {
             if new_text.ends_with("�") {
-                // Incomplete UTF-8 sequence, wait for more tokens
                 return Ok(String::new());
-            } else {
-                // Return the new text portion
-                let incremental_text = new_text[prefix_text_len..].to_string().replace("�", "");
-                self.prefix_offset = old_read_offset;
-                return Ok(incremental_text);
             }
+            let incremental = new_text[prefix_text_len..].to_string().replace("�", "");
+            return Ok(incremental);
         }
 
         Ok(String::new())

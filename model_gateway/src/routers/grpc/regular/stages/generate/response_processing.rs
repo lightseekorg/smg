@@ -131,6 +131,7 @@ impl GenerateResponseProcessingStage {
                 execution_result,
                 generate_request,
                 dispatch,
+                tokenizer,
                 stop_decoder,
                 request_logprobs,
                 start_time,

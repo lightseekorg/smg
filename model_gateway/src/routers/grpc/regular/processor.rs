@@ -66,29 +66,42 @@ impl ResponseProcessor {
         tool_parser_available: bool,
     ) -> Result<ChatChoice, String> {
         stop_decoder.reset();
-        // Decode tokens
-        let outputs = stop_decoder
-            .process_tokens(complete.output_ids())
-            .map_err(|e| format!("Failed to process tokens: {e}"))?;
-
-        // Accumulate text with early breaks
-        let mut final_text = String::new();
-        for output in outputs {
-            match output {
-                SequenceDecoderOutput::Text(t) => final_text.push_str(&t),
-                SequenceDecoderOutput::StoppedWithText(t) => {
-                    final_text.push_str(&t);
-                    break;
+        // Decode tokens with fallback to lossy direct decode
+        let final_text = match stop_decoder.process_tokens(complete.output_ids()) {
+            Ok(outputs) => {
+                let mut text = String::new();
+                for output in outputs {
+                    match output {
+                        SequenceDecoderOutput::Text(t) => text.push_str(&t),
+                        SequenceDecoderOutput::StoppedWithText(t) => {
+                            text.push_str(&t);
+                            break;
+                        }
+                        SequenceDecoderOutput::Stopped => break,
+                        SequenceDecoderOutput::Held => {}
+                    }
                 }
-                SequenceDecoderOutput::Stopped => break,
-                SequenceDecoderOutput::Held => {}
+                if let SequenceDecoderOutput::Text(t) = stop_decoder.flush() {
+                    text.push_str(&t);
+                }
+                text
             }
-        }
-
-        // Flush remaining text
-        if let SequenceDecoderOutput::Text(t) = stop_decoder.flush() {
-            final_text.push_str(&t);
-        }
+            Err(e) => {
+                tracing::warn!(
+                    "stop_decoder.process_tokens failed ({} output tokens, error: {}), falling back to direct decode",
+                    complete.output_ids().len(),
+                    e
+                );
+                match tokenizer.decode(complete.output_ids(), original_request.skip_special_tokens)
+                {
+                    Ok(decoded) => decoded,
+                    Err(e2) => {
+                        tracing::warn!("Fallback tokenizer.decode also failed: {e2}");
+                        return Err(format!("Token decoding failed: primary={e}, fallback={e2}"));
+                    }
+                }
+            }
+        };
 
         // Step 1: Handle reasoning content parsing
         let mut reasoning_text: Option<String> = None;
@@ -110,7 +123,7 @@ impl ResponseProcessor {
                     processed_text = result.normal_text;
                 }
                 Err(e) => {
-                    warn!("Reasoning parsing error, skipping parsing: {e}");
+                    warn!("Reasoning parsing error (non-fatal): {e}");
                 }
             }
         }
@@ -339,15 +352,22 @@ impl ResponseProcessor {
     }
 
     /// Process non-streaming generate response (collects all responses and builds final response array)
+    #[expect(clippy::too_many_arguments)]
     pub async fn process_non_streaming_generate_response(
         &self,
         execution_result: ExecutionResult,
-        _generate_request: Arc<GenerateRequest>,
+        generate_request: Arc<GenerateRequest>,
         dispatch: DispatchMetadata,
+        tokenizer: Arc<dyn Tokenizer>,
         stop_decoder: &mut StopSequenceDecoder,
         request_logprobs: bool,
         start_time: Instant,
     ) -> Result<Vec<GenerateResponse>, axum::response::Response> {
+        let skip_special_tokens = generate_request
+            .sampling_params
+            .as_ref()
+            .and_then(|p| p.skip_special_tokens)
+            .unwrap_or(true);
         // Collect all responses from the execution result
         let all_responses =
             response_collection::collect_responses(execution_result, request_logprobs).await?;
@@ -357,35 +377,44 @@ impl ResponseProcessor {
         for complete in all_responses {
             stop_decoder.reset();
 
-            // Process tokens through stop decoder
-            let outputs = match stop_decoder.process_tokens(complete.output_ids()) {
-                Ok(outputs) => outputs,
+            // Decode tokens with fallback to lossy direct decode (mirrors chat path)
+            let decoded_text = match stop_decoder.process_tokens(complete.output_ids()) {
+                Ok(outputs) => {
+                    let mut text = String::new();
+                    for output in outputs {
+                        match output {
+                            SequenceDecoderOutput::Text(t) => text.push_str(&t),
+                            SequenceDecoderOutput::StoppedWithText(t) => {
+                                text.push_str(&t);
+                                break;
+                            }
+                            SequenceDecoderOutput::Stopped => break,
+                            SequenceDecoderOutput::Held => {}
+                        }
+                    }
+                    if let SequenceDecoderOutput::Text(t) = stop_decoder.flush() {
+                        text.push_str(&t);
+                    }
+                    text
+                }
                 Err(e) => {
-                    return Err(error::internal_error(
-                        "process_tokens_failed",
-                        format!("Failed to process tokens: {e}"),
-                    ))
+                    tracing::warn!(
+                        "stop_decoder.process_tokens failed ({} output tokens, error: {}), falling back to direct decode",
+                        complete.output_ids().len(),
+                        e
+                    );
+                    match tokenizer.decode(complete.output_ids(), skip_special_tokens) {
+                        Ok(decoded) => decoded,
+                        Err(e2) => {
+                            tracing::warn!("Fallback tokenizer.decode also failed: {e2}");
+                            return Err(error::internal_error(
+                                "token_decode_failed",
+                                format!("Token decoding failed: primary={e}, fallback={e2}"),
+                            ));
+                        }
+                    }
                 }
             };
-
-            // Accumulate text with early breaks
-            let mut decoded_text = String::new();
-            for output in outputs {
-                match output {
-                    SequenceDecoderOutput::Text(t) => decoded_text.push_str(&t),
-                    SequenceDecoderOutput::StoppedWithText(t) => {
-                        decoded_text.push_str(&t);
-                        break;
-                    }
-                    SequenceDecoderOutput::Stopped => break,
-                    SequenceDecoderOutput::Held => {}
-                }
-            }
-
-            // Flush remaining text
-            if let SequenceDecoderOutput::Text(t) = stop_decoder.flush() {
-                decoded_text.push_str(&t);
-            }
 
             let output_ids = complete.output_ids().to_vec();
             let finish_reason_str = complete.finish_reason();
