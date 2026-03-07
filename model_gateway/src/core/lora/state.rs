@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use openai_protocol::lora::{classify, AdapterUri, UnsupportedSchemeError};
-use openai_protocol::worker::RuntimeType;
+use openai_protocol::{
+    lora::{classify, AdapterUri, UnsupportedSchemeError},
+    worker::RuntimeType,
+};
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
