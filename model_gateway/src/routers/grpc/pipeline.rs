@@ -327,11 +327,12 @@ impl RequestPipeline {
                 axum::Json(response).into_response()
             }
             Some(FinalResponse::Generate(_))
+            | Some(FinalResponse::Completion(_))
             | Some(FinalResponse::Embedding(_))
             | Some(FinalResponse::Classify(_)) => {
                 error!(
                     function = "execute_chat",
-                    "Wrong response type: expected Chat, got Generate/Embedding/Classify"
+                    "Wrong response type: expected Chat"
                 );
                 Metrics::record_router_error(
                     metrics_labels::ROUTER_GRPC,
@@ -430,11 +431,12 @@ impl RequestPipeline {
                 axum::Json(response).into_response()
             }
             Some(FinalResponse::Chat(_))
+            | Some(FinalResponse::Completion(_))
             | Some(FinalResponse::Embedding(_))
             | Some(FinalResponse::Classify(_)) => {
                 error!(
                     function = "execute_generate",
-                    "Wrong response type: expected Generate, got Chat/Embedding/Classify"
+                    "Wrong response type: expected Generate"
                 );
                 Metrics::record_router_error(
                     metrics_labels::ROUTER_GRPC,
@@ -664,68 +666,96 @@ impl RequestPipeline {
         }
     }
 
-    /// Execute the generate pipeline and return typed results
+    /// Execute the complete pipeline for a completion request
     ///
-    /// Used by route_completion to get typed Vec<GenerateResponse> without
-    /// serializing to JSON and re-parsing. Follows the same pattern as
-    /// execute_chat_for_responses.
-    pub async fn execute_generate_typed(
+    /// The completion preparation stage converts `CompletionRequest` into a `GenerateRequest`
+    /// and stores the original for response formatting. The response processing stage wraps
+    /// the generate output as `CompletionResponse` or transforms the SSE stream.
+    pub async fn execute_completion(
         &self,
-        request: Arc<GenerateRequest>,
+        request: Arc<openai_protocol::completion::CompletionRequest>,
         headers: Option<http::HeaderMap>,
         model_id: Option<String>,
         components: Arc<SharedComponents>,
-    ) -> Result<Vec<openai_protocol::generate::GenerateResponse>, Response> {
-        let mut ctx = RequestContext::for_generate(request, headers, model_id, components);
+    ) -> Response {
+        let start = Instant::now();
+        let streaming = request.stream;
+        let model = request.model.clone();
 
-        for (idx, stage) in self.stages.iter().enumerate() {
+        Metrics::record_router_request(
+            metrics_labels::ROUTER_GRPC,
+            self.backend_type,
+            metrics_labels::CONNECTION_GRPC,
+            model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+            metrics_labels::ENDPOINT_COMPLETIONS,
+            bool_to_static_str(streaming),
+        );
+
+        let mut ctx =
+            RequestContext::for_completion(request, headers, model_id.clone(), components);
+
+        for stage in self.stages.iter() {
             match stage.execute(&mut ctx).await {
-                Ok(Some(_response)) => {
-                    error!(
-                        function = "execute_generate_typed",
-                        "Streaming attempted in typed context"
+                Ok(Some(response)) => {
+                    Metrics::record_router_duration(
+                        metrics_labels::ROUTER_GRPC,
+                        self.backend_type,
+                        metrics_labels::CONNECTION_GRPC,
+                        model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                        metrics_labels::ENDPOINT_COMPLETIONS,
+                        start.elapsed(),
                     );
-                    return Err(error::bad_request(
-                        "streaming_not_supported",
-                        "Streaming is not supported in this context".to_string(),
-                    ));
+                    return response;
                 }
                 Ok(None) => continue,
                 Err(response) => {
+                    Metrics::record_router_error(
+                        metrics_labels::ROUTER_GRPC,
+                        self.backend_type,
+                        metrics_labels::CONNECTION_GRPC,
+                        model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                        metrics_labels::ENDPOINT_COMPLETIONS,
+                        error_type_from_status(response.status()),
+                    );
                     error!(
-                        "Stage {} ({}) failed with status {}",
-                        idx + 1,
+                        "Stage {} failed with status {}",
                         stage.name(),
                         response.status()
                     );
-                    return Err(response);
+                    return response;
                 }
             }
         }
 
         match ctx.state.response.final_response {
-            Some(FinalResponse::Generate(response)) => Ok(response),
-            Some(FinalResponse::Chat(_))
-            | Some(FinalResponse::Embedding(_))
-            | Some(FinalResponse::Classify(_)) => {
-                error!(
-                    function = "execute_generate_typed",
-                    "Wrong response type: expected Generate"
+            Some(FinalResponse::Completion(response)) => {
+                Metrics::record_router_duration(
+                    metrics_labels::ROUTER_GRPC,
+                    self.backend_type,
+                    metrics_labels::CONNECTION_GRPC,
+                    &model,
+                    metrics_labels::ENDPOINT_COMPLETIONS,
+                    start.elapsed(),
                 );
-                Err(error::internal_error(
-                    "wrong_response_type",
-                    "Internal error: wrong response type",
-                ))
+                axum::Json(response).into_response()
             }
-            None => {
+            _ => {
                 error!(
-                    function = "execute_generate_typed",
-                    "No response produced by pipeline"
+                    function = "execute_completion",
+                    "Wrong or missing response type: expected Completion"
                 );
-                Err(error::internal_error(
-                    "no_response_produced",
-                    "No response produced",
-                ))
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_GRPC,
+                    self.backend_type,
+                    metrics_labels::CONNECTION_GRPC,
+                    &model,
+                    metrics_labels::ENDPOINT_COMPLETIONS,
+                    metrics_labels::ERROR_INTERNAL,
+                );
+                error::internal_error(
+                    "wrong_response_type",
+                    "Internal error: expected Completion response type",
+                )
             }
         }
     }
@@ -777,11 +807,12 @@ impl RequestPipeline {
         match ctx.state.response.final_response {
             Some(FinalResponse::Chat(response)) => Ok(response),
             Some(FinalResponse::Generate(_))
+            | Some(FinalResponse::Completion(_))
             | Some(FinalResponse::Embedding(_))
             | Some(FinalResponse::Classify(_)) => {
                 error!(
                     function = "execute_chat_for_responses",
-                    "Wrong response type: expected Chat, got Generate/Embedding/Classify"
+                    "Wrong response type: expected Chat"
                 );
                 Err(error::internal_error(
                     "wrong_response_type",
