@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use axum::{
@@ -380,15 +383,18 @@ impl GrpcRouter {
             .await
     }
 
-    /// Build a GenerateRequest from a CompletionRequest.
-    fn build_generate_from_completion(body: &CompletionRequest, stream: bool) -> GenerateRequest {
+    /// Build a GenerateRequest from a CompletionRequest, returning the resolved prompt text.
+    fn build_generate_from_completion(
+        body: &CompletionRequest,
+        stream: bool,
+    ) -> (GenerateRequest, String) {
         let prompt_text = match &body.prompt {
             StringOrArray::String(s) => s.clone(),
             StringOrArray::Array(arr) => arr.join(""),
         };
 
-        GenerateRequest {
-            text: Some(prompt_text),
+        let request = GenerateRequest {
+            text: Some(prompt_text.clone()),
             model: Some(body.model.clone()),
             sampling_params: Some(SamplingParams {
                 temperature: body.temperature,
@@ -418,7 +424,9 @@ impl GrpcRouter {
             session_params: body.session_params.clone(),
             return_hidden_states: body.return_hidden_states,
             ..Default::default()
-        }
+        };
+
+        (request, prompt_text)
     }
 
     /// Main route_completion implementation
@@ -450,7 +458,7 @@ impl GrpcRouter {
         body: &CompletionRequest,
         model_id: Option<&str>,
     ) -> Response {
-        let gen_request = Self::build_generate_from_completion(body, false);
+        let (gen_request, prompt_text) = Self::build_generate_from_completion(body, false);
 
         let request = Arc::new(gen_request);
         let headers_cloned = headers.cloned();
@@ -458,10 +466,6 @@ impl GrpcRouter {
         let components = self.shared_components.clone();
         let pipeline = &self.pipeline;
         let model = body.model.clone();
-        let prompt_text = match &body.prompt {
-            StringOrArray::String(s) => s.clone(),
-            StringOrArray::Array(arr) => arr.join(""),
-        };
         let echo = body.echo;
         let suffix = body.suffix.clone();
 
@@ -519,7 +523,7 @@ impl GrpcRouter {
         body: &CompletionRequest,
         model_id: Option<&str>,
     ) -> Response {
-        let gen_request = Self::build_generate_from_completion(body, true);
+        let (gen_request, prompt_text) = Self::build_generate_from_completion(body, true);
 
         let request = Arc::new(gen_request);
         let headers_cloned = headers.cloned();
@@ -566,20 +570,13 @@ impl GrpcRouter {
             .unwrap_or_default()
             .as_secs();
 
-        let prompt_text = if body.echo {
-            Some(match &body.prompt {
-                StringOrArray::String(s) => s.clone(),
-                StringOrArray::Array(arr) => arr.join(""),
-            })
-        } else {
-            None
-        };
+        let echo_prompt = if body.echo { Some(prompt_text) } else { None };
 
         transform_generate_sse_to_completion_sse(
             response,
             body.model.clone(),
             created,
-            prompt_text,
+            echo_prompt,
             body.suffix.clone(),
         )
     }
@@ -764,9 +761,10 @@ fn transform_generate_sse_to_completion_sse(
     )]
     tokio::spawn(async move {
         let mut stream = body.into_data_stream();
-        let mut prev_texts: HashMap<u32, String> = HashMap::new();
+        let mut prev_lens: HashMap<u32, usize> = HashMap::new();
         let mut request_id = String::from("cmpl-unknown");
-        let mut echo_sent = false;
+        let mut echo_sent_for: HashSet<u32> = HashSet::new();
+        let mut buf = String::new();
 
         while let Some(chunk_result) = stream.next().await {
             let bytes = match chunk_result {
@@ -777,15 +775,17 @@ fn transform_generate_sse_to_completion_sse(
                 }
             };
 
-            let event_str = String::from_utf8_lossy(&bytes);
+            buf.push_str(&String::from_utf8_lossy(&bytes));
 
-            for line in event_str.split("\n\n") {
-                let line = line.trim();
-                if line.is_empty() {
+            while let Some(boundary) = buf.find("\n\n") {
+                let event = buf[..boundary].trim().to_string();
+                buf = buf[boundary + 2..].to_string();
+
+                if event.is_empty() {
                     continue;
                 }
 
-                let Some(data) = line.strip_prefix("data: ") else {
+                let Some(data) = event.strip_prefix("data: ") else {
                     continue;
                 };
 
@@ -806,7 +806,6 @@ fn transform_generate_sse_to_completion_sse(
                 let index = gen_chunk["index"].as_u64().unwrap_or(0) as u32;
                 let accumulated_text = gen_chunk["text"].as_str().unwrap_or("");
 
-                // Capture request id from first chunk (strip the "-index" suffix)
                 if request_id == "cmpl-unknown" {
                     if let Some(id) = gen_chunk["meta_info"]["id"].as_str() {
                         request_id = if let Some(base) = id.rsplit_once('-') {
@@ -817,24 +816,21 @@ fn transform_generate_sse_to_completion_sse(
                     }
                 }
 
-                let prev = prev_texts.entry(index).or_default();
+                let prev_len = prev_lens.entry(index).or_insert(0);
                 let mut delta_owned = String::new();
-                if !echo_sent {
-                    if let Some(ref prompt) = echo_prompt {
-                        delta_owned.push_str(prompt);
-                    }
-                    echo_sent = true;
+                if echo_prompt.is_some() && echo_sent_for.insert(index) {
+                    delta_owned.push_str(echo_prompt.as_deref().unwrap_or(""));
                 }
-                if accumulated_text.len() > prev.len() {
-                    delta_owned.push_str(&accumulated_text[prev.len()..]);
+                if accumulated_text.len() > *prev_len {
+                    delta_owned.push_str(&accumulated_text[*prev_len..]);
                 }
-                *prev = accumulated_text.to_string();
+                *prev_len = accumulated_text.len();
 
                 let finish_reason = match &gen_chunk["meta_info"]["finish_reason"] {
                     Value::Null => None,
                     Value::String(s) => match s.as_str() {
-                        "length" => Some("length".to_string()),
-                        other => Some(other.to_string()),
+                        "length" | "stop" => Some(s.to_string()),
+                        _ => Some("stop".to_string()),
                     },
                     obj => match obj["type"].as_str() {
                         Some("length") => Some("length".to_string()),
