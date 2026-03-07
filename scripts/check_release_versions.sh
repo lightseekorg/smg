@@ -385,7 +385,10 @@ echo -e "${RED}${BOLD}$issues issue(s) found.${NC}"
 # ---------------------------------------------------------------------------
 # Phase 2: Offer to fix
 # ---------------------------------------------------------------------------
-total_fixes=$(( ${#NEEDS_BUMP[@]} + ${#NEEDS_WS_SYNC[@]} + ${#NEEDS_PY_BUMP[@]} ))
+n_bump=${#NEEDS_BUMP[@]}
+n_ws=${#NEEDS_WS_SYNC[@]}
+n_py=${#NEEDS_PY_BUMP[@]:-0}
+total_fixes=$(( n_bump + n_ws + n_py ))
 if [[ "$total_fixes" -eq 0 ]]; then
     exit 1
 fi
@@ -393,7 +396,7 @@ fi
 echo ""
 echo -e "${BOLD}Proposed fixes:${NC}"
 
-for entry in "${NEEDS_BUMP[@]}"; do
+for entry in ${NEEDS_BUMP[@]+"${NEEDS_BUMP[@]}"}; do
     IFS='|' read -r name path dep_key current_version level <<< "$entry"
     new_version=$(bump_version "$current_version" "$level")
     echo -e "  $(bump_label "$level") $name v$current_version → v$new_version ($path/Cargo.toml)"
@@ -402,14 +405,14 @@ for entry in "${NEEDS_BUMP[@]}"; do
     fi
 done
 
-if [[ ${#NEEDS_WS_SYNC[@]} -gt 0 ]]; then
+if [[ "$n_ws" -gt 0 ]]; then
     for entry in "${NEEDS_WS_SYNC[@]}"; do
         IFS='|' read -r name dep_key crate_version ws_version path <<< "$entry"
         echo -e "  ${BLUE}sync${NC} workspace Cargo.toml $dep_key v$ws_version → v$crate_version"
     done
 fi
 
-for entry in "${NEEDS_PY_BUMP[@]}"; do
+for entry in ${NEEDS_PY_BUMP[@]+"${NEEDS_PY_BUMP[@]}"}; do
     IFS='|' read -r name path version_file current_version level <<< "$entry"
     new_version=$(bump_version "$current_version" "$level")
     echo -e "  $(bump_label "$level") $name v$current_version → v$new_version ($version_file)"
@@ -428,7 +431,7 @@ fi
 echo ""
 fix_failed=0
 
-for entry in "${NEEDS_BUMP[@]}"; do
+for entry in ${NEEDS_BUMP[@]+"${NEEDS_BUMP[@]}"}; do
     IFS='|' read -r name path dep_key current_version level <<< "$entry"
     new_version=$(bump_version "$current_version" "$level")
 
@@ -450,7 +453,7 @@ for entry in "${NEEDS_BUMP[@]}"; do
     fi
 done
 
-if [[ ${#NEEDS_WS_SYNC[@]} -gt 0 ]]; then
+if [[ "$n_ws" -gt 0 ]]; then
     for entry in "${NEEDS_WS_SYNC[@]}"; do
         IFS='|' read -r name dep_key crate_version ws_version path <<< "$entry"
         if set_workspace_dep_version "$dep_key" "$ws_version" "$crate_version"; then
@@ -461,7 +464,7 @@ if [[ ${#NEEDS_WS_SYNC[@]} -gt 0 ]]; then
     done
 fi
 
-for entry in "${NEEDS_PY_BUMP[@]}"; do
+for entry in ${NEEDS_PY_BUMP[@]+"${NEEDS_PY_BUMP[@]}"}; do
     IFS='|' read -r name path version_file current_version level <<< "$entry"
     new_version=$(bump_version "$current_version" "$level")
 
