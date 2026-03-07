@@ -227,8 +227,6 @@ jobs:
             SMG_REPO=${{ inputs.smg_repo }}
             SMG_COMMIT=${{ inputs.smg_commit }}
           tags: smg-build:${{ steps.resolve.outputs.image_tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       # ── Push to GHCR ────────────────────────────────────────────────────────
 
