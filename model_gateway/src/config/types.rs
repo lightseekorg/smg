@@ -95,6 +95,10 @@ pub struct RouterConfig {
     /// When set, wraps all storage backends with hook-based interceptors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_hook_wasm_path: Option<String>,
+    /// Persist workflow state to Oracle (reuses the history Oracle connection).
+    /// When true and `history_backend = oracle`, workflow state is durable across restarts.
+    #[serde(default)]
+    pub workflow_state_oracle: bool,
 }
 
 /// Tokenizer cache configuration
@@ -559,6 +563,7 @@ impl Default for RouterConfig {
             mcp_config: None,
             enable_wasm: false,
             storage_hook_wasm_path: None,
+            workflow_state_oracle: false,
             server_cert: None,
             server_key: None,
         }

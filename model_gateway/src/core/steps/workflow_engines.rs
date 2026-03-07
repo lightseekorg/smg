@@ -2,10 +2,16 @@
 //!
 //! This module provides a collection of typed workflow engines for different workflow types.
 //! Each workflow type has its own engine with compile-time type safety.
+//!
+//! When an Oracle state store config is provided, workflow state is persisted to Oracle.
+//! Otherwise, an in-memory store is used (state is lost on restart).
 
 use std::sync::Arc;
 
-use wfaas::{EventSubscriber, InMemoryStore, WorkflowEngine};
+use wfaas::{
+    ArcStateStore, EventSubscriber, OracleStateStore, OracleStateStoreConfig, WorkflowData,
+    WorkflowEngine,
+};
 
 use super::{
     create_mcp_registration_workflow, create_tokenizer_registration_workflow,
@@ -19,30 +25,30 @@ use crate::{config::RouterConfig, core::steps::workflow_data::WorkerWorkflowData
 
 /// Type alias for the unified worker registration workflow engine
 pub type WorkerRegistrationEngine =
-    WorkflowEngine<WorkerWorkflowData, InMemoryStore<WorkerWorkflowData>>;
+    WorkflowEngine<WorkerWorkflowData, ArcStateStore<WorkerWorkflowData>>;
 
 /// Type alias for worker removal workflow engine
 pub type WorkerRemovalEngine =
-    WorkflowEngine<WorkerRemovalWorkflowData, InMemoryStore<WorkerRemovalWorkflowData>>;
+    WorkflowEngine<WorkerRemovalWorkflowData, ArcStateStore<WorkerRemovalWorkflowData>>;
 
 /// Type alias for worker update workflow engine
 pub type WorkerUpdateEngine =
-    WorkflowEngine<WorkerUpdateWorkflowData, InMemoryStore<WorkerUpdateWorkflowData>>;
+    WorkflowEngine<WorkerUpdateWorkflowData, ArcStateStore<WorkerUpdateWorkflowData>>;
 
 /// Type alias for MCP registration workflow engine
-pub type McpEngine = WorkflowEngine<McpWorkflowData, InMemoryStore<McpWorkflowData>>;
+pub type McpEngine = WorkflowEngine<McpWorkflowData, ArcStateStore<McpWorkflowData>>;
 
 /// Type alias for tokenizer registration workflow engine
 pub type TokenizerEngine =
-    WorkflowEngine<TokenizerWorkflowData, InMemoryStore<TokenizerWorkflowData>>;
+    WorkflowEngine<TokenizerWorkflowData, ArcStateStore<TokenizerWorkflowData>>;
 
 /// Type alias for WASM registration workflow engine
 pub type WasmRegistrationEngine =
-    WorkflowEngine<WasmRegistrationWorkflowData, InMemoryStore<WasmRegistrationWorkflowData>>;
+    WorkflowEngine<WasmRegistrationWorkflowData, ArcStateStore<WasmRegistrationWorkflowData>>;
 
 /// Type alias for WASM removal workflow engine
 pub type WasmRemovalEngine =
-    WorkflowEngine<WasmRemovalWorkflowData, InMemoryStore<WasmRemovalWorkflowData>>;
+    WorkflowEngine<WasmRemovalWorkflowData, ArcStateStore<WasmRemovalWorkflowData>>;
 
 /// Collection of typed workflow engines
 ///
@@ -67,49 +73,80 @@ pub struct WorkflowEngines {
 }
 
 impl WorkflowEngines {
-    /// Create and initialize all workflow engines with their workflow definitions
+    /// Create and initialize all workflow engines with their workflow definitions.
+    ///
+    /// When `oracle_config` is `Some`, workflow state is persisted to Oracle.
+    /// Otherwise, an in-memory store is used.
     #[expect(
         clippy::expect_used,
         reason = "Workflow registration uses compile-time-known step/transition definitions that cannot fail at runtime — a failure here indicates a programming error in workflow construction"
     )]
-    pub fn new(router_config: &RouterConfig) -> Self {
+    pub fn new(
+        router_config: &RouterConfig,
+        oracle_config: Option<&OracleStateStoreConfig>,
+    ) -> Self {
+        fn make_store<D: WorkflowData>(
+            oracle_config: Option<&OracleStateStoreConfig>,
+        ) -> ArcStateStore<D> {
+            match oracle_config {
+                Some(cfg) => match OracleStateStore::<D>::new(cfg) {
+                    Ok(store) => ArcStateStore::oracle(store),
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            workflow_type = D::workflow_type(),
+                            "Failed to create Oracle state store, falling back to in-memory"
+                        );
+                        ArcStateStore::memory()
+                    }
+                },
+                None => ArcStateStore::memory(),
+            }
+        }
+
         // Create unified worker registration engine
-        let worker_registration = WorkflowEngine::new();
+        let worker_registration =
+            WorkflowEngine::with_store(make_store::<WorkerWorkflowData>(oracle_config));
         worker_registration
             .register_workflow(create_worker_registration_workflow(router_config))
             .expect("worker_registration workflow should be valid");
 
         // Create worker removal engine
-        let worker_removal = WorkflowEngine::new();
+        let worker_removal =
+            WorkflowEngine::with_store(make_store::<WorkerRemovalWorkflowData>(oracle_config));
         worker_removal
             .register_workflow(create_worker_removal_workflow())
             .expect("worker_removal workflow should be valid");
 
         // Create worker update engine
-        let worker_update = WorkflowEngine::new();
+        let worker_update =
+            WorkflowEngine::with_store(make_store::<WorkerUpdateWorkflowData>(oracle_config));
         worker_update
             .register_workflow(create_worker_update_workflow())
             .expect("worker_update workflow should be valid");
 
         // Create MCP engine
-        let mcp = WorkflowEngine::new();
+        let mcp = WorkflowEngine::with_store(make_store::<McpWorkflowData>(oracle_config));
         mcp.register_workflow(create_mcp_registration_workflow())
             .expect("mcp_registration workflow should be valid");
 
         // Create tokenizer engine
-        let tokenizer = WorkflowEngine::new();
+        let tokenizer =
+            WorkflowEngine::with_store(make_store::<TokenizerWorkflowData>(oracle_config));
         tokenizer
             .register_workflow(create_tokenizer_registration_workflow())
             .expect("tokenizer_registration workflow should be valid");
 
         // Create WASM registration engine
-        let wasm_registration = WorkflowEngine::new();
+        let wasm_registration =
+            WorkflowEngine::with_store(make_store::<WasmRegistrationWorkflowData>(oracle_config));
         wasm_registration
             .register_workflow(create_wasm_module_registration_workflow())
             .expect("wasm_module_registration workflow should be valid");
 
         // Create WASM removal engine
-        let wasm_removal = WorkflowEngine::new();
+        let wasm_removal =
+            WorkflowEngine::with_store(make_store::<WasmRemovalWorkflowData>(oracle_config));
         wasm_removal
             .register_workflow(create_wasm_module_removal_workflow())
             .expect("wasm_module_removal workflow should be valid");

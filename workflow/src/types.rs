@@ -55,6 +55,11 @@ impl WorkflowInstanceId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())
     }
+
+    /// Returns the underlying UUID value
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
 }
 
 impl Default for WorkflowInstanceId {
@@ -272,6 +277,9 @@ pub enum WorkflowError {
 
     #[error("Engine is shutting down, not accepting new workflows")]
     ShuttingDown,
+
+    #[error("Storage error: {0}")]
+    Storage(String),
 }
 
 pub type WorkflowResult<T> = Result<T, WorkflowError>;

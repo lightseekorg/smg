@@ -364,6 +364,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn workflow_state_oracle(mut self, enable: bool) -> Self {
+        self.config.workflow_state_oracle = enable;
+        self
+    }
+
     pub fn model_path<S: Into<String>>(mut self, path: S) -> Self {
         self.config.model_path = Some(path.into());
         self
