@@ -105,6 +105,13 @@ template:
             value: '123'
         image: fra.ocir.io/idqj093njucb/docker:dind
         restartPolicy: Always
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
         securityContext:
           privileged: true
         startupProbe:
