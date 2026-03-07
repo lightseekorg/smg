@@ -69,8 +69,11 @@ template:
           - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
             value: '120'
         resources:
+          requests:
+            memory: "128Gi"
           limits:
             nvidia.com/gpu: 4
+            memory: "128Gi"
         volumeMounts:
           - name: model-cache
             mountPath: /models
