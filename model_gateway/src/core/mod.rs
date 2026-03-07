@@ -43,5 +43,5 @@ pub use worker::{
 };
 pub use worker_builder::BasicWorkerBuilder;
 pub use worker_manager::{LoadMonitor, WorkerManager};
-pub use worker_registry::{HashRing, WorkerRegistry};
+pub use worker_registry::{HashRing, WorkerId, WorkerRegistry};
 pub use worker_service::WorkerService;

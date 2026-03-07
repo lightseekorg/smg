@@ -199,8 +199,13 @@ pub struct WorkerRegistry {
     /// Workers indexed by connection mode
     connection_workers: Arc<DashMap<ConnectionMode, Vec<WorkerId>>>,
 
-    /// URL to worker ID mapping
+    /// URL to worker ID mapping (forward: url → id)
     url_to_id: Arc<DashMap<String, WorkerId>>,
+
+    /// Reverse mapping: WorkerId → URL for O(1) `get_url_by_id` lookups.
+    /// Maintained symmetrically with `url_to_id` in `register` and `remove`.
+    id_to_url: Arc<DashMap<WorkerId, String>>,
+
     /// Optional mesh sync manager for state synchronization
     /// When None, the registry works independently without mesh synchronization
     /// Uses RwLock for thread-safe access when setting mesh_sync after initialization
@@ -217,6 +222,7 @@ impl WorkerRegistry {
             type_workers: Arc::new(DashMap::new()),
             connection_workers: Arc::new(DashMap::new()),
             url_to_id: Arc::new(DashMap::new()),
+            id_to_url: Arc::new(DashMap::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
         }
     }
@@ -245,19 +251,48 @@ impl WorkerRegistry {
 
     /// Register a new worker
     pub fn register(&self, worker: Arc<dyn Worker>) -> WorkerId {
-        let worker_id = if let Some(existing_id) = self.url_to_id.get(worker.url()) {
+        let (worker_id, old_worker) = if let Some(existing_id) = self.url_to_id.get(worker.url()) {
             // Worker with this URL already exists, update it
-            existing_id.clone()
+            let w_id = existing_id.clone();
+            let old_w = self.workers.get(&w_id).map(|e| e.clone());
+            (w_id, old_w)
         } else {
-            WorkerId::new()
+            (WorkerId::new(), None)
         };
+
+        // If replacing an existing worker, remove old memberships first to avoid duplicates
+        if let Some(old) = old_worker {
+            // Clean up old index
+            let old_model_id = old.model_id().to_string();
+            if let Some(mut entry) = self.model_index.get_mut(&old_model_id) {
+                let new_workers: Vec<Arc<dyn Worker>> = entry
+                    .iter()
+                    .filter(|w| w.url() != old.url())
+                    .cloned()
+                    .collect();
+                *entry = Arc::from(new_workers.into_boxed_slice());
+            }
+            self.rebuild_hash_ring(&old_model_id);
+
+            // Clean up old type workers
+            if let Some(mut type_workers) = self.type_workers.get_mut(old.worker_type()) {
+                type_workers.retain(|id| id != &worker_id);
+            }
+
+            // Clean up old connection workers
+            if let Some(mut conn_workers) = self.connection_workers.get_mut(old.connection_mode()) {
+                conn_workers.retain(|id| id != &worker_id);
+            }
+        }
 
         // Store worker
         self.workers.insert(worker_id.clone(), worker.clone());
 
-        // Update URL mapping
+        // Update URL ↔ ID mappings (both directions)
         self.url_to_id
             .insert(worker.url().to_string(), worker_id.clone());
+        self.id_to_url
+            .insert(worker_id.clone(), worker.url().to_string());
 
         // Update model index for O(1) lookups using copy-on-write
         // This creates a new immutable snapshot with the added worker
@@ -307,24 +342,53 @@ impl WorkerRegistry {
     /// Reserve (or retrieve) a stable UUID for a worker URL.
     /// Uses atomic entry API to avoid race conditions between check and insert.
     pub fn reserve_id_for_url(&self, url: &str) -> WorkerId {
-        self.url_to_id.entry(url.to_string()).or_default().clone()
+        let id = self.url_to_id.entry(url.to_string()).or_default().clone();
+        // Mirror into the reverse map so get_url_by_id resolves pending IDs.
+        // or_insert_with avoids overwriting a value already set by register().
+        self.id_to_url
+            .entry(id.clone())
+            .or_insert_with(|| url.to_string());
+        id
     }
 
-    /// Best-effort lookup of the URL for a given worker ID.
+    /// O(1) lookup of the URL for a given worker ID.
+    ///
+    /// Uses the `id_to_url` reverse index, so cost is a single DashMap
+    /// hash lookup regardless of fleet size. This replaces the previous
+    /// O(N) full scan of `url_to_id` for IDs not present in `workers`.
     pub fn get_url_by_id(&self, worker_id: &WorkerId) -> Option<String> {
+        // Fast path: worker is live get URL directly from the worker object.
         if let Some(worker) = self.get(worker_id) {
             return Some(worker.url().to_string());
         }
-        self.url_to_id
-            .iter()
-            .find_map(|entry| (entry.value() == worker_id).then(|| entry.key().clone()))
+
+        // Reverse index lookup O(1) for removed/stale IDs.
+        if let Some(url) = self.id_to_url.get(worker_id) {
+            // Verify forward mapping still matches to prevent stale ID resolution
+            // during concurrent add/remove where url_to_id was cleared but
+            // id_to_url insertion was delayed.
+            if let Some(current_id) = self.url_to_id.get(url.value()) {
+                if current_id.value() == worker_id {
+                    return Some(url.clone());
+                }
+            }
+
+            // If we reach here, the forward mapping is gone (or points to a new ID).
+            // This means the id_to_url entry is an orphaned remnant of a concurrent
+            // remove_by_url + reserve_id_for_url interleaving. Clean it up to avert a memory leak.
+            drop(url); // drop the DashMap reference so we don't deadlock on remove
+            self.id_to_url.remove(worker_id);
+        }
+
+        None
     }
 
     /// Remove a worker by ID
     pub fn remove(&self, worker_id: &WorkerId) -> Option<Arc<dyn Worker>> {
         if let Some((_, worker)) = self.workers.remove(worker_id) {
-            // Remove from URL mapping
+            // Remove from URL ↔ ID mappings (both directions)
             self.url_to_id.remove(worker.url());
+            self.id_to_url.remove(worker_id);
 
             // Remove from model index using copy-on-write
             // Create new snapshot without the removed worker
@@ -374,6 +438,11 @@ impl WorkerRegistry {
     /// Remove a worker by URL
     pub fn remove_by_url(&self, url: &str) -> Option<Arc<dyn Worker>> {
         if let Some((_, worker_id)) = self.url_to_id.remove(url) {
+            // Ensure id_to_url is also cleaned up. This is critical for pending workers
+            // that were reserved but not yet registered into `self.workers`,
+            // because `self.remove(&worker_id)` exits early without cleaning maps
+            // if the worker isn't found in `self.workers`.
+            self.id_to_url.remove(&worker_id);
             self.remove(&worker_id)
         } else {
             None
