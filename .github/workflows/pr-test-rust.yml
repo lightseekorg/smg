@@ -358,18 +358,21 @@ jobs:
         include:
           - engine: sglang
             timeout: 30
+            runner: 1-gpu
             test_filter: ""
           - engine: vllm
             timeout: 20
+            runner: 1-gpu
             test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
           - engine: trtllm
             timeout: 90
+            runner: 1-gpu-h100
             test_filter: ""
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
       gpu_tier: "1"
-      runner: 1-gpu-h100
+      runner: ${{ matrix.runner }}
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/chat_completions
       test_filter: ${{ matrix.test_filter }}
@@ -382,7 +385,7 @@ jobs:
     with:
       engine: sglang
       gpu_tier: "1"
-      runner: 1-gpu-h100
+      runner: 1-gpu
       timeout: 20
       test_dirs: e2e_test/embeddings
       extra_deps: "sentence-transformers"
@@ -404,7 +407,7 @@ jobs:
     with:
       engine: ${{ matrix.engine }}
       gpu_tier: "1"
-      runner: 1-gpu-h100
+      runner: 1-gpu
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/router
       test_filter: "--ignore=e2e_test/router/test_pd_mmlu.py"
