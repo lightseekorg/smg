@@ -21,12 +21,16 @@ async-trait.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 parking_lot.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros", "time"] }
 tracing.workspace = true
 uuid = { workspace = true, features = ["serde"] }
 # Only used by workflow
 backoff = "0.4"
+# Oracle state store
+deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"] }
+oracle = { version = "0.6.3", features = ["chrono"] }
 
 [lints]
 workspace = true

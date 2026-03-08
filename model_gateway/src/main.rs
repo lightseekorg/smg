@@ -458,6 +458,10 @@ struct CliArgs {
     #[arg(long, help_heading = "Backend")]
     storage_hook_wasm_path: Option<String>,
 
+    /// Persist workflow state to Oracle (requires --history-backend oracle)
+    #[arg(long, default_value_t = false, help_heading = "Oracle Database")]
+    workflow_state_oracle: bool,
+
     /// Path to a YAML schema config file for storage table/column remapping
     #[arg(long, help_heading = "Backend")]
     schema_config: Option<String>,
@@ -1109,6 +1113,7 @@ impl CliArgs {
             .circuit_breaker(!self.disable_circuit_breaker)
             .enable_wasm(self.enable_wasm)
             .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
+            .workflow_state_oracle(self.workflow_state_oracle)
             .igw(self.enable_igw)
             .maybe_server_cert_and_key(self.tls_cert_path.as_ref(), self.tls_key_path.as_ref());
 
