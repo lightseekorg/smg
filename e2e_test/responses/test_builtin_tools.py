@@ -154,7 +154,6 @@ def gateway_with_mcp_config_grpc(require_brave_server, mcp_config_file, model_po
     yield gateway, client, instance.model_path
 
     gateway.shutdown()
-    instance.release()
 
 
 # Note: These tests require manual gateway configuration with MCP config.

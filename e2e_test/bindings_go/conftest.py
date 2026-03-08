@@ -106,17 +106,13 @@ def grpc_worker(request, model_pool: ModelPool) -> Generator[ModelInstance, None
     logger.info(f"Getting gRPC worker for model: {model_id}")
 
     try:
-        # get() auto-acquires the returned instance
         instance = model_pool.get(model_id, ConnectionMode.GRPC)
     except (KeyError, RuntimeError) as e:
         pytest.fail(f"Failed to get gRPC worker for {model_id}: {e}")
 
     logger.info(f"Got gRPC worker at port {instance.port}")
 
-    try:
-        yield instance
-    finally:
-        instance.release()
+    yield instance
 
 
 @pytest.fixture(scope="class")
@@ -141,24 +137,15 @@ def grpc_workers(request, model_pool: ModelPool) -> Generator[list[ModelInstance
 
     logger.info(f"Getting {num_workers} gRPC workers for model: {model_id}")
 
-    instances: list = []
-
     try:
         if num_workers > 1:
-            # Get existing workers of this mode
-            all_existing = model_pool.get_workers_by_type(model_id, WorkerType.REGULAR)
-            existing_for_mode = [w for w in all_existing if w.mode == ConnectionMode.GRPC]
-
-            # Release workers with wrong mode
-            for w in all_existing:
-                if w not in existing_for_mode:
-                    w.release()
+            # Get existing gRPC workers
+            existing_for_mode = model_pool.get_workers_by_type(
+                model_id, WorkerType.REGULAR, ConnectionMode.GRPC
+            )
 
             if len(existing_for_mode) >= num_workers:
                 instances = existing_for_mode[:num_workers]
-                # Release excess workers
-                for w in existing_for_mode[num_workers:]:
-                    w.release()
             else:
                 # Need to launch more workers
                 missing = num_workers - len(existing_for_mode)
@@ -172,9 +159,6 @@ def grpc_workers(request, model_pool: ModelPool) -> Generator[list[ModelInstance
                     for i in range(missing)
                 ]
                 new_instances = model_pool.launch_workers(workers_to_launch, startup_timeout=300)
-                # Acquire newly launched instances
-                for inst in new_instances:
-                    inst.acquire()
                 instances = existing_for_mode + new_instances
 
             if not instances:
@@ -200,10 +184,6 @@ def grpc_workers(request, model_pool: ModelPool) -> Generator[list[ModelInstance
 
     except (KeyError, RuntimeError) as e:
         pytest.fail(f"Failed to get gRPC workers for {model_id}: {e}")
-
-    finally:
-        for inst in instances:
-            inst.release()
 
 
 @pytest.fixture(scope="class")
