@@ -7,4 +7,4 @@ set -e
 
 VLLM_SRC="${1:-/tmp/vllm-src}"
 cd "${VLLM_SRC}"
-VLLM_USE_PRECOMPILED=1 pip install --force-reinstall --editable .
+VLLM_USE_PRECOMPILED=1 pip install --no-deps --force-reinstall --editable .

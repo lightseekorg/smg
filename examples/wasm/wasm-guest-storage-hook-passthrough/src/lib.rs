@@ -5,7 +5,7 @@
 //! the hook pipeline is running.
 
 wit_bindgen::generate!({
-    path: "../../../wasm/src/interface/storage",
+    path: "../../../crates/wasm/src/interface/storage",
     world: "storage-hook",
 });
 

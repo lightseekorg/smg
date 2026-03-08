@@ -1,0 +1,270 @@
+name: _build-engine-image
+
+on:
+  workflow_call:
+    inputs:
+      engine:
+        description: 'Engine name: vllm, sglang, trtllm, tgl'
+        required: true
+        type: string
+      backend:
+        description: 'SMG_DEFAULT_BACKEND override (defaults to engine value)'
+        required: false
+        type: string
+      base_image_ref:
+        description: 'Base image (full image:tag)'
+        required: false
+        type: string
+      engine_repo:
+        description: 'Engine repo URL (empty = use engine from base image)'
+        required: false
+        type: string
+      engine_commit:
+        description: 'Engine commit/ref ("latest" for HEAD)'
+        required: false
+        default: 'latest'
+        type: string
+      smg_repo:
+        description: 'SMG repo URL'
+        required: false
+        default: 'https://github.com/lightseekorg/smg'
+        type: string
+      smg_commit:
+        description: 'SMG commit/ref ("latest" for HEAD)'
+        required: false
+        default: 'v1.1.0'
+        type: string
+      tag:
+        description: 'Override image tag'
+        required: false
+        type: string
+      # TRT-LLM source build (no-op for other engines)
+      source_build_repo:
+        description: 'Repo to build base image from source (TRT-LLM path)'
+        required: false
+        type: string
+      source_build_ref:
+        description: 'Ref/commit for source build repo'
+        required: false
+        default: 'latest'
+        type: string
+      dry_run:
+        description: 'Build only, do not push image'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  build-and-push:
+    if: github.repository == 'lightseekorg/smg'
+    runs-on: ["8-gpu-h200"]
+    steps:
+      - name: Print inputs to summary
+        env:
+          ENGINE: ${{ inputs.engine }}
+          BASE_IMAGE_REF: ${{ inputs.base_image_ref }}
+          ENGINE_REPO: ${{ inputs.engine_repo }}
+          ENGINE_COMMIT: ${{ inputs.engine_commit }}
+          SMG_REPO: ${{ inputs.smg_repo }}
+          SMG_COMMIT: ${{ inputs.smg_commit }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_BUILD_REPO: ${{ inputs.source_build_repo }}
+          SOURCE_BUILD_REF: ${{ inputs.source_build_ref }}
+        run: |
+          # Strip credentials from repo URLs for safe summary output
+          sanitize() { local v="$1"; v="${v#https://}"; v="${v#http://}"; v="${v##*@}"; v="${v%.git}"; printf '%s' "$v"; }
+          echo "## Inputs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| engine | \`${ENGINE}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| base_image_ref | \`${BASE_IMAGE_REF}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| engine_repo | \`$(sanitize "${ENGINE_REPO}")\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| engine_commit | \`${ENGINE_COMMIT}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| smg_repo | \`$(sanitize "${SMG_REPO}")\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| smg_commit | \`${SMG_COMMIT}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| tag | \`${TAG}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| source_build_repo | \`$(sanitize "${SOURCE_BUILD_REPO}")\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| source_build_ref | \`${SOURCE_BUILD_REF}\` |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Checkout SMG
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        env:
+          ENGINE: ${{ inputs.engine }}
+          BASE_IMAGE_REF: ${{ inputs.base_image_ref }}
+          SOURCE_BUILD_REPO: ${{ inputs.source_build_repo }}
+        run: |
+          case "${ENGINE}" in
+            vllm|sglang|trtllm|tgl) ;;
+            *) echo "ERROR: Unknown engine '${ENGINE}'. Must be one of: vllm, sglang, trtllm, tgl." >&2; exit 1 ;;
+          esac
+          if [ "${ENGINE}" = "trtllm" ] && [ -z "${BASE_IMAGE_REF}" ] && [ -z "${SOURCE_BUILD_REPO}" ]; then
+            echo "ERROR: For trtllm, either base_image_ref or source_build_repo must be set." >&2
+            exit 1
+          fi
+          if [ "${ENGINE}" != "trtllm" ] && [ -n "${SOURCE_BUILD_REPO}" ]; then
+            echo "ERROR: source_build_repo is only supported for engine=trtllm." >&2
+            exit 1
+          fi
+
+      # ── TRT-LLM source build (conditional) ──────────────────────────────────
+
+      - name: Resolve source build checkout ref
+        id: source-ref
+        if: inputs.engine == 'trtllm' && inputs.base_image_ref == '' && inputs.source_build_repo != ''
+        env:
+          SOURCE_BUILD_REF: ${{ inputs.source_build_ref }}
+          SOURCE_BUILD_REPO: ${{ inputs.source_build_repo }}
+        run: |
+          if [ "${SOURCE_BUILD_REF}" = "latest" ]; then
+            echo "ref=" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${SOURCE_BUILD_REF}" >> "$GITHUB_OUTPUT"
+          fi
+          repo="${SOURCE_BUILD_REPO}"
+          repo="${repo#https://github.com/}"
+          repo="${repo%.git}"
+          repo="${repo%/}"
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout source build repo
+        if: inputs.engine == 'trtllm' && inputs.base_image_ref == '' && inputs.source_build_repo != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.source-ref.outputs.repo }}
+          ref: ${{ steps.source-ref.outputs.ref }}
+          token: ${{ secrets.GH_SYNC_TOKEN }}
+          fetch-depth: 0
+          submodules: recursive
+          lfs: true
+          path: source-build-repo
+
+      # ── Docker setup ─────────────────────────────────────────────────────────
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
+      - name: Login to GitHub Container Registry
+        if: ${{ !inputs.dry_run }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Resolve tag and effective base image ─────────────────────────────────
+
+      - name: Resolve image tag and base ref
+        id: resolve
+        env:
+          ENGINE: ${{ inputs.engine }}
+          BASE_IMAGE_REF: ${{ inputs.base_image_ref }}
+          ENGINE_REPO: ${{ inputs.engine_repo }}
+          ENGINE_COMMIT: ${{ inputs.engine_commit }}
+          TAG_OVERRIDE: ${{ inputs.tag }}
+        run: |
+          SMG_VERSION=$(grep -m1 '^version = ' bindings/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+
+          if [ -n "${TAG_OVERRIDE}" ]; then
+            IMAGE_TAG="${TAG_OVERRIDE}"
+          else
+            if [ -n "${ENGINE_REPO}" ]; then
+              ENGINE_VERSION="${ENGINE_COMMIT//\//-}"
+              ENGINE_VERSION="${ENGINE_VERSION// /}"
+            else
+              ENGINE_VERSION="${BASE_IMAGE_REF##*:}"
+              ENGINE_VERSION="${ENGINE_VERSION//\//-}"
+            fi
+            IMAGE_TAG="${SMG_VERSION}-${ENGINE}-${ENGINE_VERSION}"
+          fi
+
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          # Determine effective base image ref and engine repo
+          if [ -n "${BASE_IMAGE_REF}" ]; then
+            echo "base_image_ref=${BASE_IMAGE_REF}" >> "$GITHUB_OUTPUT"
+            echo "effective_engine_repo=${ENGINE_REPO}" >> "$GITHUB_OUTPUT"
+          else
+            # Source build path: engine is baked into the base image
+            echo "base_image_ref=smg-build/release:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+            echo "effective_engine_repo=" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "**Image tag:** \`${IMAGE_TAG}\`" >> $GITHUB_STEP_SUMMARY
+
+      # ── TRT-LLM: build base image from source (conditional) ─────────────────
+
+      - name: Build base image from source
+        if: inputs.engine == 'trtllm' && inputs.base_image_ref == '' && inputs.source_build_repo != ''
+        env:
+          IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
+        run: |
+          make -C source-build-repo/docker release_build \
+            CUDA_ARCHS="100-real" \
+            IMAGE_TAG="${IMAGE_TAG}" \
+            IMAGE_NAME="smg-build"
+          echo "**Build base image from source:** done" >> $GITHUB_STEP_SUMMARY
+
+      # ── Build engine image ───────────────────────────────────────────────────
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/engine.Dockerfile
+          push: false
+          load: true
+          build-args: |
+            BASE_IMAGE_REF=${{ steps.resolve.outputs.base_image_ref }}
+            ENGINE=${{ inputs.engine }}
+            BACKEND=${{ inputs.backend }}
+            ENGINE_REPO=${{ steps.resolve.outputs.effective_engine_repo }}
+            ENGINE_COMMIT=${{ inputs.engine_commit }}
+            SMG_REPO=${{ inputs.smg_repo }}
+            SMG_COMMIT=${{ inputs.smg_commit }}
+          tags: smg-build:${{ steps.resolve.outputs.image_tag }}
+
+      # ── Push to GHCR ────────────────────────────────────────────────────────
+
+      - name: Push image to GHCR
+        if: ${{ !inputs.dry_run }}
+        id: push-ghcr
+        env:
+          IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
+        run: |
+          BASE_IMAGE_TAG="smg-build:${IMAGE_TAG}"
+          TARGET_IMAGE="ghcr.io/${{ github.repository_owner }}/smg:${IMAGE_TAG}"
+          echo "image_name=${TARGET_IMAGE}" >> "$GITHUB_OUTPUT"
+          docker tag "${BASE_IMAGE_TAG}" "${TARGET_IMAGE}"
+          docker push "${TARGET_IMAGE}"
+          echo "**Pushed:** \`${TARGET_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
+
+      # ── Cleanup ──────────────────────────────────────────────────────────────
+
+      - name: Clean up local images
+        if: always()
+        env:
+          IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
+          PUSHED_IMAGE: ${{ steps.push-ghcr.outputs.image_name }}
+          BASE_REF: ${{ steps.resolve.outputs.base_image_ref }}
+        run: |
+          docker rmi "smg-build:${IMAGE_TAG}" || true
+          docker rmi "${PUSHED_IMAGE}" || true
+          if [ -n "${BASE_REF}" ]; then
+            docker rmi "${BASE_REF}" || true
+          fi
+
+      - name: Summary
+        if: always()
+        env:
+          IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
+          IMAGE_NAME: ${{ steps.push-ghcr.outputs.image_name }}
+        run: |
+          echo "## Image" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image tag:** \`${IMAGE_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Image name:** \`${IMAGE_NAME}\`" >> $GITHUB_STEP_SUMMARY

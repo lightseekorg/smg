@@ -328,34 +328,98 @@ class TestParseServeArgs:
 
 
 class TestWorkerLauncherGpuEnv:
-    """Test GPU assignment via _get_tp_size() and gpu_env()."""
+    """Test GPU assignment via _get_tp_size() and gpu_env().
+
+    Integration tests go through parse_serve_args to verify that CLI flags
+    actually produce the correct attribute names for each launcher.
+    """
+
+    # -- Integration: CLI flags → _get_tp_size → gpu_env ---------------------
+
+    @pytest.mark.parametrize(
+        "backend, cli_flag, tp_value, expected_devices",
+        [
+            ("sglang", "--tp-size", "4", "0,1,2,3"),
+            ("sglang", "--tensor-parallel-size", "2", "0,1"),
+        ],
+    )
+    def test_sglang_tp_from_cli(self, backend, cli_flag, tp_value, expected_devices):
+        """CLI --tp-size / --tensor-parallel-size flows through to CUDA_VISIBLE_DEVICES."""
+
+        def _mock_sglang_args(b, parser):
+            if b == "sglang":
+                parser.add_argument("--tensor-parallel-size", "--tp-size", type=int, default=1)
+                parser.add_argument("--model-path", type=str)
+            else:
+                _import_backend_args(b, parser)
+
+        with patch("smg.serve._import_backend_args", side_effect=_mock_sglang_args):
+            _, args, _ = parse_serve_args(
+                ["--backend", backend, "--model-path", "/tmp/m", cli_flag, tp_value]
+            )
+        launcher = SglangWorkerLauncher()
+        env = launcher.gpu_env(args, dp_rank=0, env={})
+        assert env["CUDA_VISIBLE_DEVICES"] == expected_devices
+
+    @pytest.mark.parametrize(
+        "cli_flag, tp_value, expected_devices",
+        [
+            ("--tensor-parallel-size", "2", "0,1"),
+        ],
+    )
+    def test_vllm_tp_from_cli(self, cli_flag, tp_value, expected_devices):
+        """CLI --tensor-parallel-size flows through to CUDA_VISIBLE_DEVICES for vllm."""
+
+        def _mock_vllm_args(b, parser):
+            if b == "vllm":
+                parser.add_argument("--tensor-parallel-size", type=int, default=1)
+                parser.add_argument("--model", type=str)
+            else:
+                _import_backend_args(b, parser)
+
+        with patch("smg.serve._import_backend_args", side_effect=_mock_vllm_args):
+            _, args, _ = parse_serve_args(
+                ["--backend", "vllm", "--model", "/tmp/m", cli_flag, tp_value]
+            )
+        launcher = VllmWorkerLauncher()
+        env = launcher.gpu_env(args, dp_rank=0, env={})
+        assert env["CUDA_VISIBLE_DEVICES"] == expected_devices
+
+    def test_trtllm_tp_from_cli(self):
+        """CLI --tp_size flows through to CUDA_VISIBLE_DEVICES for trtllm."""
+        _, args, _ = parse_serve_args(
+            ["--backend", "trtllm", "--model-path", "/tmp/m", "--tp_size", "4"]
+        )
+        launcher = TrtllmWorkerLauncher()
+        env = launcher.gpu_env(args, dp_rank=0, env={})
+        assert env["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
+
+    # -- Unit: _get_tp_size with direct Namespace (TRT-LLM config paths) ------
 
     @pytest.mark.parametrize(
         "launcher_class, args, expected_tp",
         [
-            (SglangWorkerLauncher, argparse.Namespace(tp_size=4), 4),
-            (SglangWorkerLauncher, argparse.Namespace(), 1),
-            (VllmWorkerLauncher, argparse.Namespace(tensor_parallel_size=2), 2),
-            (VllmWorkerLauncher, argparse.Namespace(), 1),
             (TrtllmWorkerLauncher, argparse.Namespace(tp_size=8), 8),
             (TrtllmWorkerLauncher, argparse.Namespace(tensor_parallel_size=8), 8),
             (TrtllmWorkerLauncher, argparse.Namespace(), 1),
         ],
     )
-    def test_get_tp_size(self, launcher_class, args, expected_tp):
-        """_get_tp_size returns the correct value from args or defaults to 1."""
+    def test_get_tp_size_trtllm(self, launcher_class, args, expected_tp):
+        """TRT-LLM _get_tp_size supports both tp_size and tensor_parallel_size attrs."""
         launcher = launcher_class()
         assert launcher._get_tp_size(args) == expected_tp
 
+    # -- Unit: gpu_env math ---------------------------------------------------
+
     def test_gpu_env_dp_rank_0_tp_2(self):
         launcher = SglangWorkerLauncher()
-        args = argparse.Namespace(tp_size=2)
+        args = argparse.Namespace(tensor_parallel_size=2)
         env = launcher.gpu_env(args, dp_rank=0, env={})
         assert env["CUDA_VISIBLE_DEVICES"] == "0,1"
 
     def test_gpu_env_dp_rank_1_tp_2(self):
         launcher = SglangWorkerLauncher()
-        args = argparse.Namespace(tp_size=2)
+        args = argparse.Namespace(tensor_parallel_size=2)
         env = launcher.gpu_env(args, dp_rank=1, env={})
         assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
 
@@ -373,7 +437,7 @@ class TestWorkerLauncherGpuEnv:
 
     def test_gpu_env_preserves_existing_env(self):
         launcher = SglangWorkerLauncher()
-        args = argparse.Namespace(tp_size=1)
+        args = argparse.Namespace(tensor_parallel_size=1)
         base_env = {"PATH": "/usr/bin", "HOME": "/root"}
         env = launcher.gpu_env(args, dp_rank=0, env=base_env)
         assert env["PATH"] == "/usr/bin"
@@ -382,7 +446,7 @@ class TestWorkerLauncherGpuEnv:
 
     def test_gpu_env_does_not_mutate_input(self):
         launcher = SglangWorkerLauncher()
-        args = argparse.Namespace(tp_size=1)
+        args = argparse.Namespace(tensor_parallel_size=1)
         base_env = {"FOO": "bar"}
         env = launcher.gpu_env(args, dp_rank=0, env=base_env)
         assert "CUDA_VISIBLE_DEVICES" not in base_env
@@ -390,7 +454,7 @@ class TestWorkerLauncherGpuEnv:
 
     def test_gpu_env_none_copies_os_environ(self):
         launcher = SglangWorkerLauncher()
-        args = argparse.Namespace(tp_size=1)
+        args = argparse.Namespace(tensor_parallel_size=1)
         with patch.dict("os.environ", {"TEST_VAR": "123"}, clear=False):
             env = launcher.gpu_env(args, dp_rank=0)
         assert env["TEST_VAR"] == "123"
@@ -988,7 +1052,7 @@ class TestServeOrchestrator:
 
     def test_launch_workers_passes_gpu_env(self):
         """_launch_workers passes CUDA_VISIBLE_DEVICES via gpu_env for each dp_rank."""
-        args = _make_args(data_parallel_size=2, tp_size=2, connection_mode="grpc")
+        args = _make_args(data_parallel_size=2, tensor_parallel_size=2, connection_mode="grpc")
         backend_args = ["--model-path", "/tmp/model"]
         orch = ServeOrchestrator("sglang", args, backend_args)
 

@@ -7,4 +7,4 @@ set -e
 
 SGL_SRC="${1:-/tmp/sglang-src}"
 cd "${SGL_SRC}/python"
-pip install --force-reinstall --editable .
+pip install --no-deps --force-reinstall --editable .

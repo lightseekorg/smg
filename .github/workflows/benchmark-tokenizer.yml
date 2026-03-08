@@ -5,18 +5,18 @@ on:
     branches: [ main ]
     paths:
       - 'model_gateway/benches/tokenizer_benchmark.rs'
-      - 'tokenizer/**'
-      - '!tokenizer/**/tests/**'
-      - '!tokenizer/**/*_test.rs'
-      - '!tokenizer/**/test_*.rs'
+      - 'crates/tokenizer/**'
+      - '!crates/tokenizer/**/tests/**'
+      - '!crates/tokenizer/**/*_test.rs'
+      - '!crates/tokenizer/**/test_*.rs'
   pull_request:
     branches: [ main ]
     paths:
       - 'model_gateway/benches/tokenizer_benchmark.rs'
-      - 'tokenizer/**'
-      - '!tokenizer/**/tests/**'
-      - '!tokenizer/**/*_test.rs'
-      - '!tokenizer/**/test_*.rs'
+      - 'crates/tokenizer/**'
+      - '!crates/tokenizer/**/tests/**'
+      - '!crates/tokenizer/**/*_test.rs'
+      - '!crates/tokenizer/**/test_*.rs'
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0'

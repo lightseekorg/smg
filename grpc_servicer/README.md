@@ -26,7 +26,7 @@ vllm serve meta-llama/Llama-2-7b-hf --grpc
 Or directly:
 
 ```bash
-python -m smg_grpc_servicer.vllm.server --model meta-llama/Llama-2-7b-hf --port 50051
+python -m vllm.entrypoints.grpc_server --model meta-llama/Llama-2-7b-hf --port 50051
 ```
 
 ## Architecture

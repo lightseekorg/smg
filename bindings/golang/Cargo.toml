@@ -28,10 +28,10 @@ default-features = true
 workspace = true
 
 [dependencies.llm-tokenizer]
-path = "../../tokenizer"
+path = "../../crates/tokenizer"
 
 [dependencies.tool-parser]
-path = "../../tool_parser"
+path = "../../crates/tool_parser"
 
 [dependencies.smg-grpc-client]
 workspace = true

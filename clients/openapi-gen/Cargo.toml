@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
-openai-protocol = { path = "../../protocols" }
+openai-protocol = { path = "../../crates/protocols" }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

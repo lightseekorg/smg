@@ -20,21 +20,10 @@ pub enum ConnectionState {
     Disconnected,
 }
 
-/// A tracked WebSocket session.
+/// A tracked realtime connection (WebSocket session or WebRTC call).
 #[derive(Debug, Clone)]
-pub struct SessionEntry {
-    pub session_id: String,
-    pub model: String,
-    pub worker_url: String,
-    pub state: ConnectionState,
-    pub created_at: Instant,
-    pub cancel_token: CancellationToken,
-}
-
-/// A tracked WebRTC call.
-#[derive(Debug, Clone)]
-pub struct CallEntry {
-    pub call_id: String,
+pub struct ConnectionEntry {
+    pub id: String,
     pub model: String,
     pub worker_url: String,
     pub state: ConnectionState,
@@ -48,15 +37,77 @@ pub struct CallEntry {
 /// cleanup of stale entries.
 #[derive(Debug)]
 pub struct RealtimeRegistry {
-    sessions: DashMap<String, SessionEntry>,
-    calls: DashMap<String, CallEntry>,
+    sessions: ConnectionMap,
+    calls: ConnectionMap,
+}
+
+/// A named DashMap of connection entries with shared CRUD operations.
+#[derive(Debug)]
+struct ConnectionMap(DashMap<String, ConnectionEntry>);
+
+impl ConnectionMap {
+    fn new() -> Self {
+        Self(DashMap::new())
+    }
+
+    fn register(&self, id: String, model: String, worker_url: String) -> ConnectionEntry {
+        let entry = ConnectionEntry {
+            id: id.clone(),
+            model,
+            worker_url,
+            state: ConnectionState::Pending,
+            created_at: Instant::now(),
+            cancel_token: CancellationToken::new(),
+        };
+        if let Some(old) = self.0.insert(id, entry.clone()) {
+            old.cancel_token.cancel();
+        }
+        entry
+    }
+
+    fn set_state(&self, id: &str, state: ConnectionState) {
+        if let Some(mut entry) = self.0.get_mut(id) {
+            entry.state = state;
+        }
+    }
+
+    fn get(&self, id: &str) -> Option<ConnectionEntry> {
+        self.0.get(id).map(|e| e.clone())
+    }
+
+    fn remove(&self, id: &str) -> Option<ConnectionEntry> {
+        self.0.remove(id).map(|(_, e)| {
+            e.cancel_token.cancel();
+            e
+        })
+    }
+
+    /// Remove stale entries and cancel their tokens. Returns count of reaped entries.
+    fn reap_stale(&self, is_stale: impl Fn(ConnectionState, Duration) -> bool) -> usize {
+        let now = Instant::now();
+        let mut reaped = 0;
+        self.0.retain(|_, entry| {
+            if is_stale(entry.state, now.duration_since(entry.created_at)) {
+                entry.cancel_token.cancel();
+                reaped += 1;
+                false
+            } else {
+                true
+            }
+        });
+        reaped
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 impl RealtimeRegistry {
     pub fn new() -> Self {
         Self {
-            sessions: DashMap::new(),
-            calls: DashMap::new(),
+            sessions: ConnectionMap::new(),
+            calls: ConnectionMap::new(),
         }
     }
 
@@ -67,70 +118,43 @@ impl RealtimeRegistry {
         session_id: String,
         model: String,
         worker_url: String,
-    ) -> SessionEntry {
-        let entry = SessionEntry {
-            session_id: session_id.clone(),
-            model,
-            worker_url,
-            state: ConnectionState::Pending,
-            created_at: Instant::now(),
-            cancel_token: CancellationToken::new(),
-        };
-        if let Some(old) = self.sessions.insert(session_id, entry.clone()) {
-            old.cancel_token.cancel();
-        }
-        entry
+    ) -> ConnectionEntry {
+        self.sessions.register(session_id, model, worker_url)
     }
 
     pub fn set_session_state(&self, session_id: &str, state: ConnectionState) {
-        if let Some(mut entry) = self.sessions.get_mut(session_id) {
-            entry.state = state;
-        }
+        self.sessions.set_state(session_id, state);
     }
 
-    pub fn get_session(&self, session_id: &str) -> Option<SessionEntry> {
-        self.sessions.get(session_id).map(|e| e.clone())
+    pub fn get_session(&self, session_id: &str) -> Option<ConnectionEntry> {
+        self.sessions.get(session_id)
     }
 
-    pub fn remove_session(&self, session_id: &str) -> Option<SessionEntry> {
-        self.sessions.remove(session_id).map(|(_, e)| {
-            e.cancel_token.cancel();
-            e
-        })
+    pub fn remove_session(&self, session_id: &str) -> Option<ConnectionEntry> {
+        self.sessions.remove(session_id)
     }
 
     // ---- Call methods ----
 
-    pub fn register_call(&self, call_id: String, model: String, worker_url: String) -> CallEntry {
-        let entry = CallEntry {
-            call_id: call_id.clone(),
-            model,
-            worker_url,
-            state: ConnectionState::Pending,
-            created_at: Instant::now(),
-            cancel_token: CancellationToken::new(),
-        };
-        if let Some(old) = self.calls.insert(call_id, entry.clone()) {
-            old.cancel_token.cancel();
-        }
-        entry
+    pub fn register_call(
+        &self,
+        call_id: String,
+        model: String,
+        worker_url: String,
+    ) -> ConnectionEntry {
+        self.calls.register(call_id, model, worker_url)
     }
 
-    pub fn get_call(&self, call_id: &str) -> Option<CallEntry> {
-        self.calls.get(call_id).map(|e| e.clone())
+    pub fn get_call(&self, call_id: &str) -> Option<ConnectionEntry> {
+        self.calls.get(call_id)
     }
 
     pub fn set_call_state(&self, call_id: &str, state: ConnectionState) {
-        if let Some(mut entry) = self.calls.get_mut(call_id) {
-            entry.state = state;
-        }
+        self.calls.set_state(call_id, state);
     }
 
-    pub fn remove_call(&self, call_id: &str) -> Option<CallEntry> {
-        self.calls.remove(call_id).map(|(_, e)| {
-            e.cancel_token.cancel();
-            e
-        })
+    pub fn remove_call(&self, call_id: &str) -> Option<ConnectionEntry> {
+        self.calls.remove(call_id)
     }
 
     // ---- Reaper ----
@@ -165,7 +189,6 @@ impl RealtimeRegistry {
                         return;
                     }
                 }
-                let now = Instant::now();
 
                 let is_stale = |state: ConnectionState, age: Duration| -> bool {
                     match state {
@@ -175,39 +198,8 @@ impl RealtimeRegistry {
                     }
                 };
 
-                let stale_session_ids: Vec<String> = registry
-                    .sessions
-                    .iter()
-                    .filter(|e| is_stale(e.state, now.duration_since(e.created_at)))
-                    .map(|e| e.session_id.clone())
-                    .collect();
-
-                let mut sessions_reaped = 0usize;
-                for id in &stale_session_ids {
-                    if let Some((_, entry)) = registry.sessions.remove_if(id, |_, e| {
-                        is_stale(e.state, now.duration_since(e.created_at))
-                    }) {
-                        entry.cancel_token.cancel();
-                        sessions_reaped += 1;
-                    }
-                }
-
-                let stale_call_ids: Vec<String> = registry
-                    .calls
-                    .iter()
-                    .filter(|e| is_stale(e.state, now.duration_since(e.created_at)))
-                    .map(|e| e.call_id.clone())
-                    .collect();
-
-                let mut calls_reaped = 0usize;
-                for id in &stale_call_ids {
-                    if let Some((_, entry)) = registry.calls.remove_if(id, |_, e| {
-                        is_stale(e.state, now.duration_since(e.created_at))
-                    }) {
-                        entry.cancel_token.cancel();
-                        calls_reaped += 1;
-                    }
-                }
+                let sessions_reaped = registry.sessions.reap_stale(is_stale);
+                let calls_reaped = registry.calls.reap_stale(is_stale);
 
                 if sessions_reaped > 0 || calls_reaped > 0 {
                     debug!(

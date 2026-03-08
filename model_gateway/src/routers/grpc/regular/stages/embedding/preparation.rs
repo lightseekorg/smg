@@ -22,12 +22,6 @@ impl EmbeddingPreparationStage {
     }
 }
 
-impl Default for EmbeddingPreparationStage {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[async_trait]
 impl PipelineStage for EmbeddingPreparationStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {

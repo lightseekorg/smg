@@ -58,19 +58,19 @@ escape_version() {
 # Use "-" for the main gateway crate (no workspace dep entry).
 # ---------------------------------------------------------------------------
 CRATES=(
-    "openai-protocol|protocols|openai-protocol"
-    "reasoning-parser|reasoning_parser|reasoning-parser"
-    "tool-parser|tool_parser|tool-parser"
-    "wfaas|workflow|wfaas"
-    "llm-tokenizer|tokenizer|llm-tokenizer"
-    "smg-auth|auth|smg-auth"
-    "smg-mcp|mcp|smg-mcp"
-    "kv-index|kv_index|kv-index"
-    "data-connector|data_connector|smg-data-connector"
-    "llm-multimodal|multimodal|llm-multimodal"
-    "smg-wasm|wasm|smg-wasm"
-    "smg-mesh|mesh|smg-mesh"
-    "smg-grpc-client|grpc_client|smg-grpc-client"
+    "openai-protocol|crates/protocols|openai-protocol"
+    "reasoning-parser|crates/reasoning_parser|reasoning-parser"
+    "tool-parser|crates/tool_parser|tool-parser"
+    "wfaas|crates/workflow|wfaas"
+    "llm-tokenizer|crates/tokenizer|llm-tokenizer"
+    "smg-auth|crates/auth|smg-auth"
+    "smg-mcp|crates/mcp|smg-mcp"
+    "kv-index|crates/kv_index|kv-index"
+    "data-connector|crates/data_connector|smg-data-connector"
+    "llm-multimodal|crates/multimodal|llm-multimodal"
+    "smg-wasm|crates/wasm|smg-wasm"
+    "smg-mesh|crates/mesh|smg-mesh"
+    "smg-grpc-client|crates/grpc_client|smg-grpc-client"
     "smg|model_gateway|-"
 )
 
@@ -80,7 +80,7 @@ CRATES=(
 # version_file is relative to REPO_ROOT.
 # ---------------------------------------------------------------------------
 PYTHON_PACKAGES=(
-    "smg-grpc-proto|grpc_client/python|grpc_client/python/smg_grpc_proto/__init__.py"
+    "smg-grpc-proto|crates/grpc_client/python|crates/grpc_client/python/smg_grpc_proto/__init__.py"
 )
 
 # ---------------------------------------------------------------------------
@@ -120,11 +120,19 @@ get_crate_version() {
 }
 
 # Extract version at a specific git ref (returns empty string if crate missing)
+# Falls back to pre-crates-move path (e.g., crates/auth → auth) for older tags.
 get_crate_version_at_ref() {
     local path="$1"
     local ref="$2"
     local content
-    content=$(git show "$ref:$path/Cargo.toml" 2>/dev/null) || return 0
+    content=$(git show "$ref:$path/Cargo.toml" 2>/dev/null) || {
+        # Fallback: try legacy path before crates/ directory move
+        if [[ "$path" == crates/* ]]; then
+            content=$(git show "$ref:${path#crates/}/Cargo.toml" 2>/dev/null) || return 0
+        else
+            return 0
+        fi
+    }
     if echo "$content" | grep -qE 'version\.workspace\s*=\s*true|version\s*=\s*\{\s*workspace\s*=\s*true'; then
         echo -e "${RED}ERROR: $path/Cargo.toml at $ref uses workspace versioning; this script expects explicit version strings.${NC}" >&2
         exit 1
@@ -233,11 +241,19 @@ get_python_version() {
 }
 
 # Extract __version__ from a Python file at a specific git ref
+# Falls back to pre-crates-move path (e.g., crates/X/... → X/...) for older tags.
 get_python_version_at_ref() {
     local file="$1"
     local ref="$2"
     local content
-    content=$(git show "$ref:$file" 2>/dev/null) || return 0
+    content=$(git show "$ref:$file" 2>/dev/null) || {
+        # Fallback: try legacy path before crates/ directory move
+        if [[ "$file" == crates/* ]]; then
+            content=$(git show "$ref:${file#crates/}" 2>/dev/null) || return 0
+        else
+            return 0
+        fi
+    }
     echo "$content" | grep '__version__' | sed 's/.*"\(.*\)".*/\1/'
 }
 
@@ -385,7 +401,10 @@ echo -e "${RED}${BOLD}$issues issue(s) found.${NC}"
 # ---------------------------------------------------------------------------
 # Phase 2: Offer to fix
 # ---------------------------------------------------------------------------
-total_fixes=$(( ${#NEEDS_BUMP[@]} + ${#NEEDS_WS_SYNC[@]} + ${#NEEDS_PY_BUMP[@]} ))
+n_bump=${#NEEDS_BUMP[@]}
+n_ws=${#NEEDS_WS_SYNC[@]}
+n_py=${#NEEDS_PY_BUMP[@]:-0}
+total_fixes=$(( n_bump + n_ws + n_py ))
 if [[ "$total_fixes" -eq 0 ]]; then
     exit 1
 fi
@@ -393,7 +412,7 @@ fi
 echo ""
 echo -e "${BOLD}Proposed fixes:${NC}"
 
-for entry in "${NEEDS_BUMP[@]}"; do
+for entry in ${NEEDS_BUMP[@]+"${NEEDS_BUMP[@]}"}; do
     IFS='|' read -r name path dep_key current_version level <<< "$entry"
     new_version=$(bump_version "$current_version" "$level")
     echo -e "  $(bump_label "$level") $name v$current_version → v$new_version ($path/Cargo.toml)"
@@ -402,14 +421,14 @@ for entry in "${NEEDS_BUMP[@]}"; do
     fi
 done
 
-if [[ ${#NEEDS_WS_SYNC[@]} -gt 0 ]]; then
+if [[ "$n_ws" -gt 0 ]]; then
     for entry in "${NEEDS_WS_SYNC[@]}"; do
         IFS='|' read -r name dep_key crate_version ws_version path <<< "$entry"
         echo -e "  ${BLUE}sync${NC} workspace Cargo.toml $dep_key v$ws_version → v$crate_version"
     done
 fi
 
-for entry in "${NEEDS_PY_BUMP[@]}"; do
+for entry in ${NEEDS_PY_BUMP[@]+"${NEEDS_PY_BUMP[@]}"}; do
     IFS='|' read -r name path version_file current_version level <<< "$entry"
     new_version=$(bump_version "$current_version" "$level")
     echo -e "  $(bump_label "$level") $name v$current_version → v$new_version ($version_file)"
@@ -428,7 +447,7 @@ fi
 echo ""
 fix_failed=0
 
-for entry in "${NEEDS_BUMP[@]}"; do
+for entry in ${NEEDS_BUMP[@]+"${NEEDS_BUMP[@]}"}; do
     IFS='|' read -r name path dep_key current_version level <<< "$entry"
     new_version=$(bump_version "$current_version" "$level")
 
@@ -450,7 +469,7 @@ for entry in "${NEEDS_BUMP[@]}"; do
     fi
 done
 
-if [[ ${#NEEDS_WS_SYNC[@]} -gt 0 ]]; then
+if [[ "$n_ws" -gt 0 ]]; then
     for entry in "${NEEDS_WS_SYNC[@]}"; do
         IFS='|' read -r name dep_key crate_version ws_version path <<< "$entry"
         if set_workspace_dep_version "$dep_key" "$ws_version" "$crate_version"; then
@@ -461,7 +480,7 @@ if [[ ${#NEEDS_WS_SYNC[@]} -gt 0 ]]; then
     done
 fi
 
-for entry in "${NEEDS_PY_BUMP[@]}"; do
+for entry in ${NEEDS_PY_BUMP[@]+"${NEEDS_PY_BUMP[@]}"}; do
     IFS='|' read -r name path version_file current_version level <<< "$entry"
     new_version=$(bump_version "$current_version" "$level")
 

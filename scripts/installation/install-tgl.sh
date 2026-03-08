@@ -7,4 +7,4 @@ set -e
 
 TGL_SRC="${1:-/tmp/tgl-src}"
 cd "${TGL_SRC}/python"
-pip install --force-reinstall --editable .
+pip install --no-deps --force-reinstall --editable .
