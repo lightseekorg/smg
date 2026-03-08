@@ -12,11 +12,16 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from .constants import DEFAULT_HOST, DEFAULT_ROUTER_TIMEOUT, ENV_SHOW_ROUTER_LOGS
-from .gpu_allocator import get_open_port, release_port
-from .process_utils import kill_process_tree, wait_for_health, wait_for_workers_ready
+from .process_utils import (
+    get_open_port,
+    kill_process_tree,
+    release_port,
+    wait_for_health,
+    wait_for_workers_ready,
+)
 
 if TYPE_CHECKING:
-    from .model_pool import ModelInstance
+    from .worker import Worker
 
 logger = logging.getLogger(__name__)
 
@@ -36,48 +41,11 @@ class WorkerInfo:
 class Gateway:
     """Manages a Shepherd Model Gateway router instance.
 
-    Provides lifecycle management and API access for:
-    - Starting/stopping the router
-    - Worker management (list, add, remove)
-    - Health and metrics endpoints
-
     Four startup modes:
-    1. Regular mode: Start with worker URLs
-    2. PD mode: Start with prefill/decode workers
-    3. IGW mode: Start empty, add workers via API
-    4. Cloud mode: Start with cloud backend (OpenAI, xAI, Anthropic)
-
-    Example (regular mode):
-        gateway = Gateway()
-        gateway.start(
-            worker_urls=["http://127.0.0.1:30000"],
-            model_path="/path/to/model",
-        )
-
-    Example (PD disaggregation mode):
-        gateway = Gateway()
-        gateway.start(
-            prefill_workers=prefill_instances,
-            decode_workers=decode_instances,
-        )
-
-    Example (IGW mode):
-        gateway = Gateway()
-        gateway.start(igw_mode=True)
-        gateway.add_worker("http://127.0.0.1:30000")
-        gateway.add_worker("http://127.0.0.1:30001")
-
-        # Use gateway
-        workers = gateway.list_workers()
-        health = gateway.health()
-
-        # Cleanup
-        gateway.shutdown()
-
-    Example (cloud mode):
-        gateway = Gateway()
-        gateway.start(cloud_backend="openai")  # or "xai", "anthropic"
-        # Requires OPENAI_API_KEY, XAI_API_KEY, or ANTHROPIC_API_KEY env var
+    - Regular: start(worker_urls=[...], model_path="...")
+    - PD: start(prefill_workers=[...], decode_workers=[...])
+    - IGW: start(igw_mode=True), then add_worker(url) dynamically
+    - Cloud: start(cloud_backend="openai"|"xai"|"anthropic")
     """
 
     def __init__(
@@ -86,15 +54,7 @@ class Gateway:
         port: int | None = None,
         prometheus_port: int | None = None,
     ):
-        """Initialize gateway configuration.
-
-        Args:
-            host: Host to bind the router to.
-            port: Port for the router. If None, auto-assigns.
-            prometheus_port: Port for prometheus metrics. If None, auto-assigns.
-        """
         self.host = host
-        # Track whether we auto-allocated ports (for cleanup)
         self._port_auto_allocated = port is None
         self._prometheus_port_auto_allocated = prometheus_port is None
         self.port = port or get_open_port()
@@ -112,7 +72,7 @@ class Gateway:
         self.cloud_mode: bool = False
         self.cloud_backend: str | None = None
         self._started: bool = False
-        self._env: dict[str, str] | None = None  # Custom env for subprocess
+        self._env: dict[str, str] | None = None
 
     @property
     def is_running(self) -> bool:
@@ -122,18 +82,13 @@ class Gateway:
     def start(
         self,
         *,
-        # Regular mode arguments
         worker_urls: list[str] | None = None,
         model_path: str | None = None,
-        # PD mode arguments
-        prefill_workers: list[ModelInstance] | None = None,
-        decode_workers: list[ModelInstance] | None = None,
-        # IGW mode arguments
+        prefill_workers: list[Worker] | None = None,
+        decode_workers: list[Worker] | None = None,
         igw_mode: bool = False,
-        # Cloud mode arguments
         cloud_backend: str | None = None,
         history_backend: str = "memory",
-        # Common arguments
         policy: str = "round_robin",
         timeout: float = DEFAULT_ROUTER_TIMEOUT,
         show_output: bool | None = None,
@@ -141,55 +96,20 @@ class Gateway:
         log_level: str | None = None,
         log_dir: str | None = None,
     ) -> None:
-        """Start the gateway.
-
-        Can be started in four modes:
-        1. Regular mode: Provide worker_urls and model_path
-        2. PD mode: Provide prefill_workers and decode_workers
-        3. IGW mode: Set igw_mode=True, add workers later via add_worker()
-        4. Cloud mode: Provide cloud_backend ("openai" or "xai")
-
-        Args:
-            worker_urls: List of worker URLs for regular mode.
-            model_path: Model path for regular mode.
-            prefill_workers: List of prefill ModelInstance objects for PD mode.
-            decode_workers: List of decode ModelInstance objects for PD mode.
-            igw_mode: Start in IGW mode (no workers, add via API).
-            cloud_backend: Cloud backend type ("openai", "xai", or "anthropic").
-            history_backend: History backend for cloud mode ("memory", "oracle", or "oracle-custom").
-            policy: Routing policy (round_robin, random, etc.)
-            timeout: Startup timeout in seconds.
-            show_output: Show subprocess output (env var override).
-            extra_args: Additional router arguments.
-            log_level: Log level override (debug, info, warn, error).
-            log_dir: Directory to store gateway log files.
-
-        Raises:
-            RuntimeError: If gateway is already started.
-            ValueError: If arguments are invalid for the mode.
-        """
+        """Start the gateway in exactly one mode (regular, PD, IGW, or cloud)."""
         if self._started:
             raise RuntimeError("Gateway already started")
 
-        # Determine mode based on arguments
         is_pd_mode = prefill_workers is not None or decode_workers is not None
         is_regular_mode = worker_urls is not None
         is_igw_mode = igw_mode
         is_cloud_mode = cloud_backend is not None
 
-        # Validate mode exclusivity
         modes_specified = sum([is_pd_mode, is_regular_mode, is_igw_mode, is_cloud_mode])
-        if modes_specified > 1:
+        if modes_specified != 1:
             raise ValueError(
-                "Cannot specify multiple modes. Choose one of: "
-                "worker_urls (regular), prefill/decode_workers (PD), "
-                "igw_mode, or cloud_backend"
-            )
-
-        if modes_specified == 0:
-            raise ValueError(
-                "Must specify one mode: worker_urls (regular), "
-                "prefill/decode_workers (PD), igw_mode=True, or cloud_backend"
+                "Specify exactly one mode: worker_urls, prefill/decode_workers, "
+                "igw_mode=True, or cloud_backend"
             )
 
         if show_output is None:
@@ -202,7 +122,6 @@ class Gateway:
             self.log_dir = log_dir
 
         if is_igw_mode:
-            # IGW mode: start empty, add workers via API
             self.pd_mode = False
             self.igw_mode = True
             self._launch(
@@ -213,7 +132,6 @@ class Gateway:
                 log_msg="IGW gateway (no workers)",
             )
         elif is_pd_mode:
-            # PD mode: prefill/decode disaggregation
             self.pd_mode = True
             self.igw_mode = False
             prefills = prefill_workers or []
@@ -222,13 +140,10 @@ class Gateway:
             mode_args = ["--pd-disaggregation"]
             for pf in prefills:
                 if pf.bootstrap_port is not None:
-                    # SGLang HTTP PD: use base_url (HTTP) with bootstrap port
                     mode_args += ["--prefill", pf.base_url, str(pf.bootstrap_port)]
                 else:
-                    # gRPC PD (vLLM/SGLang): use worker_url (gRPC or HTTP based on mode)
                     mode_args += ["--prefill", pf.worker_url]
             for dc in decodes:
-                # Use worker_url to get correct protocol (HTTP or gRPC)
                 mode_args += ["--decode", dc.worker_url]
 
             self._launch(
@@ -239,103 +154,28 @@ class Gateway:
                 log_msg=f"PD gateway ({len(prefills)} prefill, {len(decodes)} decode)",
             )
         elif is_cloud_mode:
-            # Cloud mode: OpenAI/xAI backend
+            assert cloud_backend is not None
             self.pd_mode = False
             self.igw_mode = False
             self.cloud_mode = True
             self.cloud_backend = cloud_backend
-
-            # Mapping from cloud backend name to gateway --backend arg
-            cloud_backend_type = {
-                "openai": "openai",
-                "xai": "openai",
-                "anthropic": "anthropic",
-            }
-
-            # Get worker URL and API key based on backend
-            if cloud_backend == "openai":
-                worker_url = "https://api.openai.com"
-                api_key = os.environ.get("OPENAI_API_KEY")
-                if not api_key:
-                    raise ValueError("OPENAI_API_KEY environment variable required")
-                self._env = os.environ.copy()
-                self._env["OPENAI_API_KEY"] = api_key
-            elif cloud_backend == "xai":
-                worker_url = "https://api.x.ai"
-                api_key = os.environ.get("XAI_API_KEY")
-                if not api_key:
-                    raise ValueError("XAI_API_KEY environment variable required")
-                self._env = os.environ.copy()
-                self._env["XAI_API_KEY"] = api_key
-            elif cloud_backend == "anthropic":
-                worker_url = "https://api.anthropic.com"
-                api_key = os.environ.get("ANTHROPIC_API_KEY")
-                if not api_key:
-                    raise ValueError("ANTHROPIC_API_KEY environment variable required")
-                self._env = os.environ.copy()
-                self._env["ANTHROPIC_API_KEY"] = api_key
-            else:
-                raise ValueError(f"Unsupported cloud backend: {cloud_backend}")
-
-            backend_type = cloud_backend_type.get(cloud_backend, "openai")
-
-            # oracle-custom: use Flyway-managed schema with schema-config
-            actual_history_backend = history_backend
-            if history_backend == "oracle-custom":
-                actual_history_backend = "oracle"
-                # Override Oracle env vars to use Flyway user credentials
-                flyway_user = os.environ.get("ATP_FLYWAY_USER", "")
-                flyway_password = os.environ.get("ATP_FLYWAY_PASSWORD", "")
-                flyway_dsn = os.environ.get("ATP_FLYWAY_DSN", "")
-                if not all([flyway_user, flyway_password, flyway_dsn]):
-                    raise ValueError(
-                        "ATP_FLYWAY_USER, ATP_FLYWAY_PASSWORD, and ATP_FLYWAY_DSN "
-                        "environment variables required for oracle-custom backend"
-                    )
-                self._env["ATP_USER"] = flyway_user
-                self._env["ATP_PASSWORD"] = flyway_password
-                self._env["ATP_DSN"] = flyway_dsn
-
-            mode_args = [
-                "--backend",
-                backend_type,
-                "--worker-urls",
-                worker_url,
-                "--history-backend",
-                actual_history_backend,
-            ]
-
-            if history_backend == "oracle-custom":
-                schema_config_path = (
-                    Path(__file__).resolve().parents[2]
-                    / "scripts"
-                    / "oracle_flyway"
-                    / "schema-config.yaml"
-                )
-                mode_args.extend(
-                    [
-                        "--schema-config",
-                        str(schema_config_path),
-                    ]
-                )
-
+            mode_args = self._build_cloud_args(cloud_backend, history_backend)
             self._launch(
                 mode_args=mode_args,
                 timeout=timeout,
                 show_output=show_output,
                 extra_args=extra_args,
+                num_workers=1,
                 log_msg=f"{cloud_backend} cloud gateway",
             )
         else:
-            # Regular mode: worker URLs
-            if model_path is None:
+            if not model_path:
                 raise ValueError("model_path is required for regular mode")
             if not worker_urls:
-                raise ValueError("worker_urls is required and must be non-empty for regular mode")
+                raise ValueError("worker_urls must be non-empty for regular mode")
             self.model_path = model_path
             self.pd_mode = False
             self.igw_mode = False
-
             self._launch(
                 mode_args=["--model-path", model_path, "--worker-urls", *worker_urls],
                 timeout=timeout,
@@ -354,17 +194,7 @@ class Gateway:
         num_workers: int | None = None,
         log_msg: str = "",
     ) -> None:
-        """Launch the gateway process.
-
-        Args:
-            mode_args: Mode-specific CLI arguments.
-            timeout: Startup timeout in seconds.
-            show_output: Show subprocess output.
-            extra_args: Additional router arguments.
-            num_workers: If set, wait for this many workers to be ready.
-                         If None, just wait for health check.
-            log_msg: Log message describing the startup.
-        """
+        """Launch the gateway process and wait for it to become ready."""
         cmd = self._build_base_cmd()
         cmd.extend(mode_args)
 
@@ -374,18 +204,12 @@ class Gateway:
         logger.info("Starting %s on port %d", log_msg or "gateway", self.port)
         logger.debug("Gateway command: %s", " ".join(cmd))
 
-        # Discard subprocess output when not showing it, so the pipe buffer
-        # never fills up and blocks the router process.
-        if show_output:
-            stdout_target = None
-            stderr_target = None
-        else:
-            stdout_target = subprocess.DEVNULL
-            stderr_target = subprocess.DEVNULL
+        stdout_target = None if show_output else subprocess.DEVNULL
+        stderr_target = None if show_output else subprocess.DEVNULL
 
         self.process = subprocess.Popen(
             cmd,
-            env=self._env,  # Use custom env if set (e.g., for cloud mode API keys)
+            env=self._env,
             stdout=stdout_target,
             stderr=stderr_target,
             start_new_session=True,
@@ -404,13 +228,12 @@ class Gateway:
         logger.info("Gateway ready at %s", self.base_url)
 
     def shutdown(self) -> None:
-        """Shutdown the gateway process and release allocated ports."""
+        """Shutdown the gateway and release auto-allocated ports."""
         if self.process is not None:
             logger.info("Shutting down gateway (PID %d)", self.process.pid)
             kill_process_tree(self.process.pid)
             self.process = None
 
-        # Release auto-allocated ports back to the pool
         if self._port_auto_allocated:
             release_port(self.port)
         if self._prometheus_port_auto_allocated:
@@ -441,49 +264,70 @@ class Gateway:
             cmd.extend(["--log-dir", self.log_dir])
         return cmd
 
-    # -------------------------------------------------------------------------
-    # Health & Metrics APIs
-    # -------------------------------------------------------------------------
+    def _build_cloud_args(self, cloud_backend: str, history_backend: str) -> list[str]:
+        """Build CLI args and env for cloud mode."""
+        cloud_configs = {
+            "openai": ("https://api.openai.com", "OPENAI_API_KEY", "openai"),
+            "xai": ("https://api.x.ai", "XAI_API_KEY", "openai"),
+            "anthropic": ("https://api.anthropic.com", "ANTHROPIC_API_KEY", "anthropic"),
+        }
+        if cloud_backend not in cloud_configs:
+            raise ValueError(f"Unsupported cloud backend: {cloud_backend}")
+
+        worker_url, api_key_env, backend_type = cloud_configs[cloud_backend]
+        api_key = os.environ.get(api_key_env)
+        if not api_key:
+            raise ValueError(f"{api_key_env} environment variable required")
+
+        self._env = os.environ.copy()
+        self._env[api_key_env] = api_key
+
+        actual_history_backend = history_backend
+        if history_backend == "oracle-custom":
+            actual_history_backend = "oracle"
+            flyway_user = os.environ.get("ATP_FLYWAY_USER", "")
+            flyway_password = os.environ.get("ATP_FLYWAY_PASSWORD", "")
+            flyway_dsn = os.environ.get("ATP_FLYWAY_DSN", "")
+            if not all([flyway_user, flyway_password, flyway_dsn]):
+                raise ValueError(
+                    "ATP_FLYWAY_USER, ATP_FLYWAY_PASSWORD, and ATP_FLYWAY_DSN "
+                    "environment variables required for oracle-custom backend"
+                )
+            self._env["ATP_USER"] = flyway_user
+            self._env["ATP_PASSWORD"] = flyway_password
+            self._env["ATP_DSN"] = flyway_dsn
+
+        mode_args = [
+            "--backend",
+            backend_type,
+            "--worker-urls",
+            worker_url,
+            "--history-backend",
+            actual_history_backend,
+            "--disable-health-check",
+        ]
+
+        if history_backend == "oracle-custom":
+            schema_config_path = (
+                Path(__file__).resolve().parents[2]
+                / "scripts"
+                / "oracle_flyway"
+                / "schema-config.yaml"
+            )
+            mode_args.extend(["--schema-config", str(schema_config_path)])
+
+        return mode_args
 
     def health(self, timeout: float = 5.0) -> bool:
-        """Check gateway health.
-
-        Returns:
-            True if healthy, False otherwise.
-        """
+        """Check gateway health. Returns True if healthy."""
         try:
             resp = httpx.get(f"{self.base_url}/health", timeout=timeout)
             return resp.status_code == 200
         except (httpx.RequestError, httpx.TimeoutException):
             return False
 
-    def get_metrics(self, timeout: float = 5.0) -> str | None:
-        """Get Prometheus metrics.
-
-        Returns:
-            Metrics text or None if unavailable.
-        """
-        try:
-            resp = httpx.get(f"{self.metrics_url}/metrics", timeout=timeout)
-            if resp.status_code == 200:
-                return resp.text
-            return None
-        except (httpx.RequestError, httpx.TimeoutException):
-            return None
-
-    # -------------------------------------------------------------------------
-    # Worker Management APIs
-    # -------------------------------------------------------------------------
-
     def _worker_from_api_response(self, w: dict) -> WorkerInfo:
-        """Convert API response dict to WorkerInfo.
-
-        Args:
-            w: Worker dict from API response.
-
-        Returns:
-            WorkerInfo object.
-        """
+        """Convert API response dict to WorkerInfo."""
         status = "healthy" if w.get("is_healthy", False) else "unhealthy"
         return WorkerInfo(
             id=w.get("id", ""),
@@ -500,11 +344,7 @@ class Gateway:
         )
 
     def list_workers(self, timeout: float = 5.0) -> list[WorkerInfo]:
-        """List all workers connected to the gateway.
-
-        Returns:
-            List of WorkerInfo objects.
-        """
+        """List all workers connected to the gateway."""
         try:
             resp = httpx.get(f"{self.base_url}/workers", timeout=timeout)
             if resp.status_code == 200:
@@ -514,23 +354,6 @@ class Gateway:
         except (httpx.RequestError, httpx.TimeoutException):
             return []
 
-    def get_worker(self, worker_id: str, timeout: float = 5.0) -> WorkerInfo | None:
-        """Get information about a specific worker.
-
-        Args:
-            worker_id: The worker ID.
-
-        Returns:
-            WorkerInfo or None if not found.
-        """
-        try:
-            resp = httpx.get(f"{self.base_url}/workers/{worker_id}", timeout=timeout)
-            if resp.status_code == 200:
-                return self._worker_from_api_response(resp.json())
-            return None
-        except (httpx.RequestError, httpx.TimeoutException):
-            return None
-
     def add_worker(
         self,
         worker_url: str,
@@ -538,30 +361,18 @@ class Gateway:
         wait_ready: bool = True,
         ready_timeout: float = 60.0,
     ) -> tuple[bool, str | None]:
-        """Add a worker to the gateway.
-
-        Args:
-            worker_url: URL of the worker to add.
-            timeout: HTTP request timeout.
-            wait_ready: If True, wait for worker to become ready.
-            ready_timeout: Timeout for waiting for worker to be ready.
-
-        Returns:
-            Tuple of (success, worker_id or error message).
-        """
+        """Add a worker to the gateway. Returns (success, worker_id or error)."""
         try:
             resp = httpx.post(
                 f"{self.base_url}/workers",
                 json={"url": worker_url},
                 timeout=timeout,
             )
-            # API returns 200 OK or 202 Accepted for async processing
             if resp.status_code in (200, 202):
                 data = resp.json()
                 worker_id = data.get("worker_id")
 
                 if wait_ready and worker_id:
-                    # Wait for worker to appear in list
                     import time
 
                     start = time.time()
@@ -571,10 +382,7 @@ class Gateway:
                             if w.id == worker_id:
                                 return True, worker_id
                         time.sleep(1.0)
-                    return (
-                        False,
-                        f"Worker {worker_id} not ready within {ready_timeout}s",
-                    )
+                    return False, f"Worker {worker_id} not ready within {ready_timeout}s"
 
                 return True, worker_id
             return False, resp.text
@@ -582,21 +390,9 @@ class Gateway:
             return False, str(e)
 
     def remove_worker(self, worker_url: str, timeout: float = 10.0) -> tuple[bool, str]:
-        """Remove a worker from the gateway by URL.
-
-        Args:
-            worker_url: URL of the worker to remove.
-
-        Returns:
-            Tuple of (success, message).
-        """
-        # Find worker_id by URL
+        """Remove a worker from the gateway by URL. Returns (success, message)."""
         workers = self.list_workers(timeout=timeout)
-        worker_id = None
-        for w in workers:
-            if w.url == worker_url:
-                worker_id = w.id
-                break
+        worker_id = next((w.id for w in workers if w.url == worker_url), None)
 
         if not worker_id:
             return False, f"Worker with URL {worker_url} not found"
@@ -612,28 +408,15 @@ class Gateway:
         except (httpx.RequestError, httpx.TimeoutException) as e:
             return False, str(e)
 
-    # -------------------------------------------------------------------------
-    # Model APIs
-    # -------------------------------------------------------------------------
-
     def list_models(self, timeout: float = 5.0) -> list[dict]:
-        """List available models (OpenAI-compatible).
-
-        Returns:
-            List of model info dicts.
-        """
+        """List available models (OpenAI-compatible)."""
         try:
             resp = httpx.get(f"{self.base_url}/v1/models", timeout=timeout)
             if resp.status_code == 200:
-                data = resp.json()
-                return data.get("data", [])
+                return resp.json().get("data", [])
             return []
         except (httpx.RequestError, httpx.TimeoutException):
             return []
-
-    # -------------------------------------------------------------------------
-    # Context manager support
-    # -------------------------------------------------------------------------
 
     def __enter__(self) -> Gateway:
         return self
@@ -643,24 +426,19 @@ class Gateway:
 
 
 def launch_cloud_gateway(
-    runtime: str,  # "openai" or "xai"
+    runtime: str,
     *,
     history_backend: str = "memory",
     extra_args: list[str] | None = None,
     timeout: float = 60,
     show_output: bool | None = None,
+    max_attempts: int = 3,
 ) -> Gateway:
-    """Launch gateway with cloud API runtime.
+    """Launch gateway with a cloud API runtime (openai, xai, anthropic).
 
-    Args:
-        runtime: Cloud runtime ("openai" or "xai")
-        history_backend: History storage backend ("memory", "oracle", or "oracle-custom")
-        extra_args: Additional router arguments
-        timeout: Startup timeout in seconds
-        show_output: Show subprocess output
-
-    Returns:
-        Gateway instance with running router
+    Retries up to max_attempts because the AddWorker workflow can fail
+    intermittently due to a race condition in the workflow engine's
+    parallel step context handling.
     """
     from .model_specs import THIRD_PARTY_MODELS
 
@@ -669,12 +447,25 @@ def launch_cloud_gateway(
             f"Unknown cloud runtime: {runtime}. Available: {list(THIRD_PARTY_MODELS.keys())}"
         )
 
-    gateway = Gateway()
-    gateway.start(
-        cloud_backend=runtime,
-        history_backend=history_backend,
-        timeout=timeout,
-        show_output=show_output,
-        extra_args=extra_args,
-    )
-    return gateway
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        gateway = Gateway()
+        try:
+            gateway.start(
+                cloud_backend=runtime,
+                history_backend=history_backend,
+                timeout=timeout,
+                show_output=show_output,
+                extra_args=extra_args,
+            )
+            return gateway
+        except TimeoutError as e:
+            last_error = e
+            logger.warning(
+                "Cloud gateway startup attempt %d/%d timed out: %s",
+                attempt,
+                max_attempts,
+                e,
+            )
+            gateway.shutdown()
+    raise last_error  # type: ignore[misc]

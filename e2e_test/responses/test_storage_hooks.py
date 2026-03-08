@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 PASSTHROUGH_HOOK_PATH = "crates/wasm/tests/fixtures/storage_hook_passthrough.wasm"
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.gateway(extra_args=["--storage-hook-wasm-path", PASSTHROUGH_HOOK_PATH])
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestResponsesWithStorageHook:

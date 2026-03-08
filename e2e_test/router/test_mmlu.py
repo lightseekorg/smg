@@ -23,6 +23,8 @@ from infra import run_eval
 logger = logging.getLogger(__name__)
 
 
+@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestMMLUGrpc:
@@ -71,6 +73,8 @@ class TestMMLUGrpc:
         logger.info("MMLU gRPC extended score: %.2f (threshold: 0.65)", metrics["score"])
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.skip_for_runtime("vllm", reason="vLLM does not support HTTP mode")
 @pytest.mark.parametrize("setup_backend", ["http"], indirect=True)

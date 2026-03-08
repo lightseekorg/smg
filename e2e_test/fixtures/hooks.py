@@ -1,421 +1,16 @@
-"""Pytest hooks for E2E test collection and validation.
+"""Pytest hooks for E2E test collection and marker registration.
 
 This module handles:
-- Test collection: Scanning markers to determine required workers
-- GPU validation: Ensuring sufficient GPUs for test requirements
 - Marker registration: Defining custom pytest markers
+- Test filtering: Env-var-based filtering by engine, vendor, and GPU tier
 """
 
 from __future__ import annotations
 
-import logging
 import os
-from typing import TYPE_CHECKING
 
 import pytest
-
-from .markers import resolve_class_marker
-
-if TYPE_CHECKING:
-    from infra import ConnectionMode, WorkerIdentity, WorkerType
-
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Test collection state
-# ---------------------------------------------------------------------------
-
-# Track max worker counts: (model_id, mode, worker_type) -> max_count
-_worker_counts: dict[tuple[str, ConnectionMode, WorkerType], int] = {}
-
-# Track first-seen order to preserve test collection order
-_first_seen_order: list[tuple[str, ConnectionMode, WorkerType]] = []
-
-# Track max GPU requirement for any single test (for validation)
-_max_test_gpu_requirement: int = 0
-_max_test_name: str = ""
-
-_needs_default_model: bool = False
-
-# Track model affinity for each test item (nodeid -> model_id or None for cloud tests)
-_item_model_affinity: dict[str, str | None] = {}
-
-# Backends that require local GPU workers.
-# Matches ConnectionMode values (infra/constants.py) plus their pd_ prefixed variants.
-_LOCAL_BACKENDS = frozenset({"grpc", "http", "pd_grpc", "pd_http"})
-
-
-def reset_collection_state() -> None:
-    """Reset collection state (useful for testing)."""
-    global _worker_counts, _first_seen_order
-    global _max_test_gpu_requirement, _max_test_name, _needs_default_model
-    global _item_model_affinity
-    _worker_counts = {}
-    _first_seen_order = []
-    _max_test_gpu_requirement = 0
-    _max_test_name = ""
-    _needs_default_model = False
-    _item_model_affinity = {}
-
-
-def get_worker_counts() -> dict:
-    """Get the worker counts dictionary."""
-    return _worker_counts
-
-
-def get_first_seen_order() -> list:
-    """Get the first-seen order list."""
-    return _first_seen_order
-
-
-def get_max_gpu_requirement() -> tuple[int, str]:
-    """Get the max GPU requirement and test name."""
-    return _max_test_gpu_requirement, _max_test_name
-
-
-def needs_default_model() -> bool:
-    """Check if any test needs the default model."""
-    return _needs_default_model
-
-
-# ---------------------------------------------------------------------------
-# Test collection hook
-# ---------------------------------------------------------------------------
-
-
-def pytest_collection_modifyitems(
-    session: pytest.Session,
-    config: pytest.Config,
-    items: list[pytest.Item],
-) -> None:
-    """Scan collected tests to determine required workers.
-
-    This runs after test collection but before tests execute.
-    It extracts worker requirements from markers in test collection order,
-    tracking the max count needed for each (model, mode, worker_type) combination.
-    """
-    global _worker_counts, _first_seen_order, _needs_default_model
-    global _max_test_gpu_requirement, _max_test_name, _item_model_affinity
-
-    from infra import (
-        DEFAULT_MODEL,
-        PARAM_MODEL,
-        PARAM_SETUP_BACKEND,
-        ConnectionMode,
-        WorkerType,
-    )
-
-    def track_worker(
-        model_id: str, mode: ConnectionMode, worker_type: WorkerType, count: int
-    ) -> None:
-        """Track a worker requirement, updating max count if needed."""
-        key = (model_id, mode, worker_type)
-        if key not in _worker_counts:
-            _first_seen_order.append(key)
-            _worker_counts[key] = count
-        else:
-            _worker_counts[key] = max(_worker_counts[key], count)
-
-    def calculate_test_gpus(model_id: str, prefill: int, decode: int, regular: int) -> int:
-        """Calculate GPU requirement for a single test."""
-        from infra.model_specs import get_model_spec
-
-        try:
-            spec = get_model_spec(model_id)
-        except KeyError as exc:
-            raise pytest.UsageError(f"Unknown model in test markers: {model_id}") from exc
-        tp = spec.get("tp", 1)
-        return tp * (prefill + decode + regular)
-
-    # Filter items based on -k expression to only scan tests that will actually run
-    keyword = config.option.keyword
-    if keyword:
-        from _pytest.mark.expression import Expression
-
-        expr = Expression.compile(keyword)
-        items_to_scan = [
-            item
-            for item in items
-            if expr.evaluate(lambda x, **_kw: x in item.keywords)  # type: ignore[arg-type]
-        ]
-    else:
-        items_to_scan = items
-
-    for item in items_to_scan:
-        # Extract model from marker or use default
-        # Use MRO-aware resolution so child class markers override parent
-        model_marker = resolve_class_marker(item, PARAM_MODEL)
-        model_id = model_marker.args[0] if model_marker and model_marker.args else None
-
-        # Check parametrize for model
-        if model_id is None:
-            for marker in item.iter_markers("parametrize"):
-                if marker.args and len(marker.args) >= 2:
-                    param_name = marker.args[0]
-                    if param_name == PARAM_MODEL or PARAM_MODEL in param_name:
-                        param_values = marker.args[1]
-                        if isinstance(param_values, list | tuple) and param_values:
-                            model_id = param_values[0]
-                        break
-
-        # Extract backends from parametrize
-        backends: list[str] = []
-        for marker in item.iter_markers("parametrize"):
-            if marker.args and len(marker.args) >= 2:
-                param_name = marker.args[0]
-                param_values = marker.args[1]
-                if param_name == PARAM_SETUP_BACKEND:
-                    if isinstance(param_values, list | tuple):
-                        backends.extend(param_values)
-
-        # Check for workers marker
-        workers_marker = item.get_closest_marker("workers")
-        prefill_count = 0
-        decode_count = 0
-        regular_count = 1
-        if workers_marker:
-            prefill_count = workers_marker.kwargs.get("prefill") or 0
-            decode_count = workers_marker.kwargs.get("decode") or 0
-            regular_count = workers_marker.kwargs.get("count") or 1
-
-        # Track if this test needs default model
-        is_e2e = item.get_closest_marker("e2e") is not None
-        if model_id is None and is_e2e:
-            _needs_default_model = True
-            model_id = DEFAULT_MODEL
-
-        # Track worker requirements
-        test_gpus = 0
-        if model_id and backends:
-            for backend in backends:
-                if backend in ("pd_http", "pd_grpc"):
-                    mode = ConnectionMode.HTTP if backend == "pd_http" else ConnectionMode.GRPC
-                    p_count = prefill_count if prefill_count > 0 else 1
-                    d_count = decode_count if decode_count > 0 else 1
-                    track_worker(model_id, mode, WorkerType.PREFILL, p_count)
-                    track_worker(model_id, mode, WorkerType.DECODE, d_count)
-                    test_gpus = max(test_gpus, calculate_test_gpus(model_id, p_count, d_count, 0))
-                else:
-                    try:
-                        mode = ConnectionMode(backend)
-                    except ValueError:
-                        continue
-
-                    if prefill_count > 0 or decode_count > 0:
-                        track_worker(model_id, mode, WorkerType.PREFILL, prefill_count)
-                        track_worker(model_id, mode, WorkerType.DECODE, decode_count)
-                        test_gpus = max(
-                            test_gpus,
-                            calculate_test_gpus(model_id, prefill_count, decode_count, 0),
-                        )
-                    else:
-                        track_worker(model_id, mode, WorkerType.REGULAR, regular_count)
-                        test_gpus = max(
-                            test_gpus,
-                            calculate_test_gpus(model_id, 0, 0, regular_count),
-                        )
-
-        elif model_id and is_e2e:
-            track_worker(model_id, ConnectionMode.HTTP, WorkerType.REGULAR, 1)
-            test_gpus = calculate_test_gpus(model_id, 0, 0, 1)
-
-        # Track model affinity for reordering
-        # A test needs a local GPU worker if it either:
-        #   - is parametrized with at least one local backend, or
-        #   - is an e2e test with no explicit backends (defaults to local)
-        if model_id and (
-            (backends and any(b in _LOCAL_BACKENDS for b in backends)) or (is_e2e and not backends)
-        ):
-            _item_model_affinity[item.nodeid] = model_id
-        else:
-            _item_model_affinity[item.nodeid] = None
-
-        if test_gpus > _max_test_gpu_requirement:
-            _max_test_gpu_requirement = test_gpus
-            _max_test_name = item.nodeid
-
-    # Log results
-    if _worker_counts:
-        summary = []
-        for key in _first_seen_order:
-            model_id, mode, worker_type = key
-            count = _worker_counts[key]
-            if worker_type == WorkerType.REGULAR:
-                summary.append(f"{model_id}:{mode.value}x{count}")
-            else:
-                summary.append(f"{model_id}:{mode.value}:{worker_type.value}x{count}")
-        logger.info("Scanned worker requirements (in test order): %s", summary)
-        logger.info(
-            "Max GPU requirement for single test: %d (%s)",
-            _max_test_gpu_requirement,
-            _max_test_name,
-        )
-    else:
-        logger.info("Scanned worker requirements: (none)")
-
-    # Reorder tests to minimize GPU model swaps
-    _reorder_to_minimize_model_swaps(items)
-
-
-# ---------------------------------------------------------------------------
-# Test reordering
-# ---------------------------------------------------------------------------
-
-
-def _reorder_to_minimize_model_swaps(items: list[pytest.Item]) -> None:
-    """Reorder test items to minimize GPU model swaps.
-
-    Groups tests by their GPU model affinity:
-    1. Cloud tests (no GPU model) run first
-    2. Then each model group runs contiguously, in first-appearance order
-
-    Within each group, original collection order is preserved.
-    """
-    cloud_items: list[pytest.Item] = []
-    model_groups: dict[str, list[pytest.Item]] = {}
-    model_order: list[str] = []
-
-    for item in items:
-        affinity = _item_model_affinity.get(item.nodeid)
-        if affinity is None:
-            cloud_items.append(item)
-        else:
-            if affinity not in model_groups:
-                model_groups[affinity] = []
-                model_order.append(affinity)
-            model_groups[affinity].append(item)
-
-    # Rebuild items list in-place
-    items[:] = cloud_items
-    for model_id in model_order:
-        items.extend(model_groups[model_id])
-
-    # Log summary
-    parts = []
-    if cloud_items:
-        parts.append(f"cloud={len(cloud_items)}")
-    for model_id in model_order:
-        parts.append(f"{model_id}={len(model_groups[model_id])}")
-    logger.info("Reordered tests to minimize model swaps: %s", ", ".join(parts))
-
-
-# ---------------------------------------------------------------------------
-# Pool requirements
-# ---------------------------------------------------------------------------
-
-
-def get_pool_requirements() -> list[WorkerIdentity]:
-    """Build pool requirements from scanned test markers.
-
-    Returns:
-        List of WorkerIdentity objects to pre-launch.
-    """
-    from infra import DEFAULT_MODEL, ConnectionMode, WorkerIdentity, WorkerType
-
-    # Track which models have PD workers as their first requirement
-    models_with_pd_first: set[str] = set()
-    first_worker_type_per_model: dict[str, WorkerType] = {}
-
-    for model_id, mode, worker_type in _first_seen_order:
-        if model_id not in first_worker_type_per_model:
-            first_worker_type_per_model[model_id] = worker_type
-            if worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
-                models_with_pd_first.add(model_id)
-                logger.info(
-                    "Model %s has PD test first - skipping regular worker pre-launch",
-                    model_id,
-                )
-
-    # Generate individual WorkerIdentity objects in first-seen order
-    requirements: list[WorkerIdentity] = []
-    for model_id, mode, worker_type in _first_seen_order:
-        if model_id in models_with_pd_first and worker_type == WorkerType.REGULAR:
-            continue
-
-        count = _worker_counts.get((model_id, mode, worker_type), 1)
-        for i in range(count):
-            requirements.append(WorkerIdentity(model_id, mode, worker_type, i))
-
-    if not requirements and _needs_default_model:
-        requirements.append(WorkerIdentity(DEFAULT_MODEL, ConnectionMode.HTTP))
-
-    return requirements
-
-
-# ---------------------------------------------------------------------------
-# GPU validation
-# ---------------------------------------------------------------------------
-
-
-def _count_gpus_without_cuda() -> int:
-    """Count available GPUs without initializing CUDA.
-
-    Uses nvidia-smi to avoid CUDA initialization, which is critical for
-    pytest-parallel compatibility. CUDA cannot be re-initialized after a fork.
-    """
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            return len([line for line in result.stdout.strip().split("\n") if line])
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
-        pass
-    return 0
-
-
-def validate_gpu_requirements() -> tuple[int, int]:
-    """Check if there are enough GPUs for any single test.
-
-    Uses nvidia-smi instead of torch.cuda to avoid CUDA initialization,
-    which would break pytest-parallel (CUDA cannot be re-initialized after fork).
-
-    Returns:
-        Tuple of (max_required_gpus, available_gpus).
-    """
-    available_gpus = _count_gpus_without_cuda()
-    return _max_test_gpu_requirement, available_gpus
-
-
-def pytest_collection_finish(session: pytest.Session) -> None:
-    """Validate GPU requirements after test collection."""
-    from infra import ENV_SKIP_MODEL_POOL, LOG_SEPARATOR_WIDTH
-
-    if not _worker_counts:
-        return
-
-    if os.environ.get(ENV_SKIP_MODEL_POOL, "").lower() in ("1", "true", "yes"):
-        return
-
-    max_required, available_gpus = validate_gpu_requirements()
-
-    if max_required > available_gpus:
-        sep = "=" * LOG_SEPARATOR_WIDTH
-        raise pytest.UsageError(
-            f"\n{sep}\n"
-            f"GPU REQUIREMENTS EXCEEDED\n"
-            f"{sep}\n"
-            f"Test '{_max_test_name}' requires {max_required} GPUs\n"
-            f"Available: {available_gpus} GPUs\n"
-            f"\nOptions:\n"
-            f"  1. Run tests that fit: pytest -k 'not {_max_test_name.split('::')[0]}'\n"
-            f"  2. Reduce workers: @pytest.mark.workers(prefill=1, decode=1)\n"
-            f"  3. Skip GPU tests: SKIP_MODEL_POOL=1 pytest\n"
-            f"{sep}"
-        )
-
-    logger.info(
-        "GPU validation passed: max %d required (by %s), %d available",
-        max_required,
-        _max_test_name,
-        available_gpus,
-    )
-
+from infra import get_runtime
 
 # ---------------------------------------------------------------------------
 # Marker registration
@@ -426,8 +21,15 @@ def pytest_configure(config: pytest.Config) -> None:
     """Register custom markers."""
     config.addinivalue_line(
         "markers",
-        "skip_for_runtime(*runtimes, reason=None): skip test for specific runtimes "
-        "(e.g., @pytest.mark.skip_for_runtime('trtllm', reason='no guided decoding'))",
+        "engine(*names): engines this test runs on (sglang, vllm, trtllm)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "vendor(*names): cloud vendors this test runs on (openai, anthropic, xai, gemini)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "gpu(count): number of GPUs required (0, 1, 2, 4)",
     )
     config.addinivalue_line(
         "markers",
@@ -435,18 +37,24 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
-        "backend(name): mark test to use a specific backend (grpc, http, openai, etc.)",
+        "skip_for_runtime(*runtimes, reason=None): skip test for specific runtimes "
+        "(e.g., @pytest.mark.skip_for_runtime('trtllm', reason='no guided decoding'))",
     )
     config.addinivalue_line(
         "markers",
-        "workers(count=1, prefill=None, decode=None): "
-        "worker configuration - use count for regular workers, "
-        "or prefill/decode for PD disaggregation mode",
+        "gateway(policy=..., timeout=..., extra_args=...): gateway/router configuration",
     )
     config.addinivalue_line(
         "markers",
-        "gateway(policy='round_robin', timeout=None, extra_args=None): "
-        "gateway/router configuration",
+        "workers(count=1, prefill=None, decode=None): worker topology configuration",
+    )
+    config.addinivalue_line(
+        "markers",
+        "storage(backend): storage backend for cloud tests (memory, oracle-custom)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "external: mark test as depending on external services",
     )
     config.addinivalue_line(
         "markers",
@@ -458,12 +66,7 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
-        "thread_unsafe: mark test as incompatible with parallel thread execution",
-    )
-    config.addinivalue_line(
-        "markers",
-        "storage(backend): mark test to use a specific history storage backend "
-        "(memory, oracle, oracle-custom). Default is memory.",
+        "slowtest: mark test as slow-running (alias)",
     )
     config.addinivalue_line(
         "markers",
@@ -472,52 +75,12 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Parallel execution support
+# Runtime-specific skip handling
 # ---------------------------------------------------------------------------
 
 
-def is_parallel_execution(config: pytest.Config) -> bool:
-    """Check if tests are running in parallel mode (pytest-parallel).
-
-    Returns True if --tests-per-worker > 1, indicating concurrent thread execution.
-    """
-    # pytest-parallel adds the 'tests_per_worker' option
-    tests_per_worker = getattr(config.option, "tests_per_worker", None)
-    if tests_per_worker is None:
-        return False
-
-    if tests_per_worker == "auto":
-        return True
-
-    try:
-        return int(tests_per_worker) > 1
-    except (ValueError, TypeError):
-        return False
-
-
-def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Cleanup all thread-cached backends at session end.
-
-    This hook runs exactly once when the session ends, unlike session-scoped
-    autouse fixtures which fire per-test under pytest-parallel's thread model.
-    """
-    from .setup_backend import cleanup_all_cached_backends
-
-    cleanup_all_cached_backends()
-
-
 def pytest_runtest_setup(item: pytest.Item) -> None:
-    """Skip tests based on markers and runtime configuration."""
-    from infra import get_runtime
-
-    # Skip thread_unsafe tests when running in parallel mode
-    if is_parallel_execution(item.config):
-        marker = item.get_closest_marker("thread_unsafe")
-        if marker:
-            reason = marker.kwargs.get("reason", "Test is not thread-safe")
-            pytest.skip(f"Skipping in parallel mode: {reason}")
-
-    # Skip tests for specific runtimes
+    """Skip tests marked with ``@pytest.mark.skip_for_runtime``."""
     marker = item.get_closest_marker("skip_for_runtime")
     if marker:
         current_runtime = get_runtime()
@@ -525,3 +88,71 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
         if current_runtime in skip_runtimes:
             reason = marker.kwargs.get("reason", f"Not supported on {current_runtime}")
             pytest.skip(f"Skipping for {current_runtime}: {reason}")
+
+
+# ---------------------------------------------------------------------------
+# Environment-variable-based test filtering
+# ---------------------------------------------------------------------------
+
+
+def _get_own_class_marker(item: pytest.Item, name: str):
+    """Get a marker defined on the item's own class, not inherited from parents.
+
+    When a test class subclasses another test class, pytest's pytestmark list
+    includes parent markers first and child markers last.  get_closest_marker()
+    therefore returns the parent's marker, which can be wrong when the child
+    intentionally overrides a marker (e.g. engine("sglang") overriding
+    engine("sglang","vllm","trtllm")).
+
+    This helper checks the child class's __dict__ directly.
+    """
+    cls = getattr(item, "cls", None)
+    if cls is None:
+        return None
+    own_marks = cls.__dict__.get("pytestmark", [])
+    if not isinstance(own_marks, list):
+        own_marks = [own_marks]
+    for mark in own_marks:
+        if getattr(mark, "name", None) == name:
+            return mark
+    return None
+
+
+def _get_marker(item: pytest.Item, name: str):
+    """Get the most specific marker, preferring child class over parent."""
+    return _get_own_class_marker(item, name) or item.get_closest_marker(name)
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> None:
+    """Filter collected tests based on E2E_ENGINE, E2E_VENDOR, and E2E_GPU_TIER env vars."""
+    engine = os.environ.get("E2E_ENGINE") or None
+    vendor = os.environ.get("E2E_VENDOR") or None
+    gpu_tier = os.environ.get("E2E_GPU_TIER") or None
+
+    if not any([engine, vendor, gpu_tier]):
+        return
+
+    selected: list[pytest.Item] = []
+    for item in items:
+        # Filter by engine
+        if engine:
+            engine_marker = _get_marker(item, "engine")
+            if not engine_marker or engine not in engine_marker.args:
+                continue
+        # Filter by vendor
+        if vendor:
+            vendor_marker = _get_marker(item, "vendor")
+            if not vendor_marker or vendor not in vendor_marker.args:
+                continue
+        # Filter by GPU tier
+        if gpu_tier is not None:
+            gpu_marker = _get_marker(item, "gpu")
+            gpu_count = gpu_marker.args[0] if gpu_marker else 1
+            if str(gpu_count) != gpu_tier:
+                continue
+        selected.append(item)
+
+    items[:] = selected
