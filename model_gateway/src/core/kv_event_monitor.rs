@@ -46,7 +46,8 @@ pub struct KvEventMonitor {
     pub(crate) indexers: DashMap<String, Arc<PositionalIndexer>>,
     /// Per-model block sizes learned from KV events or set via WorkerSpec.
     /// Used by CacheAwarePolicy to chunk request tokens at query time.
-    block_sizes: DashMap<String, usize>,
+    /// Arc-wrapped so subscription tasks can update it from events.
+    block_sizes: Arc<DashMap<String, usize>>,
     /// Per-worker subscription handles: worker_url → subscription info.
     /// Mutex matches LoadMonitor pattern for atomic abort + remove.
     worker_handles: Mutex<HashMap<String, WorkerSubscription>>,
@@ -82,7 +83,7 @@ impl KvEventMonitor {
         let jump_size = jump_size.unwrap_or(DEFAULT_JUMP_SIZE).max(1);
         Self {
             indexers: DashMap::new(),
-            block_sizes: DashMap::new(),
+            block_sizes: Arc::new(DashMap::new()),
             worker_handles: Mutex::new(HashMap::new()),
             jump_size,
         }
@@ -126,6 +127,7 @@ impl KvEventMonitor {
 
         let worker = Arc::clone(worker);
         let worker_url = url.clone();
+        let block_sizes = Arc::clone(&self.block_sizes);
 
         info!(
             worker_url = %url,
@@ -134,6 +136,7 @@ impl KvEventMonitor {
         );
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let loop_model_id = model_id.clone();
 
         #[expect(
             clippy::disallowed_methods,
@@ -141,7 +144,15 @@ impl KvEventMonitor {
                       handle is stored and graceful shutdown is sent on removal"
         )]
         let handle = tokio::spawn(async move {
-            Self::subscription_loop(worker, worker_url, indexer, shutdown_rx).await;
+            Self::subscription_loop(
+                worker,
+                worker_url,
+                indexer,
+                block_sizes,
+                loop_model_id,
+                shutdown_rx,
+            )
+            .await;
         });
 
         handles.insert(
@@ -249,6 +260,37 @@ impl KvEventMonitor {
     // Subscription loop
     // -----------------------------------------------------------------------
 
+    /// Learn `block_size` from the first `KvBlock` in a stored event.
+    ///
+    /// Called once per model when the first stored event arrives, providing
+    /// ground truth from the backend. `CacheAwarePolicy` uses this to chunk
+    /// request tokens into blocks for overlap scoring.
+    fn learn_block_size(
+        block_sizes: &DashMap<String, usize>,
+        model_id: &str,
+        batch: &KvEventBatch,
+    ) {
+        if block_sizes.contains_key(model_id) {
+            return;
+        }
+        for event in &batch.events {
+            if let Some(kv_cache_event::Data::Stored(stored)) = &event.data {
+                if let Some(block) = stored.blocks.first() {
+                    let bs = block.block_size as usize;
+                    if bs > 0 {
+                        block_sizes.entry(model_id.to_string()).or_insert(bs);
+                        info!(
+                            model_id = %model_id,
+                            block_size = bs,
+                            "Learned block_size from KV event"
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     /// Main subscription loop for a single worker.
     ///
     /// Owns the `WorkerBlockMap` for this worker and cleans it up on exit.
@@ -257,6 +299,8 @@ impl KvEventMonitor {
         worker: Arc<dyn Worker>,
         worker_url: String,
         indexer: Arc<PositionalIndexer>,
+        block_sizes: Arc<DashMap<String, usize>>,
+        model_id: String,
         mut shutdown_rx: oneshot::Receiver<()>,
     ) {
         let worker_id = indexer.intern_worker(&worker_url);
@@ -355,10 +399,12 @@ impl KvEventMonitor {
                 }
             };
 
+            let on_batch =
+                |batch: &KvEventBatch| Self::learn_block_size(&block_sizes, &model_id, batch);
             let stream_result = tokio::select! {
                 result = Self::process_stream(
                     stream, &worker_url, worker_id, &indexer,
-                    &mut worker_blocks, &mut last_seq,
+                    &mut worker_blocks, &mut last_seq, on_batch,
                 ) => result,
                 _ = &mut shutdown_rx => {
                     indexer.remove_worker(worker_id, worker_blocks);
@@ -427,6 +473,7 @@ impl KvEventMonitor {
         indexer: &PositionalIndexer,
         worker_blocks: &mut WorkerBlockMap,
         last_seq: &mut u64,
+        mut on_batch: impl FnMut(&KvEventBatch),
     ) -> StreamResult {
         use tokio_stream::StreamExt;
 
@@ -454,6 +501,8 @@ impl KvEventMonitor {
                     received: batch.sequence_number,
                 };
             }
+
+            on_batch(&batch);
 
             for event in &batch.events {
                 Self::apply_event(event, worker_id, indexer, worker_blocks);
