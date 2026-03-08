@@ -116,7 +116,8 @@ impl KvEventMonitor {
             .or_insert_with(|| Arc::new(PositionalIndexer::new(self.jump_size)))
             .clone();
 
-        // Seed block_size from WorkerSpec if set, valid, and not already known.
+        // Seed block_size provisionally from WorkerSpec. The event stream will
+        // overwrite this with the backend's actual page size once received.
         if let Some(bs) = worker.metadata().spec.kv_block_size {
             if bs > 0 {
                 self.block_sizes.entry(model_id.clone()).or_insert(bs);
@@ -265,25 +266,30 @@ impl KvEventMonitor {
     /// Called once per model when the first stored event arrives, providing
     /// ground truth from the backend. `CacheAwarePolicy` uses this to chunk
     /// request tokens into blocks for overlap scoring.
+    ///
+    /// Overwrites any provisional value seeded from `WorkerSpec` since the
+    /// event stream reflects the backend's actual page size.
     fn learn_block_size(
         block_sizes: &DashMap<String, usize>,
         model_id: &str,
+        learned: &mut bool,
         batch: &KvEventBatch,
     ) {
-        if block_sizes.contains_key(model_id) {
+        if *learned {
             return;
         }
         for event in &batch.events {
             if let Some(kv_cache_event::Data::Stored(stored)) = &event.data {
                 if let Some(block) = stored.blocks.first() {
-                    let bs = block.block_size as usize;
-                    if bs > 0 {
-                        block_sizes.entry(model_id.to_string()).or_insert(bs);
+                    if block.block_size > 0 {
+                        let bs = block.block_size as usize;
+                        block_sizes.insert(model_id.to_string(), bs);
                         info!(
                             model_id = %model_id,
                             block_size = bs,
                             "Learned block_size from KV event"
                         );
+                        *learned = true;
                         return;
                     }
                 }
@@ -307,6 +313,7 @@ impl KvEventMonitor {
         let mut worker_blocks = WorkerBlockMap::default();
         let mut last_seq: u64 = 0;
         let mut reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
+        let mut block_size_learned = false;
 
         /// Sleep with shutdown check. Returns `true` if shutdown was signaled.
         macro_rules! sleep_or_shutdown {
@@ -399,8 +406,9 @@ impl KvEventMonitor {
                 }
             };
 
-            let on_batch =
-                |batch: &KvEventBatch| Self::learn_block_size(&block_sizes, &model_id, batch);
+            let on_batch = |batch: &KvEventBatch| {
+                Self::learn_block_size(&block_sizes, &model_id, &mut block_size_learned, batch);
+            };
             let stream_result = tokio::select! {
                 result = Self::process_stream(
                     stream, &worker_url, worker_id, &indexer,
