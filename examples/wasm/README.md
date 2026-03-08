@@ -81,7 +81,7 @@ All examples require:
 - `wasm-tools`: `cargo install wasm-tools`
 - SMG running with WASM enabled (`--enable-wasm`)
 
-**Storage hook examples** additionally require the storage hook WIT interface at `wasm/src/interface/storage/`.
+**Storage hook examples** additionally require the storage hook WIT interface at `crates/wasm/src/interface/storage/`.
 
 ## Building All Examples
 

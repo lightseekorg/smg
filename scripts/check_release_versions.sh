@@ -120,11 +120,19 @@ get_crate_version() {
 }
 
 # Extract version at a specific git ref (returns empty string if crate missing)
+# Falls back to pre-crates-move path (e.g., crates/auth → auth) for older tags.
 get_crate_version_at_ref() {
     local path="$1"
     local ref="$2"
     local content
-    content=$(git show "$ref:$path/Cargo.toml" 2>/dev/null) || return 0
+    content=$(git show "$ref:$path/Cargo.toml" 2>/dev/null) || {
+        # Fallback: try legacy path before crates/ directory move
+        if [[ "$path" == crates/* ]]; then
+            content=$(git show "$ref:${path#crates/}/Cargo.toml" 2>/dev/null) || return 0
+        else
+            return 0
+        fi
+    }
     if echo "$content" | grep -qE 'version\.workspace\s*=\s*true|version\s*=\s*\{\s*workspace\s*=\s*true'; then
         echo -e "${RED}ERROR: $path/Cargo.toml at $ref uses workspace versioning; this script expects explicit version strings.${NC}" >&2
         exit 1
@@ -233,11 +241,19 @@ get_python_version() {
 }
 
 # Extract __version__ from a Python file at a specific git ref
+# Falls back to pre-crates-move path (e.g., crates/X/... → X/...) for older tags.
 get_python_version_at_ref() {
     local file="$1"
     local ref="$2"
     local content
-    content=$(git show "$ref:$file" 2>/dev/null) || return 0
+    content=$(git show "$ref:$file" 2>/dev/null) || {
+        # Fallback: try legacy path before crates/ directory move
+        if [[ "$file" == crates/* ]]; then
+            content=$(git show "$ref:${file#crates/}" 2>/dev/null) || return 0
+        else
+            return 0
+        fi
+    }
     echo "$content" | grep '__version__' | sed 's/.*"\(.*\)".*/\1/'
 }
 

@@ -85,7 +85,7 @@ schema:
 
 ## WIT Interface
 
-The storage hook world is defined in `wasm/src/interface/storage/storage-hooks.wit` and exports:
+The storage hook world is defined in `crates/wasm/src/interface/storage/storage-hooks.wit` and exports:
 
 - `storage-hook-before`: Called before storage operations to provide extra columns or reject
 - `storage-hook-after`: Called after successful operations with the result and extra columns
