@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - grpc_client/python/pyproject.toml
+      - crates/grpc_client/python/pyproject.toml
       - grpc_servicer/pyproject.toml
   workflow_dispatch:
 
@@ -35,7 +35,7 @@ jobs:
             base="${{ github.event.before }}"
             head="${{ github.sha }}"
             changed="$(git diff --name-only "$base" "$head")"
-            proto=$(echo "$changed" | grep -q '^grpc_client/python/pyproject.toml$' && echo true || echo false)
+            proto=$(echo "$changed" | grep -q '^crates/grpc_client/python/pyproject.toml$' && echo true || echo false)
             servicer=$(echo "$changed" | grep -q '^grpc_servicer/pyproject.toml$' && echo true || echo false)
             echo "proto=$proto" >> "$GITHUB_OUTPUT"
             echo "servicer=$servicer" >> "$GITHUB_OUTPUT"
@@ -60,20 +60,20 @@ jobs:
 
       - name: Copy proto files (replace symlink with real files)
         run: |
-          rm -f grpc_client/python/smg_grpc_proto/proto
-          mkdir -p grpc_client/python/smg_grpc_proto/proto
-          cp grpc_client/proto/*.proto grpc_client/python/smg_grpc_proto/proto/
+          rm -f crates/grpc_client/python/smg_grpc_proto/proto
+          mkdir -p crates/grpc_client/python/smg_grpc_proto/proto
+          cp crates/grpc_client/proto/*.proto crates/grpc_client/python/smg_grpc_proto/proto/
 
       - name: Build package
-        run: cd grpc_client/python && python -m build
+        run: cd crates/grpc_client/python && python -m build
 
       - name: Check package
-        run: twine check --strict grpc_client/python/dist/*
+        run: twine check --strict crates/grpc_client/python/dist/*
 
       - uses: actions/upload-artifact@v7
         with:
           name: grpc-proto-dist
-          path: grpc_client/python/dist/
+          path: crates/grpc_client/python/dist/
 
   upload-proto:
     name: Upload proto to PyPI

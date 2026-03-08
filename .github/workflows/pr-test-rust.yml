@@ -90,16 +90,16 @@ jobs:
 
       - name: Copy protos and build
         run: |
-          rm -f grpc_client/python/smg_grpc_proto/proto
-          mkdir -p grpc_client/python/smg_grpc_proto/proto
-          cp grpc_client/proto/*.proto grpc_client/python/smg_grpc_proto/proto/
+          rm -f crates/grpc_client/python/smg_grpc_proto/proto
+          mkdir -p crates/grpc_client/python/smg_grpc_proto/proto
+          cp crates/grpc_client/proto/*.proto crates/grpc_client/python/smg_grpc_proto/proto/
           pip install build grpcio-tools
-          rm -rf grpc_client/python/dist/
-          cd grpc_client/python && python -m build
+          rm -rf crates/grpc_client/python/dist/
+          cd crates/grpc_client/python && python -m build
 
       - name: Test import
         run: |
-          pip install grpc_client/python/dist/*.whl
+          pip install crates/grpc_client/python/dist/*.whl
           python -c "from smg_grpc_proto import sglang_scheduler_pb2; print('OK')"
 
   build-wheel:
@@ -116,9 +116,9 @@ jobs:
           path: |
             bindings/python/dist/*.whl
             bindings/golang/target/release/libsmg_go.*
-            wasm/tests/fixtures/*.wasm
+            crates/wasm/tests/fixtures/*.wasm
             clients/python/smg_client/types/_generated.py
-          key: wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'auth/src/**', 'bindings/python/src/**', 'data_connector/src/**', 'grpc_client/src/**', 'kv_index/src/**', 'mcp/src/**', 'mesh/src/**', 'model_gateway/src/**', 'multimodal/src/**', 'protocols/src/**', 'reasoning_parser/src/**', 'tokenizer/src/**', 'tool_parser/src/**', 'wasm/src/**', 'workflow/src/**', 'bindings/golang/src/**', 'examples/wasm/**') }}
+          key: wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'crates/auth/src/**', 'bindings/python/src/**', 'crates/data_connector/src/**', 'crates/grpc_client/src/**', 'crates/kv_index/src/**', 'crates/mcp/src/**', 'crates/mesh/src/**', 'model_gateway/src/**', 'crates/multimodal/src/**', 'crates/protocols/src/**', 'crates/reasoning_parser/src/**', 'crates/tokenizer/src/**', 'crates/tool_parser/src/**', 'crates/wasm/src/**', 'crates/workflow/src/**', 'bindings/golang/src/**', 'examples/wasm/**') }}
           restore-keys: |
             wheel-${{ runner.os }}-
 
@@ -157,7 +157,7 @@ jobs:
         if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: |
           source "$HOME/.cargo/env"
-          bash wasm/tests/fixtures/build_fixtures.sh
+          bash crates/wasm/tests/fixtures/build_fixtures.sh
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7
@@ -184,7 +184,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: wasm-test-fixtures
-          path: wasm/tests/fixtures/*.wasm
+          path: crates/wasm/tests/fixtures/*.wasm
           retention-days: 1
           if-no-files-found: ignore
 
@@ -250,7 +250,7 @@ jobs:
       - name: Build WASM test fixtures
         run: |
           source "$HOME/.cargo/env"
-          bash wasm/tests/fixtures/build_fixtures.sh
+          bash crates/wasm/tests/fixtures/build_fixtures.sh
 
       - name: Run lint
         run: |
@@ -270,7 +270,7 @@ jobs:
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
           pip install transformers pillow numpy scipy
-          python multimodal/scripts/generate_vision_golden.py
+          python crates/multimodal/scripts/generate_vision_golden.py
 
       - name: Run Rust tests
         timeout-minutes: 30
@@ -300,7 +300,7 @@ jobs:
           filters: |
             common:
               - 'model_gateway/**'
-              - 'protocols/**'
+              - 'crates/protocols/**'
               - 'bindings/**'
               - 'e2e_test/conftest.py'
               - 'e2e_test/infra/**'
@@ -311,20 +311,20 @@ jobs:
               - 'scripts/ci_setup_python_venv.sh'
               - 'scripts/ci_install_sglang.sh'
               - 'scripts/ci_build_wheel.sh'
-              - 'tokenizer/**'
-              - 'tool_parser/**'
+              - 'crates/tokenizer/**'
+              - 'crates/tool_parser/**'
             chat-completions:
-              - 'reasoning_parser/**'
-              - 'multimodal/**'
-              - 'grpc_client/**'
+              - 'crates/reasoning_parser/**'
+              - 'crates/multimodal/**'
+              - 'crates/grpc_client/**'
               - 'grpc_servicer/**'
               - 'e2e_test/chat_completions/**'
               - 'e2e_test/router/test_pd_mmlu.py'
               - 'scripts/ci_install_vllm.sh'
               - 'scripts/ci_install_trtllm.sh'
             agentic:
-              - 'mcp/**'
-              - 'data_connector/**'
+              - 'crates/mcp/**'
+              - 'crates/data_connector/**'
               - 'e2e_test/responses/**'
               - 'e2e_test/messages/**'
               - 'scripts/ci_agentic_svc_deps.sh'
@@ -388,7 +388,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: wasm-test-fixtures
-          path: wasm/tests/fixtures/
+          path: crates/wasm/tests/fixtures/
         continue-on-error: true
 
       - name: Download Python client types
@@ -512,7 +512,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: wasm-test-fixtures
-          path: wasm/tests/fixtures/
+          path: crates/wasm/tests/fixtures/
         continue-on-error: true
 
       - name: Download Python client types
@@ -588,7 +588,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: wasm-test-fixtures
-          path: wasm/tests/fixtures/
+          path: crates/wasm/tests/fixtures/
         continue-on-error: true
 
       - name: Download Python client types

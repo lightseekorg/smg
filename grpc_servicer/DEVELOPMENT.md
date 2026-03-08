@@ -5,7 +5,7 @@
 Install both proto and servicer as editable packages:
 
 ```bash
-pip install -e grpc_client/python/
+pip install -e crates/grpc_client/python/
 pip install -e grpc_servicer/
 ```
 
@@ -20,7 +20,7 @@ This is handled in `scripts/ci_install_vllm.sh`:
 
 ```bash
 uv pip install vllm
-pip install -e grpc_client/python/
+pip install -e crates/grpc_client/python/
 pip install -e grpc_servicer/
 ```
 
@@ -39,14 +39,14 @@ Releases are triggered by version bumps in the respective `pyproject.toml` files
 ### Scenario 2: Changing only the proto
 
 1. Make changes to proto files and regenerate stubs
-2. Bump version in `grpc_client/python/pyproject.toml`
+2. Bump version in `crates/grpc_client/python/pyproject.toml`
 3. Open PR, CI tests pass
 4. Merge to `main` — `release-grpc-proto.yml` fires, publishes to PyPI
 
 ### Scenario 3: Changing both proto and servicer (one PR)
 
 1. Make all changes (proto + servicer) in a single PR
-2. Bump versions in both `grpc_client/python/pyproject.toml` and `grpc_servicer/pyproject.toml`
+2. Bump versions in both `crates/grpc_client/python/pyproject.toml` and `grpc_servicer/pyproject.toml`
 3. Open PR, CI tests pass (both installed from source)
 4. Merge to `main` — both release workflows trigger
 5. `release-grpc-servicer.yml` waits for `release-grpc-proto.yml` to complete via `workflow_run`

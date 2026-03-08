@@ -48,7 +48,7 @@ jobs:
           path: |
             bindings/python/dist/*.whl
             clients/python/smg_client/types/_generated.py
-          key: nightly-wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'auth/src/**', 'bindings/python/src/**', 'data_connector/src/**', 'grpc_client/src/**', 'kv_index/src/**', 'mcp/src/**', 'mesh/src/**', 'model_gateway/src/**', 'multimodal/src/**', 'protocols/src/**', 'reasoning_parser/src/**', 'tokenizer/src/**', 'tool_parser/src/**', 'wasm/src/**', 'workflow/src/**') }}
+          key: nightly-wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'crates/auth/src/**', 'bindings/python/src/**', 'crates/data_connector/src/**', 'crates/grpc_client/src/**', 'crates/kv_index/src/**', 'crates/mcp/src/**', 'crates/mesh/src/**', 'model_gateway/src/**', 'crates/multimodal/src/**', 'crates/protocols/src/**', 'crates/reasoning_parser/src/**', 'crates/tokenizer/src/**', 'crates/tool_parser/src/**', 'crates/wasm/src/**', 'crates/workflow/src/**') }}
           restore-keys: |
             nightly-wheel-${{ runner.os }}-
 
