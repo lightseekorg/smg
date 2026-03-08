@@ -158,7 +158,7 @@ def _setup_logging() -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter(fmt, datefmt))
 
-    for logger_name in ("e2e_test", "infra", "fixtures"):
+    for logger_name in ("e2e_test", "infra", "fixtures", "bfcl"):
         log = logging.getLogger(logger_name)
         log.handlers.clear()  # prevent duplicates after pytest-parallel fork()
         log.setLevel(logging.INFO)
