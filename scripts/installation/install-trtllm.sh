@@ -15,4 +15,4 @@ cd "${TRTLLM_SRC}"
 git submodule update --init --recursive
 git lfs pull
 python3 ./scripts/build_wheel.py --clean
-pip install --force-reinstall ./build/tensorrt_llm*.whl
+pip install --no-deps --force-reinstall ./build/tensorrt_llm*.whl
