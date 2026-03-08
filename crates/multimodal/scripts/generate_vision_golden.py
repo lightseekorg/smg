@@ -6,13 +6,14 @@ that are used to verify the Rust image preprocessors produce identical results.
 
 Usage:
     # Generate all golden outputs
-    python multimodal/scripts/generate_vision_golden.py
+    python crates/multimodal/scripts/generate_vision_golden.py
 
     # Generate for specific model
-    python multimodal/scripts/generate_vision_golden.py --model llava
+    python crates/multimodal/scripts/generate_vision_golden.py --model llava
 
     # Use specific image
-    python multimodal/scripts/generate_vision_golden.py --image multimodal/tests/fixtures/images/square.jpg
+    python crates/multimodal/scripts/generate_vision_golden.py \
+        --image crates/multimodal/tests/fixtures/images/square.jpg
 """
 
 import argparse
@@ -75,16 +76,16 @@ MODELS = {
 
 # Default test images
 DEFAULT_IMAGES = [
-    "multimodal/tests/fixtures/images/square.jpg",
-    "multimodal/tests/fixtures/images/tall.jpg",
-    "multimodal/tests/fixtures/images/wide.jpg",
-    "multimodal/tests/fixtures/images/small.jpg",
-    "multimodal/tests/fixtures/images/tiny.jpg",
-    "multimodal/tests/fixtures/images/very_tall.jpg",
-    "multimodal/tests/fixtures/images/very_wide.jpg",
-    "multimodal/tests/fixtures/images/large.jpg",
-    "multimodal/tests/fixtures/images/odd_dims.jpg",
-    "multimodal/tests/fixtures/images/grayscale.jpg",
+    "crates/multimodal/tests/fixtures/images/square.jpg",
+    "crates/multimodal/tests/fixtures/images/tall.jpg",
+    "crates/multimodal/tests/fixtures/images/wide.jpg",
+    "crates/multimodal/tests/fixtures/images/small.jpg",
+    "crates/multimodal/tests/fixtures/images/tiny.jpg",
+    "crates/multimodal/tests/fixtures/images/very_tall.jpg",
+    "crates/multimodal/tests/fixtures/images/very_wide.jpg",
+    "crates/multimodal/tests/fixtures/images/large.jpg",
+    "crates/multimodal/tests/fixtures/images/odd_dims.jpg",
+    "crates/multimodal/tests/fixtures/images/grayscale.jpg",
 ]
 
 
@@ -655,7 +656,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         "-o",
-        default="multimodal/tests/fixtures/golden",
+        default="crates/multimodal/tests/fixtures/golden",
         help="Output directory for golden files",
     )
     args = parser.parse_args()

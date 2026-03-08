@@ -19,7 +19,7 @@ from conftest import smg_compare
 logger = logging.getLogger(__name__)
 
 # Path relative to the workspace root (where the gateway binary runs)
-PASSTHROUGH_HOOK_PATH = "wasm/tests/fixtures/storage_hook_passthrough.wasm"
+PASSTHROUGH_HOOK_PATH = "crates/wasm/tests/fixtures/storage_hook_passthrough.wasm"
 
 
 @pytest.mark.gateway(extra_args=["--storage-hook-wasm-path", PASSTHROUGH_HOOK_PATH])
