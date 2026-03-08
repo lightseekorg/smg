@@ -9,8 +9,8 @@
 
 set -e
 
-REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-FIXTURES_DIR="$REPO_ROOT/wasm/tests/fixtures"
+REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+FIXTURES_DIR="$REPO_ROOT/crates/wasm/tests/fixtures"
 
 echo "Building WASM test fixtures..."
 
