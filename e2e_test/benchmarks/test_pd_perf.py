@@ -19,6 +19,7 @@ class TestPDPerf:
             # Increase max_requests to ensure benchmark runs long enough for
             # accurate GPU utilization sampling (at least 30+ seconds)
             max_requests_per_run=200,
+            timeout_sec=480,
             thresholds={
                 "ttft_mean_max": 5,
                 "e2e_latency_mean_max": 16,
