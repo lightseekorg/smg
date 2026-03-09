@@ -1020,10 +1020,7 @@ impl CliArgs {
                 all_urls.extend(worker_urls.clone());
             }
         }
-        let connection_mode = match &mode {
-            RoutingMode::OpenAI { .. } => ConnectionMode::Http,
-            _ => Self::determine_connection_mode(&all_urls),
-        };
+        let connection_mode = Self::determine_connection_mode(&all_urls);
 
         let history_backend = match self.history_backend.as_str() {
             "none" => HistoryBackend::None,
