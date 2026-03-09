@@ -18,10 +18,10 @@ path = "../../model_gateway"
 default-features = true
 
 [dependencies.smg-auth]
-path = "../../crates/auth"
+workspace = true
 
 [dependencies.tool-parser]
-path = "../../crates/tool_parser"
+workspace = true
 
 [features]
 default = ["pyo3/extension-module"]
