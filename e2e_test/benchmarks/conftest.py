@@ -53,6 +53,13 @@ def _build_command(
     if local_model_path:
         cmd.extend(["-v", f"{local_model_path}:{local_model_path}"])
 
+    # Mount host HF cache into container so genai-bench reuses tokenizers
+    # already downloaded by sglang workers instead of downloading from HF
+    # (HF downloads inside ephemeral containers hang intermittently).
+    hf_home = os.environ.get("HF_HOME", os.path.join(Path.home(), ".cache", "huggingface"))
+    if os.path.isdir(hf_home):
+        cmd.extend(["-v", f"{hf_home}:{hf_home}", "-e", f"HF_HOME={hf_home}"])
+
     # Pass through environment variables the container may need
     for var in ("HF_TOKEN", "HF_HOME"):
         if os.environ.get(var):
