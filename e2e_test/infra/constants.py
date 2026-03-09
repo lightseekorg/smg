@@ -69,8 +69,6 @@ def get_runtime() -> str:
     """
     global _RUNTIME_CACHE
     if _RUNTIME_CACHE is None:
-        import os
-
         _RUNTIME_CACHE = os.environ.get(ENV_RUNTIME, DEFAULT_RUNTIME)
     return _RUNTIME_CACHE
 

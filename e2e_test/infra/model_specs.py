@@ -110,22 +110,31 @@ def get_models_with_feature(feature: str) -> list[str]:
     ]
 
 
+def _parse_tp_overrides() -> dict | None:
+    """Parse E2E_MODEL_TP_OVERRIDES env var once at import time."""
+    raw = os.environ.get("E2E_MODEL_TP_OVERRIDES")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+_TP_OVERRIDES = _parse_tp_overrides()
+
+
 def get_model_spec(model_id: str) -> dict:
     """Get spec for a specific model, raising KeyError if not found."""
     if model_id not in MODEL_SPECS:
         raise KeyError(f"Unknown model: {model_id}. Available: {list(MODEL_SPECS.keys())}")
     spec = dict(MODEL_SPECS[model_id])
-    tp_overrides_json = os.environ.get("E2E_MODEL_TP_OVERRIDES")
-    if tp_overrides_json:
-        try:
-            tp_overrides = json.loads(tp_overrides_json)
-            if isinstance(tp_overrides, dict):
-                override = tp_overrides.get(model_id)
-                if isinstance(override, int) and override > 0:
-                    spec["tp"] = override
-        except json.JSONDecodeError:
-            # Ignore malformed override config and fall back to canonical specs.
-            pass
+    if _TP_OVERRIDES is not None:
+        override = _TP_OVERRIDES.get(model_id)
+        if isinstance(override, int) and override > 0:
+            spec["tp"] = override
     return spec
 
 

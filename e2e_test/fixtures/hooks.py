@@ -12,6 +12,8 @@ import os
 import pytest
 from infra import get_runtime
 
+from .markers import resolve_class_marker
+
 # ---------------------------------------------------------------------------
 # Marker registration
 # ---------------------------------------------------------------------------
@@ -95,32 +97,13 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _get_own_class_marker(item: pytest.Item, name: str):
-    """Get a marker defined on the item's own class, not inherited from parents.
-
-    When a test class subclasses another test class, pytest's pytestmark list
-    includes parent markers first and child markers last.  get_closest_marker()
-    therefore returns the parent's marker, which can be wrong when the child
-    intentionally overrides a marker (e.g. engine("sglang") overriding
-    engine("sglang","vllm","trtllm")).
-
-    This helper checks the child class's __dict__ directly.
-    """
-    cls = getattr(item, "cls", None)
-    if cls is None:
-        return None
-    own_marks = cls.__dict__.get("pytestmark", [])
-    if not isinstance(own_marks, list):
-        own_marks = [own_marks]
-    for mark in own_marks:
-        if getattr(mark, "name", None) == name:
-            return mark
-    return None
-
-
 def _get_marker(item: pytest.Item, name: str):
-    """Get the most specific marker, preferring child class over parent."""
-    return _get_own_class_marker(item, name) or item.get_closest_marker(name)
+    """Get the most specific marker, preferring child class over parent.
+
+    Delegates to resolve_class_marker() which walks the class MRO (child-first)
+    so that a child class marker overrides a parent class marker.
+    """
+    return resolve_class_marker(item, name)
 
 
 def pytest_collection_modifyitems(

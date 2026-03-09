@@ -324,37 +324,33 @@ class Worker:
             )
 
         start = time.perf_counter()
-        while time.perf_counter() - start < timeout:
-            if not self.is_alive():
-                pid = self.process.pid if self.process else "unknown"
-                raise RuntimeError(f"Worker {self.model_id} (PID {pid}) died during startup")
-            try:
-                channel = grpc.insecure_channel(f"{DEFAULT_HOST}:{self.port}")
+        channel = grpc.insecure_channel(f"{DEFAULT_HOST}:{self.port}")
+        try:
+            while time.perf_counter() - start < timeout:
+                if not self.is_alive():
+                    pid = self.process.pid if self.process else "unknown"
+                    raise RuntimeError(f"Worker {self.model_id} (PID {pid}) died during startup")
                 try:
                     stub = health_pb2_grpc.HealthStub(channel)
                     request = health_pb2.HealthCheckRequest(service="")
                     response = stub.Check(request, timeout=5.0)
                     if response.status == health_pb2.HealthCheckResponse.SERVING:
                         return
-                finally:
-                    channel.close()
-            except grpc.RpcError as e:
-                # UNIMPLEMENTED means server is up but doesn't have health service;
-                # fall back to channel connectivity check
-                if hasattr(e, "code") and e.code() == grpc.StatusCode.UNIMPLEMENTED:
-                    try:
-                        channel = grpc.insecure_channel(f"{DEFAULT_HOST}:{self.port}")
+                except grpc.RpcError as e:
+                    # UNIMPLEMENTED means server is up but doesn't have health service;
+                    # fall back to channel connectivity check
+                    if hasattr(e, "code") and e.code() == grpc.StatusCode.UNIMPLEMENTED:
                         try:
                             grpc.channel_ready_future(channel).result(timeout=5.0)
                             return
-                        finally:
-                            channel.close()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
-            time.sleep(HEALTH_CHECK_INTERVAL)
+                time.sleep(HEALTH_CHECK_INTERVAL)
+        finally:
+            channel.close()
 
         raise TimeoutError(
             f"gRPC worker {self.model_id} on port {self.port} "

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -373,10 +374,8 @@ class Gateway:
                 worker_id = data.get("worker_id")
 
                 if wait_ready and worker_id:
-                    import time
-
-                    start = time.time()
-                    while time.time() - start < ready_timeout:
+                    start = time.perf_counter()
+                    while time.perf_counter() - start < ready_timeout:
                         workers = self.list_workers()
                         for w in workers:
                             if w.id == worker_id:
