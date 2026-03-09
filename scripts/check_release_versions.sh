@@ -80,7 +80,8 @@ CRATES=(
 # version_file is relative to REPO_ROOT.
 # ---------------------------------------------------------------------------
 PYTHON_PACKAGES=(
-    "smg-grpc-proto|crates/grpc_client/python|crates/grpc_client/python/smg_grpc_proto/__init__.py"
+    "smg-grpc-proto|crates/grpc_client/python|crates/grpc_client/python/pyproject.toml"
+    "smg-grpc-servicer|grpc_servicer|grpc_servicer/pyproject.toml"
 )
 
 # ---------------------------------------------------------------------------
@@ -234,13 +235,17 @@ set_crate_version() {
     fi
 }
 
-# Extract __version__ from a Python file
+# Extract version from a Python package (pyproject.toml or __init__.py)
 get_python_version() {
     local file="$1"
-    grep '__version__' "$file" | sed 's/.*"\(.*\)".*/\1/'
+    if [[ "$file" == *.toml ]]; then
+        grep -m1 '^version' "$file" | sed 's/.*"\(.*\)".*/\1/'
+    else
+        grep '__version__' "$file" | sed 's/.*"\(.*\)".*/\1/'
+    fi
 }
 
-# Extract __version__ from a Python file at a specific git ref
+# Extract version from a Python package at a specific git ref
 # Falls back to pre-crates-move path (e.g., crates/X/... → X/...) for older tags.
 get_python_version_at_ref() {
     local file="$1"
@@ -254,17 +259,33 @@ get_python_version_at_ref() {
             return 0
         fi
     }
-    echo "$content" | grep '__version__' | sed 's/.*"\(.*\)".*/\1/'
+    if [[ "$file" == *.toml ]]; then
+        echo "$content" | grep -m1 '^version' | sed 's/.*"\(.*\)".*/\1/'
+    else
+        echo "$content" | grep '__version__' | sed 's/.*"\(.*\)".*/\1/'
+    fi
 }
 
-# Update __version__ in a Python file
+# Update version in a Python package (pyproject.toml or __init__.py)
 set_python_version() {
     local file="$1"
     local new_version="$2"
-    sed_inplace "s/__version__ = \".*\"/__version__ = \"${new_version}\"/" "$file"
-    if ! grep -q "__version__ = \"${new_version}\"" "$file"; then
-        echo -e "    ${RED}FAILED to update $file${NC}" >&2
-        return 1
+    if [[ "$file" == *.toml ]]; then
+        # Update first version = line in pyproject.toml (same as Cargo.toml)
+        awk -v new="$new_version" '
+            !done && /^version = ".*"/ { sub(/^version = ".*"/, "version = \"" new "\""); done=1 }
+            { print }
+        ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+        if ! grep -q "^version = \"${new_version}\"" "$file"; then
+            echo -e "    ${RED}FAILED to update $file${NC}" >&2
+            return 1
+        fi
+    else
+        sed_inplace "s/__version__ = \".*\"/__version__ = \"${new_version}\"/" "$file"
+        if ! grep -q "__version__ = \"${new_version}\"" "$file"; then
+            echo -e "    ${RED}FAILED to update $file${NC}" >&2
+            return 1
+        fi
     fi
 }
 
