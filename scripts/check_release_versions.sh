@@ -289,6 +289,28 @@ set_python_version() {
     fi
 }
 
+# Check if a version file has changes beyond just the version line
+has_non_version_changes() {
+    local file="$1"
+    local tag="$2"
+    # Check if the file was even changed
+    if ! git diff --name-only "$tag"..HEAD -- "$file" | grep -q .; then
+        return 1
+    fi
+    # Count diff lines that aren't version-related (exclude --- / +++ headers)
+    local pattern
+    if [[ "$file" == *.toml ]]; then
+        pattern='^[+-][[:space:]]*version[[:space:]]*='
+    else
+        pattern='^[+-].*__version__'
+    fi
+    local non_ver_lines
+    non_ver_lines=$(git diff "$tag"..HEAD -- "$file" \
+        | grep '^[+-]' | grep -v '^[+-][+-][+-]' \
+        | grep -cv "$pattern" || true)
+    [[ "$non_ver_lines" -gt 0 ]]
+}
+
 # Update workspace dep version in root Cargo.toml
 set_workspace_dep_version() {
     local dep_key="$1"
@@ -321,8 +343,11 @@ NEEDS_PY_BUMP=()
 for entry in "${CRATES[@]}"; do
     IFS='|' read -r name path dep_key <<< "$entry"
 
-    # 1. Check for code changes since tag (exclude Cargo.toml itself)
+    # 1. Check for code changes since tag (exclude version-only changes in Cargo.toml)
     diff_count=$(git diff --name-only "$TAG"..HEAD -- "$path/" | grep -cv 'Cargo\.toml$' || true)
+    if has_non_version_changes "$REPO_ROOT/$path/Cargo.toml" "$TAG"; then
+        diff_count=$((diff_count + 1))
+    fi
     if [[ "$diff_count" -eq 0 ]]; then
         clean=$((clean + 1))
         continue
@@ -377,8 +402,11 @@ py_clean=0
 for entry in "${PYTHON_PACKAGES[@]}"; do
     IFS='|' read -r name path version_file <<< "$entry"
 
-    # 1. Check for code changes since tag (exclude the version file itself)
+    # 1. Check for code changes since tag (exclude version-only changes in the version file)
     diff_count=$(git diff --name-only "$TAG"..HEAD -- "$path/" | grep -cv "$(basename "$version_file")$" || true)
+    if has_non_version_changes "$REPO_ROOT/$version_file" "$TAG"; then
+        diff_count=$((diff_count + 1))
+    fi
     if [[ "$diff_count" -eq 0 ]]; then
         py_clean=$((py_clean + 1))
         continue
