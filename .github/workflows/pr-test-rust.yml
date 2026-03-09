@@ -21,7 +21,7 @@ permissions:
 
 concurrency:
   group: gateway-tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   RUSTC_WRAPPER: sccache
@@ -344,14 +344,76 @@ jobs:
           name: genai-bench-results-all-policies
           path: benchmark_**/
 
+  detect-changes:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      common: ${{ steps.filter.outputs.common }}
+      chat-completions: ${{ steps.filter.outputs.chat-completions }}
+      agentic: ${{ steps.filter.outputs.agentic }}
+      embeddings: ${{ steps.filter.outputs.embeddings }}
+      go-bindings: ${{ steps.filter.outputs.go-bindings }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            common:
+              - 'model_gateway/**'
+              - 'crates/protocols/**'
+              - 'bindings/**'
+              - 'e2e_test/conftest.py'
+              - 'e2e_test/infra/**'
+              - 'e2e_test/fixtures/**'
+              - 'Cargo.lock'
+              - '.github/actions/**'
+              - '.github/workflows/pr-test-rust.yml'
+              - 'scripts/ci_setup_python_venv.sh'
+              - 'scripts/ci_install_sglang.sh'
+              - 'scripts/ci_build_wheel.sh'
+              - 'crates/tokenizer/**'
+              - 'crates/tool_parser/**'
+            chat-completions:
+              - 'crates/reasoning_parser/**'
+              - 'crates/multimodal/**'
+              - 'crates/grpc_client/**'
+              - 'grpc_servicer/**'
+              - 'e2e_test/chat_completions/**'
+              - 'e2e_test/router/**'
+              - 'scripts/ci_install_vllm.sh'
+              - 'scripts/ci_install_trtllm.sh'
+            agentic:
+              - 'crates/mcp/**'
+              - 'crates/data_connector/**'
+              - 'e2e_test/responses/**'
+              - 'e2e_test/messages/**'
+              - 'scripts/ci_agentic_svc_deps.sh'
+              - 'scripts/oracle_flyway/**'
+            embeddings:
+              - 'e2e_test/embeddings/**'
+            go-bindings:
+              - 'e2e_test/bindings_go/**'
+
   # --- GPU E2E: organized by GPU tier + API, engine as matrix axis ---
 
   # === 1 GPU ===
 
   e2e-1gpu-chat:
     name: e2e-1gpu-chat (${{ matrix.engine }})
-    needs: [build-wheel]
-    if: github.actor != 'dependabot[bot]'
+    needs: [build-wheel, detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.build-wheel.result == 'success'
+      && github.actor != 'dependabot[bot]'
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.chat-completions == 'true')))
     strategy:
       fail-fast: false
       matrix:
@@ -379,8 +441,16 @@ jobs:
     secrets: inherit
 
   e2e-1gpu-embeddings:
-    needs: [build-wheel]
-    if: github.actor != 'dependabot[bot]'
+    needs: [build-wheel, detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.build-wheel.result == 'success'
+      && github.actor != 'dependabot[bot]'
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.embeddings == 'true')))
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: sglang
@@ -393,8 +463,16 @@ jobs:
 
   e2e-1gpu-gateway:
     name: e2e-1gpu-gateway (${{ matrix.engine }})
-    needs: [build-wheel]
-    if: github.actor != 'dependabot[bot]'
+    needs: [build-wheel, detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.build-wheel.result == 'success'
+      && github.actor != 'dependabot[bot]'
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.chat-completions == 'true')))
     strategy:
       fail-fast: false
       matrix:
@@ -427,7 +505,15 @@ jobs:
     secrets: inherit
 
   e2e-2gpu-responses:
-    needs: [e2e-1gpu-chat]
+    needs: [build-wheel, detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.build-wheel.result == 'success'
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.agentic == 'true')))
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: sglang
@@ -440,8 +526,13 @@ jobs:
 
   e2e-2gpu-pd:
     name: e2e-2gpu-pd (${{ matrix.engine }})
-    needs: [e2e-1gpu-gateway]
-    if: ${{ !cancelled() }}
+    needs: [e2e-1gpu-gateway, detect-changes]
+    if: >-
+      !cancelled()
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.chat-completions == 'true')))
     strategy:
       fail-fast: false
       matrix:
@@ -476,8 +567,16 @@ jobs:
 
   e2e-vendor:
     name: ${{ matrix.name }}
-    needs: [build-wheel]
-    if: github.actor != 'dependabot[bot]'
+    needs: [build-wheel, detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.build-wheel.result == 'success'
+      && github.actor != 'dependabot[bot]'
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.agentic == 'true')))
     permissions:
       contents: read
     strategy:
@@ -613,8 +712,16 @@ jobs:
 
   go-bindings-e2e:
     name: go-bindings-e2e
-    needs: build-wheel
-    if: github.actor != 'dependabot[bot]'
+    needs: [build-wheel, detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.build-wheel.result == 'success'
+      && github.actor != 'dependabot[bot]'
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.go-bindings == 'true')))
     runs-on: 1-gpu-h100
     timeout-minutes: 20
     permissions:
