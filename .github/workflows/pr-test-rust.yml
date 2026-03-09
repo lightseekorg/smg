@@ -441,6 +441,7 @@ jobs:
   e2e-2gpu-pd:
     name: e2e-2gpu-pd (${{ matrix.engine }})
     needs: [e2e-1gpu-gateway]
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -456,7 +457,6 @@ jobs:
       runner: 2-gpu-h100
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/router
-      test_filter: "-k test_pd_mmlu"
     secrets: inherit
 
   # === 4 GPU ===

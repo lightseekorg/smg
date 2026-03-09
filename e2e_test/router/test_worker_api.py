@@ -171,6 +171,13 @@ class TestIGWMode:
         finally:
             stop_workers(http_workers)
 
+
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
+@pytest.mark.e2e
+class TestIGWMultiWorker:
+    """Test IGW mode with multiple workers (requires 2 GPUs)."""
+
     def test_igw_multiple_workers(self):
         """Test adding multiple workers (HTTP + gRPC) to IGW gateway."""
         engine = os.environ.get("E2E_ENGINE", "sglang")
@@ -179,7 +186,11 @@ class TestIGWMode:
         )
         try:
             grpc_workers = start_workers(
-                "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.GRPC, count=1
+                "meta-llama/Llama-3.1-8B-Instruct",
+                engine,
+                mode=ConnectionMode.GRPC,
+                count=1,
+                gpu_offset=1,
             )
         except Exception:
             stop_workers(http_workers)
