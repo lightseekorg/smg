@@ -239,9 +239,9 @@ set_crate_version() {
 get_python_version() {
     local file="$1"
     if [[ "$file" == *.toml ]]; then
-        grep -m1 '^version' "$file" | sed 's/.*"\(.*\)".*/\1/'
+        grep -m1 '^version' "$file" | sed 's/.*"\([^"]*\)".*/\1/'
     else
-        grep '__version__' "$file" | sed 's/.*"\(.*\)".*/\1/'
+        grep '__version__' "$file" | sed 's/.*"\([^"]*\)".*/\1/'
     fi
 }
 
@@ -260,9 +260,9 @@ get_python_version_at_ref() {
         fi
     }
     if [[ "$file" == *.toml ]]; then
-        echo "$content" | grep -m1 '^version' | sed 's/.*"\(.*\)".*/\1/'
+        echo "$content" | grep -m1 '^version' | sed 's/.*"\([^"]*\)".*/\1/'
     else
-        echo "$content" | grep '__version__' | sed 's/.*"\(.*\)".*/\1/'
+        echo "$content" | grep '__version__' | sed 's/.*"\([^"]*\)".*/\1/'
     fi
 }
 
@@ -273,7 +273,7 @@ set_python_version() {
     if [[ "$file" == *.toml ]]; then
         # Update first version = line in pyproject.toml (same as Cargo.toml)
         awk -v new="$new_version" '
-            !done && /^version = ".*"/ { sub(/^version = ".*"/, "version = \"" new "\""); done=1 }
+            !done && /^version = ".*"/ { sub(/"[^"]*"/, "\"" new "\""); done=1 }
             { print }
         ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
         if ! grep -q "^version = \"${new_version}\"" "$file"; then
