@@ -7,7 +7,7 @@ githubConfigSecret: github-arc-secret
 
 ## Runner scaling configuration
 minRunners: 2
-maxRunners: 8
+maxRunners: 16
 
 ## name of the runner scale set to create.  Defaults to the helm release name
 runnerScaleSetName: "1-gpu"
