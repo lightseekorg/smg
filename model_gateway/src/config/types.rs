@@ -179,6 +179,8 @@ pub enum RoutingMode {
     OpenAI { worker_urls: Vec<String> },
     #[serde(rename = "anthropic")]
     Anthropic { worker_urls: Vec<String> },
+    #[serde(rename = "gemini")]
+    Gemini { worker_urls: Vec<String> },
 }
 
 impl RoutingMode {
@@ -196,6 +198,7 @@ impl RoutingMode {
             } => prefill_urls.len() + decode_urls.len(),
             RoutingMode::OpenAI { worker_urls } => worker_urls.len(),
             RoutingMode::Anthropic { worker_urls } => worker_urls.len(),
+            RoutingMode::Gemini { worker_urls } => worker_urls.len(),
         }
     }
 
@@ -587,6 +590,7 @@ impl RouterConfig {
             RoutingMode::PrefillDecode { .. } => "prefill_decode",
             RoutingMode::OpenAI { .. } => "openai",
             RoutingMode::Anthropic { .. } => "anthropic",
+            RoutingMode::Gemini { .. } => "gemini",
         }
     }
 

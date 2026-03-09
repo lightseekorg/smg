@@ -4,7 +4,7 @@
 //! - `SharedComponents`: created once per router, `Arc`-cloned for each request.
 //! - `RequestContext`: created fresh per request, owned and mutated by steps.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::http::HeaderMap;
 use openai_protocol::interactions::InteractionsRequest;
@@ -34,6 +34,9 @@ pub(crate) struct SharedComponents {
 
     /// MCP orchestrator for creating tool sessions.
     pub mcp_orchestrator: Arc<McpOrchestrator>,
+
+    /// Per-request timeout from router config.
+    pub request_timeout: Duration,
 }
 
 // ============================================================================
