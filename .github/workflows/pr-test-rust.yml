@@ -288,7 +288,7 @@ jobs:
     needs: build-wheel
     if: github.actor != 'dependabot[bot]'
     runs-on: 4-gpu-h100
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -372,8 +372,11 @@ jobs:
               - 'Cargo.lock'
               - '.github/actions/**'
               - '.github/workflows/pr-test-rust.yml'
+              - '.github/workflows/e2e-gpu-job.yml'
               - 'scripts/ci_setup_python_venv.sh'
               - 'scripts/ci_install_sglang.sh'
+              - 'scripts/ci_install_e2e_deps.sh'
+              - 'scripts/ci_killall_sglang.sh'
               - 'scripts/ci_build_wheel.sh'
               - 'crates/tokenizer/**'
               - 'crates/tool_parser/**'
@@ -510,6 +513,7 @@ jobs:
       always()
       && !cancelled()
       && needs.build-wheel.result == 'success'
+      && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
@@ -528,7 +532,9 @@ jobs:
     name: e2e-2gpu-pd (${{ matrix.engine }})
     needs: [e2e-1gpu-gateway, detect-changes]
     if: >-
-      !cancelled()
+      always()
+      && !cancelled()
+      && needs.e2e-1gpu-gateway.result == 'success'
       && (github.event_name != 'pull_request'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
