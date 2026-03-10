@@ -49,7 +49,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::{
-    config::{BuiltinToolType, McpConfig, McpProxyConfig, McpServerConfig, McpTransport},
+    config::{
+        BuiltinToolType, McpConfig, McpProxyConfig, McpServerConfig, McpTransport, Prompt,
+        RawResource, Tool,
+    },
     handler::{HandlerRequestContext, RefreshRequest, SmgClientHandler},
     metrics::McpMetrics,
     pool::{McpConnectionPool, PoolKey},
@@ -128,6 +131,14 @@ struct ServerEntry {
     client: Arc<McpClientWithHandler>,
     handler: Arc<SmgClientHandler>,
     config: McpServerConfig,
+}
+
+/// Complete snapshot of a server's MCP inventory.
+#[derive(Debug)]
+struct ServerInventorySnapshot {
+    tools: Vec<Tool>,
+    prompts: Vec<(String, Prompt)>,
+    resources: Vec<(String, RawResource)>,
 }
 
 /// Result of a tool call.
@@ -272,7 +283,7 @@ impl ToolExecutionOutput {
 /// Thread-safe and designed for sharing across async tasks.
 pub struct McpOrchestrator {
     /// Static servers (from config, never evicted).
-    static_servers: DashMap<String, ServerEntry>,
+    static_servers: Arc<DashMap<String, ServerEntry>>,
     /// Tool inventory with qualified names.
     tool_inventory: Arc<ToolInventory>,
     /// Approval manager for interactive and policy-only modes.
@@ -331,7 +342,7 @@ impl McpOrchestrator {
         let (refresh_tx, refresh_rx) = mpsc::channel(100);
 
         let orchestrator = Self {
-            static_servers: DashMap::new(),
+            static_servers: Arc::new(DashMap::new()),
             tool_inventory,
             approval_manager,
             connection_pool,
@@ -356,8 +367,9 @@ impl McpOrchestrator {
             }
         }
 
-        // Start background refresh task
+        // Start background refresh tasks.
         orchestrator.spawn_refresh_handler(refresh_rx);
+        orchestrator.spawn_periodic_refresh_task();
 
         info!(
             "McpOrchestrator initialized with {} static servers",
@@ -384,7 +396,7 @@ impl McpOrchestrator {
         let approval_manager = Arc::new(ApprovalManager::new(policy_engine, audit_log));
 
         Self {
-            static_servers: DashMap::new(),
+            static_servers: Arc::new(DashMap::new()),
             tool_inventory: Arc::new(ToolInventory::new()),
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
@@ -435,14 +447,14 @@ impl McpOrchestrator {
         let client = Arc::new(client);
         self.tool_inventory.clear_server_tools(&config.name);
 
-        // Load tools from server
-        self.load_server_inventory(&config.name, &client).await;
+        // Load tools/prompts/resources from server.
+        Self::load_server_inventory(&self.tool_inventory, &config.name, &client).await;
 
-        // Apply tool configs (aliases, response formats)
-        self.apply_tool_configs(config);
+        // Apply tool configs (aliases, response formats).
+        Self::apply_tool_configs_to_inventory(&self.tool_inventory, config);
 
-        // Apply builtin response format if server has builtin_type configured
-        self.apply_builtin_response_format(config);
+        // Apply builtin response format if server has builtin_type configured.
+        Self::apply_builtin_response_format_to_inventory(&self.tool_inventory, config);
 
         // Store server entry with config for builtin lookups
         self.static_servers.insert(
@@ -459,18 +471,53 @@ impl McpOrchestrator {
         Ok(())
     }
 
+    /// Register a tool alias directly in the inventory.
+    fn register_alias_in_inventory(
+        tool_inventory: &ToolInventory,
+        alias_name: &str,
+        target_server: &str,
+        target_tool: &str,
+        arg_mapping: Option<ArgMapping>,
+        response_format: ResponseFormat,
+    ) -> McpResult<()> {
+        // Verify target exists.
+        let target_entry = tool_inventory
+            .get_entry(target_server, target_tool)
+            .ok_or_else(|| McpError::ToolNotFound(format!("{target_server}:{target_tool}")))?;
+
+        // Create alias entry.
+        let alias_target = AliasTarget {
+            target: QualifiedToolName::new(target_server, target_tool),
+            arg_mapping,
+        };
+
+        let alias_entry = ToolEntry::new(
+            QualifiedToolName::new("alias", alias_name),
+            target_entry.tool.clone(),
+        )
+        .with_alias(alias_target)
+        .with_response_format(response_format);
+
+        tool_inventory.insert_entry(alias_entry);
+
+        // Also register in the aliases index.
+        tool_inventory.register_alias(
+            alias_name.to_string(),
+            QualifiedToolName::new(target_server, target_tool),
+        );
+
+        Ok(())
+    }
+
     /// Apply tool configurations from server config (aliases, response formats, arg mappings).
-    fn apply_tool_configs(&self, config: &McpServerConfig) {
+    fn apply_tool_configs_to_inventory(tool_inventory: &ToolInventory, config: &McpServerConfig) {
         let Some(tools) = &config.tools else {
             return;
         };
 
         for (tool_name, tool_config) in tools {
             // Check if the tool exists
-            if !self
-                .tool_inventory
-                .has_tool_qualified(&config.name, tool_name)
-            {
+            if !tool_inventory.has_tool_qualified(&config.name, tool_name) {
                 warn!(
                     "Tool config for '{}:{}' but tool not found on server",
                     config.name, tool_name
@@ -494,7 +541,8 @@ impl McpOrchestrator {
                     mapping
                 });
 
-                if let Err(e) = self.register_alias(
+                if let Err(e) = Self::register_alias_in_inventory(
+                    tool_inventory,
                     alias_name,
                     &config.name,
                     tool_name,
@@ -513,9 +561,9 @@ impl McpOrchestrator {
                 }
             } else if response_format != ResponseFormat::Passthrough {
                 // No alias, but has custom response format - update the entry directly
-                if let Some(mut entry) = self.tool_inventory.get_entry(&config.name, tool_name) {
+                if let Some(mut entry) = tool_inventory.get_entry(&config.name, tool_name) {
                     entry.response_format = response_format.clone();
-                    self.tool_inventory.insert_entry(entry);
+                    tool_inventory.insert_entry(entry);
                     info!(
                         "Set response format {:?} for '{}:{}'",
                         response_format, config.name, tool_name
@@ -530,7 +578,10 @@ impl McpOrchestrator {
     /// When a server is configured with `builtin_type` and `builtin_tool_name`, the
     /// corresponding tool should use the response format associated with the builtin type
     /// (e.g., WebSearchPreview -> WebSearchCall) unless explicitly overridden in the tools config.
-    fn apply_builtin_response_format(&self, config: &McpServerConfig) {
+    fn apply_builtin_response_format_to_inventory(
+        tool_inventory: &ToolInventory,
+        config: &McpServerConfig,
+    ) {
         let Some(builtin_type) = &config.builtin_type else {
             return;
         };
@@ -554,20 +605,18 @@ impl McpOrchestrator {
 
         let response_format: ResponseFormat = builtin_type.response_format().into();
 
-        let updated = self
-            .tool_inventory
-            .update_entry(&config.name, tool_name, |entry| {
-                if entry.response_format != response_format {
-                    info!(
-                        server = %config.name,
-                        tool = %tool_name,
-                        builtin_type = %builtin_type,
-                        format = ?response_format,
-                        "Applied builtin response format"
-                    );
-                    entry.response_format = response_format.clone();
-                }
-            });
+        let updated = tool_inventory.update_entry(&config.name, tool_name, |entry| {
+            if entry.response_format != response_format {
+                info!(
+                    server = %config.name,
+                    tool = %tool_name,
+                    builtin_type = %builtin_type,
+                    format = ?response_format,
+                    "Applied builtin response format"
+                );
+                entry.response_format = response_format.clone();
+            }
+        });
 
         if !updated {
             warn!(
@@ -660,7 +709,11 @@ impl McpOrchestrator {
     }
 
     /// Load tools, prompts, and resources from a server into the inventory.
-    async fn load_server_inventory(&self, server_key: &str, client: &Arc<McpClientWithHandler>) {
+    async fn load_server_inventory(
+        tool_inventory: &ToolInventory,
+        server_key: &str,
+        client: &Arc<McpClientWithHandler>,
+    ) {
         // Load tools
         match client.peer().list_all_tools().await {
             Ok(tools) => {
@@ -668,7 +721,7 @@ impl McpOrchestrator {
                 for tool in tools {
                     let entry = ToolEntry::from_server_tool(server_key, tool)
                         .with_category(ToolCategory::Static);
-                    self.tool_inventory.insert_entry(entry);
+                    tool_inventory.insert_entry(entry);
                 }
             }
             Err(e) => warn!("Failed to list tools from '{}': {}", server_key, e),
@@ -679,7 +732,7 @@ impl McpOrchestrator {
             Ok(prompts) => {
                 info!("Discovered {} prompts from '{}'", prompts.len(), server_key);
                 for prompt in prompts {
-                    self.tool_inventory.insert_prompt(
+                    tool_inventory.insert_prompt(
                         prompt.name.clone(),
                         server_key.to_string(),
                         prompt,
@@ -698,7 +751,7 @@ impl McpOrchestrator {
                     server_key
                 );
                 for resource in resources {
-                    self.tool_inventory.insert_resource(
+                    tool_inventory.insert_resource(
                         resource.uri.clone(),
                         server_key.to_string(),
                         resource.raw,
@@ -711,7 +764,7 @@ impl McpOrchestrator {
 
     /// Spawn background handler for inventory refresh requests.
     fn spawn_refresh_handler(&self, mut rx: mpsc::Receiver<RefreshRequest>) {
-        let token = self.shutdown_token.clone(); //
+        let token = self.shutdown_token.clone();
         let tool_inventory = Arc::clone(&self.tool_inventory);
         let static_servers = self.static_servers.clone();
 
@@ -723,7 +776,7 @@ impl McpOrchestrator {
             loop {
                 tokio::select! {
                     // Stop the loop if the shutdown token is triggered
-                    () = token.cancelled() => { //
+                    () = token.cancelled() => {
                         debug!("Refresh handler shutting down");
                         break;
                     }
@@ -732,34 +785,232 @@ impl McpOrchestrator {
                         debug!("Processing refresh request for '{}'", request.server_key);
 
                         if let Some(entry) = static_servers.get(&request.server_key) {
-                            // Clear existing tools for this server
-                            tool_inventory.clear_server_tools(&request.server_key);
+                            let client = Arc::clone(&entry.client);
+                            let server_config = entry.config.clone();
+                            drop(entry);
 
-                            // Reload tools
-                            match entry.client.peer().list_all_tools().await {
-                                Ok(tools) => {
-                                    for tool in tools {
-                                        let entry = ToolEntry::from_server_tool(&request.server_key, tool)
-                                            .with_category(ToolCategory::Static);
-                                        tool_inventory.insert_entry(entry);
-                                    }
-                                    info!(
-                                        "Refreshed inventory for '{}': {} tools",
-                                        request.server_key,
-                                        tool_inventory.counts().0
-                                    );
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "Failed to refresh tools for '{}': {}",
-                                        request.server_key, e
-                                    );
-                                }
-                            }
+                            // Refresh inventory atomically: preserve existing tools on fetch failures.
+                            let snapshot = Self::fetch_server_inventory_snapshot(
+                                tool_inventory.as_ref(),
+                                &request.server_key,
+                                &client,
+                            )
+                            .await;
+                            Self::apply_refresh_snapshot_result(
+                                tool_inventory.as_ref(),
+                                &request.server_key,
+                                &server_config,
+                                snapshot,
+                            );
+                        } else {
+                            debug!(
+                                "Ignoring refresh request for unknown static server '{}'",
+                                request.server_key
+                            );
                         }
                     }
 
                     else => break,
+                }
+            }
+        });
+    }
+
+    /// Returns cached prompts for a specific server.
+    fn cached_prompts_for_server(
+        tool_inventory: &ToolInventory,
+        server_key: &str,
+    ) -> Vec<(String, Prompt)> {
+        tool_inventory
+            .list_prompts()
+            .into_iter()
+            .filter_map(|(prompt_name, prompt_server, prompt)| {
+                (prompt_server == server_key).then_some((prompt_name, prompt))
+            })
+            .collect()
+    }
+
+    /// Returns cached resources for a specific server.
+    fn cached_resources_for_server(
+        tool_inventory: &ToolInventory,
+        server_key: &str,
+    ) -> Vec<(String, RawResource)> {
+        tool_inventory
+            .list_resources()
+            .into_iter()
+            .filter_map(|(resource_uri, resource_server, resource)| {
+                (resource_server == server_key).then_some((resource_uri, resource))
+            })
+            .collect()
+    }
+
+    /// Fetch a full server inventory snapshot.
+    ///
+    /// Tools are required for a refresh. Prompts/resources are best-effort:
+    /// if fetching them fails, existing cached entries are preserved.
+    async fn fetch_server_inventory_snapshot(
+        tool_inventory: &ToolInventory,
+        server_key: &str,
+        client: &Arc<McpClientWithHandler>,
+    ) -> Result<ServerInventorySnapshot, String> {
+        let tools = client
+            .peer()
+            .list_all_tools()
+            .await
+            .map_err(|e| format!("list tools failed for '{server_key}': {e}"))?;
+        let prompts = match client.peer().list_all_prompts().await {
+            Ok(prompts) => prompts
+                .into_iter()
+                .map(|prompt| (prompt.name.clone(), prompt))
+                .collect(),
+            Err(err) => {
+                debug!(
+                    server_key = %server_key,
+                    error = %err,
+                    "Failed to list prompts during refresh; preserving cached prompts"
+                );
+                Self::cached_prompts_for_server(tool_inventory, server_key)
+            }
+        };
+        let resources = match client.peer().list_all_resources().await {
+            Ok(resources) => resources
+                .into_iter()
+                .map(|resource| (resource.uri.clone(), resource.raw))
+                .collect(),
+            Err(err) => {
+                debug!(
+                    server_key = %server_key,
+                    error = %err,
+                    "Failed to list resources during refresh; preserving cached resources"
+                );
+                Self::cached_resources_for_server(tool_inventory, server_key)
+            }
+        };
+
+        Ok(ServerInventorySnapshot {
+            tools,
+            prompts,
+            resources,
+        })
+    }
+
+    /// Replace server inventory with a freshly fetched snapshot.
+    fn apply_refresh_snapshot(
+        tool_inventory: &ToolInventory,
+        server_key: &str,
+        server_config: &McpServerConfig,
+        snapshot: ServerInventorySnapshot,
+    ) {
+        tool_inventory.clear_server_tools(server_key);
+
+        for tool in snapshot.tools {
+            let entry =
+                ToolEntry::from_server_tool(server_key, tool).with_category(ToolCategory::Static);
+            tool_inventory.insert_entry(entry);
+        }
+
+        for (prompt_name, prompt) in snapshot.prompts {
+            tool_inventory.insert_prompt(prompt_name, server_key.to_string(), prompt);
+        }
+
+        for (resource_uri, resource) in snapshot.resources {
+            tool_inventory.insert_resource(resource_uri, server_key.to_string(), resource);
+        }
+
+        Self::apply_tool_configs_to_inventory(tool_inventory, server_config);
+        Self::apply_builtin_response_format_to_inventory(tool_inventory, server_config);
+    }
+
+    /// Apply snapshot refresh result. On fetch failures, existing inventory is preserved.
+    fn apply_refresh_snapshot_result(
+        tool_inventory: &ToolInventory,
+        server_key: &str,
+        server_config: &McpServerConfig,
+        snapshot_result: Result<ServerInventorySnapshot, String>,
+    ) {
+        match snapshot_result {
+            Ok(snapshot) => {
+                Self::apply_refresh_snapshot(tool_inventory, server_key, server_config, snapshot);
+                info!(
+                    "Refreshed inventory for '{}': {} tools",
+                    server_key,
+                    tool_inventory.counts().0
+                );
+            }
+            Err(err) => {
+                warn!(
+                    server_key = %server_key,
+                    error = %err,
+                    "Skipping inventory refresh and preserving previous entries"
+                );
+            }
+        }
+    }
+
+    /// Queue refresh requests for the provided server keys.
+    async fn enqueue_refresh_requests<I>(refresh_tx: &mpsc::Sender<RefreshRequest>, server_keys: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        for server_key in server_keys {
+            if let Err(err) = refresh_tx
+                .send(RefreshRequest {
+                    server_key: server_key.clone(),
+                })
+                .await
+            {
+                warn!(
+                    server_key = %server_key,
+                    error = %err,
+                    "Stopped enqueuing periodic inventory refresh requests"
+                );
+                break;
+            }
+        }
+    }
+
+    /// Spawn periodic inventory refresh task for static servers.
+    fn spawn_periodic_refresh_task(&self) {
+        if !self.config.inventory.enable_refresh {
+            debug!("Periodic MCP inventory refresh disabled (inventory.enable_refresh=false)");
+            return;
+        }
+
+        let refresh_interval_secs = self.config.inventory.refresh_interval.max(1);
+        let token = self.shutdown_token.clone();
+        let refresh_tx = self.refresh_tx.clone();
+        let static_servers = self.static_servers.clone();
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "periodic refresh task runs for orchestrator lifetime; shutdown is coordinated via CancellationToken"
+        )]
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(refresh_interval_secs));
+            interval.tick().await; // consume immediate first tick
+
+            loop {
+                tokio::select! {
+                    () = token.cancelled() => {
+                        debug!("Periodic refresh task shutting down");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        let server_keys: Vec<String> = static_servers
+                            .iter()
+                            .map(|entry| entry.key().clone())
+                            .collect();
+
+                        if server_keys.is_empty() {
+                            continue;
+                        }
+
+                        debug!(
+                            server_count = server_keys.len(),
+                            "Enqueuing periodic MCP inventory refresh"
+                        );
+                        Self::enqueue_refresh_requests(&refresh_tx, server_keys).await;
+                    }
                 }
             }
         });
@@ -882,7 +1133,7 @@ impl McpOrchestrator {
 
         // First, search connected static servers (dynamically registered via connect_static_server).
         // This handles servers registered after orchestrator initialization.
-        for entry in &self.static_servers {
+        for entry in self.static_servers.iter() {
             if let Some(result) = extract_builtin(&entry.config) {
                 return Some(result);
             }
@@ -904,7 +1155,7 @@ impl McpOrchestrator {
         let mut names = HashSet::new();
 
         // Check connected static servers first
-        for entry in &self.static_servers {
+        for entry in self.static_servers.iter() {
             if entry.config.builtin_type.is_some() {
                 names.insert(entry.config.name.clone());
             }
@@ -1381,32 +1632,14 @@ impl McpOrchestrator {
         arg_mapping: Option<ArgMapping>,
         response_format: ResponseFormat,
     ) -> McpResult<()> {
-        // Verify target exists
-        let target_entry = self
-            .tool_inventory
-            .get_entry(target_server, target_tool)
-            .ok_or_else(|| McpError::ToolNotFound(format!("{target_server}:{target_tool}")))?;
-
-        // Create alias entry
-        let alias_target = AliasTarget {
-            target: QualifiedToolName::new(target_server, target_tool),
+        Self::register_alias_in_inventory(
+            &self.tool_inventory,
+            alias_name,
+            target_server,
+            target_tool,
             arg_mapping,
-        };
-
-        let alias_entry = ToolEntry::new(
-            QualifiedToolName::new("alias", alias_name),
-            target_entry.tool.clone(),
-        )
-        .with_alias(alias_target)
-        .with_response_format(response_format);
-
-        self.tool_inventory.insert_entry(alias_entry);
-
-        // Also register in the aliases index
-        self.tool_inventory.register_alias(
-            alias_name.to_string(),
-            QualifiedToolName::new(target_server, target_tool),
-        );
+            response_format,
+        )?;
 
         info!(
             "Registered alias '{}' → '{}:{}'",
@@ -1431,14 +1664,14 @@ impl McpOrchestrator {
 
     /// Set request context on all static server handlers.
     pub fn set_handler_contexts(&self, ctx: &HandlerRequestContext) {
-        for entry in &self.static_servers {
+        for entry in self.static_servers.iter() {
             entry.handler.set_request_context(ctx.clone());
         }
     }
 
     /// Clear request context from all static server handlers.
     pub fn clear_handler_contexts(&self) {
-        for entry in &self.static_servers {
+        for entry in self.static_servers.iter() {
             entry.handler.clear_request_context();
         }
     }
@@ -1588,31 +1821,12 @@ impl McpOrchestrator {
 
     /// List all tools visible to a tenant.
     pub fn list_tools(&self, _tenant_ctx: Option<&TenantContext>) -> Vec<ToolEntry> {
-        self.tool_inventory
-            .list_tools()
-            .into_iter()
-            .filter_map(|(tool_name, server_key, _)| {
-                self.tool_inventory.get_entry(&server_key, &tool_name)
-            })
-            .collect()
+        self.tool_inventory.list_entries()
     }
 
     /// List tools for specific servers.
     pub fn list_tools_for_servers(&self, server_keys: &[String]) -> Vec<ToolEntry> {
-        // For small server lists (typical case: 1-5), linear scan is faster than HashSet
-        let is_allowed = |server_key: &str| -> bool { server_keys.iter().any(|s| s == server_key) };
-
-        self.tool_inventory
-            .list_tools()
-            .into_iter()
-            .filter_map(|(tool_name, server_key, _)| {
-                if is_allowed(&server_key) {
-                    self.tool_inventory.get_entry(&server_key, &tool_name)
-                } else {
-                    None
-                }
-            })
-            .collect()
+        self.tool_inventory.list_entries_for_servers(server_keys)
     }
 
     /// Get a tool by qualified name.
@@ -1765,7 +1979,7 @@ impl McpOrchestrator {
         // Cancel pending approvals
         self.approval_manager.cancel_all_pending();
 
-        for _ in &self.static_servers {
+        for _ in self.static_servers.iter() {
             self.metrics.record_connection_closed();
         }
         self.static_servers.clear();
@@ -2029,6 +2243,14 @@ mod tests {
             annotations: None,
             icons: None,
         }
+    }
+
+    fn create_test_prompt(name: &str) -> Prompt {
+        Prompt::new(name, Some("Test prompt"), None)
+    }
+
+    fn create_test_resource(uri: &str, name: &str) -> RawResource {
+        RawResource::new(uri, name)
     }
     #[tokio::test]
     async fn test_orchestrator_graceful_shutdown_flow() {
@@ -2366,7 +2588,7 @@ mod tests {
         let approval_manager = Arc::new(ApprovalManager::new(policy_engine, audit_log));
 
         let orchestrator = McpOrchestrator {
-            static_servers: DashMap::new(),
+            static_servers: Arc::new(DashMap::new()),
             tool_inventory: Arc::new(ToolInventory::new()),
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
@@ -2435,7 +2657,7 @@ mod tests {
         let approval_manager = Arc::new(ApprovalManager::new(policy_engine, audit_log));
 
         let orchestrator = McpOrchestrator {
-            static_servers: DashMap::new(),
+            static_servers: Arc::new(DashMap::new()),
             tool_inventory: Arc::new(ToolInventory::new()),
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
@@ -2506,7 +2728,7 @@ mod tests {
         let approval_manager = Arc::new(ApprovalManager::new(policy_engine, audit_log));
 
         let orchestrator = McpOrchestrator {
-            static_servers: DashMap::new(),
+            static_servers: Arc::new(DashMap::new()),
             tool_inventory: Arc::new(ToolInventory::new()),
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
@@ -2525,7 +2747,10 @@ mod tests {
         orchestrator.tool_inventory.insert_entry(entry);
 
         // Apply builtin response format - should update to WebSearchCall
-        orchestrator.apply_builtin_response_format(&orchestrator.config.servers[0]);
+        McpOrchestrator::apply_builtin_response_format_to_inventory(
+            &orchestrator.tool_inventory,
+            &orchestrator.config.servers[0],
+        );
 
         // Verify the tool entry was updated
         let entry = orchestrator
@@ -2583,7 +2808,7 @@ mod tests {
         let approval_manager = Arc::new(ApprovalManager::new(policy_engine, audit_log));
 
         let orchestrator = McpOrchestrator {
-            static_servers: DashMap::new(),
+            static_servers: Arc::new(DashMap::new()),
             tool_inventory: Arc::new(ToolInventory::new()),
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
@@ -2601,7 +2826,10 @@ mod tests {
         orchestrator.tool_inventory.insert_entry(entry);
 
         // Apply builtin response format - should NOT override because explicit config exists
-        orchestrator.apply_builtin_response_format(&orchestrator.config.servers[0]);
+        McpOrchestrator::apply_builtin_response_format_to_inventory(
+            &orchestrator.tool_inventory,
+            &orchestrator.config.servers[0],
+        );
 
         // Verify the tool entry kept Passthrough (explicit override)
         let entry = orchestrator
@@ -2613,5 +2841,146 @@ mod tests {
             ResponseFormat::Passthrough,
             "Explicit override should be preserved"
         );
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_refresh_requests() {
+        let (tx, mut rx) = mpsc::channel(8);
+
+        McpOrchestrator::enqueue_refresh_requests(
+            &tx,
+            vec!["server-a".to_string(), "server-b".to_string()],
+        )
+        .await;
+
+        let first = rx.recv().await.expect("expected first refresh request");
+        let second = rx.recv().await.expect("expected second refresh request");
+
+        let mut received = vec![first.server_key, second.server_key];
+        received.sort();
+        assert_eq!(
+            received,
+            vec!["server-a".to_string(), "server-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_apply_refresh_snapshot_result_preserves_entries_on_error() {
+        use std::collections::HashMap;
+
+        let inventory = ToolInventory::new();
+        inventory.insert_entry(ToolEntry::from_server_tool(
+            "server-a",
+            create_test_tool("existing_tool"),
+        ));
+
+        let server_config = McpServerConfig {
+            name: "server-a".to_string(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:3000/sse".to_string(),
+                token: None,
+                headers: HashMap::new(),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+            builtin_type: None,
+            builtin_tool_name: None,
+        };
+
+        McpOrchestrator::apply_refresh_snapshot_result(
+            &inventory,
+            "server-a",
+            &server_config,
+            Err("simulated refresh failure".to_string()),
+        );
+
+        assert!(inventory.has_tool_qualified("server-a", "existing_tool"));
+    }
+
+    #[test]
+    fn test_cached_entries_for_server_are_scoped() {
+        let inventory = ToolInventory::new();
+        inventory.insert_prompt(
+            "prompt-a".to_string(),
+            "server-a".to_string(),
+            create_test_prompt("prompt-a"),
+        );
+        inventory.insert_prompt(
+            "prompt-b".to_string(),
+            "server-b".to_string(),
+            create_test_prompt("prompt-b"),
+        );
+        inventory.insert_resource(
+            "file:///a.txt".to_string(),
+            "server-a".to_string(),
+            create_test_resource("file:///a.txt", "a"),
+        );
+        inventory.insert_resource(
+            "file:///b.txt".to_string(),
+            "server-b".to_string(),
+            create_test_resource("file:///b.txt", "b"),
+        );
+
+        let prompts = McpOrchestrator::cached_prompts_for_server(&inventory, "server-a");
+        let resources = McpOrchestrator::cached_resources_for_server(&inventory, "server-a");
+
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].0, "prompt-a");
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].0, "file:///a.txt");
+    }
+
+    #[test]
+    fn test_apply_refresh_snapshot_replaces_tools_and_keeps_cached_non_tool_entries() {
+        use std::collections::HashMap;
+
+        let inventory = ToolInventory::new();
+        inventory.insert_entry(ToolEntry::from_server_tool(
+            "server-a",
+            create_test_tool("old_tool"),
+        ));
+        inventory.insert_prompt(
+            "prompt-a".to_string(),
+            "server-a".to_string(),
+            create_test_prompt("prompt-a"),
+        );
+        inventory.insert_resource(
+            "file:///a.txt".to_string(),
+            "server-a".to_string(),
+            create_test_resource("file:///a.txt", "a"),
+        );
+
+        let server_config = McpServerConfig {
+            name: "server-a".to_string(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:3000/sse".to_string(),
+                token: None,
+                headers: HashMap::new(),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+            builtin_type: None,
+            builtin_tool_name: None,
+        };
+
+        let snapshot = ServerInventorySnapshot {
+            tools: vec![create_test_tool("new_tool")],
+            prompts: McpOrchestrator::cached_prompts_for_server(&inventory, "server-a"),
+            resources: McpOrchestrator::cached_resources_for_server(&inventory, "server-a"),
+        };
+
+        McpOrchestrator::apply_refresh_snapshot_result(
+            &inventory,
+            "server-a",
+            &server_config,
+            Ok(snapshot),
+        );
+
+        assert!(inventory.has_tool_qualified("server-a", "new_tool"));
+        assert!(!inventory.has_tool_qualified("server-a", "old_tool"));
+        assert!(inventory.has_prompt("prompt-a"));
+        assert!(inventory.has_resource("file:///a.txt"));
     }
 }

@@ -209,6 +209,28 @@ impl ToolInventory {
             .collect()
     }
 
+    /// Returns all tool entries with metadata.
+    pub fn list_entries(&self) -> Vec<ToolEntry> {
+        self.tools_by_qualified
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// Returns tool entries for specific server keys.
+    pub fn list_entries_for_servers(&self, server_keys: &[String]) -> Vec<ToolEntry> {
+        let allowed_servers: HashSet<&str> = server_keys.iter().map(String::as_str).collect();
+        if allowed_servers.is_empty() {
+            return Vec::new();
+        }
+
+        self.tools_by_qualified
+            .iter()
+            .filter(|entry| allowed_servers.contains(entry.value().server_key()))
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
     /// Get a specific server's tool by qualified name.
     pub fn get_tool_qualified(&self, server_key: &str, tool_name: &str) -> Option<Tool> {
         let qualified = QualifiedToolName::new(server_key, tool_name);
@@ -1010,6 +1032,60 @@ mod tests {
 
         // Alias should be removed since it points to cleared server
         assert_eq!(inventory.list_aliases().len(), 0);
+    }
+
+    #[test]
+    fn test_list_entries() {
+        let inventory = ToolInventory::new();
+
+        inventory.insert_tool(
+            "tool1".to_string(),
+            "server1".to_string(),
+            create_test_tool("tool1"),
+        );
+        inventory.insert_tool(
+            "tool2".to_string(),
+            "server2".to_string(),
+            create_test_tool("tool2"),
+        );
+
+        let mut entries = inventory.list_entries();
+        entries.sort_by(|a, b| a.tool_name().cmp(b.tool_name()));
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].tool_name(), "tool1");
+        assert_eq!(entries[0].server_key(), "server1");
+        assert_eq!(entries[1].tool_name(), "tool2");
+        assert_eq!(entries[1].server_key(), "server2");
+    }
+
+    #[test]
+    fn test_list_entries_for_servers() {
+        let inventory = ToolInventory::new();
+
+        inventory.insert_tool(
+            "tool1".to_string(),
+            "server1".to_string(),
+            create_test_tool("tool1"),
+        );
+        inventory.insert_tool(
+            "tool2".to_string(),
+            "server2".to_string(),
+            create_test_tool("tool2"),
+        );
+        inventory.insert_tool(
+            "tool3".to_string(),
+            "server3".to_string(),
+            create_test_tool("tool3"),
+        );
+
+        let mut entries =
+            inventory.list_entries_for_servers(&["server1".to_string(), "server3".to_string()]);
+        entries.sort_by(|a, b| a.server_key().cmp(b.server_key()));
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].server_key(), "server1");
+        assert_eq!(entries[1].server_key(), "server3");
     }
 
     #[test]
