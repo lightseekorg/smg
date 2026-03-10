@@ -3,7 +3,8 @@ use smg_mcp::McpConfig;
 use super::{
     CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
     HistoryBackend, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig, RedisConfig,
-    RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig, TraceConfig,
+    RetryConfig, RouterConfig, RoutingMode, SemanticRoutingConfig, TokenizerCacheConfig,
+    TraceConfig,
 };
 use crate::core::ConnectionMode;
 
@@ -100,6 +101,11 @@ impl RouterConfigBuilder {
 
     pub fn policy(mut self, policy: PolicyConfig) -> Self {
         self.config.policy = policy;
+        self
+    }
+
+    pub fn semantic_routing_config(mut self, semantic_routing: SemanticRoutingConfig) -> Self {
+        self.config.semantic_routing = Some(semantic_routing);
         self
     }
 
@@ -507,6 +513,14 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn maybe_semantic_routing(
+        mut self,
+        semantic_routing: Option<SemanticRoutingConfig>,
+    ) -> Self {
+        self.config.semantic_routing = semantic_routing;
+        self
+    }
+
     pub fn maybe_log_dir(mut self, dir: Option<impl Into<String>>) -> Self {
         self.config.log_dir = dir.map(|d| d.into());
         self
@@ -790,6 +804,8 @@ impl RouterConfig {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::{SemanticRouteTarget, SemanticRoutingMode, SemanticRoutingRule};
+
     use super::*;
 
     /// Test that .to_builder() round-trip conversion works correctly
@@ -847,5 +863,35 @@ mod tests {
             }
             _ => panic!("Expected CacheAware policy"),
         }
+    }
+
+    #[test]
+    fn test_builder_with_semantic_routing() {
+        let config = RouterConfigBuilder::new()
+            .regular_mode(vec!["http://worker1:8000".to_string()])
+            .round_robin_policy()
+            .semantic_routing_config(SemanticRoutingConfig {
+                mode: SemanticRoutingMode::Shadow,
+                confidence_threshold: 0.7,
+                default_route: SemanticRouteTarget {
+                    model: "gpt-default".to_string(),
+                    router_hint: None,
+                },
+                policies: vec![SemanticRoutingRule {
+                    class: "coding".to_string(),
+                    min_confidence: Some(0.9),
+                    route: SemanticRouteTarget {
+                        model: "gpt-code".to_string(),
+                        router_hint: Some("http-regular".to_string()),
+                    },
+                }],
+            })
+            .build()
+            .unwrap();
+
+        let semantic_routing = config.semantic_routing.expect("semantic routing missing");
+        assert!(matches!(semantic_routing.mode, SemanticRoutingMode::Shadow));
+        assert_eq!(semantic_routing.policies.len(), 1);
+        assert_eq!(semantic_routing.default_route.model, "gpt-default");
     }
 }

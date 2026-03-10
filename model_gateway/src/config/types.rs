@@ -17,6 +17,8 @@ pub struct RouterConfig {
     #[serde(default)]
     pub connection_mode: ConnectionMode,
     pub policy: PolicyConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_routing: Option<SemanticRoutingConfig>,
     pub host: String,
     pub port: u16,
     pub max_payload_size: usize,
@@ -349,6 +351,60 @@ impl PolicyConfig {
     }
 }
 
+/// Semantic routing evaluation mode.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticRoutingMode {
+    /// Semantic routing is disabled (default).
+    #[default]
+    Disabled,
+    /// Evaluate and emit decision telemetry, but do not alter route selection.
+    Shadow,
+    /// Apply semantic routing decisions to route selection.
+    Enforced,
+}
+
+/// A concrete route target selected by semantic routing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SemanticRouteTarget {
+    /// Model identifier to route requests to.
+    pub model: String,
+    /// Optional router hint for multi-router deployments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint: Option<String>,
+}
+
+/// Declarative rule mapping a semantic class to a route target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SemanticRoutingRule {
+    /// Predicted class label from the request classifier.
+    pub class: String,
+    /// Optional class-specific confidence threshold (falls back to global threshold).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_confidence: Option<f32>,
+    /// Route target for this class.
+    pub route: SemanticRouteTarget,
+}
+
+/// Semantic routing policy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SemanticRoutingConfig {
+    /// Evaluation/enforcement mode.
+    #[serde(default)]
+    pub mode: SemanticRoutingMode,
+    /// Global minimum classifier confidence required to apply a class route.
+    #[serde(default = "default_semantic_confidence_threshold")]
+    pub confidence_threshold: f32,
+    /// Fallback route when confidence is below threshold or no rule matches.
+    pub default_route: SemanticRouteTarget,
+    /// Declarative mapping rules from classifier class to route targets.
+    pub policies: Vec<SemanticRoutingRule>,
+}
+
+fn default_semantic_confidence_threshold() -> f32 {
+    0.6
+}
+
 /// Service discovery configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryConfig {
@@ -520,6 +576,7 @@ impl Default for RouterConfig {
                 worker_urls: vec![],
             },
             policy: PolicyConfig::Random,
+            semantic_routing: None,
             host: "0.0.0.0".to_string(),
             port: 3001,
             max_payload_size: 536_870_912,     // 512MB
@@ -658,6 +715,7 @@ mod tests {
         assert!(config.discovery.is_none());
         assert!(config.metrics.is_none());
         assert!(config.trace_config.is_none());
+        assert!(config.semantic_routing.is_none());
         assert!(config.log_dir.is_none());
         assert!(config.log_level.is_none());
     }
@@ -1367,5 +1425,44 @@ mod tests {
             PolicyConfig::RoundRobin => {}
             _ => panic!("Expected RoundRobin for regular mode"),
         }
+    }
+
+    #[test]
+    fn test_router_config_semantic_routing_serialization() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker1".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+
+        config.semantic_routing = Some(SemanticRoutingConfig {
+            mode: SemanticRoutingMode::Shadow,
+            confidence_threshold: 0.7,
+            default_route: SemanticRouteTarget {
+                model: "gpt-default".to_string(),
+                router_hint: Some("http-regular".to_string()),
+            },
+            policies: vec![SemanticRoutingRule {
+                class: "coding".to_string(),
+                min_confidence: Some(0.85),
+                route: SemanticRouteTarget {
+                    model: "gpt-code".to_string(),
+                    router_hint: None,
+                },
+            }],
+        });
+
+        let json = serde_json::to_string(&config).unwrap();
+        let roundtrip: RouterConfig = serde_json::from_str(&json).unwrap();
+
+        let semantic_routing = roundtrip
+            .semantic_routing
+            .expect("missing semantic_routing");
+        assert!(matches!(semantic_routing.mode, SemanticRoutingMode::Shadow));
+        assert_eq!(semantic_routing.policies.len(), 1);
+        assert_eq!(semantic_routing.default_route.model, "gpt-default");
+        assert_eq!(semantic_routing.policies[0].class, "coding");
+        assert_eq!(semantic_routing.policies[0].route.model, "gpt-code");
     }
 }

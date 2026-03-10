@@ -21,6 +21,10 @@ impl ConfigValidator {
             Self::validate_trace(trace_config)?;
         }
 
+        if let Some(semantic_routing) = &config.semantic_routing {
+            Self::validate_semantic_routing(semantic_routing)?;
+        }
+
         Self::validate_compatibility(config)?;
 
         let retry_cfg = config.effective_retry_config();
@@ -427,6 +431,67 @@ impl ConfigValidator {
                 value: metrics.host.clone(),
                 reason: "Host cannot be empty".to_string(),
             });
+        }
+
+        Ok(())
+    }
+
+    fn validate_semantic_routing(semantic_routing: &SemanticRoutingConfig) -> ConfigResult<()> {
+        if semantic_routing.policies.is_empty() {
+            return Err(ConfigError::ValidationFailed {
+                reason: "semantic_routing.policies must not be empty".to_string(),
+            });
+        }
+
+        if semantic_routing.default_route.model.trim().is_empty() {
+            return Err(ConfigError::ValidationFailed {
+                reason: "semantic_routing.default_route.model must not be empty".to_string(),
+            });
+        }
+
+        if !(0.0..=1.0).contains(&semantic_routing.confidence_threshold) {
+            return Err(ConfigError::InvalidValue {
+                field: "semantic_routing.confidence_threshold".to_string(),
+                value: semantic_routing.confidence_threshold.to_string(),
+                reason: "Must be between 0.0 and 1.0".to_string(),
+            });
+        }
+
+        let mut seen_classes = std::collections::HashSet::new();
+        for rule in &semantic_routing.policies {
+            if rule.class.trim().is_empty() {
+                return Err(ConfigError::ValidationFailed {
+                    reason: "semantic_routing.policies[].class must not be empty".to_string(),
+                });
+            }
+
+            if !seen_classes.insert(rule.class.as_str()) {
+                return Err(ConfigError::ValidationFailed {
+                    reason: format!(
+                        "semantic_routing.policies contains duplicate class '{}'",
+                        rule.class
+                    ),
+                });
+            }
+
+            if let Some(min_confidence) = rule.min_confidence {
+                if !(0.0..=1.0).contains(&min_confidence) {
+                    return Err(ConfigError::InvalidValue {
+                        field: "semantic_routing.policies[].min_confidence".to_string(),
+                        value: min_confidence.to_string(),
+                        reason: "Must be between 0.0 and 1.0".to_string(),
+                    });
+                }
+            }
+
+            if rule.route.model.trim().is_empty() {
+                return Err(ConfigError::ValidationFailed {
+                    reason: format!(
+                        "semantic_routing.policies[].route.model must not be empty (class '{}')",
+                        rule.class
+                    ),
+                });
+            }
         }
 
         Ok(())
@@ -1046,6 +1111,122 @@ mod tests {
 
         config.connection_mode = ConnectionMode::Grpc;
         config.tokenizer_path = Some("/path/to/tokenizer.json".to_string());
+
+        let result = ConfigValidator::validate(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_semantic_routing_duplicate_classes() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+
+        config.semantic_routing = Some(SemanticRoutingConfig {
+            mode: SemanticRoutingMode::Shadow,
+            confidence_threshold: 0.5,
+            default_route: SemanticRouteTarget {
+                model: "gpt-default".to_string(),
+                router_hint: None,
+            },
+            policies: vec![
+                SemanticRoutingRule {
+                    class: "coding".to_string(),
+                    min_confidence: Some(0.6),
+                    route: SemanticRouteTarget {
+                        model: "gpt-code".to_string(),
+                        router_hint: None,
+                    },
+                },
+                SemanticRoutingRule {
+                    class: "coding".to_string(),
+                    min_confidence: Some(0.8),
+                    route: SemanticRouteTarget {
+                        model: "gpt-code-v2".to_string(),
+                        router_hint: None,
+                    },
+                },
+            ],
+        });
+
+        let result = ConfigValidator::validate(&config);
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert!(err.to_string().contains("duplicate class"));
+        }
+    }
+
+    #[test]
+    fn test_validate_semantic_routing_confidence_bounds() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+
+        config.semantic_routing = Some(SemanticRoutingConfig {
+            mode: SemanticRoutingMode::Shadow,
+            confidence_threshold: 1.1,
+            default_route: SemanticRouteTarget {
+                model: "gpt-default".to_string(),
+                router_hint: None,
+            },
+            policies: vec![SemanticRoutingRule {
+                class: "qa".to_string(),
+                min_confidence: Some(0.4),
+                route: SemanticRouteTarget {
+                    model: "gpt-small".to_string(),
+                    router_hint: None,
+                },
+            }],
+        });
+
+        let result = ConfigValidator::validate(&config);
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert!(err.to_string().contains("confidence_threshold"));
+        }
+    }
+
+    #[test]
+    fn test_validate_semantic_routing_valid_config() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+
+        config.semantic_routing = Some(SemanticRoutingConfig {
+            mode: SemanticRoutingMode::Enforced,
+            confidence_threshold: 0.65,
+            default_route: SemanticRouteTarget {
+                model: "gpt-default".to_string(),
+                router_hint: Some("http-regular".to_string()),
+            },
+            policies: vec![
+                SemanticRoutingRule {
+                    class: "coding".to_string(),
+                    min_confidence: Some(0.8),
+                    route: SemanticRouteTarget {
+                        model: "gpt-code".to_string(),
+                        router_hint: None,
+                    },
+                },
+                SemanticRoutingRule {
+                    class: "safety".to_string(),
+                    min_confidence: Some(0.9),
+                    route: SemanticRouteTarget {
+                        model: "gpt-guard".to_string(),
+                        router_hint: Some("http-openai".to_string()),
+                    },
+                },
+            ],
+        });
 
         let result = ConfigValidator::validate(&config);
         assert!(result.is_ok());

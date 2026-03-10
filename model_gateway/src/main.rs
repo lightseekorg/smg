@@ -7,7 +7,7 @@ use smg::{
         CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
         HistoryBackend, ManualAssignmentMode, MetricsConfig, OracleConfig, PolicyConfig,
         PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode, SchemaConfig,
-        TokenizerCacheConfig, TraceConfig,
+        SemanticRoutingConfig, TokenizerCacheConfig, TraceConfig,
     },
     core::ConnectionMode,
     observability::{
@@ -199,6 +199,10 @@ struct CliArgs {
     /// Enable IGW (Inference Gateway) mode for multi-model support
     #[arg(long, default_value_t = false, help_heading = "Routing Policy")]
     enable_igw: bool,
+
+    /// Path to semantic routing YAML config file
+    #[arg(long, help_heading = "Routing Policy")]
+    semantic_routing_config: Option<String>,
 
     // ==================== PD Disaggregation ====================
     /// Enable PD (Prefill-Decode) disaggregated mode
@@ -816,6 +820,27 @@ impl CliArgs {
         }
     }
 
+    fn load_semantic_routing_config(&self) -> ConfigResult<Option<SemanticRoutingConfig>> {
+        match &self.semantic_routing_config {
+            Some(path) => {
+                let content =
+                    std::fs::read_to_string(path).map_err(|e| ConfigError::ValidationFailed {
+                        reason: format!(
+                            "Failed to read semantic routing config file '{path}': {e}"
+                        ),
+                    })?;
+                let semantic_routing: SemanticRoutingConfig = serde_yaml::from_str(&content)
+                    .map_err(|e| ConfigError::ValidationFailed {
+                        reason: format!(
+                            "Failed to parse semantic routing config file '{path}': {e}"
+                        ),
+                    })?;
+                Ok(Some(semantic_routing))
+            }
+            None => Ok(None),
+        }
+    }
+
     fn resolve_oracle_connect_details(&self) -> ConfigResult<OracleConnectSource> {
         if let Some(dsn) = self.oracle_dsn.clone() {
             return Ok(OracleConnectSource::Dsn { descriptor: dsn });
@@ -1048,10 +1073,12 @@ impl CliArgs {
             HistoryBackend::Redis => (None, None, Some(self.build_redis_config(schema)?)),
             _ => (None, None, None),
         };
+        let semantic_routing = self.load_semantic_routing_config()?;
 
         let builder = RouterConfig::builder()
             .mode(mode)
             .policy(policy)
+            .maybe_semantic_routing(semantic_routing)
             .connection_mode(connection_mode)
             .host(&self.host)
             .port(self.port)
@@ -1336,4 +1363,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_otel();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use smg::config::SemanticRoutingMode;
+
+    use super::*;
+
+    #[test]
+    fn test_semantic_routing_config_file_is_loaded() {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("smg-semantic-routing-{ts}.yaml"));
+
+        let yaml = r"
+mode: shadow
+confidence_threshold: 0.7
+default_route:
+  model: gpt-default
+policies:
+  - class: coding
+    min_confidence: 0.8
+    route:
+      model: gpt-code
+";
+
+        fs::write(&path, yaml).expect("failed to write temp semantic routing config");
+
+        let cli = Cli::parse_from([
+            "smg",
+            "--semantic-routing-config",
+            path.to_str().expect("invalid utf-8 temp path"),
+        ]);
+
+        let cli_args = match cli.command {
+            Some(Commands::Launch { args }) => args,
+            None => cli.router_args,
+        };
+
+        let router_config = cli_args
+            .to_router_config(vec![])
+            .expect("failed to build router config");
+
+        let semantic_routing = router_config
+            .semantic_routing
+            .expect("semantic routing config was not loaded");
+        assert!(matches!(semantic_routing.mode, SemanticRoutingMode::Shadow));
+        assert_eq!(semantic_routing.default_route.model, "gpt-default");
+        assert_eq!(semantic_routing.policies.len(), 1);
+        assert_eq!(semantic_routing.policies[0].class, "coding");
+
+        let _ = fs::remove_file(path);
+    }
 }
