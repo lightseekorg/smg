@@ -1,5 +1,5 @@
 # Router with Ingress and TLS.
-# Usage: helm install smg deploy/helm/smg -f examples/with-ingress.yaml
+# Usage: helm install smg deploy/helm/smg -f deploy/helm/smg/examples/with-ingress.yaml
 router:
   workerUrls:
     - http://worker-1:8000

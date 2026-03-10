@@ -1,10 +1,17 @@
 # SMG Helm Chart Design
 
+> **Note:** This design doc is partially superseded. The v0.1.0 chart implements
+> **router-only mode**. The `router-worker` and `router-pd` modes described below
+> are planned for a future release.
+
 ## Overview
 
-A single Helm chart at `deploy/helm/smg/` that deploys the Shepherd Model Gateway (SMG) in one of three user-selectable modes:
+A single Helm chart at `deploy/helm/smg/` that deploys the Shepherd Model Gateway (SMG). The v0.1.0 release supports:
 
 - **`router`** — Router only, connects to pre-existing inference workers
+
+Future releases will add:
+
 - **`router-worker`** — Router + inference worker Deployments
 - **`router-pd`** — Router + prefill/decode disaggregated worker Deployments
 
@@ -17,7 +24,7 @@ A single Helm chart at `deploy/helm/smg/` that deploys the Shepherd Model Gatewa
 
 ## Architecture
 
-```
+```text
               ┌─────────────────────┐
               │   SMG Router        │  ← Always deployed
               │   Port: 30000       │
@@ -76,7 +83,7 @@ helm install smg deploy/helm/smg \
 
 ## File Layout
 
-```
+```text
 deploy/helm/smg/
 ├── Chart.yaml
 ├── values.yaml
@@ -198,7 +205,7 @@ mode: router  # "router" | "router-worker" | "router-pd"
 
 A `_helpers.tpl` helper builds the full CLI args from values, keeping the Deployment template clean:
 
-```
+```gotemplate
 {{ include "smg.routerArgs" . }}
 ```
 

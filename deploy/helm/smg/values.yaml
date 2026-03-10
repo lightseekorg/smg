@@ -139,6 +139,8 @@ router:
   extraEnv: []
 
   # -- Autoscaling (HPA)
+  # NOTE: HPA scales on CPU utilization, so router.resources.requests.cpu must
+  # be set when autoscaling is enabled.
   autoscaling:
     enabled: false
     minReplicas: 1

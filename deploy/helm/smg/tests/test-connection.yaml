@@ -9,7 +9,7 @@ metadata:
 spec:
   containers:
     - name: curl
-      image: curlimages/curl:latest
+      image: curlimages/curl:8.12.1
       command:
         - curl
         - -sf

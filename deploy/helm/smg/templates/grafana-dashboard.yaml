@@ -51,6 +51,6 @@ data:
       "templating": { "list": [] },
       "time": { "from": "now-1h", "to": "now" },
       "title": "SMG Overview",
-      "uid": "smg-overview"
+      "uid": "{{ include "smg.fullname" . }}-overview"
     }
 {{- end }}

@@ -4,6 +4,7 @@ description: "Shepherd Model Gateway - high-performance inference router for LLM
 type: application
 version: 0.1.0
 appVersion: "0.7.0"
+kubeVersion: ">=1.26.0-0"
 home: https://github.com/lightseekorg/smg
 sources:
   - https://github.com/lightseekorg/smg

@@ -1,8 +1,12 @@
 # SMG Helm Chart Implementation Plan
 
+> **Note:** This plan is partially superseded. The v0.1.0 chart implements
+> **router-only mode**. Worker and PD tasks were not implemented and are
+> deferred to a future release.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Create a production-ready Helm chart for SMG supporting three deployment modes (router, router-worker, router-pd) with comprehensive documentation and examples.
+**Goal:** Create a production-ready Helm chart for SMG. The v0.1.0 release supports router-only mode. Worker and PD modes are planned for future releases.
 
 **Architecture:** Single Helm chart at `deploy/helm/smg/` with a top-level `mode` value controlling conditional template rendering. Router deployment is always created; worker and PD templates only render in their respective modes. CLI args are assembled in `_helpers.tpl` from structured values.
 
