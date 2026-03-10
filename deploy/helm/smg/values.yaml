@@ -164,10 +164,8 @@ router:
 # Auth Configuration
 # =============================================================================
 auth:
-  # -- API key authentication
+  # -- API key authentication (passed via --api-key CLI flag)
   apiKey: ""
-  apiKeySecret: ""           # name of an existing Secret
-  apiKeySecretKey: "api-key" # key within the Secret
 
   # -- OIDC
   oidc:
@@ -187,16 +185,13 @@ history:
 
   postgres:
     url: ""                    # "postgresql://user:pass@host:5432/db"
-    existingSecret: ""         # Secret name containing key "postgres-url"
-    poolMax: 10
-    retentionDays: 30
+    poolMaxSize: 10
     # -- Deploy a PostgreSQL instance via sub-chart
     deploy: false
 
   redis:
     url: ""                    # "redis://localhost:6379"
-    existingSecret: ""         # Secret name containing key "redis-url"
-    poolMax: 10
+    poolMaxSize: 10
     # -- Deploy a Redis instance via sub-chart
     deploy: false
 

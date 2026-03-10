@@ -58,38 +58,9 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.router.resources | nindent 12 }}
-          {{- if or .Values.auth.apiKey .Values.auth.apiKeySecret (and (eq .Values.history.backend "postgres") .Values.history.postgres.existingSecret) (and (eq .Values.history.backend "redis") .Values.history.redis.existingSecret) .Values.router.extraEnv }}
+          {{- with .Values.router.extraEnv }}
           env:
-            {{- if .Values.auth.apiKey }}
-            - name: SMG_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "smg.fullname" . }}-secrets
-                  key: api-key
-            {{- else if .Values.auth.apiKeySecret }}
-            - name: SMG_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.auth.apiKeySecret }}
-                  key: {{ .Values.auth.apiKeySecretKey }}
-            {{- end }}
-            {{- if and (eq .Values.history.backend "postgres") .Values.history.postgres.existingSecret }}
-            - name: POSTGRES_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.history.postgres.existingSecret }}
-                  key: postgres-url
-            {{- end }}
-            {{- if and (eq .Values.history.backend "redis") .Values.history.redis.existingSecret }}
-            - name: REDIS_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.history.redis.existingSecret }}
-                  key: redis-url
-            {{- end }}
-            {{- with .Values.router.extraEnv }}
             {{- toYaml . | nindent 12 }}
-            {{- end }}
           {{- end }}
       {{- with .Values.router.nodeSelector }}
       nodeSelector:

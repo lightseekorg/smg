@@ -196,21 +196,19 @@ Called from the router Deployment template.
 {{- end }}
 {{- if eq .Values.history.backend "postgres" }}
 {{- if .Values.history.postgres.url }}
-- "--postgres-url"
+- "--postgres-db-url"
 - {{ .Values.history.postgres.url | quote }}
 {{- end }}
-- "--postgres-pool-max"
-- {{ .Values.history.postgres.poolMax | quote }}
-- "--postgres-retention-days"
-- {{ .Values.history.postgres.retentionDays | quote }}
+- "--postgres-pool-max-size"
+- {{ .Values.history.postgres.poolMaxSize | quote }}
 {{- end }}
 {{- if eq .Values.history.backend "redis" }}
 {{- if .Values.history.redis.url }}
 - "--redis-url"
 - {{ .Values.history.redis.url | quote }}
 {{- end }}
-- "--redis-pool-max"
-- {{ .Values.history.redis.poolMax | quote }}
+- "--redis-pool-max-size"
+- {{ .Values.history.redis.poolMaxSize | quote }}
 {{- end }}
 {{- if eq .Values.history.backend "oracle" }}
 {{- if .Values.history.oracle.dsn }}
@@ -219,6 +217,14 @@ Called from the router Deployment template.
 {{- end }}
 - "--oracle-pool-max"
 - {{ .Values.history.oracle.poolMax | quote }}
+{{- if .Values.history.oracle.user }}
+- "--oracle-user"
+- {{ .Values.history.oracle.user | quote }}
+{{- end }}
+{{- if .Values.history.oracle.password }}
+- "--oracle-password"
+- {{ .Values.history.oracle.password | quote }}
+{{- end }}
 {{- end }}
 {{- if gt (int .Values.auth.rateLimitTokensPerSecond) 0 }}
 - "--rate-limit-tokens-per-second"
@@ -242,6 +248,10 @@ Called from the router Deployment template.
 {{- if .Values.router.toolCallParser }}
 - "--tool-call-parser"
 - {{ .Values.router.toolCallParser | quote }}
+{{- end }}
+{{- if .Values.auth.apiKey }}
+- "--api-key"
+- {{ .Values.auth.apiKey | quote }}
 {{- end }}
 {{- range .Values.router.extraArgs }}
 - {{ . | quote }}

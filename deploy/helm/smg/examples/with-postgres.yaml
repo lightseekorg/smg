@@ -7,5 +7,4 @@ history:
   backend: postgres
   postgres:
     url: "postgresql://smg:password@postgres:5432/smg"
-    poolMax: 10
-    retentionDays: 30
+    poolMaxSize: 10
