@@ -104,7 +104,7 @@ class SglangWorkerLauncher(WorkerLauncher):
     """Launcher for sglang inference workers."""
 
     def _get_tp_size(self, args: argparse.Namespace) -> int:
-        return getattr(args, "tp_size", 1)
+        return getattr(args, "tensor_parallel_size", 1)
 
     def build_command(
         self, args: argparse.Namespace, backend_args: list[str], host: str, port: int

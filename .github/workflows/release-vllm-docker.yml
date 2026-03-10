@@ -1,0 +1,53 @@
+name: Release SMG+vLLM Docker Image
+
+run-name: >-
+  SMG+vLLM |
+  base=${{ inputs.base_image_ref }} |
+  engine=${{ inputs.vllm_commit }} |
+  smg=${{ inputs.smg_commit }} |
+  by @${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_image_ref:
+        description: 'Base image (e.g. vllm/vllm-openai:v0.16.0)'
+        default: 'vllm/vllm-openai:v0.16.0'
+        required: true
+        type: string
+      vllm_repo:
+        description: 'vLLM repo URL (empty = use engine from base image)'
+        required: false
+        type: string
+      vllm_commit:
+        description: 'vLLM commit/ref ("latest" for HEAD)'
+        required: false
+        default: 'latest'
+        type: string
+      smg_repo:
+        description: 'SMG repo URL'
+        required: false
+        default: 'https://github.com/lightseekorg/smg'
+        type: string
+      smg_commit:
+        description: 'SMG commit/ref ("latest" for HEAD)'
+        required: false
+        default: 'v1.1.0'
+        type: string
+      tag:
+        description: 'Override image tag (e.g. v1.1.0-vllm-v0.16.0)'
+        required: false
+        type: string
+
+jobs:
+  build:
+    uses: ./.github/workflows/_build-engine-image.yml
+    with:
+      engine: vllm
+      base_image_ref: ${{ inputs.base_image_ref }}
+      engine_repo: ${{ inputs.vllm_repo }}
+      engine_commit: ${{ inputs.vllm_commit }}
+      smg_repo: ${{ inputs.smg_repo }}
+      smg_commit: ${{ inputs.smg_commit }}
+      tag: ${{ inputs.tag }}
+    secrets: inherit

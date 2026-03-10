@@ -10,8 +10,8 @@ use crate::routers::{
     grpc::{
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, RequestContext},
-        proto_wrapper::{ProtoGenerateRequest, ProtoRequest},
-        utils,
+        multimodal::assemble_multimodal_data,
+        proto_wrapper::ProtoRequest,
     },
 };
 
@@ -75,28 +75,24 @@ impl PipelineStage for ChatRequestBuildingStage {
             )
         })?;
 
+        // Assemble backend-specific multimodal data now that the backend is known
+        let multimodal_data = processed_messages
+            .multimodal_intermediate
+            .map(|intermediate| assemble_multimodal_data(intermediate, builder_client));
+
         let mut proto_request = builder_client
             .build_chat_request(
                 request_id,
                 body_ref,
                 processed_messages.text,
                 prep.token_ids,
-                processed_messages.multimodal_data,
+                multimodal_data,
                 prep.tool_constraints,
             )
             .map_err(|e| {
                 error!(function = "ChatRequestBuildingStage::execute", error = %e, "Failed to build generate request");
                 error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
             })?;
-
-        // Inject tokenized stop sequences for TRT-LLM requests
-        if let ProtoGenerateRequest::Trtllm(ref mut req) = proto_request {
-            if let Some(stop) = &body_ref.stop {
-                if let Some(tokenizer) = ctx.state.tokenizer.as_ref() {
-                    utils::inject_trtllm_stop_words(req, tokenizer.as_ref(), stop);
-                }
-            }
-        }
 
         if self.inject_pd_metadata {
             if let Some(workers) = ctx.state.workers.as_ref() {

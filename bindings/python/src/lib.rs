@@ -452,6 +452,7 @@ struct Router {
     enable_trace: bool,
     otlp_traces_endpoint: String,
     control_plane_auth: Option<PyControlPlaneAuthConfig>,
+    schema_config: Option<String>,
 }
 
 impl Router {
@@ -587,24 +588,49 @@ impl Router {
             HistoryBackendType::Redis => config::HistoryBackend::Redis,
         };
 
+        // Load schema config from YAML file if provided
+        let schema = if let Some(ref path) = self.schema_config {
+            let content = std::fs::read_to_string(path).map_err(|e| {
+                config::ConfigError::ValidationFailed {
+                    reason: format!("Failed to read schema config file '{path}': {e}"),
+                }
+            })?;
+            let schema: config::SchemaConfig = serde_yaml::from_str(&content).map_err(|e| {
+                config::ConfigError::ValidationFailed {
+                    reason: format!("Failed to parse schema config file '{path}': {e}"),
+                }
+            })?;
+            Some(schema)
+        } else {
+            None
+        };
+
         let oracle = if matches!(self.history_backend, HistoryBackendType::Oracle) {
-            self.oracle_config
-                .as_ref()
-                .map(|cfg| cfg.to_config_oracle())
+            self.oracle_config.as_ref().map(|cfg| {
+                let mut c = cfg.to_config_oracle();
+                c.schema.clone_from(&schema);
+                c
+            })
         } else {
             None
         };
 
         let postgres_config = if matches!(self.history_backend, HistoryBackendType::Postgres) {
-            self.postgres_config
-                .as_ref()
-                .map(|cfg| cfg.to_config_postgres())
+            self.postgres_config.as_ref().map(|cfg| {
+                let mut c = cfg.to_config_postgres();
+                c.schema.clone_from(&schema);
+                c
+            })
         } else {
             None
         };
 
         let redis_config = if matches!(self.history_backend, HistoryBackendType::Redis) {
-            self.redis_config.as_ref().map(|cfg| cfg.to_config_redis())
+            self.redis_config.as_ref().map(|cfg| {
+                let mut c = cfg.to_config_redis();
+                c.schema = schema;
+                c
+            })
         } else {
             None
         };
@@ -779,6 +805,7 @@ impl Router {
         enable_trace = false,
         otlp_traces_endpoint = String::from("localhost:4317"),
         control_plane_auth = None,
+        schema_config = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -874,6 +901,7 @@ impl Router {
         enable_trace: bool,
         otlp_traces_endpoint: String,
         control_plane_auth: Option<PyControlPlaneAuthConfig>,
+        schema_config: Option<String>,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -979,6 +1007,7 @@ impl Router {
             enable_trace,
             otlp_traces_endpoint,
             control_plane_auth,
+            schema_config,
         })
     }
 

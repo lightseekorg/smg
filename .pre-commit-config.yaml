@@ -31,7 +31,7 @@ repos:
             src/proto/.*\.proto$|
             src/mesh/proto/.*\.proto$|
             src/tokenizer/chat_template\.rs|
-            multimodal/tests/fixtures/.*|
+            crates/multimodal/tests/fixtures/.*|
             target/.*
           )$
 
@@ -74,6 +74,21 @@ repos:
         description: Check that the commit message contains a DCO sign-off
         entry: |
           bash -c 'grep -q "^Signed-off-by: .* <.*>$" "$1"' --
+        language: system
+        stages: [commit-msg]
+        always_run: true
+
+      - id: no-ai-co-author
+        name: No AI co-author or sign-off
+        description: Reject Co-authored-by or Signed-off-by lines referencing Claude or noreply@anthropic.com
+        entry: |
+          bash -c '
+            if grep -iE "^(Co-authored-by|Signed-off-by):.*(Claude|noreply@anthropic\.com)" "$1"; then
+              echo ""
+              echo "ERROR: Commit message must not reference Claude or noreply@anthropic.com in Co-authored-by/Signed-off-by lines."
+              exit 1
+            fi
+          ' --
         language: system
         stages: [commit-msg]
         always_run: true

@@ -294,7 +294,7 @@ impl StreamingProcessor {
                             if total_completion > 0 {
                                 request_stats.completion_tokens = total_completion;
                             }
-                            let stream_error = format!("Stream error: {e}");
+                            let stream_error = format!("Stream error: {}", e.message());
                             RequestStatsEvent {
                                 request_id,
                                 model,
@@ -306,7 +306,7 @@ impl StreamingProcessor {
                             .emit();
                         }
                     }
-                    return Err(format!("Stream error: {e}"));
+                    return Err(format!("Stream error: {}", e.message()));
                 }
             };
 
@@ -749,7 +749,8 @@ impl StreamingProcessor {
         // Phase 1.5: Collect input_logprobs from prefill stream if requested
         if original_request.logprobs {
             while let Some(response) = prefill_stream.next().await {
-                let gen_response = response.map_err(|e| format!("Prefill stream error: {e}"))?;
+                let gen_response =
+                    response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
                 match gen_response.into_response() {
                     ProtoResponseVariant::Complete(_complete) => {
                         // Input logprobs collected but not yet used in streaming
@@ -902,7 +903,7 @@ impl StreamingProcessor {
                         break;
                     }
                     if ctx.enable_request_statistics {
-                        let stream_error = format!("Stream error: {e}");
+                        let stream_error = format!("Stream error: {}", e.message());
                         Self::emit_generate_request_stats(
                             &ctx,
                             &completed_responses,
@@ -912,7 +913,7 @@ impl StreamingProcessor {
                         )
                         .await;
                     }
-                    return Err(format!("Stream error: {e}"));
+                    return Err(format!("Stream error: {}", e.message()));
                 }
             };
 
@@ -1068,7 +1069,8 @@ impl StreamingProcessor {
         let input_token_logprobs = if ctx.return_logprob {
             let mut input_logprobs = None;
             while let Some(response) = prefill_stream.next().await {
-                let gen_response = response.map_err(|e| format!("Prefill stream error: {e}"))?;
+                let gen_response =
+                    response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
                 match gen_response.into_response() {
                     ProtoResponseVariant::Complete(complete) => {
                         // Extract input_logprobs from prefill Complete message (convert proto to SGLang format)
@@ -1139,7 +1141,7 @@ impl StreamingProcessor {
                         break;
                     }
                     if ctx.enable_request_statistics {
-                        let stream_error = format!("Stream error: {e}");
+                        let stream_error = format!("Stream error: {}", e.message());
                         Self::emit_generate_request_stats(
                             &ctx,
                             &completed_responses,
@@ -1149,7 +1151,7 @@ impl StreamingProcessor {
                         )
                         .await;
                     }
-                    return Err(format!("Stream error: {e}"));
+                    return Err(format!("Stream error: {}", e.message()));
                 }
             };
 

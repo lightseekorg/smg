@@ -86,6 +86,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn gemini_mode(mut self, worker_urls: Vec<String>) -> Self {
+        self.config.mode = RoutingMode::Gemini { worker_urls };
+        self
+    }
+
     pub fn mode(mut self, mode: RoutingMode) -> Self {
         self.config.mode = mode;
         self

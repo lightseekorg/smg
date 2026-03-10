@@ -20,6 +20,7 @@ use openai_protocol::{
     completion::CompletionRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
+    interactions::InteractionsRequest,
     messages::CreateMessageRequest,
     parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
     rerank::{RerankRequest, V1RerankReqInput},
@@ -59,6 +60,7 @@ use crate::{
             get_mesh_health, get_policy_state, get_policy_states, get_worker_state,
             get_worker_states, set_global_rate_limit, trigger_graceful_shutdown, update_app_config,
         },
+        openai::realtime::{rest as realtime_rest, ws as realtime_ws},
         parse,
         router_manager::RouterManager,
         tokenize, RouterTrait,
@@ -117,6 +119,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             RoutingMode::Regular { .. } => !healthy_workers.is_empty(),
             RoutingMode::OpenAI { .. } => !healthy_workers.is_empty(),
             RoutingMode::Anthropic { .. } => !healthy_workers.is_empty(),
+            RoutingMode::Gemini { .. } => !healthy_workers.is_empty(),
         }
     };
 
@@ -233,6 +236,18 @@ async fn v1_responses(
     state
         .router
         .route_responses(Some(&headers), &body, Some(&body.model))
+        .await
+}
+
+async fn v1_interactions(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    ValidatedJson(body): ValidatedJson<InteractionsRequest>,
+) -> Response {
+    let model_id = body.model.as_deref().or(body.agent.as_deref());
+    state
+        .router
+        .route_interactions(Some(&headers), &body, model_id)
         .await
 }
 
@@ -562,6 +577,14 @@ pub fn build_app(
     request_id_headers: Vec<String>,
     cors_allowed_origins: Vec<String>,
 ) -> Router {
+    // Pending (upgrade not completed): 30s TTL
+    // Disconnected: 60 min TTL
+    app_state.context.realtime_registry.start_reaper(
+        Duration::from_secs(3600),
+        Duration::from_secs(30),
+        Duration::from_secs(60),
+    );
+
     let protected_routes = Router::new()
         .route("/generate", post(generate))
         .route("/v1/chat/completions", post(v1_chat_completions))
@@ -571,6 +594,7 @@ pub fn build_app(
         .route("/v1/responses", post(v1_responses))
         .route("/v1/embeddings", post(v1_embeddings))
         .route("/v1/messages", post(v1_messages))
+        .route("/v1/interactions", post(v1_interactions))
         .route("/v1/classify", post(v1_classify))
         .route("/v1/responses/{response_id}", get(v1_responses_get))
         .route(
@@ -611,6 +635,26 @@ pub fn build_app(
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::wasm_middleware,
+        ));
+
+    let realtime_routes = Router::new()
+        .route("/v1/realtime", get(realtime_ws::ws_handler))
+        .route("/v1/realtime/sessions", post(realtime_rest::create_session))
+        .route(
+            "/v1/realtime/client_secrets",
+            post(realtime_rest::create_client_secret),
+        )
+        .route(
+            "/v1/realtime/transcription_sessions",
+            post(realtime_rest::create_transcription_session),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::concurrency_limit_middleware,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            auth_config.clone(),
+            middleware::auth_middleware,
         ));
 
     let public_routes = Router::new()
@@ -692,6 +736,7 @@ pub fn build_app(
 
     Router::new()
         .merge(protected_routes)
+        .merge(realtime_routes)
         .merge(public_routes)
         .merge(admin_routes)
         .merge(worker_routes)

@@ -6,8 +6,8 @@ use smg::{
     config::{
         CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
         HistoryBackend, ManualAssignmentMode, MetricsConfig, OracleConfig, PolicyConfig,
-        PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig,
-        TraceConfig,
+        PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode, SchemaConfig,
+        TokenizerCacheConfig, TraceConfig,
     },
     core::ConnectionMode,
     observability::{
@@ -63,6 +63,8 @@ pub enum Backend {
     Openai,
     #[value(name = "anthropic")]
     Anthropic,
+    #[value(name = "gemini")]
+    Gemini,
 }
 
 impl std::fmt::Display for Backend {
@@ -73,6 +75,7 @@ impl std::fmt::Display for Backend {
             Backend::Trtllm => "trtllm",
             Backend::Openai => "openai",
             Backend::Anthropic => "anthropic",
+            Backend::Gemini => "gemini",
         };
         write!(f, "{s}")
     }
@@ -462,6 +465,10 @@ struct CliArgs {
     #[arg(long, help_heading = "Backend")]
     storage_hook_wasm_path: Option<String>,
 
+    /// Path to a YAML schema config file for storage table/column remapping
+    #[arg(long, help_heading = "Backend")]
+    schema_config: Option<String>,
+
     // ==================== Oracle Database ====================
     /// Path to Oracle ATP wallet directory
     #[arg(long, env = "ATP_WALLET_PATH", help_heading = "Oracle Database")]
@@ -796,6 +803,23 @@ impl CliArgs {
         }
     }
 
+    fn load_schema_config(&self) -> ConfigResult<Option<SchemaConfig>> {
+        match &self.schema_config {
+            Some(path) => {
+                let content =
+                    std::fs::read_to_string(path).map_err(|e| ConfigError::ValidationFailed {
+                        reason: format!("Failed to read schema config file '{path}': {e}"),
+                    })?;
+                let schema: SchemaConfig =
+                    serde_yaml::from_str(&content).map_err(|e| ConfigError::ValidationFailed {
+                        reason: format!("Failed to parse schema config file '{path}': {e}"),
+                    })?;
+                Ok(Some(schema))
+            }
+            None => Ok(None),
+        }
+    }
+
     fn resolve_oracle_connect_details(&self) -> ConfigResult<OracleConnectSource> {
         if let Some(dsn) = self.oracle_dsn.clone() {
             return Ok(OracleConnectSource::Dsn { descriptor: dsn });
@@ -821,7 +845,7 @@ impl CliArgs {
         })
     }
 
-    fn build_oracle_config(&self) -> ConfigResult<OracleConfig> {
+    fn build_oracle_config(&self, schema: Option<SchemaConfig>) -> ConfigResult<OracleConfig> {
         let (wallet_path, connect_descriptor) = match self.resolve_oracle_connect_details()? {
             OracleConnectSource::Dsn { descriptor } => (None, descriptor),
             OracleConnectSource::Wallet { path, alias } => (Some(path), alias),
@@ -882,11 +906,11 @@ impl CliArgs {
             pool_min,
             pool_max,
             pool_timeout_secs,
-            schema: None,
+            schema,
         })
     }
 
-    fn build_postgres_config(&self) -> ConfigResult<PostgresConfig> {
+    fn build_postgres_config(&self, schema: Option<SchemaConfig>) -> ConfigResult<PostgresConfig> {
         let db_url = self.postgres_db_url.clone().unwrap_or_default();
         let pool_max = self
             .postgres_pool_max_size
@@ -894,7 +918,7 @@ impl CliArgs {
         let pcf = PostgresConfig {
             db_url,
             pool_max,
-            schema: None,
+            schema,
         };
         pcf.validate().map_err(|e| ConfigError::ValidationFailed {
             reason: e.to_string(),
@@ -902,7 +926,7 @@ impl CliArgs {
         Ok(pcf)
     }
 
-    fn build_redis_config(&self) -> ConfigResult<RedisConfig> {
+    fn build_redis_config(&self, schema: Option<SchemaConfig>) -> ConfigResult<RedisConfig> {
         let url = self.redis_url.clone().unwrap_or_default();
         let pool_max = self.redis_pool_max_size.unwrap_or(16);
 
@@ -916,7 +940,7 @@ impl CliArgs {
             url,
             pool_max,
             retention_days,
-            schema: None,
+            schema,
         };
         rcf.validate().map_err(|e| ConfigError::ValidationFailed {
             reason: e.to_string(),
@@ -936,6 +960,10 @@ impl CliArgs {
             }
         } else if matches!(self.backend, Some(Backend::Anthropic)) {
             RoutingMode::Anthropic {
+                worker_urls: self.worker_urls.clone(),
+            }
+        } else if matches!(self.backend, Some(Backend::Gemini)) {
+            RoutingMode::Gemini {
                 worker_urls: self.worker_urls.clone(),
             }
         } else if self.pd_disaggregation {
@@ -1002,11 +1030,11 @@ impl CliArgs {
             RoutingMode::Anthropic { worker_urls } => {
                 all_urls.extend(worker_urls.clone());
             }
+            RoutingMode::Gemini { worker_urls } => {
+                all_urls.extend(worker_urls.clone());
+            }
         }
-        let connection_mode = match &mode {
-            RoutingMode::OpenAI { .. } => ConnectionMode::Http,
-            _ => Self::determine_connection_mode(&all_urls),
-        };
+        let connection_mode = Self::determine_connection_mode(&all_urls);
 
         let history_backend = match self.history_backend.as_str() {
             "none" => HistoryBackend::None,
@@ -1016,20 +1044,13 @@ impl CliArgs {
             _ => HistoryBackend::Memory,
         };
 
-        let oracle = if history_backend == HistoryBackend::Oracle {
-            Some(self.build_oracle_config()?)
-        } else {
-            None
-        };
-        let postgres = if history_backend == HistoryBackend::Postgres {
-            Some(self.build_postgres_config()?)
-        } else {
-            None
-        };
-        let redis = if history_backend == HistoryBackend::Redis {
-            Some(self.build_redis_config()?)
-        } else {
-            None
+        let schema = self.load_schema_config()?;
+
+        let (oracle, postgres, redis) = match history_backend {
+            HistoryBackend::Oracle => (Some(self.build_oracle_config(schema)?), None, None),
+            HistoryBackend::Postgres => (None, Some(self.build_postgres_config(schema)?), None),
+            HistoryBackend::Redis => (None, None, Some(self.build_redis_config(schema)?)),
+            _ => (None, None, None),
         };
 
         let builder = RouterConfig::builder()

@@ -23,7 +23,7 @@ use crate::{
     middleware::TokenBucket,
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
-    routers::router_manager::RouterManager,
+    routers::{openai::realtime::RealtimeRegistry, router_manager::RouterManager},
     wasm::{config::WasmRuntimeConfig, module_manager::WasmModuleManager},
 };
 
@@ -63,6 +63,7 @@ pub struct AppContext {
     pub worker_service: Arc<WorkerService>,
     pub inflight_tracker: Arc<InFlightRequestTracker>,
     pub kv_event_monitor: Option<Arc<KvEventMonitor>>,
+    pub realtime_registry: Arc<RealtimeRegistry>,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -301,6 +302,7 @@ impl AppContextBuilder {
             worker_service,
             inflight_tracker: InFlightRequestTracker::new(),
             kv_event_monitor: self.kv_event_monitor,
+            realtime_registry: Arc::new(RealtimeRegistry::new()),
         })
     }
 

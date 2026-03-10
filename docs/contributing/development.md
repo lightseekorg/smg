@@ -78,22 +78,26 @@ smg/
 │   ├── benches/              # Benchmarks
 │   ├── tests/                # Integration tests
 │   └── Cargo.toml            # Gateway package manifest
-├── protocols/                # OpenAI protocol definitions
-├── tokenizer/                # LLM tokenization
-├── tool_parser/              # Tool call parsing
-├── reasoning_parser/         # Reasoning extraction
-├── mcp/                      # MCP integration
-├── auth/                     # Authentication
-├── mesh/                     # HA mesh networking
-├── wasm/                     # WebAssembly plugins
-├── grpc_client/              # gRPC client
-├── data_connector/           # Storage backends
-├── kv_index/                 # KV cache indexing
-├── multimodal/               # Multimodal support
-├── workflow/                 # Workflow automation
+├── crates/                   # Library crates
+│   ├── auth/                 # Authentication
+│   ├── data_connector/       # Storage backends
+│   ├── grpc_client/          # gRPC client
+│   ├── kv_index/             # KV cache indexing
+│   ├── mcp/                  # MCP integration
+│   ├── mesh/                 # HA mesh networking
+│   ├── multimodal/           # Multimodal support
+│   ├── protocols/            # OpenAI protocol definitions
+│   ├── reasoning_parser/     # Reasoning extraction
+│   ├── tokenizer/            # LLM tokenization
+│   ├── tool_parser/          # Tool call parsing
+│   ├── wasm/                 # WebAssembly plugins
+│   └── workflow/             # Workflow automation
 ├── bindings/
 │   ├── python/               # Python bindings
 │   └── golang/               # Go SDK
+├── clients/
+│   ├── rust/                 # Rust client library
+│   └── openapi-gen/          # OpenAPI spec generator
 ├── docs/                     # Documentation (MkDocs)
 ├── e2e_test/                 # End-to-end tests
 ├── examples/                 # Example configurations

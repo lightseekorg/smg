@@ -21,8 +21,9 @@ pub use proto_wrapper::{MultimodalData, TensorBytes};
 #[derive(Debug)]
 pub struct ProcessedMessages {
     pub text: String,
-    /// Preprocessed multimodal data (pixel values, placeholders, hashes).
+    /// Preprocessed multimodal intermediate (deferred assembly).
     /// Populated during preparation when multimodal content is detected.
-    pub multimodal_data: Option<MultimodalData>,
+    /// Assembled into backend-specific `MultimodalData` in request_building.
+    pub(crate) multimodal_intermediate: Option<multimodal::MultimodalIntermediate>,
     pub stop_sequences: Option<StringOrArray>,
 }

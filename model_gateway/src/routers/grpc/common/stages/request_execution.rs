@@ -17,11 +17,12 @@ use crate::{
                 ProtoEmbedRequest, ProtoEmbedResponseVariant, ProtoGenerateRequest, ProtoRequest,
                 ProtoStream,
             },
+            utils::tonic_ext::{TonicResultExt, TonicStatusExt},
         },
     },
 };
 
-type StreamResult = Result<ProtoStream, Box<dyn std::error::Error + Send + Sync>>;
+type StreamResult = Result<ProtoStream, tonic::Status>;
 
 /// Request execution stage: Execute gRPC requests (single or dual dispatch)
 pub(crate) struct RequestExecutionStage {
@@ -80,18 +81,9 @@ impl PipelineStage for RequestExecutionStage {
         ctx.state.load_guards = Some(LoadGuards::new(workers, ctx.input.headers.as_ref()));
 
         // Extract dispatch metadata for tracing span
-        let request_id = ctx
-            .state
-            .dispatch
-            .as_ref()
-            .map(|d| d.request_id.as_str())
-            .unwrap_or("unknown");
-        let model = ctx
-            .state
-            .dispatch
-            .as_ref()
-            .map(|d| d.model.as_str())
-            .unwrap_or("unknown");
+        let dispatch = ctx.state.dispatch.as_ref();
+        let request_id = dispatch.map(|d| d.request_id.as_str()).unwrap_or("unknown");
+        let model = dispatch.map(|d| d.model.as_str()).unwrap_or("unknown");
 
         // Create OTEL span for gRPC request execution
         let span = info_span!(
@@ -110,7 +102,8 @@ impl PipelineStage for RequestExecutionStage {
                         // Dispatch based on runtime type:
                         // - SGLang: parallel dual dispatch with bootstrap metadata
                         // - vLLM: sequential prefill-then-decode (NIXL handles KV transfer)
-                        match workers.pd_runtime_type() {
+                        let runtime_type = workers.pd_runtime_type();
+                        match runtime_type {
                             Some(RuntimeType::Vllm) => {
                                 self.execute_sequential_pd(req, clients, workers).await
                             }
@@ -120,7 +113,7 @@ impl PipelineStage for RequestExecutionStage {
                             Some(RuntimeType::Trtllm) | Some(RuntimeType::External) => {
                                 error!(
                                     function = "RequestExecutionStage::execute",
-                                    runtime_type = ?workers.pd_runtime_type(),
+                                    runtime_type = ?runtime_type,
                                     "Runtime does not support PD disaggregated mode"
                                 );
                                 Err(error::bad_request(
@@ -176,19 +169,13 @@ impl RequestExecutionStage {
         })?;
 
         let result = client.generate(proto_request).await;
-
-        // Record circuit breaker outcome
-        workers.record_outcome(result.is_ok());
+        workers.record_outcome(result.is_healthy());
 
         let stream = result.map_err(|e| {
-            error!(
-                function = "execute_single",
-                error = %e,
-                "Failed to start generation"
-            );
-            error::internal_error(
+            error!(function = "execute_single", error = %e, "Failed to start generation");
+            e.to_http_error(
                 "start_generation_failed",
-                format!("Failed to start generation: {e}"),
+                format!("Failed to start generation: {}", e.message()),
             )
         })?;
 
@@ -212,14 +199,10 @@ impl RequestExecutionStage {
         })?;
 
         let response = client.embed(proto_request).await.map_err(|e| {
-            error!(
-                function = "execute_single_embed",
-                error = %e,
-                "Failed to start embedding"
-            );
-            error::internal_error(
+            error!(function = "execute_single_embed", error = %e, "Failed to start embedding");
+            e.to_http_error(
                 "start_embedding_failed",
-                format!("Failed to start embedding: {e}"),
+                format!("Failed to start embedding: {}", e.message()),
             )
         })?;
 
@@ -276,40 +259,23 @@ impl RequestExecutionStage {
             decode_client.generate(decode_request)
         );
 
-        // Record circuit breaker outcomes for each worker individually
-        workers.record_dual_outcomes(prefill_result.is_ok(), decode_result.is_ok());
+        // Record circuit breaker outcomes (client errors don't count as failures)
+        workers.record_dual_outcomes(prefill_result.is_healthy(), decode_result.is_healthy());
 
         // Handle prefill result
-        let prefill_stream = match prefill_result {
-            Ok(s) => s,
-            Err(e) => {
-                error!(
-                    function = "execute_dual_dispatch",
-                    error = %e,
-                    "Prefill worker failed to start"
-                );
-                return Err(error::internal_error(
-                    "prefill_worker_failed_to_start",
-                    format!("Prefill worker failed to start: {e}"),
-                ));
-            }
-        };
+        let prefill_stream = prefill_result.map_err(|e| {
+            error!(function = "execute_dual_dispatch", error = %e, "Prefill worker failed to start");
+            e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {}", e.message()))
+        })?;
 
         // Handle decode result
-        let decode_stream = match decode_result {
-            Ok(s) => s,
-            Err(e) => {
-                error!(
-                    function = "execute_dual_dispatch",
-                    error = %e,
-                    "Decode worker failed to start"
-                );
-                return Err(error::internal_error(
-                    "decode_worker_failed_to_start",
-                    format!("Decode worker failed to start: {e}"),
-                ));
-            }
-        };
+        let decode_stream = decode_result.map_err(|e| {
+            error!(function = "execute_dual_dispatch", error = %e, "Decode worker failed to start");
+            e.to_http_error(
+                "decode_worker_failed_to_start",
+                format!("Decode worker failed to start: {}", e.message()),
+            )
+        })?;
 
         Ok(ExecutionResult::Dual {
             prefill: prefill_stream,
@@ -391,16 +357,9 @@ impl RequestExecutionStage {
             .generate(prefill_request)
             .await
             .map_err(|e| {
-                workers.record_outcome_prefill(false);
-                error!(
-                    function = "execute_sequential_pd",
-                    error = %e,
-                    "Prefill worker failed to start"
-                );
-                error::internal_error(
-                    "prefill_worker_failed_to_start",
-                    format!("Prefill worker failed to start: {e}"),
-                )
+                workers.record_outcome_prefill(!e.is_cb_failure());
+                error!(function = "execute_sequential_pd", error = %e, "Prefill worker failed to start");
+                e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {}", e.message()))
             })?;
 
         // Drain prefill response (we just need to wait for completion)
@@ -410,15 +369,11 @@ impl RequestExecutionStage {
                     // Just consume the response, we use bootstrap info from worker metadata
                 }
                 Err(e) => {
-                    workers.record_outcome_prefill(false);
-                    error!(
-                        function = "execute_sequential_pd",
-                        error = %e,
-                        "Prefill stream error"
-                    );
-                    return Err(error::internal_error(
+                    workers.record_outcome_prefill(!e.is_cb_failure());
+                    error!(function = "execute_sequential_pd", error = %e, "Prefill stream error");
+                    return Err(e.to_http_error(
                         "prefill_stream_error",
-                        format!("Prefill stream error: {e}"),
+                        format!("Prefill stream error: {}", e.message()),
                     ));
                 }
             }
@@ -441,15 +396,11 @@ impl RequestExecutionStage {
 
         // Send request to decode
         let decode_stream = decode_client.generate(decode_request).await.map_err(|e| {
-            workers.record_outcome_decode(false);
-            error!(
-                function = "execute_sequential_pd",
-                error = %e,
-                "Decode worker failed to start"
-            );
-            error::internal_error(
+            workers.record_outcome_decode(!e.is_cb_failure());
+            error!(function = "execute_sequential_pd", error = %e, "Decode worker failed to start");
+            e.to_http_error(
                 "decode_worker_failed_to_start",
-                format!("Decode worker failed to start: {e}"),
+                format!("Decode worker failed to start: {}", e.message()),
             )
         })?;
 

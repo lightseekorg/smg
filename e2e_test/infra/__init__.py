@@ -37,20 +37,8 @@ from .constants import (  # Enums; Convenience sets; Fixture parameters; Default
     is_vllm,
 )
 from .gateway import Gateway, WorkerInfo, launch_cloud_gateway
-from .gpu_allocator import (
-    GPUAllocator,
-    GPUInfo,
-    GPUSlot,
-    get_gpu_memory_usage,
-    get_open_port,
-    get_physical_device_indices,
-    nvml_context,
-    release_port,
-    wait_for_gpu_memory_to_clear,
-)
 from .gpu_monitor import GPUMonitor
 from .gpu_monitor import should_monitor as should_monitor_gpu
-from .model_pool import ModelInstance, ModelPool, WorkerIdentity
 from .model_specs import (  # Default model paths; Model groups
     CHAT_MODELS,
     DEFAULT_EMBEDDING_MODEL_PATH,
@@ -69,19 +57,21 @@ from .model_specs import (  # Default model paths; Model groups
 )
 from .process_utils import (
     detect_ib_device,
+    get_open_port,
     kill_process_tree,
+    release_port,
     terminate_process,
     wait_for_health,
     wait_for_workers_ready,
 )
 from .run_eval import run_eval
+from .worker import Worker, start_workers, stop_workers
 
 __all__ = [
-    # Enums and Identity
+    # Enums
     "ConnectionMode",
     "WorkerType",
     "Runtime",
-    "WorkerIdentity",
     # Convenience sets
     "LOCAL_MODES",
     "LOCAL_RUNTIMES",
@@ -118,17 +108,9 @@ __all__ = [
     "is_vllm",
     "is_sglang",
     "is_trtllm",
-    # GPU allocation
-    "GPUAllocator",
-    "GPUInfo",
-    "GPUSlot",
-    # GPU utilities
-    "nvml_context",
+    # Port utilities
     "get_open_port",
     "release_port",
-    "get_physical_device_indices",
-    "get_gpu_memory_usage",
-    "wait_for_gpu_memory_to_clear",
     # Process utilities
     "kill_process_tree",
     "terminate_process",
@@ -138,9 +120,10 @@ __all__ = [
     # GPU monitoring
     "GPUMonitor",
     "should_monitor_gpu",
-    # Model management
-    "ModelInstance",
-    "ModelPool",
+    # Worker management
+    "Worker",
+    "start_workers",
+    "stop_workers",
     "MODEL_SPECS",
     # Gateway
     "Gateway",

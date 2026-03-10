@@ -61,6 +61,8 @@ def wait_for_background_task(
 # =============================================================================
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestResponseCRUD:
     """Tests for Response API CRUD operations."""
@@ -152,6 +154,8 @@ class TestResponseCRUD:
 # =============================================================================
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.storage("oracle")
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestResponseCRUDOracleStorage:
@@ -244,6 +248,8 @@ class TestResponseCRUDOracleStorage:
 # =============================================================================
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestConversationCRUD:
     """Tests for Conversation API CRUD operations."""
@@ -360,6 +366,8 @@ class TestConversationCRUD:
 # =============================================================================
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.storage("oracle")
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestConversationCRUDOracleStorage:

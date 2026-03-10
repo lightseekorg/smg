@@ -1,0 +1,66 @@
+name: PR Validation
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-validation:
+    name: PR Title & Commit Messages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Validate PR title format
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          REGEX='^(feat|fix|chore|docs|refactor|test|ci|perf|lint|style|revert|build)(\([a-z0-9_./-]+\))?!?: .+'
+
+          if [[ ! "$PR_TITLE" =~ $REGEX ]]; then
+            echo "::error::PR title does not follow conventional commits format."
+            echo ""
+            echo "Expected format:"
+            echo "  type(scope): description"
+            echo "  type: description"
+            echo ""
+            echo "Allowed types: feat, fix, chore, docs, refactor, test, ci, perf, lint, style, revert, build"
+            echo ""
+            echo "Examples:"
+            echo "  feat(auth): add OAuth2 support"
+            echo "  fix: resolve null pointer in parser"
+            echo "  refactor(grpc): simplify connection pooling"
+            echo "  perf: optimize JSON streaming validation"
+            echo "  feat!: breaking change"
+            echo "  feat(api)!: breaking change with scope"
+            echo ""
+            echo "Your title: '$PR_TITLE'"
+            exit 1
+          fi
+
+          echo "✅ PR title is valid: '$PR_TITLE'"
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check commit messages for forbidden AI co-authors
+        run: |
+          FORBIDDEN=$(git log --format='%B' origin/${{ github.base_ref }}..HEAD | \
+            grep -iE "^(Co-authored-by|Signed-off-by):.*(Claude|noreply@anthropic\.com)" || true)
+          if [ -n "$FORBIDDEN" ]; then
+            echo "::error::Commit messages must not reference Claude or noreply@anthropic.com in Co-authored-by/Signed-off-by lines."
+            echo ""
+            echo "Offending lines:"
+            echo "$FORBIDDEN"
+            echo ""
+            echo "Please amend the offending commits to remove these lines."
+            exit 1
+          fi
+
+          echo "✅ No forbidden AI co-author/sign-off lines found."

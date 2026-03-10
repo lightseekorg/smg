@@ -180,14 +180,47 @@ fn infer_provider_from_id(id: &str) -> Option<ProviderType> {
     None
 }
 
+/// Resolve the API key to use for model discovery.
+///
+/// Priority: per-provider env var > config.api_key > None (wildcard).
+fn resolve_discovery_api_key(
+    provider: Option<&ProviderType>,
+    url: &str,
+    config_api_key: Option<&str>,
+) -> Option<String> {
+    // 1. Try per-provider admin key from env var
+    if let Some(env_name) = provider.and_then(|p| p.admin_key_env_var()) {
+        if let Some(key) = std::env::var(env_name).ok().filter(|k| !k.is_empty()) {
+            debug!("Using {} for model discovery on {}", env_name, url);
+            return Some(key);
+        }
+    }
+
+    // 2. Fall back to config api_key (from --api-key)
+    if let Some(key) = config_api_key {
+        debug!("Using --api-key for model discovery on {}", url);
+        return Some(key.to_string());
+    }
+
+    None
+}
+
 /// Fetch models from /v1/models endpoint.
-async fn fetch_models(url: &str, api_key: Option<&str>) -> Result<Vec<ModelCard>, String> {
+async fn fetch_models(
+    url: &str,
+    api_key: Option<&str>,
+    provider: Option<&ProviderType>,
+) -> Result<Vec<ModelCard>, String> {
     let base_url = url.trim_end_matches('/');
     let models_url = format!("{base_url}/v1/models");
 
     let mut req = HTTP_CLIENT.get(&models_url);
     if let Some(key) = api_key {
-        req = req.bearer_auth(key);
+        if provider.is_some_and(|p| p.uses_x_api_key()) {
+            req = req.header("x-api-key", key);
+        } else {
+            req = req.bearer_auth(key);
+        }
     }
 
     let response = req
@@ -238,9 +271,13 @@ impl StepExecutor<WorkerWorkflowData> for DiscoverModelsStep {
         }
 
         let config = &context.data.config;
+        let provider = ProviderType::from_url(&config.url);
 
-        // If no API key is provided, skip model discovery and use wildcard mode.
-        if config.api_key.as_ref().is_none_or(|k| k.is_empty()) {
+        // Resolve discovery API key: env var admin key > config.api_key > None (wildcard)
+        let discovery_key =
+            resolve_discovery_api_key(provider.as_ref(), &config.url, config.api_key.as_deref());
+
+        if discovery_key.is_none() {
             info!(
                 "No API key provided for {} - using wildcard mode (accepts any model). \
                  User's Authorization header will be forwarded to backend.",
@@ -252,7 +289,7 @@ impl StepExecutor<WorkerWorkflowData> for DiscoverModelsStep {
 
         debug!("Discovering models from external endpoint {}", config.url);
 
-        let model_cards = fetch_models(&config.url, config.api_key.as_deref())
+        let model_cards = fetch_models(&config.url, discovery_key.as_deref(), provider.as_ref())
             .await
             .map_err(|e| WorkflowError::StepFailed {
                 step_id: StepId::new("discover_models"),

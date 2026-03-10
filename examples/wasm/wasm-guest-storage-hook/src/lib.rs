@@ -7,7 +7,7 @@
 //! - Passes through all other operations unchanged
 
 wit_bindgen::generate!({
-    path: "../../../wasm/src/interface/storage",
+    path: "../../../crates/wasm/src/interface/storage",
     world: "storage-hook",
 });
 

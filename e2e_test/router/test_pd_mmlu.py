@@ -31,6 +31,9 @@ from infra import run_eval
 logger = logging.getLogger(__name__)
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
+@pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.e2e
 @pytest.mark.skip_for_runtime("vllm", reason="vLLM does not support HTTP mode")
 @pytest.mark.parametrize("setup_backend", ["pd_http"], indirect=True)
@@ -57,6 +60,9 @@ class TestPDMMLUHttp:
         logger.info("PD HTTP MMLU score: %.2f (threshold: 0.65)", metrics["score"])
 
 
+@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.gpu(2)
+@pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.e2e
 @pytest.mark.parametrize("setup_backend", ["pd_grpc"], indirect=True)
 class TestPDMMLUGrpc:

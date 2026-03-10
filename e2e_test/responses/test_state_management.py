@@ -18,13 +18,12 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Cloud Backend Tests (OpenAI, xAI)
+# Cloud Backend Tests (base mixin — no parametrize, subclasses add their own)
 # =============================================================================
 
 
-@pytest.mark.parametrize("setup_backend", ["openai", "xai"], indirect=True)
-class TestStateManagementCloud:
-    """State management tests against cloud APIs."""
+class _StateManagementCloudBase:
+    """Base test methods for state management against cloud APIs."""
 
     def test_basic_response_creation(self, setup_backend, smg):
         """Test basic response creation without state."""
@@ -186,10 +185,53 @@ class TestStateManagementCloud:
 
 
 # =============================================================================
+# Cloud Backend Tests (OpenAI)
+# =============================================================================
+
+
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
+@pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
+class TestStateManagementCloud(_StateManagementCloudBase):
+    """State management tests against OpenAI cloud API."""
+
+
+# =============================================================================
+# Cloud Backend Tests (xAI)
+# =============================================================================
+
+
+@pytest.mark.vendor("xai")
+@pytest.mark.gpu(0)
+@pytest.mark.parametrize("setup_backend", ["xai"], indirect=True)
+class TestStateManagementCloudXai(_StateManagementCloudBase):
+    """State management tests against xAI cloud API."""
+
+
+# =============================================================================
+# Cloud Backend Tests with Flyway-managed Oracle schema (oracle-custom)
+# =============================================================================
+
+
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
+@pytest.mark.storage("oracle-custom")
+@pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
+class TestStateManagementOracleCustom(_StateManagementCloudBase):
+    """State management tests against Oracle with Flyway-managed schema (schema-config).
+
+    The storage("oracle-custom") marker causes the gateway to launch with
+    --schema-config pointing to the Flyway schema, using ATP_FLYWAY_* env vars.
+    """
+
+
+# =============================================================================
 # Local Backend Tests (gRPC with Qwen model)
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
@@ -318,6 +360,8 @@ class TestStateManagementLocal:
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])

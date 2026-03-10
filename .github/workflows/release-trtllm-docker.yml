@@ -1,0 +1,54 @@
+name: Release SMG+TRTLLM Docker Image
+
+run-name: >-
+  SMG+TRTLLM |
+  base=${{ inputs.base_image_ref }} |
+  engine=${{ inputs.trtllm_commit }} |
+  smg=${{ inputs.smg_commit }} |
+  by @${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_image_ref:
+        description: 'Base image (e.g. nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc6). Empty = build from source.'
+        required: false
+        type: string
+      trtllm_repo:
+        description: 'TRTLLM repo URL (required when base_image_ref is empty to build from source)'
+        required: false
+        type: string
+      trtllm_commit:
+        description: 'TRTLLM commit/ref ("latest" for HEAD)'
+        required: false
+        default: 'latest'
+        type: string
+      smg_repo:
+        description: 'SMG repo URL'
+        required: false
+        default: 'https://github.com/lightseekorg/smg'
+        type: string
+      smg_commit:
+        description: 'SMG commit/ref ("latest" for HEAD)'
+        required: false
+        default: 'v1.1.0'
+        type: string
+      tag:
+        description: 'Override image tag (e.g. v1.1.0-trtllm-1.3.0)'
+        required: false
+        type: string
+
+jobs:
+  build:
+    uses: ./.github/workflows/_build-engine-image.yml
+    with:
+      engine: trtllm
+      base_image_ref: ${{ inputs.base_image_ref }}
+      engine_repo: ${{ inputs.trtllm_repo }}
+      engine_commit: ${{ inputs.trtllm_commit }}
+      smg_repo: ${{ inputs.smg_repo }}
+      smg_commit: ${{ inputs.smg_commit }}
+      tag: ${{ inputs.tag }}
+      source_build_repo: ${{ inputs.trtllm_repo }}
+      source_build_ref: ${{ inputs.trtllm_commit }}
+    secrets: inherit

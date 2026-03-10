@@ -56,6 +56,8 @@ CALCULATE_TOOL = {
 # =============================================================================
 
 
+@pytest.mark.vendor("anthropic")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["anthropic"], indirect=True)
 class TestToolUseBasic:
     """Tool use tests against the Anthropic Messages API."""

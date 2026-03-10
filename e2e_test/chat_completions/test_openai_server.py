@@ -12,7 +12,7 @@ import logging
 
 import pytest
 from conftest import smg_compare
-from infra import is_trtllm
+from infra import is_sglang, is_trtllm
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +22,17 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
+@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestChatCompletion:
     """Tests for OpenAI-compatible chat completions API."""
+
+    # Whether the backend trims stop sequences from output.
+    # Harmony (gpt-oss) does not trim because its detokenization is not channel-aware.
+    STOP_SEQUENCE_TRIMMED = True
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
@@ -278,7 +284,8 @@ convenient hands-free control to your smart devices.
             f"content chunk count ({content_chunk_count})"
         )
         # But they should be close - allow small difference for special tokens
-        assert usage_completion_tokens - content_chunk_count <= 2, (
+        token_tolerance = getattr(self, "STREAMING_TOKEN_TOLERANCE", 2)
+        assert usage_completion_tokens - content_chunk_count <= token_tolerance, (
             f"completion_tokens ({usage_completion_tokens}) differs too much from "
             f"content chunk count ({content_chunk_count})"
         )
@@ -348,8 +355,14 @@ convenient hands-free control to your smart devices.
         )
 
         assert response.choices[0].finish_reason == "stop"
-        content = response.choices[0].message.content
-        assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+        msg = response.choices[0].message
+        content = msg.content or getattr(msg, "reasoning_content", "") or ""
+        if self.STOP_SEQUENCE_TRIMMED:
+            assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+        else:
+            assert content.endswith(","), (
+                f"Stop sequence ',' should be the suffix of output: {content}"
+            )
 
         # SmgClient comparison
         with smg_compare():
@@ -366,10 +379,16 @@ convenient hands-free control to your smart devices.
                 stop=[","],
             )
             assert smg_resp.choices[0].finish_reason == "stop"
-            smg_content = smg_resp.choices[0].message.content
-            assert "," not in smg_content, (
-                f"SmgClient: stop sequence ',' should not appear: {smg_content}"
-            )
+            smg_msg = smg_resp.choices[0].message
+            smg_content = smg_msg.content or getattr(smg_msg, "reasoning_content", "") or ""
+            if self.STOP_SEQUENCE_TRIMMED:
+                assert "," not in smg_content, (
+                    f"SmgClient: stop sequence ',' should not appear: {smg_content}"
+                )
+            else:
+                assert smg_content.endswith(","), (
+                    f"SmgClient: stop sequence ',' should be the suffix: {smg_content}"
+                )
 
     def test_stop_sequences_stream(self, setup_backend, smg):
         """Test that stop sequences work in streaming mode."""
@@ -397,11 +416,18 @@ convenient hands-free control to your smart devices.
         ]
         assert "stop" in finish_reasons
 
-        # Collect all content
+        # Collect all content (fall back to reasoning_content for models like Harmony)
         content = "".join(
-            c.choices[0].delta.content for c in chunks if c.choices and c.choices[0].delta.content
+            self._delta_text(c.choices[0].delta)
+            for c in chunks
+            if c.choices and self._delta_text(c.choices[0].delta)
         )
-        assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+        if self.STOP_SEQUENCE_TRIMMED:
+            assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+        else:
+            assert content.endswith(","), (
+                f"Stop sequence ',' should be the suffix of output: {content}"
+            )
 
         # SmgClient streaming comparison
         with smg_compare():
@@ -426,15 +452,23 @@ convenient hands-free control to your smart devices.
             ]
             assert "stop" in smg_finish
             smg_text = "".join(
-                c.choices[0].delta.content
+                self._delta_text(c.choices[0].delta)
                 for c in smg_chunks
-                if c.choices and c.choices[0].delta.content
+                if c.choices and self._delta_text(c.choices[0].delta)
             )
-            assert "," not in smg_text
+            if self.STOP_SEQUENCE_TRIMMED:
+                assert "," not in smg_text
+            else:
+                assert smg_text.endswith(",")
 
     # -------------------------------------------------------------------------
     # Helper methods
     # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _delta_text(delta):
+        """Extract text from delta, falling back to reasoning_content for Harmony."""
+        return delta.content or getattr(delta, "reasoning_content", "") or ""
 
     def _run_chat_completion(self, client, model, logprobs, parallel_sample_num):
         """Run a non-streaming chat completion and verify response."""
@@ -549,6 +583,8 @@ convenient hands-free control to your smart devices.
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
 class TestChatCompletionGptOss(TestChatCompletion):
@@ -557,6 +593,12 @@ class TestChatCompletionGptOss(TestChatCompletion):
     Inherits from TestChatCompletion and overrides tests that don't work
     with OSS models. Logprobs are supported via Harmony's built-in tokenizer.
     """
+
+    # Harmony channel markers add ~10 special tokens
+    STREAMING_TOKEN_TOLERANCE = 10
+
+    # Harmony doesn't trim stop sequences (detokenization is not channel-aware)
+    STOP_SEQUENCE_TRIMMED = False
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
@@ -570,6 +612,18 @@ class TestChatCompletionGptOss(TestChatCompletion):
         """Test streaming chat completion with logprobs and parallel sampling."""
         super().test_chat_completion_stream(setup_backend, smg, logprobs, parallel_sample_num)
 
+    def test_stop_sequences(self, setup_backend, smg):
+        if is_trtllm():
+            pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
+        super().test_stop_sequences(setup_backend, smg)
+
+    def test_stop_sequences_stream(self, setup_backend, smg):
+        if is_trtllm():
+            pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
+        if is_sglang():
+            self.STOP_SEQUENCE_TRIMMED = True
+        super().test_stop_sequences_stream(setup_backend, smg)
+
     @pytest.mark.skip(reason="OSS models don't support regex constraints")
     def test_regex(self, setup_backend, smg):
         pass
@@ -580,18 +634,4 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
     @pytest.mark.skip(reason="OSS models don't support continue_final_message")
     def test_response_prefill(self, setup_backend, smg):
-        pass
-
-    @pytest.mark.skip(reason="TODO: Harmony puts output in reasoning_content, content is None")
-    def test_stop_sequences(self, setup_backend):
-        pass
-
-    @pytest.mark.skip(reason="TODO: Harmony puts output in reasoning_content, content is None")
-    def test_stop_sequences_stream(self, setup_backend):
-        pass
-
-    @pytest.mark.skip(
-        reason="TODO: Harmony channel markers add ~10 tokens exceeding parent tolerance of 2"
-    )
-    def test_streaming_token_count_matches_chunks(self, setup_backend):
         pass

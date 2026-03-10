@@ -4,10 +4,18 @@
 //! Both regular and harmony processors use these functions to avoid duplication.
 
 use axum::response::Response;
+use tracing::{error as trace_error, warn};
 
 use crate::routers::{
     error,
-    grpc::{context::ExecutionResult, proto_wrapper::ProtoGenerateComplete, utils},
+    grpc::{
+        context::ExecutionResult,
+        proto_wrapper::{
+            collect_request_stats, ProtoGenerateComplete, ProtoRequestStats, ProtoResponseVariant,
+            ProtoStream,
+        },
+        utils::tonic_ext::TonicStatusExt,
+    },
 };
 use crate::observability::events::UnifiedRequestStats;
 
@@ -35,20 +43,16 @@ pub(crate) async fn collect_responses(
     let collected = match execution_result {
         ExecutionResult::Single { mut stream } => {
             let responses =
-                utils::collect_stream_responses(&mut stream, "Single", enable_request_statistics)
-                    .await?;
+                collect_stream_responses(&mut stream, "Single", enable_request_statistics).await?;
             stream.mark_completed();
-            CollectedResponses {
-                completes: responses.completes,
-                request_stats: responses.request_stats,
-            }
+            responses
         }
         ExecutionResult::Dual {
             mut prefill,
             decode,
         } => {
             // Collect prefill for input_logprobs (don't mark completed yet)
-            let prefill_collected = utils::collect_stream_responses(
+            let prefill_collected = collect_stream_responses(
                 &mut prefill,
                 "Prefill",
                 enable_request_statistics,
@@ -57,7 +61,7 @@ pub(crate) async fn collect_responses(
 
             // Collect decode for actual output (don't mark completed yet)
             let mut decode_stream = *decode;
-            let mut decode_collected = utils::collect_stream_responses(
+            let mut decode_collected = collect_stream_responses(
                 &mut decode_stream,
                 "Decode",
                 enable_request_statistics,
@@ -76,9 +80,13 @@ pub(crate) async fn collect_responses(
                 );
             }
 
+            let request_stats = decode_collected
+                .request_stats
+                .or(prefill_collected.request_stats);
+
             CollectedResponses {
                 completes: decode_collected.completes,
-                request_stats: decode_collected.request_stats,
+                request_stats,
             }
         }
         ExecutionResult::Embedding { .. } => {
@@ -121,4 +129,66 @@ fn merge_prefill_logprobs(
             }
         }
     }
+}
+
+/// Collect all complete responses from a gRPC stream, discarding chunks.
+async fn collect_stream_responses(
+    stream: &mut ProtoStream,
+    worker_name: &str,
+    enable_request_statistics: bool,
+) -> Result<CollectedResponses, Response> {
+    let mut all_responses = Vec::new();
+    let mut stream_request_stats: Vec<ProtoRequestStats> = Vec::new();
+
+    while let Some(response) = stream.next().await {
+        match response {
+            Ok(gen_response) => {
+                match gen_response.into_response() {
+                    ProtoResponseVariant::Complete(complete) => {
+                        all_responses.push(complete);
+                    }
+                    ProtoResponseVariant::Error(err) => {
+                        // In-band error (legacy): backends should use context.abort() instead.
+                        // Kept for backward compatibility during the transition.
+                        warn!(function = "collect_stream_responses", worker = %worker_name, error = %err.message(), "Worker sent in-band error (legacy path, backend should use context.abort)");
+                        // Don't mark as completed - let Drop send abort for error cases
+                        return Err(error::internal_error(
+                            "worker_generation_failed",
+                            format!("{} generation failed: {}", worker_name, err.message()),
+                        ));
+                    }
+                    ProtoResponseVariant::Chunk(_chunk) => {
+                        // Streaming chunk - no action needed
+                    }
+                    ProtoResponseVariant::RequestStats(request_stats) => {
+                        if enable_request_statistics {
+                            stream_request_stats.push(request_stats);
+                        }
+                    }
+                    ProtoResponseVariant::None => {
+                        // Empty response - no action needed
+                    }
+                }
+            }
+            Err(e) => {
+                trace_error!(function = "collect_stream_responses", worker = %worker_name, grpc_code = ?e.code(), error = ?e, "Worker stream error");
+                // Don't mark as completed - let Drop send abort for error cases
+                return Err(e.to_http_error(
+                    "worker_stream_failed",
+                    format!("{worker_name} stream failed: {}", e.message()),
+                ));
+            }
+        }
+    }
+
+    let request_stats = if enable_request_statistics {
+        collect_request_stats(&all_responses, &stream_request_stats)
+    } else {
+        None
+    };
+
+    Ok(CollectedResponses {
+        completes: all_responses,
+        request_stats,
+    })
 }

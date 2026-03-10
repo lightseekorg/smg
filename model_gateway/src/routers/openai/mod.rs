@@ -9,6 +9,7 @@
 
 mod context;
 mod provider;
+pub mod realtime;
 pub mod responses;
 mod router;
 
