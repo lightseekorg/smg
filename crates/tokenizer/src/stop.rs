@@ -258,6 +258,10 @@ impl StopSequenceDecoder {
 
     /// Flush any held text
     pub fn flush(&mut self) -> SequenceDecoderOutput {
+        if let Ok(Some(text)) = self.sequence.flush_pending() {
+            self.jail_buffer.push_str(&text);
+        }
+
         if self.jail_buffer.is_empty() {
             SequenceDecoderOutput::Text(String::new())
         } else {
@@ -453,6 +457,83 @@ mod tests {
 
         // After processing, flush should work
         assert!(matches!(result, SequenceDecoderOutput::Text(_)));
+    }
+
+    #[test]
+    fn test_flush_includes_pending_sequence_suffix() {
+        use anyhow::Result;
+
+        use crate::traits::{
+            Decoder, Encoder, Encoding, SpecialTokens, Tokenizer as TokenizerTrait,
+        };
+
+        struct ReplacementMergingTokenizer {
+            special_tokens: SpecialTokens,
+        }
+
+        impl Encoder for ReplacementMergingTokenizer {
+            fn encode(&self, _input: &str, _add_special_tokens: bool) -> Result<Encoding> {
+                Ok(Encoding::Plain(vec![]))
+            }
+
+            fn encode_batch(
+                &self,
+                inputs: &[&str],
+                add_special_tokens: bool,
+            ) -> Result<Vec<Encoding>> {
+                inputs
+                    .iter()
+                    .map(|input| self.encode(input, add_special_tokens))
+                    .collect()
+            }
+        }
+
+        impl Decoder for ReplacementMergingTokenizer {
+            fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
+                Ok(match token_ids {
+                    [] => String::new(),
+                    [1] => "\u{FFFD}".into(),
+                    [1, 2] => "é".into(),
+                    _ => String::new(),
+                })
+            }
+        }
+
+        impl TokenizerTrait for ReplacementMergingTokenizer {
+            fn vocab_size(&self) -> usize {
+                10
+            }
+
+            fn get_special_tokens(&self) -> &SpecialTokens {
+                &self.special_tokens
+            }
+
+            fn token_to_id(&self, _token: &str) -> Option<u32> {
+                None
+            }
+
+            fn id_to_token(&self, _id: u32) -> Option<String> {
+                None
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        let tokenizer: Arc<dyn TokenizerTrait> = Arc::new(ReplacementMergingTokenizer {
+            special_tokens: SpecialTokens::default(),
+        });
+        let config = StopSequenceConfig::default();
+        let mut decoder = StopSequenceDecoder::new(tokenizer, config, false);
+
+        assert!(matches!(
+            decoder.process_token(1).unwrap(),
+            SequenceDecoderOutput::Held
+        ));
+
+        let flushed = decoder.flush();
+        assert_eq!(flushed, SequenceDecoderOutput::Text("\u{FFFD}".to_string()));
     }
 
     #[test]
