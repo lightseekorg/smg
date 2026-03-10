@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["router", "router-worker", "router-pd"],
+      "description": "Deployment mode"
+    },
+    "router": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "type": "string",
+          "enum": ["cache_aware", "round_robin", "power_of_two", "consistent_hashing", "prefix_hash", "manual", "random", "bucket"]
+        },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "replicas": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["sglang", "vllm", "trtllm"]
+        },
+        "replicas": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "history": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["none", "memory", "postgres", "redis", "oracle"]
+        }
+      }
+    }
+  },
+  "required": ["mode"]
+}
