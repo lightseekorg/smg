@@ -406,6 +406,10 @@ struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "Health Checks")]
     disable_health_check: bool,
 
+    /// Remove workers from the registry when they are marked unhealthy
+    #[arg(long, default_value_t = false, help_heading = "Health Checks")]
+    remove_unhealthy_workers: bool,
+
     // ==================== Tokenizer ====================
     /// Model path for loading tokenizer (HuggingFace ID or local path)
     #[arg(long, alias = "model", help_heading = "Tokenizer")]
@@ -1102,6 +1106,7 @@ impl CliArgs {
                 check_interval_secs: self.health_check_interval_secs,
                 endpoint: self.health_check_endpoint.clone(),
                 disable_health_check: self.disable_health_check,
+                remove_unhealthy_workers: self.remove_unhealthy_workers,
             })
             .tokenizer_cache(TokenizerCacheConfig {
                 enable_l0: self.tokenizer_cache_enable_l0,

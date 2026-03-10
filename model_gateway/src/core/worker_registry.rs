@@ -221,6 +221,20 @@ impl WorkerRegistry {
         }
     }
 
+    /// Create a cheap handle that shares all internal Arc state.
+    /// Unlike `Clone`, this is private so the singleton semantics are preserved.
+    fn shallow_clone(&self) -> Self {
+        Self {
+            workers: self.workers.clone(),
+            model_index: self.model_index.clone(),
+            hash_rings: self.hash_rings.clone(),
+            type_workers: self.type_workers.clone(),
+            connection_workers: self.connection_workers.clone(),
+            url_to_id: self.url_to_id.clone(),
+            mesh_sync: self.mesh_sync.clone(),
+        }
+    }
+
     /// Rebuild the hash ring for a model based on current workers in the model index
     fn rebuild_hash_ring(&self, model_id: &str) {
         if let Some(workers) = self.model_index.get(model_id) {
@@ -660,10 +674,19 @@ impl WorkerRegistry {
     /// Each worker is checked according to its own `health_config.check_interval_secs`.
     /// The task sleeps until the next worker is due, so it only wakes when there is
     /// actual work to do — zero CPU when idle, no polling.
-    pub(crate) fn start_health_checker(&self, default_interval_secs: u64) -> HealthChecker {
+    pub(crate) fn start_health_checker(
+        &self,
+        default_interval_secs: u64,
+        remove_unhealthy: bool,
+    ) -> HealthChecker {
         let shutdown_notify = Arc::new(tokio::sync::Notify::new());
         let shutdown_clone = shutdown_notify.clone();
         let workers_ref = self.workers.clone();
+        let registry = if remove_unhealthy {
+            Some(self.shallow_clone())
+        } else {
+            None
+        };
 
         #[expect(
             clippy::disallowed_methods,
@@ -724,9 +747,25 @@ impl WorkerRegistry {
                         .into_iter()
                         .map(|w| async move {
                             let _ = w.check_health_async().await;
+                            w
                         })
                         .collect();
-                    futures::future::join_all(futs).await;
+                    let checked_workers = futures::future::join_all(futs).await;
+
+                    // Remove workers that transitioned to unhealthy
+                    if let Some(ref registry) = registry {
+                        for worker in &checked_workers {
+                            if !worker.is_healthy() {
+                                let url = worker.url().to_string();
+                                tracing::warn!(
+                                    worker_url = %url,
+                                    "Removing unhealthy worker from registry"
+                                );
+                                next_check.remove(&url);
+                                registry.remove_by_url(&url);
+                            }
+                        }
+                    }
                 }
 
                 // Sleep until the earliest deadline or until shutdown is signalled.
@@ -889,5 +928,84 @@ mod tests {
         let llama_workers_after = registry.get_by_model("llama-3");
         assert_eq!(llama_workers_after.len(), 1);
         assert_eq!(llama_workers_after[0].url(), "http://worker2:8080");
+    }
+
+    #[tokio::test]
+    async fn test_health_checker_removes_unhealthy_workers() {
+        use openai_protocol::worker::HealthCheckConfig;
+
+        let registry = WorkerRegistry::new();
+
+        // Worker pointing at a non-existent URL so health checks fail immediately.
+        // failure_threshold=1 so it becomes unhealthy after the first failed check.
+        let mut labels = HashMap::new();
+        labels.insert("model_id".to_string(), "test-model".to_string());
+
+        let worker: Box<dyn Worker> = Box::new(
+            BasicWorkerBuilder::new("http://127.0.0.1:1")
+                .worker_type(WorkerType::Regular)
+                .labels(labels)
+                .health_config(HealthCheckConfig {
+                    failure_threshold: 1,
+                    success_threshold: 1,
+                    timeout_secs: 1,
+                    check_interval_secs: 1,
+                    disable_health_check: false,
+                })
+                .build(),
+        );
+
+        registry.register(Arc::from(worker));
+        assert_eq!(registry.stats().total_workers, 1);
+
+        // Start health checker with remove_unhealthy=true and 1s interval
+        let _hc = registry.start_health_checker(1, true);
+
+        // Wait for the health check to run and remove the worker
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+        assert_eq!(
+            registry.stats().total_workers,
+            0,
+            "Unhealthy worker should have been removed from the registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_checker_keeps_unhealthy_workers_when_disabled() {
+        use openai_protocol::worker::HealthCheckConfig;
+
+        let registry = WorkerRegistry::new();
+
+        let mut labels = HashMap::new();
+        labels.insert("model_id".to_string(), "test-model".to_string());
+
+        let worker: Box<dyn Worker> = Box::new(
+            BasicWorkerBuilder::new("http://127.0.0.1:1")
+                .worker_type(WorkerType::Regular)
+                .labels(labels)
+                .health_config(HealthCheckConfig {
+                    failure_threshold: 1,
+                    success_threshold: 1,
+                    timeout_secs: 1,
+                    check_interval_secs: 1,
+                    disable_health_check: false,
+                })
+                .build(),
+        );
+
+        registry.register(Arc::from(worker));
+        assert_eq!(registry.stats().total_workers, 1);
+
+        // Start health checker with remove_unhealthy=false (default behavior)
+        let _hc = registry.start_health_checker(1, false);
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+        assert_eq!(
+            registry.stats().total_workers,
+            1,
+            "Worker should remain in the registry when remove_unhealthy is false"
+        );
     }
 }

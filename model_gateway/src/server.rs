@@ -1046,7 +1046,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     } else {
         let hc = app_context
             .worker_registry
-            .start_health_checker(config.router_config.health_check.check_interval_secs);
+            .start_health_checker(
+                config.router_config.health_check.check_interval_secs,
+                config.router_config.health_check.remove_unhealthy_workers,
+            );
         debug!(
             "Started health checker for workers with {}s interval",
             config.router_config.health_check.check_interval_secs
