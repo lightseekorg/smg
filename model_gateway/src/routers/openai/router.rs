@@ -14,6 +14,10 @@ use axum::{
 use futures_util::{future::join_all, StreamExt};
 use openai_protocol::{
     chat::ChatCompletionRequest,
+    realtime_session::{
+        RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
+        RealtimeTranscriptionSessionCreateRequest,
+    },
     responses::{
         generate_id, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
         ResponsesGetParams, ResponsesRequest,
@@ -41,7 +45,10 @@ use crate::{
         WorkerRegistry,
     },
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
-    routers::header_utils::{apply_provider_headers, extract_auth_header},
+    routers::{
+        header_utils::{apply_provider_headers, extract_auth_header},
+        openai::realtime::{rest::forward_realtime_rest, ws::handle_realtime_ws, RealtimeRegistry},
+    },
 };
 
 pub struct OpenAIRouter {
@@ -51,6 +58,7 @@ pub struct OpenAIRouter {
     shared_components: Arc<SharedComponents>,
     responses_components: Arc<ResponsesComponents>,
     retry_config: RetryConfig,
+    realtime_registry: Arc<RealtimeRegistry>,
 }
 
 impl std::fmt::Debug for OpenAIRouter {
@@ -120,6 +128,7 @@ impl OpenAIRouter {
             shared_components,
             responses_components,
             retry_config: ctx.router_config.effective_retry_config(),
+            realtime_registry: ctx.realtime_registry.clone(),
         })
     }
 
@@ -1027,6 +1036,95 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 )
             }
         }
+    }
+
+    async fn route_realtime_session(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeSessionCreateRequest,
+    ) -> Response {
+        // TODO(Phase 3): Inject MCP tool definitions into body.tools
+        let model = body.model.as_deref().unwrap_or_default();
+        let auth = extract_auth_header(headers, None);
+        let worker = self.select_worker_for_model(model, auth.as_ref()).await;
+        forward_realtime_rest(
+            &self.shared_components.client,
+            worker,
+            headers,
+            body,
+            model,
+            "/v1/realtime/sessions",
+            metrics_labels::ENDPOINT_REALTIME_SESSIONS,
+        )
+        .await
+    }
+
+    async fn route_realtime_client_secret(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeClientSecretCreateRequest,
+    ) -> Response {
+        // TODO(Phase 3): Inject MCP tool definitions into body.session.tools
+        let model = body.session.model.as_deref().unwrap_or_default();
+        let auth = extract_auth_header(headers, None);
+        let worker = self.select_worker_for_model(model, auth.as_ref()).await;
+        forward_realtime_rest(
+            &self.shared_components.client,
+            worker,
+            headers,
+            body,
+            model,
+            "/v1/realtime/client_secrets",
+            metrics_labels::ENDPOINT_REALTIME_CLIENT_SECRETS,
+        )
+        .await
+    }
+
+    async fn route_realtime_transcription_session(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeTranscriptionSessionCreateRequest,
+    ) -> Response {
+        let model = body.model.as_deref().unwrap_or_default();
+        let auth = extract_auth_header(headers, None);
+        let worker = self.select_worker_for_model(model, auth.as_ref()).await;
+        forward_realtime_rest(
+            &self.shared_components.client,
+            worker,
+            headers,
+            body,
+            model,
+            "/v1/realtime/transcription_sessions",
+            metrics_labels::ENDPOINT_REALTIME_TRANSCRIPTION,
+        )
+        .await
+    }
+
+    async fn route_realtime_ws(&self, req: Request<Body>, model: &str) -> Response {
+        let (parts, _body) = req.into_parts();
+
+        Metrics::record_router_request(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_WEBSOCKET,
+            model,
+            metrics_labels::ENDPOINT_REALTIME,
+            "false",
+        );
+
+        let auth_header = extract_auth_header(Some(&parts.headers), None);
+        let worker = self
+            .select_worker_for_model(model, auth_header.as_ref())
+            .await;
+
+        handle_realtime_ws(
+            parts,
+            model.to_owned(),
+            worker,
+            auth_header,
+            Arc::clone(&self.realtime_registry),
+        )
+        .await
     }
 
     fn router_type(&self) -> &'static str {
