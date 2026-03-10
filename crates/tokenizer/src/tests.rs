@@ -490,6 +490,76 @@ fn test_decode_stream_byte_fallback_consecutive_cjk() {
 }
 
 #[test]
+fn test_sequence_flush_emits_deferred_fffd() {
+    // When byte-fallback tokens produce a legitimate U+FFFD at end-of-stream,
+    // flush() must emit it (append_token defers trailing FFFD).
+    let tokenizer = new_byte_fallback_tokenizer();
+    let mut seq = Sequence::new(tokenizer);
+    let mut output = String::new();
+
+    // 'a' then the 3 bytes of U+FFFD itself: EF BF BD
+    output.push_str(&seq.append_token(b'a' as u32).unwrap());
+    output.push_str(
+        &seq.append_token(ByteFallbackTokenizer::byte_token(0xEF))
+            .unwrap(),
+    );
+    output.push_str(
+        &seq.append_token(ByteFallbackTokenizer::byte_token(0xBF))
+            .unwrap(),
+    );
+    output.push_str(
+        &seq.append_token(ByteFallbackTokenizer::byte_token(0xBD))
+            .unwrap(),
+    );
+
+    // append_token deferred the FFFD — incremental output is just "a"
+    assert_eq!(output, "a");
+
+    // flush() recovers the deferred replacement character
+    output.push_str(&seq.flush().unwrap());
+    assert_eq!(output, "a\u{FFFD}");
+    assert_eq!(seq.text().unwrap(), "a\u{FFFD}");
+}
+
+#[test]
+fn test_sequence_flush_noop_when_caught_up() {
+    let tokenizer = new_byte_fallback_tokenizer();
+    let mut seq = Sequence::new(tokenizer);
+
+    seq.append_token(b'a' as u32).unwrap();
+    seq.append_token(b'b' as u32).unwrap();
+
+    // All tokens emitted successfully — flush has nothing to do
+    assert_eq!(seq.flush().unwrap(), "");
+}
+
+#[test]
+fn test_sequence_flush_mid_stream_fffd_then_continue() {
+    // EF BF BD (legitimate FFFD) followed by 'x':
+    // Without flush, 'x' alone would be emitted after FFFD is consumed as common prefix.
+    // With the offset fix, flush can recover the FFFD before continuing.
+    let tokenizer = new_byte_fallback_tokenizer();
+    let mut seq = Sequence::new(tokenizer);
+    let mut output = String::new();
+
+    output.push_str(&seq.append_token(b'a' as u32).unwrap());
+    // Byte-fallback tokens for U+FFFD: EF BF BD
+    for &byte in &[0xEF, 0xBF, 0xBD] {
+        output.push_str(
+            &seq.append_token(ByteFallbackTokenizer::byte_token(byte))
+                .unwrap(),
+        );
+    }
+    // Flush before continuing to emit the deferred FFFD
+    output.push_str(&seq.flush().unwrap());
+    // Continue with more tokens
+    output.push_str(&seq.append_token(b'x' as u32).unwrap());
+
+    assert_eq!(output, "a\u{FFFD}x");
+    assert_eq!(seq.text().unwrap(), "a\u{FFFD}x");
+}
+
+#[test]
 fn test_sequence_with_tokens_bounded_prefix_offset() {
     let tokenizer = new_byte_fallback_tokenizer();
     let tokens = vec![b'a' as u32; 100];

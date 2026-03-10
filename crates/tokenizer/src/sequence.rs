@@ -22,7 +22,7 @@ pub struct Sequence {
     /// The position in the current sequence the last decoded token completed
     prefix_offset: usize,
 
-    /// Current position in the sequence
+    /// Last successfully emitted position in the sequence
     read_offset: usize,
 
     /// Whether to skip special tokens when decoding
@@ -129,7 +129,6 @@ impl Sequence {
         let old_read_offset = self.read_offset;
 
         self.token_ids.push(token_id);
-        self.read_offset = self.token_ids.len();
 
         // First token: decode everything
         if self.prefix_offset == 0 && old_read_offset == 0 {
@@ -139,6 +138,7 @@ impl Sequence {
             if text.ends_with('\u{FFFD}') {
                 return Ok(String::new());
             }
+            self.read_offset = self.token_ids.len();
             return Ok(text);
         }
 
@@ -177,10 +177,29 @@ impl Sequence {
         let incremental = &new_text[split_at..];
         if !incremental.is_empty() {
             self.prefix_offset = old_read_offset;
+            self.read_offset = self.token_ids.len();
             return Ok(incremental.to_string());
         }
 
         Ok(String::new())
+    }
+
+    /// Force-emit any text buffered by trailing U+FFFD deferral.
+    /// Call at end-of-stream to ensure legitimate replacement characters are not lost.
+    pub fn flush(&mut self) -> Result<String> {
+        if self.read_offset >= self.token_ids.len() {
+            return Ok(String::new());
+        }
+
+        let remaining = self.tokenizer.decode(
+            &self.token_ids[self.read_offset..],
+            self.skip_special_tokens,
+        )?;
+
+        self.prefix_offset = self.read_offset;
+        self.read_offset = self.token_ids.len();
+
+        Ok(remaining)
     }
 
     /// Get a reference to the tokenizer
