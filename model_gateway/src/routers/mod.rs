@@ -277,7 +277,7 @@ pub trait RouterTrait: Send + Sync + Debug {
     }
 
     /// Route a realtime WebSocket upgrade request
-    async fn route_realtime_ws(&self, _req: Request<Body>) -> Response {
+    async fn route_realtime_ws(&self, _req: Request<Body>, _model_id: &str) -> Response {
         (
             StatusCode::NOT_IMPLEMENTED,
             "Realtime WebSocket not implemented",

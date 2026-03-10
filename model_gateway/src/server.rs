@@ -64,6 +64,7 @@ use crate::{
             get_mesh_health, get_policy_state, get_policy_states, get_worker_state,
             get_worker_states, set_global_rate_limit, trigger_graceful_shutdown, update_app_config,
         },
+        openai::realtime::ws::RealtimeQueryParams,
         parse,
         router_manager::RouterManager,
         tokenize, RouterTrait,
@@ -437,8 +438,22 @@ async fn v1_conversations_delete_item(
     .await
 }
 
-async fn v1_realtime_ws(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    state.router.route_realtime_ws(req).await
+async fn v1_realtime_ws(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RealtimeQueryParams>,
+    req: Request,
+) -> Response {
+    let model = match params.model {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing required 'model' query parameter",
+            )
+                .into_response();
+        }
+    };
+    state.router.route_realtime_ws(req, &model).await
 }
 
 async fn v1_realtime_session(

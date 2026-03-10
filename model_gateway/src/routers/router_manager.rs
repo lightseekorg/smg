@@ -757,7 +757,8 @@ impl RouterTrait for RouterManager {
         headers: Option<&HeaderMap>,
         body: &RealtimeSessionCreateRequest,
     ) -> Response {
-        let router = self.select_router_for_request(headers, None);
+        let model = body.model.as_deref();
+        let router = self.select_router_for_request(headers, model);
         if let Some(router) = router {
             router.route_realtime_session(headers, body).await
         } else {
@@ -774,7 +775,8 @@ impl RouterTrait for RouterManager {
         headers: Option<&HeaderMap>,
         body: &RealtimeClientSecretCreateRequest,
     ) -> Response {
-        let router = self.select_router_for_request(headers, None);
+        let model = body.session.model.as_deref();
+        let router = self.select_router_for_request(headers, model);
         if let Some(router) = router {
             router.route_realtime_client_secret(headers, body).await
         } else {
@@ -791,7 +793,8 @@ impl RouterTrait for RouterManager {
         headers: Option<&HeaderMap>,
         body: &RealtimeTranscriptionSessionCreateRequest,
     ) -> Response {
-        let router = self.select_router_for_request(headers, None);
+        let model = body.model.as_deref();
+        let router = self.select_router_for_request(headers, model);
         if let Some(router) = router {
             router
                 .route_realtime_transcription_session(headers, body)
@@ -805,10 +808,10 @@ impl RouterTrait for RouterManager {
         }
     }
 
-    async fn route_realtime_ws(&self, req: Request<Body>) -> Response {
-        let router = self.select_router_for_request(None, None);
+    async fn route_realtime_ws(&self, req: Request<Body>, model: &str) -> Response {
+        let router = self.select_router_for_request(None, Some(model));
         if let Some(router) = router {
-            router.route_realtime_ws(req).await
+            router.route_realtime_ws(req, model).await
         } else {
             (
                 StatusCode::NOT_FOUND,

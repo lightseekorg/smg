@@ -7,7 +7,7 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{FromRequestParts, Query, Request},
+    extract::Request,
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -48,11 +48,7 @@ use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
         header_utils::{apply_provider_headers, extract_auth_header},
-        openai::realtime::{
-            rest::forward_realtime_rest,
-            ws::{handle_realtime_ws, RealtimeQueryParams},
-            RealtimeRegistry,
-        },
+        openai::realtime::{rest::forward_realtime_rest, ws::handle_realtime_ws, RealtimeRegistry},
     },
 };
 
@@ -1143,44 +1139,26 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         .await
     }
 
-    async fn route_realtime_ws(&self, req: Request<Body>) -> Response {
-        let (mut parts, _body) = req.into_parts();
-
-        let params: RealtimeQueryParams = match Query::from_request_parts(&mut parts, &()).await {
-            Ok(Query(p)) => p,
-            Err(rejection) => {
-                return rejection.into_response();
-            }
-        };
-
-        let model = match params.model {
-            Some(m) => m,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "Missing required 'model' query parameter",
-                )
-                    .into_response();
-            }
-        };
+    async fn route_realtime_ws(&self, req: Request<Body>, model: &str) -> Response {
+        let (parts, _body) = req.into_parts();
 
         Metrics::record_router_request(
             metrics_labels::ROUTER_OPENAI,
             metrics_labels::BACKEND_EXTERNAL,
             metrics_labels::CONNECTION_WEBSOCKET,
-            &model,
+            model,
             metrics_labels::ENDPOINT_REALTIME,
             "false",
         );
 
         let auth_header = extract_auth_header(Some(&parts.headers), None);
         let worker = self
-            .select_worker_for_model(&model, auth_header.as_ref())
+            .select_worker_for_model(model, auth_header.as_ref())
             .await;
 
         handle_realtime_ws(
             parts,
-            model,
+            model.to_owned(),
             worker,
             auth_header,
             Arc::clone(&self.realtime_registry),
