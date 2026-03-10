@@ -169,12 +169,6 @@ auth:
   # -- API key authentication (passed via --api-key CLI flag)
   apiKey: ""
 
-  # -- OIDC
-  oidc:
-    enabled: false
-    issuer: ""
-    audience: ""
-
   # -- Rate limiting
   rateLimitTokensPerSecond: -1  # -1 = disabled
 
@@ -187,21 +181,20 @@ history:
 
   postgres:
     url: ""                    # "postgresql://user:pass@host:5432/db"
-    poolMaxSize: 10
+    poolMax: 10
     # -- Deploy a PostgreSQL instance via sub-chart
     deploy: false
 
   redis:
     url: ""                    # "redis://localhost:6379"
-    poolMaxSize: 10
+    poolMax: 10
     # -- Deploy a Redis instance via sub-chart
     deploy: false
 
   oracle:
-    dsn: ""
+    dsn: ""                    # Oracle connect descriptor / DSN
     user: ""
     password: ""
-    existingSecret: ""         # Secret containing oracle-dsn, oracle-user, oracle-password
     poolMax: 10
 
 # =============================================================================

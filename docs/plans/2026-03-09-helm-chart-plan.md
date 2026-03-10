@@ -835,6 +835,10 @@ git commit -s -m "feat(helm): add template helpers with router args builder"
 - Create: `deploy/helm/smg/templates/secret.yaml`
 - Create: `deploy/helm/smg/templates/NOTES.txt`
 
+> **Note:** The env var wiring below (SMG_API_KEY, POSTGRES_URL, REDIS_URL via
+> secretKeyRef) is from the original design. The actual implementation passes
+> credentials via CLI args since the router has no env var bindings for these.
+
 **Step 1: Create deployment-router.yaml**
 
 ```yaml

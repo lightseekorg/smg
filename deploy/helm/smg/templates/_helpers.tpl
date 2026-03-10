@@ -10,13 +10,13 @@ Create a default fully qualified app name.
 */}}
 {{- define "smg.fullname" -}}
 {{- if .Values.fullnameOverride }}
-{{- .Values.fullnameOverride | trunc 46 | trimSuffix "-" }}
+{{- .Values.fullnameOverride | trunc 45 | trimSuffix "-" }}
 {{- else }}
 {{- $name := default .Chart.Name .Values.nameOverride }}
 {{- if contains $name .Release.Name }}
-{{- .Release.Name | trunc 46 | trimSuffix "-" }}
+{{- .Release.Name | trunc 45 | trimSuffix "-" }}
 {{- else }}
-{{- printf "%s-%s" .Release.Name $name | trunc 46 | trimSuffix "-" }}
+{{- printf "%s-%s" .Release.Name $name | trunc 45 | trimSuffix "-" }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -199,26 +199,26 @@ Called from the router Deployment template.
 - "--postgres-db-url"
 - {{ .Values.history.postgres.url | quote }}
 {{- end }}
-- "--postgres-pool-max-size"
-- {{ .Values.history.postgres.poolMaxSize | quote }}
+- "--postgres-pool-max"
+- {{ .Values.history.postgres.poolMax | quote }}
 {{- end }}
 {{- if eq .Values.history.backend "redis" }}
 {{- if .Values.history.redis.url }}
 - "--redis-url"
 - {{ .Values.history.redis.url | quote }}
 {{- end }}
-- "--redis-pool-max-size"
-- {{ .Values.history.redis.poolMaxSize | quote }}
+- "--redis-pool-max"
+- {{ .Values.history.redis.poolMax | quote }}
 {{- end }}
 {{- if eq .Values.history.backend "oracle" }}
 {{- if .Values.history.oracle.dsn }}
-- "--oracle-dsn"
+- "--oracle-connect-descriptor"
 - {{ .Values.history.oracle.dsn | quote }}
 {{- end }}
 - "--oracle-pool-max"
 - {{ .Values.history.oracle.poolMax | quote }}
 {{- if .Values.history.oracle.user }}
-- "--oracle-user"
+- "--oracle-username"
 - {{ .Values.history.oracle.user | quote }}
 {{- end }}
 {{- if .Values.history.oracle.password }}

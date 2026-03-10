@@ -7,4 +7,4 @@ history:
   backend: postgres
   postgres:
     url: "postgresql://smg:<YOUR_PASSWORD>@postgres:5432/smg"  # replace with real credentials
-    poolMaxSize: 10
+    poolMax: 10

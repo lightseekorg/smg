@@ -235,10 +235,12 @@ Users can still add additional external `workerUrls` alongside chart-managed wor
 
 ### Secret Management
 
-Three patterns:
-1. **Inline value** — e.g. `auth.apiKey: "sk-..."` → chart creates a Secret
-2. **Existing secret** — e.g. `auth.apiKeySecret: "my-secret"` → chart references it via `envFrom`
-3. **Neither** — feature disabled, no secret mounted
+> **Note:** The router CLI passes credentials via CLI args (not env vars).
+> For production, use `extraEnv` with `SecretKeyRef` if env var support is added.
+
+Two patterns:
+1. **Inline value** — e.g. `history.oracle.dsn: "..."` → chart passes via CLI args
+2. **Neither** — feature disabled, no secret mounted
 
 ### JSON Schema Validation
 
