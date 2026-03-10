@@ -71,6 +71,8 @@ CRATES=(
     "smg-wasm|crates/wasm|smg-wasm"
     "smg-mesh|crates/mesh|smg-mesh"
     "smg-grpc-client|crates/grpc_client|smg-grpc-client"
+    "smg-client|clients/rust|-"
+    "openapi-gen|clients/openapi-gen|-"
     "smg|model_gateway|-"
 )
 
@@ -82,6 +84,23 @@ CRATES=(
 PYTHON_PACKAGES=(
     "smg-grpc-proto|crates/grpc_client/python|crates/grpc_client/python/pyproject.toml"
     "smg-grpc-servicer|grpc_servicer|grpc_servicer/pyproject.toml"
+)
+
+# ---------------------------------------------------------------------------
+# SMG version sync: files that must mirror the smg (model_gateway) version.
+# Format: "label|file|type"
+#   type: "cargo"  → first `version = "X.Y.Z"` line in a Cargo.toml
+#         "pyproject" → first `version = "X.Y.Z"` line in a pyproject.toml
+#         "workflow"  → `default: 'vX.Y.Z'` for smg_commit in a workflow file
+# ---------------------------------------------------------------------------
+SMG_VERSION_SYNC=(
+    "smg-python|bindings/python/Cargo.toml|cargo"
+    "smg-golang|bindings/golang/Cargo.toml|cargo"
+    "smg pyproject|bindings/python/pyproject.toml|pyproject"
+    "sglang-docker|.github/workflows/release-sglang-docker.yml|workflow"
+    "vllm-docker|.github/workflows/release-vllm-docker.yml|workflow"
+    "trtllm-docker|.github/workflows/release-trtllm-docker.yml|workflow"
+    "build-engine|.github/workflows/_build-engine-image.yml|workflow"
 )
 
 # ---------------------------------------------------------------------------
@@ -323,6 +342,27 @@ has_non_version_changes() {
     [[ "$non_ver_lines" -gt 0 ]]
 }
 
+# Extract smg_commit default version from a workflow file (e.g. "default: 'v1.2.0'")
+get_workflow_smg_version() {
+    local file="$1"
+    grep -m1 "default: 'v[0-9]" "$file" | sed "s/.*default: 'v\([^']*\)'.*/\1/"
+}
+
+# Update all smg version references in a workflow file.
+# Replaces the version in default: values, || fallbacks, and description examples.
+set_workflow_smg_version() {
+    local file="$1"
+    local old_version="$2"
+    local new_version="$3"
+    local escaped_old
+    escaped_old=$(escape_version "$old_version")
+    sed_inplace "s/v${escaped_old}/v${new_version}/g" "$file"
+    if ! grep -q "default: 'v${new_version}'" "$file"; then
+        echo -e "    ${RED}FAILED to update $file${NC}" >&2
+        return 1
+    fi
+}
+
 # Update workspace dep version in root Cargo.toml
 set_workspace_dep_version() {
     local dep_key="$1"
@@ -462,6 +502,48 @@ for entry in "${PYTHON_PACKAGES[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
+# Phase 1c: Check SMG version sync (files that must mirror model_gateway)
+# ---------------------------------------------------------------------------
+smg_version=$(get_crate_version "model_gateway/Cargo.toml")
+
+# If smg is being bumped, use the bumped version as the sync target
+smg_target_version="$smg_version"
+for entry in ${NEEDS_BUMP[@]+"${NEEDS_BUMP[@]}"}; do
+    IFS='|' read -r _name _path _dep_key _cur _level <<< "$entry"
+    if [[ "$_name" == "smg" ]]; then
+        smg_target_version=$(bump_version "$_cur" "$_level")
+        break
+    fi
+done
+
+# Collect sync mismatches: "label|file|type|current_version"
+NEEDS_VERSION_SYNC=()
+
+for entry in "${SMG_VERSION_SYNC[@]}"; do
+    IFS='|' read -r label file type <<< "$entry"
+
+    case "$type" in
+        cargo)
+            file_version=$(get_crate_version "$file")
+            ;;
+        pyproject)
+            file_version=$(grep -m1 '^version' "$file" | sed 's/.*"\([^"]*\)".*/\1/')
+            ;;
+        workflow)
+            file_version=$(get_workflow_smg_version "$file")
+            ;;
+    esac
+
+    if [[ "$file_version" != "$smg_target_version" ]]; then
+        echo -e "  ${YELLOW}!${NC} ${BOLD}$label${NC} ($file) — v$file_version, expected v$smg_target_version"
+        NEEDS_VERSION_SYNC+=("$label|$file|$type|$file_version")
+        issues=$((issues + 1))
+    else
+        echo -e "  ${GREEN}✓${NC} ${BOLD}$label${NC} ($file) — v$file_version"
+    fi
+done
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -480,7 +562,8 @@ echo -e "${RED}${BOLD}$issues issue(s) found.${NC}"
 n_bump=${#NEEDS_BUMP[@]}
 n_ws=${#NEEDS_WS_SYNC[@]}
 n_py=${#NEEDS_PY_BUMP[@]:-0}
-total_fixes=$(( n_bump + n_ws + n_py ))
+n_vsync=${#NEEDS_VERSION_SYNC[@]:-0}
+total_fixes=$(( n_bump + n_ws + n_py + n_vsync ))
 if [[ "$total_fixes" -eq 0 ]]; then
     exit 1
 fi
@@ -508,6 +591,11 @@ for entry in ${NEEDS_PY_BUMP[@]+"${NEEDS_PY_BUMP[@]}"}; do
     IFS='|' read -r name path version_file current_version level <<< "$entry"
     new_version=$(bump_version "$current_version" "$level")
     echo -e "  $(bump_label "$level") $name v$current_version → v$new_version ($version_file)"
+done
+
+for entry in ${NEEDS_VERSION_SYNC[@]+"${NEEDS_VERSION_SYNC[@]}"}; do
+    IFS='|' read -r label file type file_version <<< "$entry"
+    echo -e "  ${BLUE}sync${NC} $label v$file_version → v$smg_target_version ($file)"
 done
 
 echo ""
@@ -565,6 +653,33 @@ for entry in ${NEEDS_PY_BUMP[@]+"${NEEDS_PY_BUMP[@]}"}; do
     else
         fix_failed=$((fix_failed + 1))
     fi
+done
+
+for entry in ${NEEDS_VERSION_SYNC[@]+"${NEEDS_VERSION_SYNC[@]}"}; do
+    IFS='|' read -r label file type file_version <<< "$entry"
+    case "$type" in
+        cargo)
+            if set_crate_version "$file" "$smg_target_version"; then
+                echo -e "  ${GREEN}✓${NC} $file → v$smg_target_version"
+            else
+                fix_failed=$((fix_failed + 1))
+            fi
+            ;;
+        pyproject)
+            if set_python_version "$file" "$smg_target_version"; then
+                echo -e "  ${GREEN}✓${NC} $file → v$smg_target_version"
+            else
+                fix_failed=$((fix_failed + 1))
+            fi
+            ;;
+        workflow)
+            if set_workflow_smg_version "$file" "$file_version" "$smg_target_version"; then
+                echo -e "  ${GREEN}✓${NC} $file → v$smg_target_version"
+            else
+                fix_failed=$((fix_failed + 1))
+            fi
+            ;;
+    esac
 done
 
 echo ""
