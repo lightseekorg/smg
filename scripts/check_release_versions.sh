@@ -160,9 +160,13 @@ detect_bump_level() {
     local path="$1"
     local level="patch"
 
-    # Get commit hashes that touch this path
+    # Get commit hashes that touch this path (and legacy pre-move path)
+    local log_paths=("$path/")
+    if [[ "$path" == crates/* ]]; then
+        log_paths+=("${path#crates/}/")
+    fi
     local commits
-    commits=$(git log "$TAG"..HEAD --format='%H' --no-merges -- "$path/")
+    commits=$(git log "$TAG"..HEAD --format='%H' --no-merges -- "${log_paths[@]}")
     if [[ -z "$commits" ]]; then
         echo "patch"
         return
@@ -289,12 +293,20 @@ set_python_version() {
     fi
 }
 
-# Check if a version file has changes beyond just the version line
+# Check if a version file has changes beyond just the version line.
+# Uses rename detection to handle crate directory moves correctly —
+# a pure rename (R100) produces no content diff lines, so it returns false.
 has_non_version_changes() {
     local file="$1"
     local tag="$2"
+    # Build file paths (include legacy pre-move path for rename detection)
+    local diff_files=("$file")
+    local rel="${file#$REPO_ROOT/}"
+    if [[ "$rel" == crates/* ]]; then
+        diff_files+=("$REPO_ROOT/${rel#crates/}")
+    fi
     # Check if the file was even changed
-    if ! git diff --name-only "$tag"..HEAD -- "$file" | grep -q .; then
+    if ! git diff --name-only -M "$tag"..HEAD -- "${diff_files[@]}" | grep -q .; then
         return 1
     fi
     # Count diff lines that aren't version-related (exclude --- / +++ headers)
@@ -305,7 +317,7 @@ has_non_version_changes() {
         pattern='^[+-].*__version__'
     fi
     local non_ver_lines
-    non_ver_lines=$(git diff "$tag"..HEAD -- "$file" \
+    non_ver_lines=$(git diff -M "$tag"..HEAD -- "${diff_files[@]}" \
         | grep '^[+-]' | grep -v '^[+-][+-][+-]' \
         | grep -cv "$pattern" || true)
     [[ "$non_ver_lines" -gt 0 ]]
@@ -344,7 +356,15 @@ for entry in "${CRATES[@]}"; do
     IFS='|' read -r name path dep_key <<< "$entry"
 
     # 1. Check for code changes since tag (exclude version-only changes in Cargo.toml)
-    diff_count=$(git diff --name-only "$TAG"..HEAD -- "$path/" | grep -cv 'Cargo\.toml$' || true)
+    # Include legacy pre-move path and use rename detection to avoid
+    # counting crate directory moves (R100) as content changes.
+    _diff_paths=("$path/")
+    if [[ "$path" == crates/* ]]; then
+        _diff_paths+=("${path#crates/}/")
+    fi
+    diff_count=$(git diff --name-status -M "$TAG"..HEAD -- "${_diff_paths[@]}" \
+        | grep -Ev '^R100' \
+        | grep -cv 'Cargo\.toml$' || true)
     if has_non_version_changes "$REPO_ROOT/$path/Cargo.toml" "$TAG"; then
         diff_count=$((diff_count + 1))
     fi
@@ -403,7 +423,14 @@ for entry in "${PYTHON_PACKAGES[@]}"; do
     IFS='|' read -r name path version_file <<< "$entry"
 
     # 1. Check for code changes since tag (exclude version-only changes in the version file)
-    diff_count=$(git diff --name-only "$TAG"..HEAD -- "$path/" | grep -cv "$(basename "$version_file")$" || true)
+    # Include legacy pre-move path and use rename detection.
+    _diff_paths=("$path/")
+    if [[ "$path" == crates/* ]]; then
+        _diff_paths+=("${path#crates/}/")
+    fi
+    diff_count=$(git diff --name-status -M "$TAG"..HEAD -- "${_diff_paths[@]}" \
+        | grep -Ev '^R100' \
+        | grep -cv "$(basename "$version_file")$" || true)
     if has_non_version_changes "$REPO_ROOT/$version_file" "$TAG"; then
         diff_count=$((diff_count + 1))
     fi
