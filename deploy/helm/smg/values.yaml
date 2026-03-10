@@ -1,0 +1,372 @@
+# =============================================================================
+# SMG Helm Chart - values.yaml
+# =============================================================================
+# Deployment mode: "router" | "router-worker" | "router-pd"
+#   router        - Router only, connect to existing workers
+#   router-worker - Router + inference worker pods
+#   router-pd     - Router + prefill/decode disaggregated workers
+mode: router
+
+# -- Global settings shared across all components
+global:
+  image:
+    registry: docker.io
+    repository: lightseekorg/smg
+    tag: ""  # defaults to Chart.appVersion
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+
+# =============================================================================
+# Router Configuration
+# =============================================================================
+router:
+  replicas: 1
+
+  # -- Routing policy: cache_aware, round_robin, power_of_two,
+  #    consistent_hashing, prefix_hash, manual, random, bucket
+  policy: cache_aware
+
+  # -- Explicit worker URLs (used when mode=router or as additional workers)
+  workerUrls: []
+  #   - http://worker-1:8000
+  #   - grpc://worker-2:8001
+
+  # -- Kubernetes service discovery (auto-discover worker pods by label)
+  serviceDiscovery:
+    enabled: false
+    namespace: ""          # defaults to release namespace
+    selector: ""           # e.g. "app=sglang-worker"
+    port: 80
+    # -- PD-specific selectors (used when mode=router-pd)
+    prefillSelector: ""    # e.g. "component=prefill"
+    decodeSelector: ""     # e.g. "component=decode"
+    # -- Extract model ID from pod metadata
+    modelIdFrom: ""        # "namespace", "label:key", or "annotation:key"
+
+  # -- Model / tokenizer
+  model: ""                # HuggingFace model ID or local path
+  tokenizerPath: ""        # override tokenizer (defaults to model)
+  chatTemplate: ""         # custom chat template path
+
+  # -- Cache-aware routing tuning
+  cacheThreshold: 0.3
+  balanceAbsThreshold: 64
+  balanceRelThreshold: 1.5
+  evictionInterval: 120
+  maxTreeSize: 67108864
+  blockSize: 16
+
+  # -- Request handling
+  maxPayloadSize: 536870912    # 512MB in bytes
+  requestTimeoutSecs: 1800
+  maxConcurrentRequests: -1    # -1 = unlimited
+  queueSize: 100
+  queueTimeoutSecs: 60
+
+  # -- Resilience: retry
+  retry:
+    enabled: true
+    maxRetries: 5
+    initialBackoffMs: 50
+    maxBackoffMs: 30000
+    backoffMultiplier: 1.5
+    jitterFactor: 0.2
+
+  # -- Resilience: circuit breaker
+  circuitBreaker:
+    enabled: true
+    failureThreshold: 10
+    successThreshold: 3
+    timeoutDurationSecs: 60
+    windowDurationSecs: 120
+
+  # -- Resilience: health checks on workers
+  healthCheck:
+    enabled: true
+    failureThreshold: 3
+    successThreshold: 2
+    timeoutSecs: 5
+    intervalSecs: 60
+    endpoint: /health
+
+  # -- Networking
+  port: 30000
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+    #   - host: smg.example.com
+    #     paths:
+    #       - path: /
+    #         pathType: Prefix
+    tls: []
+
+  # -- Observability: Prometheus metrics
+  metrics:
+    port: 29000
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      labels: {}
+
+  # -- Observability: OpenTelemetry tracing
+  tracing:
+    enabled: false
+    otlpEndpoint: ""
+
+  # -- Observability: logging
+  logging:
+    level: info
+    json: false
+    dir: ""
+
+  # -- Pod resources
+  resources: {}
+  #   requests:
+  #     cpu: "2"
+  #     memory: 4Gi
+  #   limits:
+  #     cpu: "4"
+  #     memory: 8Gi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+
+  # -- Extra CLI args appended to the smg binary invocation
+  extraArgs: []
+
+  # -- Extra environment variables
+  extraEnv: []
+
+  # -- Autoscaling (HPA)
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+
+  # -- Pod disruption budget
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+  # -- Optional features
+  wasm:
+    enabled: false
+    path: ""
+  mcp:
+    enabled: false
+    configPath: ""
+  reasoningParser: ""
+  toolCallParser: ""
+
+# =============================================================================
+# Auth Configuration
+# =============================================================================
+auth:
+  # -- API key authentication
+  apiKey: ""
+  apiKeySecret: ""           # name of an existing Secret
+  apiKeySecretKey: "api-key" # key within the Secret
+
+  # -- OIDC
+  oidc:
+    enabled: false
+    issuer: ""
+    audience: ""
+
+  # -- Rate limiting
+  rateLimitTokensPerSecond: -1  # -1 = disabled
+
+# =============================================================================
+# History / Storage Backend
+# =============================================================================
+history:
+  # -- Backend type: none, memory, postgres, redis, oracle
+  backend: memory
+
+  postgres:
+    url: ""                    # "postgresql://user:pass@host:5432/db"
+    existingSecret: ""         # Secret name containing key "postgres-url"
+    poolMax: 10
+    retentionDays: 30
+    # -- Deploy a PostgreSQL instance via sub-chart
+    deploy: false
+
+  redis:
+    url: ""                    # "redis://localhost:6379"
+    existingSecret: ""         # Secret name containing key "redis-url"
+    poolMax: 10
+    # -- Deploy a Redis instance via sub-chart
+    deploy: false
+
+  oracle:
+    dsn: ""
+    user: ""
+    password: ""
+    existingSecret: ""         # Secret containing oracle-dsn, oracle-user, oracle-password
+    poolMax: 10
+
+# =============================================================================
+# Worker Configuration (mode: router-worker)
+# =============================================================================
+worker:
+  replicas: 1
+
+  # -- Inference backend: sglang, vllm, trtllm
+  backend: sglang
+
+  image:
+    # -- Backend-specific image (e.g. lmsysorg/sglang:latest, vllm/vllm-openai:latest)
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # -- Model to serve
+  model: ""                    # e.g. "meta-llama/Llama-3-70b"
+
+  # -- Parallelism
+  tensorParallelSize: 1
+  dataParallelSize: 1
+
+  # -- Worker port
+  port: 8000
+
+  # -- GPU resources
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+  # -- Model storage volume
+  modelVolume:
+    # -- Volume type: "emptyDir" (download at start), "hostPath", or "pvc"
+    type: emptyDir
+    hostPath: ""
+    pvcName: ""                # name of an existing PVC
+    pvcSize: 100Gi
+    pvcStorageClass: ""
+
+  # -- Shared memory size for /dev/shm
+  shmSize: "16Gi"
+
+  # -- Extra args passed to the backend CLI (sglang/vllm/trtllm)
+  extraArgs: []
+
+  # -- Extra environment variables
+  extraEnv: []
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+
+# =============================================================================
+# PD Disaggregation Configuration (mode: router-pd)
+# =============================================================================
+pd:
+  prefill:
+    replicas: 1
+    policy: cache_aware
+    port: 8000
+    bootstrapPort: 9001
+
+    image:
+      repository: ""
+      tag: ""
+      pullPolicy: IfNotPresent
+    model: ""
+    backend: sglang
+    tensorParallelSize: 1
+
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+
+    modelVolume:
+      type: emptyDir
+      hostPath: ""
+      pvcName: ""
+      pvcSize: 100Gi
+      pvcStorageClass: ""
+
+    shmSize: "16Gi"
+    extraArgs: []
+    extraEnv: []
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    podAnnotations: {}
+    podLabels: {}
+
+  decode:
+    replicas: 1
+    policy: power_of_two
+    port: 8000
+
+    image:
+      repository: ""
+      tag: ""
+      pullPolicy: IfNotPresent
+    model: ""
+    backend: sglang
+    tensorParallelSize: 1
+
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+
+    modelVolume:
+      type: emptyDir
+      hostPath: ""
+      pvcName: ""
+      pvcSize: 100Gi
+      pvcStorageClass: ""
+
+    shmSize: "16Gi"
+    extraArgs: []
+    extraEnv: []
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    podAnnotations: {}
+    podLabels: {}
+
+# =============================================================================
+# Service Account & RBAC
+# =============================================================================
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  # -- Create Role/RoleBinding for K8s service discovery (pods list/watch).
+  #    Automatically enabled when router.serviceDiscovery.enabled=true.
+  create: false
+
+# =============================================================================
+# Grafana Dashboard
+# =============================================================================
+grafana:
+  dashboard:
+    enabled: false
+    labels:
+      grafana_dashboard: "1"
+
+# =============================================================================
+# Dependency Sub-Charts (overrides go here)
+# =============================================================================
+postgresql:
+  enabled: false
+
+redis:
+  enabled: false
