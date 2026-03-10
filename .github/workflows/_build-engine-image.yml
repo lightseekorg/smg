@@ -212,7 +212,7 @@ jobs:
       # ── Build engine image ───────────────────────────────────────────────────
 
       - name: Build image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/engine.Dockerfile
