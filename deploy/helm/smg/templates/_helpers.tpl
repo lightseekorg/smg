@@ -187,10 +187,11 @@ Called from the router Deployment template.
 - {{ .Values.router.logging.dir | quote }}
 {{- end }}
 {{- if .Values.router.tracing.enabled }}
+- "--enable-trace"
 - "--otlp-traces-endpoint"
 - {{ .Values.router.tracing.otlpEndpoint | quote }}
 {{- end }}
-{{- if and (ne .Values.history.backend "memory") (ne .Values.history.backend "none") }}
+{{- if ne .Values.history.backend "memory" }}
 - "--history-backend"
 - {{ .Values.history.backend | quote }}
 {{- end }}
