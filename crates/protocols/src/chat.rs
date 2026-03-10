@@ -6,10 +6,9 @@ use validator::Validate;
 
 use super::{
     common::{
-        default_model, default_true, validate_stop, ChatLogProbs, ContentPart, Function,
-        FunctionCall, FunctionChoice, GenerationRequest, ResponseFormat, StreamOptions,
-        StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference,
-        Usage,
+        default_true, validate_stop, ChatLogProbs, ContentPart, Function, FunctionCall,
+        FunctionChoice, GenerationRequest, ResponseFormat, StreamOptions, StringOrArray, Tool,
+        ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference, Usage,
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
@@ -148,7 +147,6 @@ pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
 
     /// ID of the model to use
-    #[serde(default = "default_model")]
     pub model: String,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based on their existing frequency in the text so far
