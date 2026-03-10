@@ -92,6 +92,7 @@ class RouterArgs:
     health_check_interval_secs: int = 60
     health_check_endpoint: str = "/health"
     disable_health_check: bool = False
+    remove_unhealthy_workers: bool = False
     # Circuit breaker configuration
     cb_failure_threshold: int = 10
     cb_success_threshold: int = 3
@@ -702,6 +703,12 @@ class RouterArgs:
             action="store_true",
             default=RouterArgs.disable_health_check,
             help="Disable all worker health checks at startup",
+        )
+        health_group.add_argument(
+            f"--{prefix}remove-unhealthy-workers",
+            action="store_true",
+            default=RouterArgs.remove_unhealthy_workers,
+            help="Remove workers from the registry when they are marked unhealthy",
         )
         # Tokenizer configuration
         tokenizer_group.add_argument(
