@@ -18,6 +18,8 @@ keyVault: {}
 ## Runner pod template
 template:
   spec:
+    terminationGracePeriodSeconds: 600
+
     nodeSelector:
       nvidia.com/gpu: "true"
       node.kubernetes.io/instance-type: BM.GPU.H100.8

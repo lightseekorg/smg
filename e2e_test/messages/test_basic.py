@@ -14,6 +14,8 @@ from conftest import smg_compare
 logger = logging.getLogger(__name__)
 
 
+@pytest.mark.vendor("anthropic")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["anthropic"], indirect=True)
 class TestMessagesBasic:
     """Basic message creation tests against the Anthropic Messages API."""

@@ -32,7 +32,7 @@ on:
       smg_commit:
         description: 'SMG commit/ref ("latest" for HEAD)'
         required: false
-        default: 'v1.1.0'
+        default: 'v1.2.0'
         type: string
       tag:
         description: 'Override image tag'

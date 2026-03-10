@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.skip_for_runtime(
     "trtllm", reason="TRT-LLM does not support reasoning content extraction"
 )

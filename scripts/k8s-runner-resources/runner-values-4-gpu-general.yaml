@@ -6,7 +6,7 @@ githubConfigUrl: "https://github.com/lightseekorg/smg"
 githubConfigSecret: github-arc-secret
 
 ## Runner scaling configuration
-minRunners: 10
+minRunners: 2
 maxRunners: 20
 
 ## name of the runner scale set to create.  Defaults to the helm release name
@@ -18,6 +18,8 @@ keyVault: {}
 ## Runner pod template
 template:
   spec:
+    terminationGracePeriodSeconds: 600
+
     nodeSelector:
       nvidia.com/gpu: "true"
 

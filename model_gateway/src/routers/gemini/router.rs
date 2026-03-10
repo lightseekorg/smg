@@ -3,21 +3,24 @@
 use std::{
     any::Any,
     sync::{atomic::AtomicBool, Arc},
+    time::Duration,
 };
 
 use async_trait::async_trait;
 use axum::{
+    body::Body,
+    extract::Request,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
+    Json,
 };
-use openai_protocol::{chat::ChatCompletionRequest, interactions::InteractionsRequest};
-use smg_mcp::McpOrchestrator;
+use openai_protocol::interactions::InteractionsRequest;
 
 use super::{
     context::{RequestContext, SharedComponents},
     driver,
 };
-use crate::{core::WorkerRegistry, routers::RouterTrait};
+use crate::{app_context::AppContext, routers::RouterTrait};
 
 pub struct GeminiRouter {
     shared_components: Arc<SharedComponents>,
@@ -32,47 +35,26 @@ impl std::fmt::Debug for GeminiRouter {
 }
 
 impl GeminiRouter {
-    /// Create a new `GeminiRouter`.
-    pub fn new(
-        worker_registry: Arc<WorkerRegistry>,
-        mcp_orchestrator: Arc<McpOrchestrator>,
-        client: reqwest::Client,
-    ) -> Self {
+    /// Create a new `GeminiRouter` from the application context.
+    pub fn new(ctx: Arc<AppContext>) -> Result<Self, String> {
+        let mcp_orchestrator = ctx
+            .mcp_orchestrator
+            .get()
+            .ok_or_else(|| "Gemini router requires MCP orchestrator".to_string())?
+            .clone();
+
+        let request_timeout = Duration::from_secs(ctx.router_config.request_timeout_secs);
+
         let shared_components = Arc::new(SharedComponents {
-            client,
-            worker_registry,
+            client: ctx.client.clone(),
+            worker_registry: ctx.worker_registry.clone(),
             mcp_orchestrator,
+            request_timeout,
         });
-        Self {
+        Ok(Self {
             shared_components,
             healthy: AtomicBool::new(true),
-        }
-    }
-
-    /// Main handler for `POST /v1/interactions`.
-    ///
-    /// Builds a `RequestContext` and runs the driver state machine.
-    ///
-    /// For **non-streaming** requests the driver returns the HTTP response directly.
-    ///
-    /// For **streaming** requests the terminal streaming step (`StreamRequest` or
-    /// `StreamRequestWithTool`) creates an SSE channel internally, spawns the
-    /// streaming work in a background task, and returns the SSE `Response` — the
-    /// same pattern as `process_streaming_response` in the gRPC router.
-    pub async fn route_interactions(
-        &self,
-        headers: Option<HeaderMap>,
-        body: InteractionsRequest,
-        model_id: Option<String>,
-    ) -> Response {
-        let mut ctx = RequestContext::new(
-            Arc::new(body),
-            headers,
-            model_id,
-            self.shared_components.clone(),
-        );
-
-        driver::execute(&mut ctx).await
+        })
     }
 }
 
@@ -90,12 +72,34 @@ impl RouterTrait for GeminiRouter {
         "gemini"
     }
 
-    async fn route_chat(
+    async fn get_models(&self, _req: Request<Body>) -> Response {
+        let cards = self
+            .shared_components
+            .worker_registry
+            .get_all()
+            .iter()
+            .flat_map(|w| w.models())
+            .collect::<Vec<_>>();
+        if cards.is_empty() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "No models available").into_response();
+        }
+        let resp = openai_protocol::models::ListModelsResponse::from_model_cards(cards);
+        (StatusCode::OK, Json(resp)).into_response()
+    }
+
+    async fn route_interactions(
         &self,
-        _headers: Option<&HeaderMap>,
-        _body: &ChatCompletionRequest,
-        _model_id: Option<&str>,
+        headers: Option<&HeaderMap>,
+        body: &InteractionsRequest,
+        model_id: Option<&str>,
     ) -> Response {
-        (StatusCode::NOT_IMPLEMENTED, "Not implemented").into_response()
+        let mut ctx = RequestContext::new(
+            Arc::new(body.clone()),
+            headers.cloned(),
+            model_id.map(String::from),
+            self.shared_components.clone(),
+        );
+
+        driver::execute(&mut ctx).await
     }
 }

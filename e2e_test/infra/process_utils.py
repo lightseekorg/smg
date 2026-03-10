@@ -5,12 +5,70 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import socket
 import subprocess
 import time
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Port reservation utilities
+# ---------------------------------------------------------------------------
+
+# Port reservation to prevent the OS from returning the same port
+# for sequential get_open_port() calls before the port is actually bound.
+_reserved_ports: set[int] = set()
+
+
+def get_open_port(max_attempts: int = 10) -> int:
+    """Get an available port with reservation tracking.
+
+    Finds an available port from the kernel and reserves it in our tracking set
+    to prevent the OS from returning the same port on subsequent calls.
+
+    Args:
+        max_attempts: Maximum attempts to find an unreserved port.
+
+    Returns:
+        An available port number that is reserved until release_port() is called.
+
+    Raises:
+        RuntimeError: If unable to find an available port after max_attempts.
+    """
+    for attempt in range(max_attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("", 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+
+        if port not in _reserved_ports:
+            _reserved_ports.add(port)
+            logger.debug("Reserved port %d (attempt %d)", port, attempt + 1)
+            return port
+
+        logger.debug(
+            "Port %d already reserved, retrying (attempt %d/%d)",
+            port,
+            attempt + 1,
+            max_attempts,
+        )
+
+    raise RuntimeError(f"Failed to find available port after {max_attempts} attempts")
+
+
+def release_port(port: int) -> None:
+    """Release a reserved port back to the available pool.
+
+    Should be called when the process using the port has terminated.
+
+    Args:
+        port: The port number to release.
+    """
+    _reserved_ports.discard(port)
+    logger.debug("Released port %d", port)
 
 
 def kill_process_tree(pid: int, sig: int = signal.SIGTERM) -> None:

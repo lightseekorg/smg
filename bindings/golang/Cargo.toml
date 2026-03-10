@@ -1,6 +1,6 @@
 [package]
 name = "smg-golang"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 
 [lib]
@@ -28,10 +28,10 @@ default-features = true
 workspace = true
 
 [dependencies.llm-tokenizer]
-path = "../../crates/tokenizer"
+workspace = true
 
 [dependencies.tool-parser]
-path = "../../crates/tool_parser"
+workspace = true
 
 [dependencies.smg-grpc-client]
 workspace = true

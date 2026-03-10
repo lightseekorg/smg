@@ -20,11 +20,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _percentile(samples: list[float], p: float) -> float:
-    """Calculate percentile from sorted samples."""
-    if not samples:
+def _percentile(sorted_samples: list[float], p: float) -> float:
+    """Calculate percentile from pre-sorted samples."""
+    if not sorted_samples:
         return 0.0
-    sorted_samples = sorted(samples)
     idx = max(
         0,
         min(len(sorted_samples) - 1, int(round((p / 100.0) * (len(sorted_samples) - 1)))),
@@ -64,17 +63,18 @@ def _compute_stats(
     if not trimmed:
         trimmed = samples  # Fallback to original if trimming removes all samples
 
+    sorted_trimmed = sorted(trimmed)
     return {
         "mean": sum(trimmed) / len(trimmed),
-        "min": min(trimmed),
-        "max": max(trimmed),
-        "p5": _percentile(trimmed, 5),
-        "p10": _percentile(trimmed, 10),
-        "p25": _percentile(trimmed, 25),
-        "p50": _percentile(trimmed, 50),
-        "p75": _percentile(trimmed, 75),
-        "p90": _percentile(trimmed, 90),
-        "p95": _percentile(trimmed, 95),
+        "min": sorted_trimmed[0],
+        "max": sorted_trimmed[-1],
+        "p5": _percentile(sorted_trimmed, 5),
+        "p10": _percentile(sorted_trimmed, 10),
+        "p25": _percentile(sorted_trimmed, 25),
+        "p50": _percentile(sorted_trimmed, 50),
+        "p75": _percentile(sorted_trimmed, 75),
+        "p90": _percentile(sorted_trimmed, 90),
+        "p95": _percentile(sorted_trimmed, 95),
         "count": len(trimmed),
     }
 

@@ -21,17 +21,17 @@ use openai_protocol::{
     completion::CompletionRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
+    interactions::InteractionsRequest,
     messages::CreateMessageRequest,
     rerank::RerankRequest,
     responses::{ResponsesGetParams, ResponsesRequest},
 };
-use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use crate::{
     app_context::AppContext,
     config::RoutingMode,
-    core::{ConnectionMode, RuntimeType, WorkerRegistry, WorkerType},
+    core::{ConnectionMode, ProviderType, RuntimeType, WorkerRegistry, WorkerType},
     routers::{
         factory::{router_ids, RouterId},
         RouterFactory, RouterTrait,
@@ -130,8 +130,10 @@ impl RouterManager {
             (ConnectionMode::Http, RoutingMode::Anthropic { .. }) => router_ids::HTTP_ANTHROPIC,
             (ConnectionMode::Grpc, RoutingMode::Regular { .. }) => router_ids::GRPC_REGULAR,
             (ConnectionMode::Grpc, RoutingMode::PrefillDecode { .. }) => router_ids::GRPC_PD,
+            (ConnectionMode::Http, RoutingMode::Gemini { .. }) => router_ids::HTTP_GEMINI,
             (ConnectionMode::Grpc, RoutingMode::OpenAI { .. }) => router_ids::GRPC_REGULAR,
             (ConnectionMode::Grpc, RoutingMode::Anthropic { .. }) => router_ids::GRPC_REGULAR,
+            (ConnectionMode::Grpc, RoutingMode::Gemini { .. }) => router_ids::GRPC_REGULAR,
         }
     }
 
@@ -216,7 +218,7 @@ impl RouterManager {
         let workers = self.worker_registry.get_by_model(model_id);
 
         // Find the best router ID based on worker capabilities
-        // Priority: external (OpenAI) > grpc-pd > http-pd > grpc-regular > http-regular
+        // Priority: external (provider-specific) > grpc-pd > http-pd > grpc-regular > http-regular
         let best_router_id = workers
             .iter()
             .map(|w| {
@@ -225,8 +227,13 @@ impl RouterManager {
                 let is_external = matches!(w.metadata().spec.runtime_type, RuntimeType::External);
 
                 if is_external {
-                    // External workers should be routed via OpenAI-compatible router
-                    return (4, &router_ids::HTTP_OPENAI);
+                    // Route external workers to the correct provider-specific router
+                    let router_id = match w.provider_for_model(model_id) {
+                        Some(ProviderType::Gemini) => &router_ids::HTTP_GEMINI,
+                        Some(ProviderType::Anthropic) => &router_ids::HTTP_ANTHROPIC,
+                        _ => &router_ids::HTTP_OPENAI,
+                    };
+                    return (4, router_id);
                 }
 
                 match (is_grpc, is_pd) {
@@ -396,32 +403,17 @@ impl RouterTrait for RouterManager {
         }
 
         // Fallback: return OpenAI-compatible format from worker registry
-        let model_names = self.worker_registry.get_models();
-
-        if model_names.is_empty() {
+        let cards = self
+            .worker_registry
+            .get_all()
+            .iter()
+            .flat_map(|w| w.models())
+            .collect::<Vec<_>>();
+        if cards.is_empty() {
             (StatusCode::SERVICE_UNAVAILABLE, "No models available").into_response()
         } else {
-            // Convert model names to OpenAI-compatible model objects
-            let models: Vec<Value> = model_names
-                .iter()
-                .map(|name| {
-                    serde_json::json!({
-                        "id": name,
-                        "object": "model",
-                        "owned_by": "local"
-                    })
-                })
-                .collect();
-
-            (
-                StatusCode::OK,
-                serde_json::json!({
-                    "object": "list",
-                    "data": models
-                })
-                .to_string(),
-            )
-                .into_response()
+            let resp = openai_protocol::models::ListModelsResponse::from_model_cards(cards);
+            (StatusCode::OK, axum::Json(resp)).into_response()
         }
     }
 
@@ -598,6 +590,28 @@ impl RouterTrait for RouterManager {
             (
                 StatusCode::NOT_FOUND,
                 "No router available to handle responses request",
+            )
+                .into_response()
+        }
+    }
+
+    async fn route_interactions(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &InteractionsRequest,
+        model_id: Option<&str>,
+    ) -> Response {
+        let selected_model = model_id.or(body.model.as_deref()).or(body.agent.as_deref());
+        let router = self.select_router_for_request(headers, selected_model);
+
+        if let Some(router) = router {
+            router
+                .route_interactions(headers, body, selected_model)
+                .await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available to handle interactions request",
             )
                 .into_response()
         }

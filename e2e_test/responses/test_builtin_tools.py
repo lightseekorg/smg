@@ -121,22 +121,28 @@ def gateway_with_mcp_config(require_brave_server, mcp_config_file):
 
 
 @pytest.fixture(scope="class")
-def gateway_with_mcp_config_grpc(require_brave_server, mcp_config_file, model_pool):
+def gateway_with_mcp_config_grpc(require_brave_server, mcp_config_file):
     """Launch gRPC gateway with MCP config that routes web_search_preview to Brave."""
     from infra import ConnectionMode, Gateway
+    from infra.model_specs import get_model_spec
+    from infra.worker import start_workers, stop_workers
 
+    engine = os.environ.get("E2E_ENGINE", "sglang")
     logger.info("Launching gRPC gateway with MCP config: %s", mcp_config_file)
 
-    # Get a gRPC worker from the pool
+    # Start a gRPC worker
     try:
-        instance = model_pool.get("openai/gpt-oss-20b", ConnectionMode.GRPC)
-    except (KeyError, RuntimeError) as e:
+        workers = start_workers("openai/gpt-oss-20b", engine, mode=ConnectionMode.GRPC, count=1)
+    except Exception as e:
         pytest.skip(f"gRPC worker not available: {e}")
+
+    worker = workers[0]
+    model_path = get_model_spec("openai/gpt-oss-20b")["model"]
 
     gateway = Gateway()
     gateway.start(
-        worker_urls=[instance.worker_url],
-        model_path=instance.model_path,
+        worker_urls=[worker.base_url],
+        model_path=model_path,
         extra_args=[
             "--mcp-config-path",
             mcp_config_file,
@@ -151,10 +157,10 @@ def gateway_with_mcp_config_grpc(require_brave_server, mcp_config_file, model_po
         api_key="not-used",
     )
 
-    yield gateway, client, instance.model_path
+    yield gateway, client, model_path
 
     gateway.shutdown()
-    instance.release()
+    stop_workers(workers)
 
 
 # Note: These tests require manual gateway configuration with MCP config.
@@ -165,6 +171,8 @@ def gateway_with_mcp_config_grpc(require_brave_server, mcp_config_file, model_po
 # tests serve as documentation and can be run manually with proper setup.
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestBuiltinVsMcpComparison:
     """Compare built-in tool behavior vs direct MCP tool behavior.
@@ -211,6 +219,8 @@ class TestBuiltinVsMcpComparison:
             assert smg_resp.status in ("completed", "incomplete")
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestBuiltinToolsCloudBackend:
     """Built-in tool tests against cloud backend (OpenAI).
@@ -284,6 +294,8 @@ class TestBuiltinToolsCloudBackend:
             assert smg_resp.id is not None
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
@@ -370,6 +382,8 @@ class TestBuiltinToolsLocalBackend:
 # 3. Run: pytest e2e_test/responses/test_builtin_tools.py::TestBuiltinToolRouting -v
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 class TestBuiltinToolRouting:
     """Full integration tests for built-in tool routing.
 
@@ -447,6 +461,8 @@ class TestBuiltinToolRouting:
             )
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestMcpWebSearchStreamingEvents:
     """Test MCP tool SSE streaming events (baseline behavior).
@@ -528,6 +544,8 @@ class TestMcpWebSearchStreamingEvents:
         # covered by test_tools_call.py MCP streaming tests
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 class TestWebSearchStreamingEvents:
     """Test web_search_call SSE streaming events with builtin routing.
 
@@ -678,6 +696,8 @@ class TestWebSearchStreamingEvents:
 # to verify the harmony router produces the same events as the regular router.
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 class TestBuiltinToolRoutingGrpc:
@@ -690,7 +710,7 @@ class TestBuiltinToolRoutingGrpc:
 
     Requires:
     - Brave MCP server on port 8080
-    - gRPC worker available in model_pool
+    - gRPC worker available via start_workers
     """
 
     def test_web_search_preview_produces_web_search_call(self, gateway_with_mcp_config_grpc):
@@ -749,6 +769,8 @@ class TestBuiltinToolRoutingGrpc:
             )
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 class TestWebSearchStreamingEventsGrpc:

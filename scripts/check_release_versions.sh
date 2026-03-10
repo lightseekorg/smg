@@ -71,6 +71,8 @@ CRATES=(
     "smg-wasm|crates/wasm|smg-wasm"
     "smg-mesh|crates/mesh|smg-mesh"
     "smg-grpc-client|crates/grpc_client|smg-grpc-client"
+    "smg-client|clients/rust|-"
+    "openapi-gen|clients/openapi-gen|-"
     "smg|model_gateway|-"
 )
 
@@ -80,7 +82,25 @@ CRATES=(
 # version_file is relative to REPO_ROOT.
 # ---------------------------------------------------------------------------
 PYTHON_PACKAGES=(
-    "smg-grpc-proto|crates/grpc_client/python|crates/grpc_client/python/smg_grpc_proto/__init__.py"
+    "smg-grpc-proto|crates/grpc_client/python|crates/grpc_client/python/pyproject.toml"
+    "smg-grpc-servicer|grpc_servicer|grpc_servicer/pyproject.toml"
+)
+
+# ---------------------------------------------------------------------------
+# SMG version sync: files that must mirror the smg (model_gateway) version.
+# Format: "label|file|type"
+#   type: "cargo"  → first `version = "X.Y.Z"` line in a Cargo.toml
+#         "pyproject" → first `version = "X.Y.Z"` line in a pyproject.toml
+#         "workflow"  → `default: 'vX.Y.Z'` for smg_commit in a workflow file
+# ---------------------------------------------------------------------------
+SMG_VERSION_SYNC=(
+    "smg-python|bindings/python/Cargo.toml|cargo"
+    "smg-golang|bindings/golang/Cargo.toml|cargo"
+    "smg pyproject|bindings/python/pyproject.toml|pyproject"
+    "sglang-docker|.github/workflows/release-sglang-docker.yml|workflow"
+    "vllm-docker|.github/workflows/release-vllm-docker.yml|workflow"
+    "trtllm-docker|.github/workflows/release-trtllm-docker.yml|workflow"
+    "build-engine|.github/workflows/_build-engine-image.yml|workflow"
 )
 
 # ---------------------------------------------------------------------------
@@ -159,9 +179,13 @@ detect_bump_level() {
     local path="$1"
     local level="patch"
 
-    # Get commit hashes that touch this path
+    # Get commit hashes that touch this path (and legacy pre-move path)
+    local log_paths=("$path/")
+    if [[ "$path" == crates/* ]]; then
+        log_paths+=("${path#crates/}/")
+    fi
     local commits
-    commits=$(git log "$TAG"..HEAD --format='%H' --no-merges -- "$path/")
+    commits=$(git log "$TAG"..HEAD --format='%H' --no-merges -- "${log_paths[@]}")
     if [[ -z "$commits" ]]; then
         echo "patch"
         return
@@ -234,13 +258,17 @@ set_crate_version() {
     fi
 }
 
-# Extract __version__ from a Python file
+# Extract version from a Python package (pyproject.toml or __init__.py)
 get_python_version() {
     local file="$1"
-    grep '__version__' "$file" | sed 's/.*"\(.*\)".*/\1/'
+    if [[ "$file" == *.toml ]]; then
+        grep -m1 '^version' "$file" | sed 's/.*"\([^"]*\)".*/\1/'
+    else
+        grep '__version__' "$file" | sed 's/.*"\([^"]*\)".*/\1/'
+    fi
 }
 
-# Extract __version__ from a Python file at a specific git ref
+# Extract version from a Python package at a specific git ref
 # Falls back to pre-crates-move path (e.g., crates/X/... → X/...) for older tags.
 get_python_version_at_ref() {
     local file="$1"
@@ -254,15 +282,82 @@ get_python_version_at_ref() {
             return 0
         fi
     }
-    echo "$content" | grep '__version__' | sed 's/.*"\(.*\)".*/\1/'
+    if [[ "$file" == *.toml ]]; then
+        echo "$content" | grep -m1 '^version' | sed 's/.*"\([^"]*\)".*/\1/'
+    else
+        echo "$content" | grep '__version__' | sed 's/.*"\([^"]*\)".*/\1/'
+    fi
 }
 
-# Update __version__ in a Python file
+# Update version in a Python package (pyproject.toml or __init__.py)
 set_python_version() {
     local file="$1"
     local new_version="$2"
-    sed_inplace "s/__version__ = \".*\"/__version__ = \"${new_version}\"/" "$file"
-    if ! grep -q "__version__ = \"${new_version}\"" "$file"; then
+    if [[ "$file" == *.toml ]]; then
+        # Update first version = line in pyproject.toml (same as Cargo.toml)
+        awk -v new="$new_version" '
+            !done && /^version = ".*"/ { sub(/"[^"]*"/, "\"" new "\""); done=1 }
+            { print }
+        ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+        if ! grep -q "^version = \"${new_version}\"" "$file"; then
+            echo -e "    ${RED}FAILED to update $file${NC}" >&2
+            return 1
+        fi
+    else
+        sed_inplace "s/__version__ = \".*\"/__version__ = \"${new_version}\"/" "$file"
+        if ! grep -q "__version__ = \"${new_version}\"" "$file"; then
+            echo -e "    ${RED}FAILED to update $file${NC}" >&2
+            return 1
+        fi
+    fi
+}
+
+# Check if a version file has changes beyond just the version line.
+# Uses rename detection to handle crate directory moves correctly —
+# a pure rename (R100) produces no content diff lines, so it returns false.
+has_non_version_changes() {
+    local file="$1"
+    local tag="$2"
+    # Build file paths (include legacy pre-move path for rename detection)
+    local diff_files=("$file")
+    local rel="${file#$REPO_ROOT/}"
+    if [[ "$rel" == crates/* ]]; then
+        diff_files+=("$REPO_ROOT/${rel#crates/}")
+    fi
+    # Check if the file was even changed
+    if ! git diff --name-only -M "$tag"..HEAD -- "${diff_files[@]}" | grep -q .; then
+        return 1
+    fi
+    # Count diff lines that aren't version-related (exclude --- / +++ headers)
+    local pattern
+    if [[ "$file" == *.toml ]]; then
+        pattern='^[+-][[:space:]]*version[[:space:]]*='
+    else
+        pattern='^[+-].*__version__'
+    fi
+    local non_ver_lines
+    non_ver_lines=$(git diff -M "$tag"..HEAD -- "${diff_files[@]}" \
+        | grep '^[+-]' | grep -v '^[+-][+-][+-]' \
+        | grep -cv "$pattern" || true)
+    [[ "$non_ver_lines" -gt 0 ]]
+}
+
+# Extract smg_commit default version from a workflow file (e.g. "default: 'v1.2.0'")
+get_workflow_smg_version() {
+    local file="$1"
+    grep -m1 "default: 'v[0-9]" "$file" | sed "s/.*default: 'v\([^']*\)'.*/\1/"
+}
+
+# Update all smg version references in a workflow file.
+# Replaces the version in default: values, || fallbacks, and description examples.
+set_workflow_smg_version() {
+    local file="$1"
+    local old_version="$2"
+    local new_version="$3"
+    local escaped_old
+    escaped_old=$(escape_version "$old_version")
+    sed_inplace "s/v${escaped_old}/v${new_version}/g" "$file"
+    if ! grep -q "default: 'v${new_version}'" "$file"; then
         echo -e "    ${RED}FAILED to update $file${NC}" >&2
         return 1
     fi
@@ -300,8 +395,19 @@ NEEDS_PY_BUMP=()
 for entry in "${CRATES[@]}"; do
     IFS='|' read -r name path dep_key <<< "$entry"
 
-    # 1. Check for code changes since tag (exclude Cargo.toml itself)
-    diff_count=$(git diff --name-only "$TAG"..HEAD -- "$path/" | grep -cv 'Cargo\.toml$' || true)
+    # 1. Check for code changes since tag (exclude version-only changes in Cargo.toml)
+    # Include legacy pre-move path and use rename detection to avoid
+    # counting crate directory moves (R100) as content changes.
+    _diff_paths=("$path/")
+    if [[ "$path" == crates/* ]]; then
+        _diff_paths+=("${path#crates/}/")
+    fi
+    diff_count=$(git diff --name-status -M "$TAG"..HEAD -- "${_diff_paths[@]}" \
+        | grep -Ev '^R100' \
+        | grep -cv 'Cargo\.toml$' || true)
+    if has_non_version_changes "$REPO_ROOT/$path/Cargo.toml" "$TAG"; then
+        diff_count=$((diff_count + 1))
+    fi
     if [[ "$diff_count" -eq 0 ]]; then
         clean=$((clean + 1))
         continue
@@ -356,8 +462,18 @@ py_clean=0
 for entry in "${PYTHON_PACKAGES[@]}"; do
     IFS='|' read -r name path version_file <<< "$entry"
 
-    # 1. Check for code changes since tag (exclude the version file itself)
-    diff_count=$(git diff --name-only "$TAG"..HEAD -- "$path/" | grep -cv "$(basename "$version_file")$" || true)
+    # 1. Check for code changes since tag (exclude version-only changes in the version file)
+    # Include legacy pre-move path and use rename detection.
+    _diff_paths=("$path/")
+    if [[ "$path" == crates/* ]]; then
+        _diff_paths+=("${path#crates/}/")
+    fi
+    diff_count=$(git diff --name-status -M "$TAG"..HEAD -- "${_diff_paths[@]}" \
+        | grep -Ev '^R100' \
+        | grep -cv "$(basename "$version_file")$" || true)
+    if has_non_version_changes "$REPO_ROOT/$version_file" "$TAG"; then
+        diff_count=$((diff_count + 1))
+    fi
     if [[ "$diff_count" -eq 0 ]]; then
         py_clean=$((py_clean + 1))
         continue
@@ -386,6 +502,48 @@ for entry in "${PYTHON_PACKAGES[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
+# Phase 1c: Check SMG version sync (files that must mirror model_gateway)
+# ---------------------------------------------------------------------------
+smg_version=$(get_crate_version "model_gateway/Cargo.toml")
+
+# If smg is being bumped, use the bumped version as the sync target
+smg_target_version="$smg_version"
+for entry in ${NEEDS_BUMP[@]+"${NEEDS_BUMP[@]}"}; do
+    IFS='|' read -r _name _path _dep_key _cur _level <<< "$entry"
+    if [[ "$_name" == "smg" ]]; then
+        smg_target_version=$(bump_version "$_cur" "$_level")
+        break
+    fi
+done
+
+# Collect sync mismatches: "label|file|type|current_version"
+NEEDS_VERSION_SYNC=()
+
+for entry in "${SMG_VERSION_SYNC[@]}"; do
+    IFS='|' read -r label file type <<< "$entry"
+
+    case "$type" in
+        cargo)
+            file_version=$(get_crate_version "$file")
+            ;;
+        pyproject)
+            file_version=$(grep -m1 '^version' "$file" | sed 's/.*"\([^"]*\)".*/\1/')
+            ;;
+        workflow)
+            file_version=$(get_workflow_smg_version "$file")
+            ;;
+    esac
+
+    if [[ "$file_version" != "$smg_target_version" ]]; then
+        echo -e "  ${YELLOW}!${NC} ${BOLD}$label${NC} ($file) — v$file_version, expected v$smg_target_version"
+        NEEDS_VERSION_SYNC+=("$label|$file|$type|$file_version")
+        issues=$((issues + 1))
+    else
+        echo -e "  ${GREEN}✓${NC} ${BOLD}$label${NC} ($file) — v$file_version"
+    fi
+done
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -404,7 +562,8 @@ echo -e "${RED}${BOLD}$issues issue(s) found.${NC}"
 n_bump=${#NEEDS_BUMP[@]}
 n_ws=${#NEEDS_WS_SYNC[@]}
 n_py=${#NEEDS_PY_BUMP[@]:-0}
-total_fixes=$(( n_bump + n_ws + n_py ))
+n_vsync=${#NEEDS_VERSION_SYNC[@]:-0}
+total_fixes=$(( n_bump + n_ws + n_py + n_vsync ))
 if [[ "$total_fixes" -eq 0 ]]; then
     exit 1
 fi
@@ -432,6 +591,11 @@ for entry in ${NEEDS_PY_BUMP[@]+"${NEEDS_PY_BUMP[@]}"}; do
     IFS='|' read -r name path version_file current_version level <<< "$entry"
     new_version=$(bump_version "$current_version" "$level")
     echo -e "  $(bump_label "$level") $name v$current_version → v$new_version ($version_file)"
+done
+
+for entry in ${NEEDS_VERSION_SYNC[@]+"${NEEDS_VERSION_SYNC[@]}"}; do
+    IFS='|' read -r label file type file_version <<< "$entry"
+    echo -e "  ${BLUE}sync${NC} $label v$file_version → v$smg_target_version ($file)"
 done
 
 echo ""
@@ -489,6 +653,33 @@ for entry in ${NEEDS_PY_BUMP[@]+"${NEEDS_PY_BUMP[@]}"}; do
     else
         fix_failed=$((fix_failed + 1))
     fi
+done
+
+for entry in ${NEEDS_VERSION_SYNC[@]+"${NEEDS_VERSION_SYNC[@]}"}; do
+    IFS='|' read -r label file type file_version <<< "$entry"
+    case "$type" in
+        cargo)
+            if set_crate_version "$file" "$smg_target_version"; then
+                echo -e "  ${GREEN}✓${NC} $file → v$smg_target_version"
+            else
+                fix_failed=$((fix_failed + 1))
+            fi
+            ;;
+        pyproject)
+            if set_python_version "$file" "$smg_target_version"; then
+                echo -e "  ${GREEN}✓${NC} $file → v$smg_target_version"
+            else
+                fix_failed=$((fix_failed + 1))
+            fi
+            ;;
+        workflow)
+            if set_workflow_smg_version "$file" "$file_version" "$smg_target_version"; then
+                echo -e "  ${GREEN}✓${NC} $file → v$smg_target_version"
+            else
+                fix_failed=$((fix_failed + 1))
+            fi
+            ;;
+    esac
 done
 
 echo ""

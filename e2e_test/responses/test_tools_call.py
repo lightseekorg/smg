@@ -139,6 +139,8 @@ MCP_TEST_PROMPT = (
 # =============================================================================
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestToolCallingCloud:
     """Tool calling tests against cloud APIs."""
@@ -597,6 +599,8 @@ class TestToolCallingCloud:
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
@@ -1131,6 +1135,8 @@ class TestToolChoiceHarmony:
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])

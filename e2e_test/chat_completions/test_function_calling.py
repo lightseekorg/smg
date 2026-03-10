@@ -100,6 +100,8 @@ PYTHONIC_MESSAGES = [
 # =============================================================================
 
 
+@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.gpu(1)
 @pytest.mark.skip_for_runtime(
     "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )
@@ -882,6 +884,8 @@ class TestOpenAIServerFunctionCalling:
 # =============================================================================
 
 
+@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "pythonic", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
@@ -1861,6 +1865,8 @@ class _TestToolChoiceBase:
 # =============================================================================
 
 
+@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.gpu(1)
 @pytest.mark.skip_for_runtime(
     "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )
@@ -1882,6 +1888,8 @@ class TestToolChoiceLlama(_TestToolChoiceBase):
 # =============================================================================
 
 
+@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.gpu(1)
 @pytest.mark.skip_for_runtime(
     "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )
@@ -1900,6 +1908,8 @@ class TestToolChoiceQwen(_TestToolChoiceBase):
 # =============================================================================
 
 
+@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.gpu(1)
 @pytest.mark.skip_for_runtime(
     "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )

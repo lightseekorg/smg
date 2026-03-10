@@ -96,7 +96,13 @@ helm install 2-gpu-h100 \
   -f scripts/k8s-runner-resources/runner-values-2-gpu-h100.yaml \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
 
-# 1x GPU H100 runners
+# 1x GPU H100/A10 runners (sglang, vllm)
+helm install 1-gpu \
+  --namespace actions-runner-system \
+  -f scripts/k8s-runner-resources/runner-values-1-gpu.yaml \
+  oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+
+# 1x GPU H100 runners (trtllm - requires sm90)
 helm install 1-gpu-h100 \
   --namespace actions-runner-system \
   -f scripts/k8s-runner-resources/runner-values-1-gpu-h100.yaml \
