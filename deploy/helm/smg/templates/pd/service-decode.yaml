@@ -1,0 +1,19 @@
+{{- if eq .Values.mode "router-pd" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "smg.fullname" . }}-decode
+  labels:
+    {{- include "smg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: decode
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.pd.decode.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "smg.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: decode
+{{- end }}

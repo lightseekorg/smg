@@ -1,0 +1,94 @@
+{{- if eq .Values.mode "router-pd" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "smg.fullname" . }}-decode
+  labels:
+    {{- include "smg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: decode
+spec:
+  replicas: {{ .Values.pd.decode.replicas }}
+  selector:
+    matchLabels:
+      {{- include "smg.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: decode
+  template:
+    metadata:
+      {{- with .Values.pd.decode.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "smg.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: decode
+        {{- with .Values.pd.decode.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: decode
+          image: "{{ include "smg.workerImage" (dict "image" .Values.pd.decode.image "backend" .Values.pd.decode.backend) }}"
+          imagePullPolicy: {{ .Values.pd.decode.image.pullPolicy }}
+          args:
+            - "--model"
+            - {{ .Values.pd.decode.model | quote }}
+            - "--port"
+            - {{ .Values.pd.decode.port | quote }}
+            - "--host"
+            - "0.0.0.0"
+            {{- if gt (int .Values.pd.decode.tensorParallelSize) 1 }}
+            - "--tensor-parallel-size"
+            - {{ .Values.pd.decode.tensorParallelSize | quote }}
+            {{- end }}
+            {{- range .Values.pd.decode.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.pd.decode.port }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.pd.decode.resources | nindent 12 }}
+          {{- with .Values.pd.decode.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            {{- if ne .Values.pd.decode.modelVolume.type "emptyDir" }}
+            - name: models
+              mountPath: /models
+            {{- end }}
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.pd.decode.shmSize }}
+        {{- if eq .Values.pd.decode.modelVolume.type "hostPath" }}
+        - name: models
+          hostPath:
+            path: {{ .Values.pd.decode.modelVolume.hostPath }}
+            type: Directory
+        {{- else if eq .Values.pd.decode.modelVolume.type "pvc" }}
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ .Values.pd.decode.modelVolume.pvcName }}
+        {{- end }}
+      {{- with .Values.pd.decode.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.pd.decode.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.pd.decode.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

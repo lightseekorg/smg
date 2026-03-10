@@ -1,0 +1,99 @@
+{{- if eq .Values.mode "router-pd" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "smg.fullname" . }}-prefill
+  labels:
+    {{- include "smg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prefill
+spec:
+  replicas: {{ .Values.pd.prefill.replicas }}
+  selector:
+    matchLabels:
+      {{- include "smg.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: prefill
+  template:
+    metadata:
+      {{- with .Values.pd.prefill.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "smg.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: prefill
+        {{- with .Values.pd.prefill.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: prefill
+          image: "{{ include "smg.workerImage" (dict "image" .Values.pd.prefill.image "backend" .Values.pd.prefill.backend) }}"
+          imagePullPolicy: {{ .Values.pd.prefill.image.pullPolicy }}
+          args:
+            - "--model"
+            - {{ .Values.pd.prefill.model | quote }}
+            - "--port"
+            - {{ .Values.pd.prefill.port | quote }}
+            - "--host"
+            - "0.0.0.0"
+            {{- if gt (int .Values.pd.prefill.tensorParallelSize) 1 }}
+            - "--tensor-parallel-size"
+            - {{ .Values.pd.prefill.tensorParallelSize | quote }}
+            {{- end }}
+            {{- range .Values.pd.prefill.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.pd.prefill.port }}
+              protocol: TCP
+            {{- if .Values.pd.prefill.bootstrapPort }}
+            - name: bootstrap
+              containerPort: {{ .Values.pd.prefill.bootstrapPort }}
+              protocol: TCP
+            {{- end }}
+          resources:
+            {{- toYaml .Values.pd.prefill.resources | nindent 12 }}
+          {{- with .Values.pd.prefill.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            {{- if ne .Values.pd.prefill.modelVolume.type "emptyDir" }}
+            - name: models
+              mountPath: /models
+            {{- end }}
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.pd.prefill.shmSize }}
+        {{- if eq .Values.pd.prefill.modelVolume.type "hostPath" }}
+        - name: models
+          hostPath:
+            path: {{ .Values.pd.prefill.modelVolume.hostPath }}
+            type: Directory
+        {{- else if eq .Values.pd.prefill.modelVolume.type "pvc" }}
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ .Values.pd.prefill.modelVolume.pvcName }}
+        {{- end }}
+      {{- with .Values.pd.prefill.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.pd.prefill.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.pd.prefill.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
