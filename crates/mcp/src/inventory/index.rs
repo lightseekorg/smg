@@ -373,6 +373,45 @@ impl ToolInventory {
             }
         }
 
+        // Remove alias entries that target this server.
+        let alias_entries_to_remove: Vec<QualifiedToolName> = self
+            .tools_by_qualified
+            .iter()
+            .filter_map(|entry| {
+                let qualified = entry.key().clone();
+                entry
+                    .value()
+                    .alias_target
+                    .as_ref()
+                    .and_then(|alias_target| {
+                        (alias_target.target.server_key() == server_key).then_some(qualified)
+                    })
+            })
+            .collect();
+
+        for qualified in alias_entries_to_remove {
+            let tool_name = qualified.tool_name().to_string();
+            let alias_server_key = qualified.server_key().to_string();
+
+            if let Some((_, entry)) = self.tools_by_qualified.remove(&qualified) {
+                if let Some(mut cat_set) = self.tools_by_category.get_mut(&entry.category) {
+                    cat_set.remove(&qualified);
+                }
+            }
+
+            if let Some(mut entry) = self.tools_by_simple_name.get_mut(&tool_name) {
+                entry.retain(|q| q != &qualified);
+            }
+            self.tools_by_simple_name
+                .remove_if(&tool_name, |_, v| v.is_empty());
+
+            if let Some(mut server_tools) = self.tools_by_server.get_mut(&alias_server_key) {
+                server_tools.remove(&tool_name);
+            }
+            self.tools_by_server
+                .remove_if(&alias_server_key, |_, v| v.is_empty());
+        }
+
         // Remove aliases that point to this server
         self.aliases
             .retain(|_, target| target.server_key() != server_key);
@@ -1032,6 +1071,37 @@ mod tests {
 
         // Alias should be removed since it points to cleared server
         assert_eq!(inventory.list_aliases().len(), 0);
+    }
+
+    #[test]
+    fn test_clear_server_removes_alias_entries_targeting_server() {
+        let inventory = ToolInventory::new();
+
+        let target_tool = create_test_tool("tool1");
+        inventory.insert_entry(ToolEntry::from_server_tool("server1", target_tool.clone()));
+
+        let alias_entry =
+            ToolEntry::new(QualifiedToolName::new("alias", "alias_tool1"), target_tool).with_alias(
+                crate::inventory::AliasTarget {
+                    target: QualifiedToolName::new("server1", "tool1"),
+                    arg_mapping: None,
+                },
+            );
+        inventory.insert_entry(alias_entry);
+        inventory.register_alias(
+            "alias_tool1".to_string(),
+            QualifiedToolName::new("server1", "tool1"),
+        );
+
+        assert!(inventory.get_entry("alias", "alias_tool1").is_some());
+        assert!(inventory.resolve_alias("alias_tool1").is_some());
+
+        inventory.clear_server_tools("server1");
+
+        assert!(inventory.get_entry("alias", "alias_tool1").is_none());
+        assert!(inventory.resolve_alias("alias_tool1").is_none());
+        assert!(!inventory.has_tool("alias_tool1"));
+        assert_eq!(inventory.index_counts().servers, 0);
     }
 
     #[test]
