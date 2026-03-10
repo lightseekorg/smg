@@ -1242,12 +1242,8 @@ impl crate::routers::RouterTrait for OpenAIRouter {
 
         let params: RealtimeQueryParams = match Query::from_request_parts(&mut parts, &()).await {
             Ok(Query(p)) => p,
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "Missing required 'model' query parameter",
-                )
-                    .into_response();
+            Err(rejection) => {
+                return rejection.into_response();
             }
         };
 
