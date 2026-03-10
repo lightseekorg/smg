@@ -78,6 +78,30 @@ pub struct StopSequenceDecoder {
 }
 
 impl StopSequenceDecoder {
+    fn append_pending_sequence_text(&mut self) -> Result<()> {
+        if let Some(text) = self.sequence.flush_pending()? {
+            self.jail_buffer.push_str(&text);
+        }
+
+        Ok(())
+    }
+
+    fn flush_jail_buffer(&mut self) -> SequenceDecoderOutput {
+        if let Some(ac) = &self.aho_corasick {
+            if let Some(mat) = ac.find(&self.jail_buffer) {
+                let is_visible = mat.pattern().as_usize() >= self.visible_boundary_idx;
+
+                return if is_visible {
+                    SequenceDecoderOutput::Text(self.jail_buffer[..mat.end()].to_string())
+                } else {
+                    SequenceDecoderOutput::Text(self.jail_buffer[..mat.start()].to_string())
+                };
+            }
+        }
+
+        SequenceDecoderOutput::Text(std::mem::take(&mut self.jail_buffer))
+    }
+
     /// Create a new stop sequence decoder
     pub fn new(
         tokenizer: Arc<dyn traits::Tokenizer>,
@@ -132,6 +156,7 @@ impl StopSequenceDecoder {
         // Check for token-level stops first
         if self.config.stop_tokens.contains(&token_id) {
             self.stopped = true;
+            self.append_pending_sequence_text()?;
 
             // Flush any jailed text before stopping - use mem::take to avoid clone
             if !self.jail_buffer.is_empty() {
@@ -144,6 +169,7 @@ impl StopSequenceDecoder {
 
         if self.config.visible_stop_tokens.contains(&token_id) {
             self.stopped = true;
+            self.append_pending_sequence_text()?;
 
             // Include jailed text plus the stop token
             let stop_text = self
@@ -268,8 +294,7 @@ impl StopSequenceDecoder {
         if self.jail_buffer.is_empty() {
             SequenceDecoderOutput::Text(String::new())
         } else {
-            // Use mem::take to avoid clone - transfers ownership and leaves empty string
-            SequenceDecoderOutput::Text(std::mem::take(&mut self.jail_buffer))
+            self.flush_jail_buffer()
         }
     }
 
@@ -460,6 +485,168 @@ mod tests {
 
         // After processing, flush should work
         assert!(matches!(result, SequenceDecoderOutput::Text(_)));
+    }
+
+    #[test]
+    fn test_flush_rechecks_hidden_stop_in_pending_suffix() {
+        use anyhow::Result;
+
+        use crate::traits::{
+            Decoder, Encoder, Encoding, SpecialTokens, Tokenizer as TokenizerTrait,
+        };
+
+        struct PendingStopTokenizer {
+            special_tokens: SpecialTokens,
+        }
+
+        impl Encoder for PendingStopTokenizer {
+            fn encode(&self, _input: &str, _add_special_tokens: bool) -> Result<Encoding> {
+                Ok(Encoding::Plain(vec![]))
+            }
+
+            fn encode_batch(
+                &self,
+                inputs: &[&str],
+                add_special_tokens: bool,
+            ) -> Result<Vec<Encoding>> {
+                inputs
+                    .iter()
+                    .map(|input| self.encode(input, add_special_tokens))
+                    .collect()
+            }
+        }
+
+        impl Decoder for PendingStopTokenizer {
+            fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
+                Ok(match token_ids {
+                    [] => String::new(),
+                    [1] => "abc".into(),
+                    [1, 2] => "abcSTOP\u{FFFD}".into(),
+                    _ => String::new(),
+                })
+            }
+        }
+
+        impl TokenizerTrait for PendingStopTokenizer {
+            fn vocab_size(&self) -> usize {
+                10
+            }
+
+            fn get_special_tokens(&self) -> &SpecialTokens {
+                &self.special_tokens
+            }
+
+            fn token_to_id(&self, _token: &str) -> Option<u32> {
+                None
+            }
+
+            fn id_to_token(&self, _id: u32) -> Option<String> {
+                None
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        let tokenizer: Arc<dyn TokenizerTrait> = Arc::new(PendingStopTokenizer {
+            special_tokens: SpecialTokens::default(),
+        });
+        let config = StopSequenceConfig::default().with_stop_sequence("STOP");
+        let mut decoder = StopSequenceDecoder::new(tokenizer, config, false);
+
+        assert_eq!(
+            decoder.process_token(1).unwrap(),
+            SequenceDecoderOutput::Text("abc".to_string())
+        );
+        assert_eq!(
+            decoder.process_token(2).unwrap(),
+            SequenceDecoderOutput::Held
+        );
+        assert_eq!(decoder.flush(), SequenceDecoderOutput::Text(String::new()));
+    }
+
+    #[test]
+    fn test_stop_token_includes_pending_sequence_suffix() {
+        use anyhow::Result;
+
+        use crate::traits::{
+            Decoder, Encoder, Encoding, SpecialTokens, Tokenizer as TokenizerTrait,
+        };
+
+        struct PendingStopTokenizer {
+            special_tokens: SpecialTokens,
+        }
+
+        impl Encoder for PendingStopTokenizer {
+            fn encode(&self, _input: &str, _add_special_tokens: bool) -> Result<Encoding> {
+                Ok(Encoding::Plain(vec![]))
+            }
+
+            fn encode_batch(
+                &self,
+                inputs: &[&str],
+                add_special_tokens: bool,
+            ) -> Result<Vec<Encoding>> {
+                inputs
+                    .iter()
+                    .map(|input| self.encode(input, add_special_tokens))
+                    .collect()
+            }
+        }
+
+        impl Decoder for PendingStopTokenizer {
+            fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
+                Ok(match token_ids {
+                    [] => String::new(),
+                    [1] => "abc".into(),
+                    [1, 2] => "abc\u{FFFD}".into(),
+                    [999] => "<eos>".into(),
+                    _ => String::new(),
+                })
+            }
+        }
+
+        impl TokenizerTrait for PendingStopTokenizer {
+            fn vocab_size(&self) -> usize {
+                10
+            }
+
+            fn get_special_tokens(&self) -> &SpecialTokens {
+                &self.special_tokens
+            }
+
+            fn token_to_id(&self, _token: &str) -> Option<u32> {
+                None
+            }
+
+            fn id_to_token(&self, _id: u32) -> Option<String> {
+                None
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        let tokenizer: Arc<dyn TokenizerTrait> = Arc::new(PendingStopTokenizer {
+            special_tokens: SpecialTokens::default(),
+        });
+        let config = StopSequenceConfig::default().with_stop_token(999);
+        let mut decoder = StopSequenceDecoder::new(tokenizer, config, false);
+
+        assert_eq!(
+            decoder.process_token(1).unwrap(),
+            SequenceDecoderOutput::Text("abc".to_string())
+        );
+        assert_eq!(
+            decoder.process_token(2).unwrap(),
+            SequenceDecoderOutput::Held
+        );
+        assert_eq!(
+            decoder.process_token(999).unwrap(),
+            SequenceDecoderOutput::StoppedWithText("\u{FFFD}".to_string())
+        );
     }
 
     #[test]
