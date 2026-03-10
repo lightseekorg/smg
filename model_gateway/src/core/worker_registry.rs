@@ -655,6 +655,21 @@ impl WorkerRegistry {
         (regular_count, pd_count)
     }
 
+    /// Find the least-loaded healthy external worker that supports the given model.
+    pub fn find_best_external_worker(&self, model_id: &str) -> Option<Arc<dyn Worker>> {
+        self.get_workers_filtered(None, None, None, Some(RuntimeType::External), true)
+            .into_iter()
+            .filter(|w| w.supports_model(model_id) && w.circuit_breaker().can_execute())
+            .min_by_key(|w| w.load())
+    }
+
+    /// Check if any external worker supports the model (regardless of circuit breaker state).
+    pub fn any_external_worker_supports_model(&self, model_id: &str) -> bool {
+        self.get_workers_filtered(None, None, None, Some(RuntimeType::External), true)
+            .into_iter()
+            .any(|w| w.supports_model(model_id))
+    }
+
     /// Start a deadline-driven health checker for all workers in the registry.
     ///
     /// Each worker is checked according to its own `health_config.check_interval_secs`.
