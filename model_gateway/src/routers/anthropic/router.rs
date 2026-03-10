@@ -136,11 +136,17 @@ impl RouterTrait for AnthropicRouter {
             "Processing Messages API request"
         );
 
-        let selected_worker =
-            match worker::select_worker(&self.router_ctx.worker_registry, model_id) {
-                Ok(w) => w,
-                Err(resp) => return resp,
-            };
+        let selected_worker = match worker::select_worker(
+            &self.router_ctx.worker_registry,
+            &self.router_ctx.http_client,
+            headers,
+            model_id,
+        )
+        .await
+        {
+            Ok(w) => w,
+            Err(resp) => return resp,
+        };
 
         let req_ctx = RequestContext {
             request,
