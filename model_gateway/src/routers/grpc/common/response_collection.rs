@@ -6,17 +6,15 @@
 use axum::response::Response;
 use tracing::{error as trace_error, warn};
 
+use crate::observability::events::UnifiedRequestStats;
 use crate::routers::{
     error,
     grpc::{
         context::ExecutionResult,
-        proto_wrapper::{
-            collect_request_stats, ProtoGenerateComplete, ProtoResponseVariant, ProtoStream,
-        },
+        proto_wrapper::{ProtoGenerateComplete, ProtoResponseVariant, StatsProtoStream},
         utils::tonic_ext::TonicStatusExt,
     },
 };
-use crate::observability::events::UnifiedRequestStats;
 
 pub(crate) struct CollectedResponses {
     pub completes: Vec<ProtoGenerateComplete>,
@@ -37,12 +35,10 @@ pub(crate) struct CollectedResponses {
 pub(crate) async fn collect_responses(
     execution_result: ExecutionResult,
     merge_logprobs: bool,
-    enable_request_statistics: bool,
 ) -> Result<CollectedResponses, Response> {
     let collected = match execution_result {
         ExecutionResult::Single { mut stream } => {
-            let responses =
-                collect_stream_responses(&mut stream, "Single", enable_request_statistics).await?;
+            let responses = collect_stream_responses(&mut stream, "Single").await?;
             stream.mark_completed();
             responses
         }
@@ -51,21 +47,12 @@ pub(crate) async fn collect_responses(
             decode,
         } => {
             // Collect prefill for input_logprobs (don't mark completed yet)
-            let prefill_collected = collect_stream_responses(
-                &mut prefill,
-                "Prefill",
-                enable_request_statistics,
-            )
-            .await?;
+            let prefill_collected = collect_stream_responses(&mut prefill, "Prefill").await?;
 
             // Collect decode for actual output (don't mark completed yet)
             let mut decode_stream = *decode;
-            let mut decode_collected = collect_stream_responses(
-                &mut decode_stream,
-                "Decode",
-                enable_request_statistics,
-            )
-            .await?;
+            let mut decode_collected =
+                collect_stream_responses(&mut decode_stream, "Decode").await?;
 
             // Mark both streams as completed now that both succeeded
             prefill.mark_completed();
@@ -132,9 +119,8 @@ fn merge_prefill_logprobs(
 
 /// Collect all complete responses from a gRPC stream, discarding chunks.
 async fn collect_stream_responses(
-    stream: &mut ProtoStream,
+    stream: &mut StatsProtoStream,
     worker_name: &str,
-    enable_request_statistics: bool,
 ) -> Result<CollectedResponses, Response> {
     let mut all_responses = Vec::new();
 
@@ -174,14 +160,8 @@ async fn collect_stream_responses(
         }
     }
 
-    let request_stats = if enable_request_statistics {
-        collect_request_stats(&all_responses)
-    } else {
-        None
-    };
-
     Ok(CollectedResponses {
         completes: all_responses,
-        request_stats,
+        request_stats: stream.take_request_stats(),
     })
 }

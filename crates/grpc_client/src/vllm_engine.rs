@@ -66,7 +66,6 @@ impl AbortOnDropStream {
         self.aborted.store(true, Ordering::Release);
         debug!("Request {} marked as completed", self.request_id);
     }
-
 }
 
 impl Drop for AbortOnDropStream {

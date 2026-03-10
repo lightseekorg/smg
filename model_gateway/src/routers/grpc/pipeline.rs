@@ -63,14 +63,12 @@ impl RequestPipeline {
         reasoning_parser_factory: ReasoningParserFactory,
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
-        enable_request_statistics: bool,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             tool_parser_factory.clone(),
             reasoning_parser_factory.clone(),
             configured_tool_parser.clone(),
             configured_reasoning_parser.clone(),
-            enable_request_statistics,
         );
 
         let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
@@ -79,7 +77,6 @@ impl RequestPipeline {
             configured_tool_parser,
             configured_reasoning_parser,
             metrics_labels::BACKEND_REGULAR,
-            enable_request_statistics,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
@@ -110,7 +107,6 @@ impl RequestPipeline {
         _reasoning_parser_factory: ReasoningParserFactory,
         _configured_tool_parser: Option<String>,
         _configured_reasoning_parser: Option<String>,
-        enable_request_statistics: bool,
     ) -> Self {
         let stages: Vec<Box<dyn PipelineStage>> = vec![
             Box::new(harmony::stages::HarmonyPreparationStage::new()),
@@ -123,9 +119,7 @@ impl RequestPipeline {
             Box::new(harmony::stages::HarmonyRequestBuildingStage::new(false)),
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
-            Box::new(harmony::stages::HarmonyResponseProcessingStage::new(
-                enable_request_statistics,
-            )),
+            Box::new(harmony::stages::HarmonyResponseProcessingStage::new()),
         ];
 
         Self {
@@ -143,7 +137,6 @@ impl RequestPipeline {
         _reasoning_parser_factory: ReasoningParserFactory,
         _configured_tool_parser: Option<String>,
         _configured_reasoning_parser: Option<String>,
-        enable_request_statistics: bool,
     ) -> Self {
         let stages: Vec<Box<dyn PipelineStage>> = vec![
             Box::new(harmony::stages::HarmonyPreparationStage::new()),
@@ -156,9 +149,7 @@ impl RequestPipeline {
             Box::new(harmony::stages::HarmonyRequestBuildingStage::new(true)),
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
-            Box::new(harmony::stages::HarmonyResponseProcessingStage::new(
-                enable_request_statistics,
-            )),
+            Box::new(harmony::stages::HarmonyResponseProcessingStage::new()),
         ];
 
         Self {
@@ -175,14 +166,12 @@ impl RequestPipeline {
         reasoning_parser_factory: ReasoningParserFactory,
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
-        enable_request_statistics: bool,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             tool_parser_factory.clone(),
             reasoning_parser_factory.clone(),
             configured_tool_parser.clone(),
             configured_reasoning_parser.clone(),
-            enable_request_statistics,
         );
 
         let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
@@ -191,7 +180,6 @@ impl RequestPipeline {
             configured_tool_parser,
             configured_reasoning_parser,
             metrics_labels::BACKEND_PD,
-            enable_request_statistics,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![

@@ -22,7 +22,7 @@ use tracing::debug;
 use super::{
     client::GrpcClient,
     multimodal::MultimodalComponents,
-    proto_wrapper::{ProtoEmbedComplete, ProtoRequest, ProtoStream},
+    proto_wrapper::{ProtoEmbedComplete, ProtoRequest, StatsProtoStream},
 };
 use crate::core::{RuntimeType, Worker, WorkerLoadGuard};
 
@@ -61,6 +61,8 @@ pub(crate) struct SharedComponents {
     pub tool_parser_factory: ToolParserFactory,
     #[expect(dead_code)]
     pub reasoning_parser_factory: ReasoningParserFactory,
+    /// Feature flag for request-level statistics collection.
+    pub enable_request_statistics: bool,
     /// Multimodal processing components (initialized at router creation)
     pub multimodal: Option<Arc<MultimodalComponents>>,
 }
@@ -518,14 +520,14 @@ impl ClientSelection {
 }
 
 /// Result of request execution (streams from workers)
-/// Uses ProtoStream to automatically abort on cancellation
+/// Uses StatsProtoStream to automatically abort on cancellation
 pub(crate) enum ExecutionResult {
     Single {
-        stream: ProtoStream,
+        stream: StatsProtoStream,
     },
     Dual {
-        prefill: ProtoStream,
-        decode: Box<ProtoStream>,
+        prefill: StatsProtoStream,
+        decode: Box<StatsProtoStream>,
     },
     /// Embedding requests return a single response, not a stream
     Embedding {

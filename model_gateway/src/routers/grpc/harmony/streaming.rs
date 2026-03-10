@@ -42,9 +42,7 @@ use crate::{
             },
         },
         context,
-        proto_wrapper::{
-            collect_request_stats, ProtoGenerateComplete, ProtoResponseVariant, ProtoStream,
-        },
+        proto_wrapper::{ProtoResponseVariant, StatsProtoStream},
         utils,
     },
 };
@@ -53,16 +51,12 @@ use crate::{
 ///
 /// Returns an SSE stream that parses Harmony tokens incrementally and
 /// emits ChatCompletionChunk events for streaming responses.
-pub(crate) struct HarmonyStreamingProcessor {
-    enable_request_statistics: bool,
-}
+pub(crate) struct HarmonyStreamingProcessor {}
 
 impl HarmonyStreamingProcessor {
     /// Create a new Harmony streaming processor
-    pub fn new(enable_request_statistics: bool) -> Self {
-        Self {
-            enable_request_statistics,
-        }
+    pub fn new() -> Self {
+        Self {}
     }
 
     /// Process a streaming Harmony Chat Completion response
@@ -91,17 +85,9 @@ impl HarmonyStreamingProcessor {
         // Spawn background task based on execution mode
         match execution_result {
             context::ExecutionResult::Single { stream } => {
-                let enable_request_statistics = self.enable_request_statistics;
                 tokio::spawn(async move {
                     let result =
-                        Self::process_single_stream(
-                            stream,
-                            dispatch,
-                            chat_request,
-                            &tx,
-                            enable_request_statistics,
-                        )
-                        .await;
+                        Self::process_single_stream(stream, dispatch, chat_request, &tx).await;
 
                     if let Err(e) = result {
                         error!("Harmony streaming error: {}", e);
@@ -112,17 +98,10 @@ impl HarmonyStreamingProcessor {
                 });
             }
             context::ExecutionResult::Dual { prefill, decode } => {
-                let enable_request_statistics = self.enable_request_statistics;
                 tokio::spawn(async move {
-                    let result = Self::process_dual_stream(
-                        prefill,
-                        *decode,
-                        dispatch,
-                        chat_request,
-                        &tx,
-                        enable_request_statistics,
-                    )
-                    .await;
+                    let result =
+                        Self::process_dual_stream(prefill, *decode, dispatch, chat_request, &tx)
+                            .await;
 
                     if let Err(e) = result {
                         error!("Harmony dual streaming error: {}", e);
@@ -149,11 +128,10 @@ impl HarmonyStreamingProcessor {
 
     /// Process streaming chunks from a single stream
     async fn process_single_stream(
-        grpc_stream: ProtoStream,
+        grpc_stream: StatsProtoStream,
         dispatch: context::DispatchMetadata,
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        enable_request_statistics: bool,
     ) -> Result<(), String> {
         let mut prompt_tokens = HashMap::new();
         let mut cached_tokens = HashMap::new();
@@ -164,19 +142,17 @@ impl HarmonyStreamingProcessor {
             tx,
             &mut prompt_tokens,
             &mut cached_tokens,
-            enable_request_statistics,
         )
         .await
     }
 
     /// Process streaming chunks from dual streams (prefill + decode)
     async fn process_dual_stream(
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: StatsProtoStream,
+        decode_stream: StatsProtoStream,
         dispatch: context::DispatchMetadata,
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        enable_request_statistics: bool,
     ) -> Result<(), String> {
         // Phase 1: Process prefill stream (collect metadata)
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
@@ -199,7 +175,6 @@ impl HarmonyStreamingProcessor {
             tx,
             &mut prompt_tokens,
             &mut cached_tokens,
-            enable_request_statistics,
         )
         .await?;
 
@@ -216,13 +191,12 @@ impl HarmonyStreamingProcessor {
     /// (dual stream) or empty (single stream). Values from `Complete` messages
     /// are inserted only if not already present.
     async fn process_chat_decode_stream(
-        mut decode_stream: ProtoStream,
+        mut decode_stream: StatsProtoStream,
         dispatch: &context::DispatchMetadata,
         original_request: &ChatCompletionRequest,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         prompt_tokens: &mut HashMap<u32, u32>,
         cached_tokens: &mut HashMap<u32, u32>,
-        enable_request_statistics: bool,
     ) -> Result<(), String> {
         // Timing for metrics
         let start_time = Instant::now();
@@ -233,7 +207,6 @@ impl HarmonyStreamingProcessor {
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
         let mut completion_tokens = CompletionTokenTracker::new();
-        let mut completed_responses: Vec<ProtoGenerateComplete> = Vec::new();
 
         let stream_options = &original_request.stream_options;
 
@@ -298,7 +271,6 @@ impl HarmonyStreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Complete(complete_wrapper) => {
-                    completed_responses.push(complete_wrapper.clone());
                     let index = complete_wrapper.index();
 
                     // Store final metadata
@@ -329,28 +301,24 @@ impl HarmonyStreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Error(error_wrapper) => {
-                    if enable_request_statistics {
-                        let total_prompt: u64 =
-                            prompt_tokens.values().map(|v| u64::from(*v)).sum();
-                        let total_completion = u64::from(completion_tokens.total());
-                        if let Some(mut request_stats) = collect_request_stats(&completed_responses)
-                        {
-                            if total_prompt > 0 {
-                                request_stats.prompt_tokens = total_prompt;
-                            }
-                            if total_completion > 0 {
-                                request_stats.completion_tokens = total_completion;
-                            }
-                            RequestStatsEvent {
-                                request_id: &dispatch.request_id,
-                                model: &original_request.model,
-                                router_backend: metrics_labels::BACKEND_HARMONY,
-                                http_status_code: error_wrapper.http_status_code(),
-                                error_message: Some(error_wrapper.message()),
-                                stats: &request_stats,
-                            }
-                            .emit();
+                    let total_prompt: u64 = prompt_tokens.values().map(|v| u64::from(*v)).sum();
+                    let total_completion = u64::from(completion_tokens.total());
+                    if let Some(mut request_stats) = decode_stream.take_request_stats() {
+                        if total_prompt > 0 {
+                            request_stats.prompt_tokens = total_prompt;
                         }
+                        if total_completion > 0 {
+                            request_stats.completion_tokens = total_completion;
+                        }
+                        RequestStatsEvent {
+                            request_id: &dispatch.request_id,
+                            model: &original_request.model,
+                            router_backend: metrics_labels::BACKEND_HARMONY,
+                            http_status_code: error_wrapper.http_status_code(),
+                            error_message: Some(error_wrapper.message()),
+                            stats: &request_stats,
+                        }
+                        .emit();
                     }
                     return Err(format!("Server error: {}", error_wrapper.message()));
                 }
@@ -390,22 +358,18 @@ impl HarmonyStreamingProcessor {
             output_tokens: total_completion as u64,
         });
 
-        if enable_request_statistics {
-            let request_stats = collect_request_stats(&completed_responses);
-
-            if let Some(mut request_stats) = request_stats {
-                request_stats.prompt_tokens = total_prompt as u64;
-                request_stats.completion_tokens = total_completion as u64;
-                RequestStatsEvent {
-                    request_id: &dispatch.request_id,
-                    model: &original_request.model,
-                    router_backend: metrics_labels::BACKEND_HARMONY,
-                    http_status_code: Some(200),
-                    error_message: None,
-                    stats: &request_stats,
-                }
-                .emit();
+        if let Some(mut request_stats) = decode_stream.take_request_stats() {
+            request_stats.prompt_tokens = total_prompt as u64;
+            request_stats.completion_tokens = total_completion as u64;
+            RequestStatsEvent {
+                request_id: &dispatch.request_id,
+                model: &original_request.model,
+                router_backend: metrics_labels::BACKEND_HARMONY,
+                http_status_code: Some(200),
+                error_message: None,
+                stats: &request_stats,
             }
+            .emit();
         }
 
         Ok(())
@@ -567,8 +531,8 @@ impl HarmonyStreamingProcessor {
     }
 
     async fn process_responses_dual_stream(
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: StatsProtoStream,
+        decode_stream: StatsProtoStream,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
@@ -595,7 +559,7 @@ impl HarmonyStreamingProcessor {
 
     /// Process decode stream for tool call events.
     async fn process_decode_stream(
-        mut decode_stream: ProtoStream,
+        mut decode_stream: StatsProtoStream,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
@@ -1135,6 +1099,6 @@ impl HarmonyStreamingProcessor {
 
 impl Default for HarmonyStreamingProcessor {
     fn default() -> Self {
-        Self::new(false)
+        Self::new()
     }
 }

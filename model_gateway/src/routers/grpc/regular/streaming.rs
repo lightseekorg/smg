@@ -31,9 +31,7 @@ use crate::{
     routers::grpc::{
         common::{response_formatting::CompletionTokenTracker, responses::build_sse_response},
         context,
-        proto_wrapper::{
-            collect_request_stats, ProtoGenerateComplete, ProtoResponseVariant, ProtoStream,
-        },
+        proto_wrapper::{ProtoResponseVariant, StatsProtoStream},
         utils,
     },
 };
@@ -46,7 +44,6 @@ pub(crate) struct StreamingProcessor {
     configured_tool_parser: Option<String>,
     configured_reasoning_parser: Option<String>,
     backend_type: &'static str,
-    enable_request_statistics: bool,
 }
 
 /// Context for generate endpoint streaming - groups config params to reduce function arguments
@@ -56,7 +53,6 @@ struct GenerateStreamContext {
     return_logprob: bool,
     backend_type: &'static str,
     model: String,
-    enable_request_statistics: bool,
 }
 
 /// Encapsulates SSE sender state and tracking for client disconnect.
@@ -86,11 +82,7 @@ impl<'a> ClientConnection<'a> {
         self.client_disconnect_error_message
     }
 
-    fn send_or_abort(
-        &mut self,
-        payload: Bytes,
-        send_error_message: &'static str,
-    ) {
+    fn send_or_abort(&mut self, payload: Bytes, send_error_message: &'static str) {
         if self.client_disconnected {
             return;
         }
@@ -111,7 +103,6 @@ impl StreamingProcessor {
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
         backend_type: &'static str,
-        enable_request_statistics: bool,
     ) -> Self {
         Self {
             tool_parser_factory,
@@ -119,7 +110,6 @@ impl StreamingProcessor {
             configured_tool_parser,
             configured_reasoning_parser,
             backend_type,
-            enable_request_statistics,
         }
     }
 
@@ -225,7 +215,7 @@ impl StreamingProcessor {
     /// Process streaming chunks from a single stream (Regular mode)
     pub async fn process_streaming_chunks(
         &self,
-        mut grpc_stream: ProtoStream,
+        mut grpc_stream: StatsProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
@@ -251,7 +241,6 @@ impl StreamingProcessor {
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
         let mut completion_tokens = CompletionTokenTracker::new();
         let mut cached_tokens: HashMap<u32, u32> = HashMap::new();
-        let mut completed_responses: Vec<ProtoGenerateComplete> = Vec::new();
 
         // Parser state (lazy initialization per index)
         type PooledReasoningParser = Arc<tokio::sync::Mutex<Box<dyn ReasoningParser>>>;
@@ -324,28 +313,25 @@ impl StreamingProcessor {
                     if client_connection.is_disconnected() {
                         break;
                     }
-                    if self.enable_request_statistics {
-                        let total_prompt: u64 = prompt_tokens.values().map(|v| u64::from(*v)).sum();
-                        let total_completion = u64::from(completion_tokens.total());
-                        if let Some(mut request_stats) = collect_request_stats(&completed_responses)
-                        {
-                            if total_prompt > 0 {
-                                request_stats.prompt_tokens = total_prompt;
-                            }
-                            if total_completion > 0 {
-                                request_stats.completion_tokens = total_completion;
-                            }
-                            let stream_error = format!("Stream error: {}", e.message());
-                            RequestStatsEvent {
-                                request_id,
-                                model,
-                                router_backend: self.backend_type,
-                                http_status_code: None,
-                                error_message: Some(&stream_error),
-                                stats: &request_stats,
-                            }
-                            .emit();
+                    let total_prompt: u64 = prompt_tokens.values().map(|v| u64::from(*v)).sum();
+                    let total_completion = u64::from(completion_tokens.total());
+                    if let Some(mut request_stats) = grpc_stream.take_request_stats() {
+                        if total_prompt > 0 {
+                            request_stats.prompt_tokens = total_prompt;
                         }
+                        if total_completion > 0 {
+                            request_stats.completion_tokens = total_completion;
+                        }
+                        let stream_error = format!("Stream error: {}", e.message());
+                        RequestStatsEvent {
+                            request_id,
+                            model,
+                            router_backend: self.backend_type,
+                            http_status_code: None,
+                            error_message: Some(&stream_error),
+                            stats: &request_stats,
+                        }
+                        .emit();
                     }
                     return Err(format!("Stream error: {}", e.message()));
                 }
@@ -511,7 +497,6 @@ impl StreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Complete(complete) => {
-                    completed_responses.push(complete.clone());
                     let index = complete.index();
 
                     // Flush any remaining text for this index's stop_decoder
@@ -553,27 +538,24 @@ impl StreamingProcessor {
                     // Don't break - continue reading all Complete messages for n>1
                 }
                 ProtoResponseVariant::Error(error) => {
-                    if self.enable_request_statistics {
-                        let total_prompt: u64 = prompt_tokens.values().map(|v| u64::from(*v)).sum();
-                        let total_completion = u64::from(completion_tokens.total());
-                        if let Some(mut request_stats) = collect_request_stats(&completed_responses)
-                        {
-                            if total_prompt > 0 {
-                                request_stats.prompt_tokens = total_prompt;
-                            }
-                            if total_completion > 0 {
-                                request_stats.completion_tokens = total_completion;
-                            }
-                            RequestStatsEvent {
-                                request_id,
-                                model,
-                                router_backend: self.backend_type,
-                                http_status_code: error.http_status_code(),
-                                error_message: Some(error.message()),
-                                stats: &request_stats,
-                            }
-                            .emit();
+                    let total_prompt: u64 = prompt_tokens.values().map(|v| u64::from(*v)).sum();
+                    let total_completion = u64::from(completion_tokens.total());
+                    if let Some(mut request_stats) = grpc_stream.take_request_stats() {
+                        if total_prompt > 0 {
+                            request_stats.prompt_tokens = total_prompt;
                         }
+                        if total_completion > 0 {
+                            request_stats.completion_tokens = total_completion;
+                        }
+                        RequestStatsEvent {
+                            request_id,
+                            model,
+                            router_backend: self.backend_type,
+                            http_status_code: error.http_status_code(),
+                            error_message: Some(error.message()),
+                            stats: &request_stats,
+                        }
+                        .emit();
                     }
                     return Err(error.message().to_string());
                 }
@@ -683,36 +665,32 @@ impl StreamingProcessor {
             output_tokens: total_completion as u64,
         });
 
-        if self.enable_request_statistics {
-            let request_stats = collect_request_stats(&completed_responses);
-
-            if let Some(mut request_stats) = request_stats {
-                if total_prompt > 0 {
-                    request_stats.prompt_tokens = total_prompt as u64;
-                }
-                if total_completion > 0 {
-                    request_stats.completion_tokens = total_completion as u64;
-                }
-                RequestStatsEvent {
-                    request_id,
-                    model,
-                    router_backend: self.backend_type,
-                    http_status_code: if client_connection.is_disconnected() {
-                        Some(499)
-                    } else {
-                        Some(200)
-                    },
-                    error_message: if client_connection.is_disconnected() {
-                        client_connection
-                            .disconnect_error_message()
-                            .or(Some("Client disconnected"))
-                    } else {
-                        None
-                    },
-                    stats: &request_stats,
-                }
-                .emit();
+        if let Some(mut request_stats) = grpc_stream.take_request_stats() {
+            if total_prompt > 0 {
+                request_stats.prompt_tokens = total_prompt as u64;
             }
+            if total_completion > 0 {
+                request_stats.completion_tokens = total_completion as u64;
+            }
+            RequestStatsEvent {
+                request_id,
+                model,
+                router_backend: self.backend_type,
+                http_status_code: if client_connection.is_disconnected() {
+                    Some(499)
+                } else {
+                    Some(200)
+                },
+                error_message: if client_connection.is_disconnected() {
+                    client_connection
+                        .disconnect_error_message()
+                        .or(Some("Client disconnected"))
+                } else {
+                    None
+                },
+                stats: &request_stats,
+            }
+            .emit();
         }
 
         Ok(())
@@ -722,8 +700,8 @@ impl StreamingProcessor {
     #[expect(clippy::too_many_arguments)]
     pub async fn process_dual_streaming_chunks(
         &self,
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: StatsProtoStream,
+        decode_stream: StatsProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
@@ -797,7 +775,6 @@ impl StreamingProcessor {
             return_logprob: generate_request.return_logprob.unwrap_or(false),
             backend_type: self.backend_type,
             model: dispatch.model.clone(),
-            enable_request_statistics: self.enable_request_statistics,
         };
 
         // Spawn background task based on execution mode
@@ -857,7 +834,7 @@ impl StreamingProcessor {
     /// TODO: add streaming logprob support
     async fn process_generate_streaming(
         tokenizer: Arc<dyn Tokenizer>,
-        mut stream: ProtoStream,
+        mut stream: StatsProtoStream,
         ctx: GenerateStreamContext,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -868,7 +845,6 @@ impl StreamingProcessor {
         // Track state per index for n>1 case
         let mut accumulated_texts: HashMap<u32, String> = HashMap::new();
         let mut completion_tokens_map: HashMap<u32, u32> = HashMap::new();
-        let mut completed_responses: Vec<ProtoGenerateComplete> = Vec::new();
 
         while let Some(response) = stream.next().await {
             let gen_response = match response {
@@ -877,15 +853,14 @@ impl StreamingProcessor {
                     if client_connection.is_disconnected() {
                         break;
                     }
-                    if ctx.enable_request_statistics {
-                        let stream_error = format!("Stream error: {}", e.message());
+                    let stream_error = format!("Stream error: {}", e.message());
+                    if let Some(request_stats) = stream.take_request_stats() {
                         Self::emit_generate_request_stats(
                             &ctx,
-                            &completed_responses,
+                            Some(request_stats),
                             None,
                             Some(&stream_error),
-                        )
-                        .await;
+                        );
                     }
                     return Err(format!("Stream error: {}", e.message()));
                 }
@@ -940,7 +915,6 @@ impl StreamingProcessor {
                     );
                 }
                 ProtoResponseVariant::Complete(complete) => {
-                    completed_responses.push(complete.clone());
                     let index = complete.index();
                     let accumulated_text =
                         accumulated_texts.get(&index).cloned().unwrap_or_default();
@@ -974,14 +948,13 @@ impl StreamingProcessor {
                     // Continue to process all completions if n>1
                 }
                 ProtoResponseVariant::Error(error) => {
-                    if ctx.enable_request_statistics {
+                    if let Some(request_stats) = stream.take_request_stats() {
                         Self::emit_generate_request_stats(
                             &ctx,
-                            &completed_responses,
+                            Some(request_stats),
                             error.http_status_code(),
                             Some(error.message()),
-                        )
-                        .await;
+                        );
                     }
                     return Err(error.message().to_string());
                 }
@@ -997,7 +970,7 @@ impl StreamingProcessor {
         Self::record_generate_metrics(start_time, first_token_time, total_completion, &ctx);
         Self::emit_generate_request_stats(
             &ctx,
-            &completed_responses,
+            stream.take_request_stats(),
             if client_connection.is_disconnected() {
                 Some(499)
             } else {
@@ -1010,8 +983,7 @@ impl StreamingProcessor {
             } else {
                 None
             },
-        )
-        .await;
+        );
 
         Ok(())
     }
@@ -1019,8 +991,8 @@ impl StreamingProcessor {
     /// Process dual streaming for generate endpoint (PD mode with logprobs support)
     async fn process_generate_streaming_dual(
         tokenizer: Arc<dyn Tokenizer>,
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: StatsProtoStream,
+        decode_stream: StatsProtoStream,
         ctx: GenerateStreamContext,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -1073,7 +1045,7 @@ impl StreamingProcessor {
     /// Process generate streaming with optional input_logprobs
     async fn process_generate_streaming_with_input_logprobs(
         tokenizer: Arc<dyn Tokenizer>,
-        mut stream: ProtoStream,
+        mut stream: StatsProtoStream,
         ctx: GenerateStreamContext,
         input_token_logprobs: Option<Vec<Vec<Option<f64>>>>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
@@ -1087,7 +1059,6 @@ impl StreamingProcessor {
         let mut accumulated_output_logprobs: HashMap<u32, Option<Vec<Vec<Option<f64>>>>> =
             HashMap::new();
         let mut completion_tokens_map: HashMap<u32, u32> = HashMap::new();
-        let mut completed_responses: Vec<ProtoGenerateComplete> = Vec::new();
 
         while let Some(response) = stream.next().await {
             let gen_response = match response {
@@ -1096,15 +1067,14 @@ impl StreamingProcessor {
                     if client_connection.is_disconnected() {
                         break;
                     }
-                    if ctx.enable_request_statistics {
-                        let stream_error = format!("Stream error: {}", e.message());
+                    let stream_error = format!("Stream error: {}", e.message());
+                    if let Some(request_stats) = stream.take_request_stats() {
                         Self::emit_generate_request_stats(
                             &ctx,
-                            &completed_responses,
+                            Some(request_stats),
                             None,
                             Some(&stream_error),
-                        )
-                        .await;
+                        );
                     }
                     return Err(format!("Stream error: {}", e.message()));
                 }
@@ -1185,7 +1155,6 @@ impl StreamingProcessor {
                     );
                 }
                 ProtoResponseVariant::Complete(complete) => {
-                    completed_responses.push(complete.clone());
                     let index = complete.index();
                     let accumulated_text =
                         accumulated_texts.get(&index).cloned().unwrap_or_default();
@@ -1233,14 +1202,13 @@ impl StreamingProcessor {
                     // Continue to process all completions if n>1
                 }
                 ProtoResponseVariant::Error(error) => {
-                    if ctx.enable_request_statistics {
+                    if let Some(request_stats) = stream.take_request_stats() {
                         Self::emit_generate_request_stats(
                             &ctx,
-                            &completed_responses,
+                            Some(request_stats),
                             error.http_status_code(),
                             Some(error.message()),
-                        )
-                        .await;
+                        );
                     }
                     return Err(error.message().to_string());
                 }
@@ -1256,7 +1224,7 @@ impl StreamingProcessor {
         Self::record_generate_metrics(start_time, first_token_time, total_completion, &ctx);
         Self::emit_generate_request_stats(
             &ctx,
-            &completed_responses,
+            stream.take_request_stats(),
             if client_connection.is_disconnected() {
                 Some(499)
             } else {
@@ -1269,8 +1237,7 @@ impl StreamingProcessor {
             } else {
                 None
             },
-        )
-        .await;
+        );
 
         Ok(())
     }
@@ -1298,17 +1265,12 @@ impl StreamingProcessor {
         });
     }
 
-    async fn emit_generate_request_stats(
+    fn emit_generate_request_stats(
         ctx: &GenerateStreamContext,
-        completed_responses: &[ProtoGenerateComplete],
+        request_stats: Option<UnifiedRequestStats>,
         http_status_code: Option<u16>,
         error_message: Option<&str>,
     ) {
-        if !ctx.enable_request_statistics {
-            return;
-        }
-        let request_stats = collect_request_stats(completed_responses);
-
         if let Some(request_stats) = request_stats {
             Self::emit_request_stats_event(
                 &ctx.request_id,

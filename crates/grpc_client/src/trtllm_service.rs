@@ -68,7 +68,6 @@ impl AbortOnDropStream {
         self.aborted.store(true, Ordering::Release);
         debug!("Request {} marked as completed", self.request_id);
     }
-
 }
 
 impl Drop for AbortOnDropStream {
@@ -214,10 +213,7 @@ impl TrtllmServiceClient {
     }
 
     /// Abort a request
-    pub async fn abort_request(
-        &self,
-        request_id: String,
-    ) -> Result<(), tonic::Status> {
+    pub async fn abort_request(&self, request_id: String) -> Result<(), tonic::Status> {
         debug!("Sending abort request for {}", request_id);
         let request = Request::new(proto::AbortRequest {
             request_id: request_id.clone(),

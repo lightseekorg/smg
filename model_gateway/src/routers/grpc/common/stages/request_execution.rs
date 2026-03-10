@@ -15,7 +15,7 @@ use crate::{
             },
             proto_wrapper::{
                 ProtoEmbedRequest, ProtoEmbedResponseVariant, ProtoGenerateRequest, ProtoRequest,
-                ProtoStream,
+                ProtoStream, StatsProtoStream,
             },
             utils::tonic_ext::{TonicResultExt, TonicStatusExt},
         },
@@ -95,9 +95,15 @@ impl PipelineStage for RequestExecutionStage {
         );
 
         let result = async {
+            let enable_request_statistics = ctx.components.enable_request_statistics;
             match proto_request {
                 ProtoRequest::Generate(req) => match self.mode {
-                    ExecutionMode::Single => self.execute_single(req, clients, workers).await,
+                    ExecutionMode::Single => {
+                        let stream = self.execute_single(req, clients, workers).await?;
+                        Ok(ExecutionResult::Single {
+                            stream: StatsProtoStream::new(stream, enable_request_statistics),
+                        })
+                    }
                     ExecutionMode::DualDispatch => {
                         // Dispatch based on runtime type:
                         // - SGLang: parallel dual dispatch with bootstrap metadata
@@ -105,10 +111,28 @@ impl PipelineStage for RequestExecutionStage {
                         let runtime_type = workers.pd_runtime_type();
                         match runtime_type {
                             Some(RuntimeType::Vllm) => {
-                                self.execute_sequential_pd(req, clients, workers).await
+                                let stream =
+                                    self.execute_sequential_pd(req, clients, workers).await?;
+                                Ok(ExecutionResult::Single {
+                                    stream: StatsProtoStream::new(
+                                        stream,
+                                        enable_request_statistics,
+                                    ),
+                                })
                             }
                             Some(RuntimeType::Sglang) => {
-                                self.execute_dual_dispatch(req, clients, workers).await
+                                let (prefill, decode) =
+                                    self.execute_dual_dispatch(req, clients, workers).await?;
+                                Ok(ExecutionResult::Dual {
+                                    prefill: StatsProtoStream::new(
+                                        prefill,
+                                        enable_request_statistics,
+                                    ),
+                                    decode: Box::new(StatsProtoStream::new(
+                                        decode,
+                                        enable_request_statistics,
+                                    )),
+                                })
                             }
                             Some(RuntimeType::Trtllm) | Some(RuntimeType::External) => {
                                 error!(
@@ -156,7 +180,7 @@ impl RequestExecutionStage {
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
-    ) -> Result<ExecutionResult, Response> {
+    ) -> Result<ProtoStream, Response> {
         let client = clients.single_mut().ok_or_else(|| {
             error!(
                 function = "execute_single",
@@ -179,7 +203,7 @@ impl RequestExecutionStage {
             )
         })?;
 
-        Ok(ExecutionResult::Single { stream })
+        Ok(stream)
     }
 
     async fn execute_single_embed(
@@ -239,7 +263,7 @@ impl RequestExecutionStage {
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
-    ) -> Result<ExecutionResult, Response> {
+    ) -> Result<(ProtoStream, ProtoStream), Response> {
         let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
             error!(
                 function = "execute_dual_dispatch",
@@ -277,10 +301,7 @@ impl RequestExecutionStage {
             )
         })?;
 
-        Ok(ExecutionResult::Dual {
-            prefill: prefill_stream,
-            decode: Box::new(decode_stream),
-        })
+        Ok((prefill_stream, decode_stream))
     }
 
     /// Execute vLLM PD: send to prefill with max_tokens=1 first, wait for completion,
@@ -294,7 +315,7 @@ impl RequestExecutionStage {
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
-    ) -> Result<ExecutionResult, Response> {
+    ) -> Result<ProtoStream, Response> {
         let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
             error!(
                 function = "execute_sequential_pd",
@@ -406,8 +427,6 @@ impl RequestExecutionStage {
 
         workers.record_outcome_decode(true);
 
-        Ok(ExecutionResult::Single {
-            stream: decode_stream,
-        })
+        Ok(decode_stream)
     }
 }

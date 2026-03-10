@@ -83,6 +83,7 @@ impl GrpcRouter {
             tokenizer_registry: tokenizer_registry.clone(),
             tool_parser_factory: tool_parser_factory.clone(),
             reasoning_parser_factory: reasoning_parser_factory.clone(),
+            enable_request_statistics,
             multimodal,
         });
 
@@ -94,7 +95,6 @@ impl GrpcRouter {
             reasoning_parser_factory.clone(),
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
-            enable_request_statistics,
         );
 
         // Create Harmony pipelines
@@ -105,7 +105,6 @@ impl GrpcRouter {
             reasoning_parser_factory.clone(),
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
-            enable_request_statistics,
         );
 
         // Create Embedding pipeline

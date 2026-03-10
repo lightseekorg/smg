@@ -33,16 +33,12 @@ use crate::{
 ///
 /// Collects all output tokens from execution and parses them using
 /// HarmonyParserAdapter to extract the complete response.
-pub(crate) struct HarmonyResponseProcessor {
-    enable_request_statistics: bool,
-}
+pub(crate) struct HarmonyResponseProcessor {}
 
 impl HarmonyResponseProcessor {
     /// Create a new Harmony response processor
-    pub fn new(enable_request_statistics: bool) -> Self {
-        Self {
-            enable_request_statistics,
-        }
+    pub fn new() -> Self {
+        Self {}
     }
 
     /// Process a non-streaming Harmony chat response
@@ -58,12 +54,7 @@ impl HarmonyResponseProcessor {
         let response_collection::CollectedResponses {
             completes: all_responses,
             request_stats,
-        } = response_collection::collect_responses(
-            execution_result,
-            request_logprobs,
-            self.enable_request_statistics,
-        )
-        .await?;
+        } = response_collection::collect_responses(execution_result, request_logprobs).await?;
         if all_responses.is_empty() {
             return Err(error::internal_error(
                 "no_responses_from_server",
@@ -168,7 +159,7 @@ impl HarmonyResponseProcessor {
 
 impl Default for HarmonyResponseProcessor {
     fn default() -> Self {
-        Self::new(false)
+        Self::new()
     }
 }
 
@@ -220,12 +211,7 @@ impl HarmonyResponseProcessor {
         let response_collection::CollectedResponses {
             completes: all_responses,
             request_stats,
-        } = response_collection::collect_responses(
-            execution_result,
-            request_logprobs,
-            self.enable_request_statistics,
-        )
-        .await?;
+        } = response_collection::collect_responses(execution_result, request_logprobs).await?;
         if all_responses.is_empty() {
             return Err(error::internal_error(
                 "no_responses_from_server",

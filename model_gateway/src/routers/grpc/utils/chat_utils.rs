@@ -20,18 +20,9 @@ use tokio::sync::mpsc;
 use tracing::error;
 use uuid::Uuid;
 
-use crate::{
-    observability::events::UnifiedRequestStats,
-    routers::{
-        error,
-        grpc::{
-            context::RequestContext,
-            proto_wrapper::{
-                collect_request_stats, ProtoGenerateComplete, ProtoResponseVariant, ProtoStream,
-            },
-            ProcessedMessages,
-        },
-    },
+use crate::routers::{
+    error,
+    grpc::{context::RequestContext, ProcessedMessages},
 };
 
 /// Type alias for the SSE channel sender used across streaming endpoints.
@@ -593,76 +584,6 @@ pub(crate) fn parse_json_schema_response(
         }
         _ => (None, processed_text.to_string()),
     }
-}
-
-/// Collect responses from a gRPC stream
-///
-/// This helper processes a gRPC GenerateResponse stream and collects all Complete responses.
-/// Used by both regular and PD routers for non-streaming requests.
-///
-/// # Arguments
-/// * `stream` - The gRPC response stream to consume
-/// * `worker_name` - Name for logging (e.g., "Prefill", "Decode", "Worker")
-///
-/// # Returns
-/// * `Ok(CollectedStreamResponses)` - Collected complete responses and unified request stats
-/// * `Err(Response)` - Error response if the stream fails or returns an error
-pub(crate) struct CollectedStreamResponses {
-    pub completes: Vec<ProtoGenerateComplete>,
-    pub request_stats: Option<UnifiedRequestStats>,
-}
-
-pub(crate) async fn collect_stream_responses(
-    stream: &mut ProtoStream,
-    worker_name: &str,
-    enable_request_statistics: bool,
-) -> Result<CollectedStreamResponses, Response> {
-    let mut all_responses = Vec::new();
-
-    while let Some(response) = stream.next().await {
-        match response {
-            Ok(gen_response) => {
-                match gen_response.into_response() {
-                    ProtoResponseVariant::Complete(complete) => {
-                        all_responses.push(complete);
-                    }
-                    ProtoResponseVariant::Error(err) => {
-                        error!(function = "collect_stream_responses", worker = %worker_name, error = %err.message(), "Worker generation error");
-                        // Don't mark as completed - let Drop send abort for error cases
-                        return Err(error::internal_error(
-                            "worker_generation_failed",
-                            format!("{} generation failed: {}", worker_name, err.message()),
-                        ));
-                    }
-                    ProtoResponseVariant::Chunk(_chunk) => {
-                        // Streaming chunk - no action needed
-                    }
-                    ProtoResponseVariant::None => {
-                        // Empty response - no action needed
-                    }
-                }
-            }
-            Err(e) => {
-                error!(function = "collect_stream_responses", worker = %worker_name, error = ?e, "Worker stream error");
-                // Don't mark as completed - let Drop send abort for error cases
-                return Err(error::internal_error(
-                    "worker_stream_failed",
-                    format!("{worker_name} stream failed: {e}"),
-                ));
-            }
-        }
-    }
-
-    let request_stats = if enable_request_statistics {
-        collect_request_stats(&all_responses)
-    } else {
-        None
-    };
-
-    Ok(CollectedStreamResponses {
-        completes: all_responses,
-        request_stats,
-    })
 }
 
 /// Count the number of tool calls in the request message history

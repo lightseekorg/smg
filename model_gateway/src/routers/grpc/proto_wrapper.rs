@@ -479,6 +479,63 @@ impl ProtoGenerateResponse {
             },
         }
     }
+
+    #[inline]
+    fn to_stats_sample(&self) -> Option<(&'static str, EngineRequestStatsSample)> {
+        match self {
+            Self::Sglang(resp) => match resp.response.as_ref() {
+                Some(sglang::generate_response::Response::Complete(complete)) => Some((
+                    "sglang",
+                    basic_stats_sample(
+                        complete.prompt_tokens,
+                        complete.completion_tokens,
+                        complete.cached_tokens,
+                    ),
+                )),
+                _ => None,
+            },
+            Self::Vllm(resp) => match resp.response.as_ref() {
+                Some(vllm::generate_response::Response::Complete(complete)) => Some((
+                    "vllm",
+                    basic_stats_sample(
+                        complete.prompt_tokens,
+                        complete.completion_tokens,
+                        complete.cached_tokens,
+                    ),
+                )),
+                _ => None,
+            },
+            Self::Trtllm(resp) => match resp.response.as_ref() {
+                Some(trtllm::generate_response::Response::Complete(complete)) => {
+                    let mut sample = basic_stats_sample(
+                        complete.prompt_tokens,
+                        complete.completion_tokens,
+                        complete.cached_tokens,
+                    );
+                    let (
+                        request_received_timestamp_s,
+                        first_token_generated_timestamp_s,
+                        request_finished_timestamp_s,
+                    ) = complete
+                        .perf_metrics
+                        .as_ref()
+                        .map(|m| {
+                            normalize_trtllm_timestamps(
+                                Some(m.arrival_time),
+                                Some(m.first_token_time),
+                                Some(m.last_token_time),
+                            )
+                        })
+                        .unwrap_or((None, None, None));
+                    sample.request_received_timestamp_s = request_received_timestamp_s;
+                    sample.first_token_generated_timestamp_s = first_token_generated_timestamp_s;
+                    sample.request_finished_timestamp_s = request_finished_timestamp_s;
+                    Some(("trtllm", sample))
+                }
+                _ => None,
+            },
+        }
+    }
 }
 
 /// Response variant extracted from GenerateResponse
@@ -861,55 +918,6 @@ impl ProtoGenerateComplete {
             Self::Sglang(_) | Self::Trtllm(_) => None,
         }
     }
-
-    #[inline]
-    fn engine(&self) -> &'static str {
-        match self {
-            Self::Sglang(_) => "sglang",
-            Self::Vllm(_) => "vllm",
-            Self::Trtllm(_) => "trtllm",
-        }
-    }
-
-    #[inline]
-    fn to_stats_sample(&self) -> Option<EngineRequestStatsSample> {
-        match self {
-            Self::Sglang(c) => Some(basic_stats_sample(
-                c.prompt_tokens,
-                c.completion_tokens,
-                c.cached_tokens,
-            )),
-            Self::Vllm(c) => Some(basic_stats_sample(
-                c.prompt_tokens,
-                c.completion_tokens,
-                c.cached_tokens,
-            )),
-            Self::Trtllm(c) => {
-                let mut sample =
-                    basic_stats_sample(c.prompt_tokens, c.completion_tokens, c.cached_tokens);
-                let (
-                    request_received_timestamp_s,
-                    first_token_generated_timestamp_s,
-                    request_finished_timestamp_s,
-                ) = c
-                    .perf_metrics
-                    .as_ref()
-                    .map(|m| {
-                        normalize_trtllm_timestamps(
-                            Some(m.arrival_time),
-                            Some(m.first_token_time),
-                            Some(m.last_token_time),
-                        )
-                    })
-                    .unwrap_or((None, None, None));
-
-                sample.request_received_timestamp_s = request_received_timestamp_s;
-                sample.first_token_generated_timestamp_s = first_token_generated_timestamp_s;
-                sample.request_finished_timestamp_s = request_finished_timestamp_s;
-                Some(sample)
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -922,85 +930,6 @@ struct EngineRequestStatsSample {
     prompt_tokens: u64,
     completion_tokens: u64,
     cached_tokens: u64,
-}
-
-/// Build unified request-level stats from complete responses.
-pub fn collect_request_stats(completes: &[ProtoGenerateComplete]) -> Option<UnifiedRequestStats> {
-    let engine = completes.first()?.engine();
-    let mut seen = 0u64;
-    let mut request_received_timestamp_s: Option<f64> = None;
-    let mut first_token_generated_timestamp_s: Option<f64> = None;
-    let mut request_finished_timestamp_s: Option<f64> = None;
-    let mut cache_hit_rate_sum = 0.0f64;
-    let mut cache_hit_rate_count = 0u64;
-    let mut spec_acceptance_rate_sum = 0.0f64;
-    let mut spec_acceptance_rate_count = 0u64;
-    let mut prompt_tokens = 0u64;
-    let mut completion_tokens = 0u64;
-    let mut cached_tokens = 0u64;
-
-    for complete in completes {
-        if complete.engine() != engine {
-            continue;
-        }
-        let Some(sample) = complete.to_stats_sample() else {
-            continue;
-        };
-        seen += 1;
-        prompt_tokens = prompt_tokens.saturating_add(sample.prompt_tokens);
-        completion_tokens = completion_tokens.saturating_add(sample.completion_tokens);
-        cached_tokens = cached_tokens.saturating_add(sample.cached_tokens);
-
-        request_received_timestamp_s = min_timestamp(
-            request_received_timestamp_s,
-            sample.request_received_timestamp_s,
-        );
-        first_token_generated_timestamp_s = min_timestamp(
-            first_token_generated_timestamp_s,
-            sample.first_token_generated_timestamp_s,
-        );
-        request_finished_timestamp_s = max_timestamp(
-            request_finished_timestamp_s,
-            sample.request_finished_timestamp_s,
-        );
-
-        if let Some(rate) = sample.cache_hit_rate {
-            cache_hit_rate_sum += rate;
-            cache_hit_rate_count += 1;
-        }
-        if let Some(rate) = sample.spec_decoding_acceptance_rate {
-            spec_acceptance_rate_sum += rate;
-            spec_acceptance_rate_count += 1;
-        }
-    }
-
-    if seen == 0 {
-        return None;
-    }
-
-    let cache_hit_rate = if cache_hit_rate_count > 0 {
-        Some(cache_hit_rate_sum / cache_hit_rate_count as f64)
-    } else {
-        derive_cache_hit_rate(cached_tokens, prompt_tokens)
-    };
-    let spec_decoding_acceptance_rate = if spec_acceptance_rate_count > 0 {
-        Some(spec_acceptance_rate_sum / spec_acceptance_rate_count as f64)
-    } else {
-        None
-    };
-
-    Some(UnifiedRequestStats {
-        engine,
-        error_message: None,
-        request_received_timestamp_s,
-        first_token_generated_timestamp_s,
-        request_finished_timestamp_s,
-        cache_hit_rate,
-        spec_decoding_acceptance_rate,
-        prompt_tokens,
-        completion_tokens,
-        cached_tokens,
-    })
 }
 
 #[inline]
@@ -1114,6 +1043,127 @@ impl ProtoGenerateError {
     }
 }
 
+#[derive(Default)]
+struct RequestStatsCollector {
+    enabled: bool,
+    engine: Option<&'static str>,
+    seen: u64,
+    request_received_timestamp_s: Option<f64>,
+    first_token_generated_timestamp_s: Option<f64>,
+    request_finished_timestamp_s: Option<f64>,
+    cache_hit_rate_sum: f64,
+    cache_hit_rate_count: u64,
+    spec_acceptance_rate_sum: f64,
+    spec_acceptance_rate_count: u64,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cached_tokens: u64,
+}
+
+impl RequestStatsCollector {
+    #[inline]
+    fn reset(&mut self) {
+        self.engine = None;
+        self.seen = 0;
+        self.request_received_timestamp_s = None;
+        self.first_token_generated_timestamp_s = None;
+        self.request_finished_timestamp_s = None;
+        self.cache_hit_rate_sum = 0.0;
+        self.cache_hit_rate_count = 0;
+        self.spec_acceptance_rate_sum = 0.0;
+        self.spec_acceptance_rate_count = 0;
+        self.prompt_tokens = 0;
+        self.completion_tokens = 0;
+        self.cached_tokens = 0;
+    }
+
+    #[inline]
+    fn record(&mut self, response: &ProtoGenerateResponse) {
+        if !self.enabled {
+            return;
+        }
+
+        let Some((engine, sample)) = response.to_stats_sample() else {
+            return;
+        };
+
+        if let Some(current_engine) = self.engine {
+            if current_engine != engine {
+                return;
+            }
+        } else {
+            self.engine = Some(engine);
+        }
+
+        self.seen += 1;
+        self.prompt_tokens = self.prompt_tokens.saturating_add(sample.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(sample.completion_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_add(sample.cached_tokens);
+
+        self.request_received_timestamp_s = min_timestamp(
+            self.request_received_timestamp_s,
+            sample.request_received_timestamp_s,
+        );
+        self.first_token_generated_timestamp_s = min_timestamp(
+            self.first_token_generated_timestamp_s,
+            sample.first_token_generated_timestamp_s,
+        );
+        self.request_finished_timestamp_s = max_timestamp(
+            self.request_finished_timestamp_s,
+            sample.request_finished_timestamp_s,
+        );
+
+        if let Some(rate) = sample.cache_hit_rate {
+            self.cache_hit_rate_sum += rate;
+            self.cache_hit_rate_count += 1;
+        }
+        if let Some(rate) = sample.spec_decoding_acceptance_rate {
+            self.spec_acceptance_rate_sum += rate;
+            self.spec_acceptance_rate_count += 1;
+        }
+    }
+
+    #[inline]
+    fn take_stats(&mut self) -> Option<UnifiedRequestStats> {
+        if !self.enabled {
+            return None;
+        }
+        if self.seen == 0 {
+            return None;
+        }
+
+        let cache_hit_rate = if self.cache_hit_rate_count > 0 {
+            Some(self.cache_hit_rate_sum / self.cache_hit_rate_count as f64)
+        } else {
+            derive_cache_hit_rate(self.cached_tokens, self.prompt_tokens)
+        };
+        let spec_decoding_acceptance_rate = if self.spec_acceptance_rate_count > 0 {
+            Some(self.spec_acceptance_rate_sum / self.spec_acceptance_rate_count as f64)
+        } else {
+            None
+        };
+
+        let stats = Some(UnifiedRequestStats {
+            engine: self
+                .engine
+                .expect("collector invariant violated: seen>0 requires engine"),
+            error_message: None,
+            request_received_timestamp_s: self.request_received_timestamp_s,
+            first_token_generated_timestamp_s: self.first_token_generated_timestamp_s,
+            request_finished_timestamp_s: self.request_finished_timestamp_s,
+            cache_hit_rate,
+            spec_decoding_acceptance_rate,
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+            cached_tokens: self.cached_tokens,
+        });
+        self.reset();
+        stats
+    }
+}
+
 /// Unified stream wrapper
 pub enum ProtoStream {
     Sglang(SglangStream),
@@ -1147,6 +1197,40 @@ impl ProtoStream {
             Self::Vllm(stream) => stream.mark_completed(),
             Self::Trtllm(stream) => stream.mark_completed(),
         }
+    }
+}
+
+/// Optional stats-collecting wrapper around `ProtoStream`.
+pub struct StatsProtoStream {
+    stream: ProtoStream,
+    request_stats: RequestStatsCollector,
+}
+
+impl StatsProtoStream {
+    pub fn new(stream: ProtoStream, enable_request_statistics: bool) -> Self {
+        Self {
+            stream,
+            request_stats: RequestStatsCollector {
+                enabled: enable_request_statistics,
+                ..RequestStatsCollector::default()
+            },
+        }
+    }
+
+    pub async fn next(&mut self) -> Option<Result<ProtoGenerateResponse, tonic::Status>> {
+        let response = self.stream.next().await;
+        if let Some(Ok(gen_response)) = response.as_ref() {
+            self.request_stats.record(gen_response);
+        }
+        response
+    }
+
+    pub fn mark_completed(&mut self) {
+        self.stream.mark_completed();
+    }
+
+    pub fn take_request_stats(&mut self) -> Option<UnifiedRequestStats> {
+        self.request_stats.take_stats()
     }
 }
 
