@@ -7,7 +7,10 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::Request,
+    extract::{
+        ws::{WebSocket, WebSocketUpgrade},
+        FromRequestParts, Query, Request,
+    },
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -38,8 +41,8 @@ use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
     core::{
-        is_retryable_status, Endpoint, ModelCard, ProviderType, RetryExecutor, RuntimeType, Worker,
-        WorkerRegistry,
+        is_retryable_status, worker::WorkerLoadGuard, Endpoint, ModelCard, ProviderType,
+        RetryExecutor, RuntimeType, Worker, WorkerRegistry,
     },
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::header_utils::{apply_provider_headers, extract_auth_header},
@@ -52,6 +55,7 @@ pub struct OpenAIRouter {
     shared_components: Arc<SharedComponents>,
     responses_components: Arc<ResponsesComponents>,
     retry_config: RetryConfig,
+    realtime_registry: Arc<super::realtime::RealtimeRegistry>,
 }
 
 impl std::fmt::Debug for OpenAIRouter {
@@ -121,6 +125,7 @@ impl OpenAIRouter {
             shared_components,
             responses_components,
             retry_config: ctx.router_config.effective_retry_config(),
+            realtime_registry: ctx.realtime_registry.clone(),
         })
     }
 
@@ -221,30 +226,13 @@ impl OpenAIRouter {
         join_all(futures).await;
     }
 
-    /// Find workers that can handle the given model and select the least loaded one
-    fn find_best_worker_for_model(&self, model_id: &str) -> Option<Arc<dyn Worker>> {
-        self.worker_registry
-            .get_workers_filtered(None, None, None, Some(RuntimeType::External), true)
-            .into_iter()
-            .filter(|w| w.supports_model(model_id) && w.circuit_breaker().can_execute())
-            .min_by_key(|w| w.load())
-    }
-
-    /// Check if any worker supports the model (regardless of circuit breaker state)
-    fn any_worker_supports_model(&self, model_id: &str) -> bool {
-        self.worker_registry
-            .get_workers_filtered(None, None, None, Some(RuntimeType::External), true)
-            .into_iter()
-            .any(|w| w.supports_model(model_id))
-    }
-
     async fn select_worker_for_model(
         &self,
         model_id: &str,
         auth_header: Option<&HeaderValue>,
     ) -> Result<Arc<dyn Worker>, Response> {
         // Try to find a worker immediately
-        if let Some(worker) = self.find_best_worker_for_model(model_id) {
+        if let Some(worker) = self.worker_registry.find_best_external_worker(model_id) {
             return Ok(worker);
         }
 
@@ -255,17 +243,22 @@ impl OpenAIRouter {
         );
         self.refresh_external_models(auth_header).await;
 
-        self.find_best_worker_for_model(model_id).ok_or_else(|| {
-            // Check if the model exists but all workers are circuit-broken
-            if self.any_worker_supports_model(model_id) {
-                error::service_unavailable(
-                    "service_unavailable",
-                    format!("All workers for model '{model_id}' are temporarily unavailable"),
-                )
-            } else {
-                error::model_not_found(model_id)
-            }
-        })
+        self.worker_registry
+            .find_best_external_worker(model_id)
+            .ok_or_else(|| {
+                // Check if the model exists but all workers are circuit-broken
+                if self
+                    .worker_registry
+                    .any_external_worker_supports_model(model_id)
+                {
+                    error::service_unavailable(
+                        "service_unavailable",
+                        format!("All workers for model '{model_id}' are temporarily unavailable"),
+                    )
+                } else {
+                    error::model_not_found(model_id)
+                }
+            })
     }
 
     /// Deserialize ResponseInputOutputItems from a JSON array value
@@ -1066,6 +1059,289 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 )
             }
         }
+    }
+
+    async fn route_realtime_rest(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &Value,
+        endpoint: &str,
+    ) -> Response {
+        let start = Instant::now();
+        let endpoint_label = match endpoint {
+            "/v1/realtime/sessions" => metrics_labels::ENDPOINT_REALTIME_SESSIONS,
+            "/v1/realtime/client_secrets" => metrics_labels::ENDPOINT_REALTIME_CLIENT_SECRETS,
+            "/v1/realtime/transcription_sessions" => {
+                metrics_labels::ENDPOINT_REALTIME_TRANSCRIPTION
+            }
+            _ => metrics_labels::ENDPOINT_REALTIME,
+        };
+
+        // TODO(Phase 3): Inject MCP tool definitions into the request body
+        // - client_secrets: body.session.tools
+        // - sessions: body.tools
+        // - transcription_sessions: config
+
+        // Extract model from body — location depends on endpoint
+        let model = if endpoint == "/v1/realtime/client_secrets" {
+            body.pointer("/session/model").and_then(|v| v.as_str())
+        } else {
+            body.get("model").and_then(|v| v.as_str())
+        };
+        let model = match model {
+            Some(m) => m,
+            None => {
+                return error::bad_request(
+                    "missing_model",
+                    if endpoint == "/v1/realtime/client_secrets" {
+                        "session.model is required"
+                    } else {
+                        "model is required"
+                    },
+                );
+            }
+        };
+
+        Metrics::record_router_request(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model,
+            endpoint_label,
+            "false",
+        );
+
+        let auth_header = extract_auth_header(headers, None);
+
+        let worker = match self
+            .select_worker_for_model(model, auth_header.as_ref())
+            .await
+        {
+            Ok(w) => w,
+            Err(response) => {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model,
+                    endpoint_label,
+                    metrics_labels::ERROR_NO_WORKERS,
+                );
+                return response;
+            }
+        };
+
+        let auth = match extract_auth_header(headers, worker.api_key()) {
+            Some(v) => v,
+            None => {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model,
+                    endpoint_label,
+                    metrics_labels::ERROR_VALIDATION,
+                );
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+        };
+
+        // Track load for the duration of the upstream request
+        let _guard = WorkerLoadGuard::new(worker.clone(), headers);
+
+        let upstream_url = format!("{}{endpoint}", worker.url().trim_end_matches('/'));
+
+        let result = self
+            .shared_components
+            .client
+            .post(&upstream_url)
+            .header("Authorization", &auth)
+            .json(body)
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) => {
+                let success = resp.status().is_success();
+                let response = super::realtime::rest::proxy_response(resp).await;
+                worker.record_outcome(success);
+                if success {
+                    Metrics::record_router_duration(
+                        metrics_labels::ROUTER_OPENAI,
+                        metrics_labels::BACKEND_EXTERNAL,
+                        metrics_labels::CONNECTION_HTTP,
+                        model,
+                        endpoint_label,
+                        start.elapsed(),
+                    );
+                } else {
+                    Metrics::record_router_error(
+                        metrics_labels::ROUTER_OPENAI,
+                        metrics_labels::BACKEND_EXTERNAL,
+                        metrics_labels::CONNECTION_HTTP,
+                        model,
+                        endpoint_label,
+                        metrics_labels::ERROR_BACKEND,
+                    );
+                }
+                response
+            }
+            Err(e) => {
+                tracing::error!(error = %e, endpoint, "Failed to forward realtime REST request");
+                worker.record_outcome(false);
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model,
+                    endpoint_label,
+                    metrics_labels::ERROR_BACKEND,
+                );
+                StatusCode::BAD_GATEWAY.into_response()
+            }
+        }
+    }
+
+    async fn route_realtime_ws(&self, req: Request<Body>) -> Response {
+        let (mut parts, _body) = req.into_parts();
+
+        let params: super::realtime::ws::RealtimeQueryParams =
+            match Query::from_request_parts(&mut parts, &()).await {
+                Ok(Query(p)) => p,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "Missing required 'model' query parameter",
+                    )
+                        .into_response();
+                }
+            };
+
+        let model = match params.model {
+            Some(m) => m,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "Missing required 'model' query parameter",
+                )
+                    .into_response();
+            }
+        };
+
+        Metrics::record_router_request(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_WEBSOCKET,
+            &model,
+            metrics_labels::ENDPOINT_REALTIME,
+            "false",
+        );
+
+        let headers = &parts.headers;
+        let auth_header = extract_auth_header(Some(headers), None);
+
+        let worker = match self
+            .select_worker_for_model(&model, auth_header.as_ref())
+            .await
+        {
+            Ok(w) => w,
+            Err(response) => {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_WEBSOCKET,
+                    &model,
+                    metrics_labels::ENDPOINT_REALTIME,
+                    metrics_labels::ERROR_NO_WORKERS,
+                );
+                return response;
+            }
+        };
+
+        let worker_url = worker.url().to_string();
+        let upstream_ws_url = super::realtime::ws::build_upstream_ws_url(&worker_url, &model);
+
+        // Use user auth if available, fall back to worker's API key
+        let effective_auth = auth_header.or_else(|| extract_auth_header(None, worker.api_key()));
+        let auth_str = match effective_auth {
+            Some(v) => match v.to_str() {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    Metrics::record_router_error(
+                        metrics_labels::ROUTER_OPENAI,
+                        metrics_labels::BACKEND_EXTERNAL,
+                        metrics_labels::CONNECTION_WEBSOCKET,
+                        &model,
+                        metrics_labels::ENDPOINT_REALTIME,
+                        metrics_labels::ERROR_VALIDATION,
+                    );
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "Authorization header contains invalid UTF-8 characters",
+                    )
+                        .into_response();
+                }
+            },
+            None => {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_WEBSOCKET,
+                    &model,
+                    metrics_labels::ENDPOINT_REALTIME,
+                    metrics_labels::ERROR_VALIDATION,
+                );
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+        };
+
+        let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+            Ok(ws) => ws,
+            Err(e) => {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_WEBSOCKET,
+                    &model,
+                    metrics_labels::ENDPOINT_REALTIME,
+                    metrics_labels::ERROR_VALIDATION,
+                );
+                return e.into_response();
+            }
+        };
+
+        let registry = Arc::clone(&self.realtime_registry);
+
+        let session_id = uuid::Uuid::now_v7().to_string();
+        let entry =
+            registry.register_session(session_id.clone(), model.clone(), worker_url.clone());
+        let cancel_token = entry.cancel_token.clone();
+
+        tracing::info!(
+            session_id,
+            model,
+            worker_url,
+            "Upgrading to realtime WebSocket"
+        );
+
+        ws.on_upgrade(move |socket: WebSocket| async move {
+            if let Err(e) = super::realtime::proxy::run_ws_proxy(
+                socket,
+                &upstream_ws_url,
+                &auth_str,
+                registry.clone(),
+                session_id.clone(),
+                cancel_token,
+            )
+            .await
+            {
+                tracing::error!(session_id, error = %e, "Realtime WebSocket proxy error");
+            }
+
+            // Cleanup: remove session on disconnect
+            registry.remove_session(&session_id);
+            tracing::debug!(session_id, "Realtime session cleaned up");
+        })
     }
 
     fn router_type(&self) -> &'static str {

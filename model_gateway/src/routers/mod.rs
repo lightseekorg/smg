@@ -233,6 +233,25 @@ pub trait RouterTrait: Send + Sync + Debug {
             .into_response()
     }
 
+    /// Route a realtime REST request (sessions, client_secrets, transcription_sessions)
+    async fn route_realtime_rest(
+        &self,
+        _headers: Option<&HeaderMap>,
+        _body: &serde_json::Value,
+        _endpoint: &str,
+    ) -> Response {
+        (StatusCode::NOT_IMPLEMENTED, "Realtime REST not implemented").into_response()
+    }
+
+    /// Route a realtime WebSocket upgrade request
+    async fn route_realtime_ws(&self, _req: Request<Body>) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Realtime WebSocket not implemented",
+        )
+            .into_response()
+    }
+
     /// Get router type name
     fn router_type(&self) -> &'static str;
 

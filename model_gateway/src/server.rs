@@ -60,7 +60,6 @@ use crate::{
             get_mesh_health, get_policy_state, get_policy_states, get_worker_state,
             get_worker_states, set_global_rate_limit, trigger_graceful_shutdown, update_app_config,
         },
-        openai::realtime::{rest as realtime_rest, ws as realtime_ws},
         parse,
         router_manager::RouterManager,
         tokenize, RouterTrait,
@@ -434,6 +433,43 @@ async fn v1_conversations_delete_item(
     .await
 }
 
+async fn v1_realtime_ws(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    state.router.route_realtime_ws(req).await
+}
+
+async fn v1_realtime_session(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    state
+        .router
+        .route_realtime_rest(Some(&headers), &body, "/v1/realtime/sessions")
+        .await
+}
+
+async fn v1_realtime_client_secret(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    state
+        .router
+        .route_realtime_rest(Some(&headers), &body, "/v1/realtime/client_secrets")
+        .await
+}
+
+async fn v1_realtime_transcription_session(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    state
+        .router
+        .route_realtime_rest(Some(&headers), &body, "/v1/realtime/transcription_sessions")
+        .await
+}
+
 async fn flush_cache(State(state): State<Arc<AppState>>, _req: Request) -> Response {
     WorkerManager::flush_cache_all(&state.context.worker_registry, &state.context.client)
         .await
@@ -624,6 +660,17 @@ pub fn build_app(
         // Tokenize / Detokenize endpoints
         .route("/v1/tokenize", post(v1_tokenize))
         .route("/v1/detokenize", post(v1_detokenize))
+        // Realtime endpoints (same middleware as other protected routes)
+        .route("/v1/realtime", get(v1_realtime_ws))
+        .route("/v1/realtime/sessions", post(v1_realtime_session))
+        .route(
+            "/v1/realtime/client_secrets",
+            post(v1_realtime_client_secret),
+        )
+        .route(
+            "/v1/realtime/transcription_sessions",
+            post(v1_realtime_transcription_session),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::concurrency_limit_middleware,
@@ -635,26 +682,6 @@ pub fn build_app(
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::wasm_middleware,
-        ));
-
-    let realtime_routes = Router::new()
-        .route("/v1/realtime", get(realtime_ws::ws_handler))
-        .route("/v1/realtime/sessions", post(realtime_rest::create_session))
-        .route(
-            "/v1/realtime/client_secrets",
-            post(realtime_rest::create_client_secret),
-        )
-        .route(
-            "/v1/realtime/transcription_sessions",
-            post(realtime_rest::create_transcription_session),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            app_state.clone(),
-            middleware::concurrency_limit_middleware,
-        ))
-        .route_layer(axum::middleware::from_fn_with_state(
-            auth_config.clone(),
-            middleware::auth_middleware,
         ));
 
     let public_routes = Router::new()
@@ -736,7 +763,6 @@ pub fn build_app(
 
     Router::new()
         .merge(protected_routes)
-        .merge(realtime_routes)
         .merge(public_routes)
         .merge(admin_routes)
         .merge(worker_routes)
