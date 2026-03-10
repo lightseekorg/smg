@@ -44,18 +44,22 @@ spec:
             - name: metrics
               containerPort: {{ .Values.router.metrics.port }}
               protocol: TCP
+          {{- with .Values.router.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 30
+            initialDelaySeconds: {{ .Values.router.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.router.livenessProbe.periodSeconds }}
           readinessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            initialDelaySeconds: {{ .Values.router.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.router.readinessProbe.periodSeconds }}
           {{- with .Values.router.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

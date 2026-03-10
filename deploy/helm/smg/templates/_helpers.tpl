@@ -92,10 +92,8 @@ Called from the router Deployment template.
 {{- end }}
 - "--service-discovery-port"
 - {{ .Values.router.serviceDiscovery.port | quote }}
-{{- if .Values.router.serviceDiscovery.namespace }}
 - "--service-discovery-namespace"
-- {{ .Values.router.serviceDiscovery.namespace | quote }}
-{{- end }}
+- {{ .Values.router.serviceDiscovery.namespace | default .Release.Namespace | quote }}
 {{- if .Values.router.serviceDiscovery.modelIdFrom }}
 - "--model-id-from"
 - {{ .Values.router.serviceDiscovery.modelIdFrom | quote }}
@@ -119,8 +117,8 @@ Called from the router Deployment template.
 - {{ .Values.router.balanceAbsThreshold | quote }}
 - "--balance-rel-threshold"
 - {{ .Values.router.balanceRelThreshold | quote }}
-- "--eviction-interval"
-- {{ .Values.router.evictionInterval | quote }}
+- "--eviction-interval-secs"
+- {{ .Values.router.evictionIntervalSecs | quote }}
 - "--max-tree-size"
 - {{ int .Values.router.maxTreeSize | quote }}
 - "--block-size"
@@ -231,12 +229,9 @@ Called from the router Deployment template.
 - "--rate-limit-tokens-per-second"
 - {{ .Values.auth.rateLimitTokensPerSecond | quote }}
 {{- end }}
-{{- if .Values.router.wasm.enabled }}
-- "--enable-wasm"
 {{- if .Values.router.wasm.path }}
 - "--storage-hook-wasm-path"
 - {{ .Values.router.wasm.path | quote }}
-{{- end }}
 {{- end }}
 {{- if .Values.router.mcp.enabled }}
 - "--mcp-config-path"

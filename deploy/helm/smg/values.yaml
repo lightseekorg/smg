@@ -17,8 +17,7 @@ global:
 router:
   replicas: 1
 
-  # -- Routing policy: cache_aware, round_robin, power_of_two,
-  #    consistent_hashing, prefix_hash, manual, random, bucket
+  # -- Routing policy: cache_aware, round_robin, power_of_two, manual, random
   policy: cache_aware
 
   # -- Explicit worker URLs
@@ -44,7 +43,7 @@ router:
   cacheThreshold: 0.3
   balanceAbsThreshold: 64
   balanceRelThreshold: 1.5
-  evictionInterval: 120
+  evictionIntervalSecs: 60
   maxTreeSize: 67108864
   blockSize: 16
 
@@ -152,9 +151,24 @@ router:
     enabled: false
     minAvailable: 1
 
+  # -- Security context for router container
+  securityContext:
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+
+  # -- Liveness probe tuning
+  livenessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 30
+
+  # -- Readiness probe tuning
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
   # -- Optional features
   wasm:
-    enabled: false
     path: ""
   mcp:
     enabled: false
