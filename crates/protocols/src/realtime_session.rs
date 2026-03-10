@@ -78,15 +78,29 @@ pub struct RealtimeSessionCreateResponse {
 
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "validate_transcription_session_create_request"))]
 pub struct RealtimeTranscriptionSessionCreateRequest {
     #[serde(rename = "type")]
     pub r#type: RealtimeTranscriptionSessionType,
     pub audio: Option<RealtimeTranscriptionSessionAudio>,
     pub include: Option<Vec<RealtimeIncludeOption>>,
+    pub model: Option<String>,
+    pub language: Option<String>,
+    pub prompt: Option<String>,
 }
 
 impl Normalizable for RealtimeTranscriptionSessionCreateRequest {
     // Use default no-op implementation
+}
+
+fn validate_transcription_session_create_request(
+    req: &RealtimeTranscriptionSessionCreateRequest,
+) -> Result<(), ValidationError> {
+    let has_model = req.model.as_deref().is_some_and(|m| !m.trim().is_empty());
+    if !has_model {
+        return Err(ValidationError::new("model is required"));
+    }
+    Ok(())
 }
 
 // ============================================================================

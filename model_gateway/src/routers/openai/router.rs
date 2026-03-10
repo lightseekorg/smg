@@ -1128,17 +1128,15 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         headers: Option<&HeaderMap>,
         body: &RealtimeTranscriptionSessionCreateRequest,
     ) -> Response {
-        // Transcription sessions don't require a model field
+        let model = body.model.as_deref().unwrap_or_default();
         let auth = extract_auth_header(headers, None);
-        let worker = self
-            .select_worker_for_model("realtime-transcription", auth.as_ref())
-            .await;
+        let worker = self.select_worker_for_model(model, auth.as_ref()).await;
         forward_realtime_rest(
             &self.shared_components.client,
             worker,
             headers,
             body,
-            "realtime-transcription",
+            model,
             "/v1/realtime/transcription_sessions",
             metrics_labels::ENDPOINT_REALTIME_TRANSCRIPTION,
         )
