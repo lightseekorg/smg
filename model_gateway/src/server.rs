@@ -664,8 +664,7 @@ pub fn build_app(
         // Tokenize / Detokenize endpoints
         .route("/v1/tokenize", post(v1_tokenize))
         .route("/v1/detokenize", post(v1_detokenize))
-        // Realtime endpoints (same middleware as other protected routes)
-        .route("/v1/realtime", get(v1_realtime_ws))
+        // Realtime REST endpoints (same middleware as other protected routes)
         .route("/v1/realtime/sessions", post(v1_realtime_session))
         .route(
             "/v1/realtime/client_secrets",
@@ -686,6 +685,20 @@ pub fn build_app(
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::wasm_middleware,
+        ));
+
+    // WebSocket route: auth + concurrency but NO WASM middleware.
+    // WASM OnResponse reconstructs the response from status/headers/body,
+    // dropping the response extensions that carry the WebSocket upgrade future.
+    let ws_routes = Router::new()
+        .route("/v1/realtime", get(v1_realtime_ws))
+        .route_layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::concurrency_limit_middleware,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            auth_config.clone(),
+            middleware::auth_middleware,
         ));
 
     let public_routes = Router::new()
@@ -767,6 +780,7 @@ pub fn build_app(
 
     Router::new()
         .merge(protected_routes)
+        .merge(ws_routes)
         .merge(public_routes)
         .merge(admin_routes)
         .merge(worker_routes)
