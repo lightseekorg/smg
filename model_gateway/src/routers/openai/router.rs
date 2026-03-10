@@ -1,6 +1,5 @@
 use std::{
     any::Any,
-    collections::HashSet,
     sync::{atomic::AtomicBool, Arc},
     time::Instant,
 };
@@ -553,48 +552,10 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         let auth_header = extract_auth_header(Some(req.headers()), None);
         self.refresh_external_models(auth_header.as_ref()).await;
 
-        let mut all_models = Vec::new();
-        let mut seen_models = HashSet::new();
+        let cards = external_workers.iter().flat_map(|w| w.models());
+        let resp = openai_protocol::models::ListModelsResponse::from_model_cards(cards);
 
-        for worker in &external_workers {
-            for model_card in worker.models() {
-                let owned_by = model_card
-                    .provider
-                    .as_ref()
-                    .map(|p| format!("{p:?}").to_lowercase())
-                    .unwrap_or_else(|| "unknown".to_string());
-
-                if seen_models.insert(model_card.id.clone()) {
-                    all_models.push(json!({
-                        "id": &model_card.id,
-                        "object": "model",
-                        "created": 0,
-                        "owned_by": &owned_by,
-                        "aliases": model_card.aliases,
-                        "model_type": format!("{:?}", model_card.model_type),
-                    }));
-                }
-
-                for alias in &model_card.aliases {
-                    if seen_models.insert(alias.clone()) {
-                        all_models.push(json!({
-                            "id": alias,
-                            "object": "model",
-                            "created": 0,
-                            "owned_by": &owned_by,
-                            "primary_model": &model_card.id,
-                        }));
-                    }
-                }
-            }
-        }
-
-        let response_json = json!({
-            "object": "list",
-            "data": all_models
-        });
-
-        (StatusCode::OK, Json(response_json)).into_response()
+        (StatusCode::OK, Json(resp)).into_response()
     }
 
     async fn route_chat(

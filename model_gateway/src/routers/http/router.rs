@@ -671,8 +671,15 @@ impl RouterTrait for Router {
         self.proxy_get_request(req, "get_server_info").await
     }
 
-    async fn get_models(&self, req: Request<Body>) -> Response {
-        self.proxy_get_request(req, "v1/models").await
+    async fn get_models(&self, _req: Request<Body>) -> Response {
+        let cards = self
+            .worker_registry
+            .get_all()
+            .iter()
+            .flat_map(|w| w.models())
+            .collect::<Vec<_>>();
+        let resp = openai_protocol::models::ListModelsResponse::from_model_cards(cards);
+        (StatusCode::OK, Json(resp)).into_response()
     }
 
     async fn get_model_info(&self, req: Request<Body>) -> Response {

@@ -1238,13 +1238,15 @@ impl RouterTrait for PDRouter {
             .await
     }
 
-    async fn get_models(&self, req: Request<Body>) -> Response {
-        // Extract headers first to avoid Send issues
-        let headers = header_utils::copy_request_headers(&req);
-
-        // Proxy to first prefill worker
-        self.proxy_to_first_prefill_worker("v1/models", Some(headers))
-            .await
+    async fn get_models(&self, _req: Request<Body>) -> Response {
+        let cards = self
+            .worker_registry
+            .get_all()
+            .iter()
+            .flat_map(|w| w.models())
+            .collect::<Vec<_>>();
+        let resp = openai_protocol::models::ListModelsResponse::from_model_cards(cards);
+        (StatusCode::OK, axum::Json(resp)).into_response()
     }
 
     async fn get_model_info(&self, req: Request<Body>) -> Response {

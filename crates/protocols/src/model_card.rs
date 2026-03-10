@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     model_type::{Endpoint, ModelType},
+    models::ModelObject,
     worker::ProviderType,
 };
 
@@ -284,6 +285,28 @@ impl ModelCard {
     #[inline]
     pub fn supports_reasoning(&self) -> bool {
         self.model_type.supports_reasoning()
+    }
+
+    /// Get the `owned_by` string for this model.
+    ///
+    /// Maps `None` → `"self_hosted"`, provider → `provider.as_str()`.
+    pub fn owned_by(&self) -> &str {
+        match &self.provider {
+            Some(p) => p.as_str(),
+            None => "self_hosted",
+        }
+    }
+
+    /// Convert this model card into an OpenAI-compatible [`ModelObject`],
+    /// consuming `self` to avoid cloning the model ID.
+    pub fn into_model_object(self) -> ModelObject {
+        let owned_by = self.owned_by().to_owned();
+        ModelObject {
+            id: self.id,
+            object: "model".to_owned(),
+            created: 0,
+            owned_by,
+        }
     }
 
     /// Check if this is a classification model
