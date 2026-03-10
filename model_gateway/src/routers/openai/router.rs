@@ -549,24 +549,6 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         (StatusCode::OK, info.to_string()).into_response()
     }
 
-    async fn get_models(&self, req: Request<Body>) -> Response {
-        let external_workers = self.external_workers();
-        if external_workers.is_empty() {
-            return error::service_unavailable(
-                "service_unavailable",
-                "No external workers registered",
-            );
-        }
-
-        let auth_header = extract_auth_header(Some(req.headers()), None);
-        self.refresh_external_models(auth_header.as_ref()).await;
-
-        let cards = external_workers.iter().flat_map(|w| w.models());
-        let resp = openai_protocol::models::ListModelsResponse::from_model_cards(cards);
-
-        (StatusCode::OK, Json(resp)).into_response()
-    }
-
     async fn route_chat(
         &self,
         headers: Option<&HeaderMap>,

@@ -4,15 +4,16 @@
 //! - Single Router Mode (enable_igw=false): Router owns workers directly
 //! - Multi-Router Mode (enable_igw=true): RouterManager coordinates everything
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::Request,
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
+    Json,
 };
 use dashmap::DashMap;
 use openai_protocol::{
@@ -23,6 +24,8 @@ use openai_protocol::{
     generate::GenerateRequest,
     interactions::InteractionsRequest,
     messages::CreateMessageRequest,
+    model_card::ModelCard,
+    models::ListModelsResponse,
     realtime_session::{
         RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
         RealtimeTranscriptionSessionCreateRequest,
@@ -30,6 +33,7 @@ use openai_protocol::{
     rerank::RerankRequest,
     responses::{ResponsesGetParams, ResponsesRequest},
 };
+use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -38,6 +42,7 @@ use crate::{
     core::{ConnectionMode, ProviderType, RuntimeType, WorkerRegistry, WorkerType},
     routers::{
         factory::{router_ids, RouterId},
+        header_utils::apply_provider_headers,
         RouterFactory, RouterTrait,
     },
     server::ServerConfig,
@@ -45,6 +50,7 @@ use crate::{
 
 pub struct RouterManager {
     worker_registry: Arc<WorkerRegistry>,
+    client: reqwest::Client,
     routers: Arc<DashMap<RouterId, Arc<dyn RouterTrait>>>,
     routers_snapshot: ArcSwap<Vec<Arc<dyn RouterTrait>>>,
     default_router: Arc<std::sync::RwLock<Option<RouterId>>>,
@@ -52,9 +58,10 @@ pub struct RouterManager {
 }
 
 impl RouterManager {
-    pub fn new(worker_registry: Arc<WorkerRegistry>) -> Self {
+    pub fn new(worker_registry: Arc<WorkerRegistry>, client: reqwest::Client) -> Self {
         Self {
             worker_registry,
+            client,
             routers: Arc::new(DashMap::new()),
             routers_snapshot: ArcSwap::from_pointee(Vec::new()),
             default_router: Arc::new(std::sync::RwLock::new(None)),
@@ -84,7 +91,10 @@ impl RouterManager {
         config: &ServerConfig,
         app_context: &Arc<AppContext>,
     ) -> Result<Arc<Self>, String> {
-        let mut manager = Self::new(app_context.worker_registry.clone());
+        let mut manager = Self::new(
+            app_context.worker_registry.clone(),
+            app_context.client.clone(),
+        );
         manager.enable_igw = config.router_config.enable_igw;
         let manager = Arc::new(manager);
 
@@ -339,6 +349,74 @@ impl RouterManager {
 
         best_router
     }
+
+    /// Fan out `GET /v1/models` to all healthy external upstreams using the
+    /// caller's bearer token. Returns discovered [`ModelCard`]s (empty on
+    /// total failure). This is ephemeral — nothing is persisted to workers.
+    async fn fetch_upstream_models(&self, bearer_token: &str) -> Vec<ModelCard> {
+        let unique_urls: Vec<_> = self
+            .worker_registry
+            .get_workers_filtered(None, None, None, Some(RuntimeType::External), true)
+            .iter()
+            .map(|w| w.url().to_string())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        if unique_urls.is_empty() {
+            return Vec::new();
+        }
+
+        debug!(
+            "Fanning out to {} upstream(s) for model discovery",
+            unique_urls.len()
+        );
+
+        let auth = HeaderValue::from_str(&format!("Bearer {bearer_token}")).ok();
+        let futs = unique_urls
+            .iter()
+            .map(|base| Self::fetch_models_from(self.client.clone(), base, auth.clone()));
+
+        futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    /// Fetch models from a single upstream endpoint.
+    async fn fetch_models_from(
+        client: reqwest::Client,
+        base_url: &str,
+        auth: Option<HeaderValue>,
+    ) -> Vec<ModelCard> {
+        let url = format!("{base_url}/v1/models");
+        let req = apply_provider_headers(client.get(&url), &url, auth.as_ref());
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("Failed to reach upstream {url}: {e}");
+                return Vec::new();
+            }
+        };
+
+        if !resp.status().is_success() {
+            debug!(
+                "Upstream {url} returned {} for model discovery",
+                resp.status()
+            );
+            return Vec::new();
+        }
+
+        match resp.json::<Value>().await {
+            Ok(json) => ListModelsResponse::parse_upstream(&json, ProviderType::from_url(&url)),
+            Err(e) => {
+                warn!("Failed to parse upstream models from {url}: {e}");
+                Vec::new()
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -381,43 +459,37 @@ impl RouterTrait for RouterManager {
     }
 
     async fn get_models(&self, req: Request<Body>) -> Response {
-        // In multi-router (IGW) setups, select router based on request headers
-        // This ensures requests to /v1/models get routed to the correct router
-        // (e.g., Anthropic router for anthropic-version header)
-        let (parts, body) = req.into_parts();
-        let router = if parts.headers.contains_key("anthropic-version") {
-            self.routers
-                .get(&router_ids::HTTP_ANTHROPIC)
-                .map(|r| r.clone())
-                .or_else(|| self.select_router_for_request(Some(&parts.headers), None))
-        } else {
-            self.select_router_for_request(Some(&parts.headers), None)
-        };
+        // Extract bearer token from the request (if present).
+        let bearer_token = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .map(String::from);
 
-        if let Some(router) = router {
-            // Reconstruct request to pass to the selected router
-            let new_req = Request::from_parts(parts, body);
-            let response = router.get_models(new_req).await;
-
-            // If router has a custom implementation, use its response
-            if response.status() != StatusCode::NOT_IMPLEMENTED {
-                return response;
+        // If the caller sent a bearer token, try to discover models from upstream
+        // providers using that token. This enables BYOK (bring your own key) flows.
+        if let Some(ref token) = bearer_token {
+            let upstream_cards = self.fetch_upstream_models(token).await;
+            if !upstream_cards.is_empty() {
+                let resp = ListModelsResponse::from_model_cards(upstream_cards);
+                return (StatusCode::OK, Json(resp)).into_response();
             }
-            // Otherwise fall through to worker registry fallback
+            // All upstreams failed or returned nothing — fall through to registry.
         }
 
-        // Fallback: return OpenAI-compatible format from worker registry
-        let cards = self
+        // Return self-hosted registry models.
+        let cards: Vec<_> = self
             .worker_registry
             .get_all()
             .iter()
             .flat_map(|w| w.models())
-            .collect::<Vec<_>>();
+            .collect();
         if cards.is_empty() {
             (StatusCode::SERVICE_UNAVAILABLE, "No models available").into_response()
         } else {
-            let resp = openai_protocol::models::ListModelsResponse::from_model_cards(cards);
-            (StatusCode::OK, axum::Json(resp)).into_response()
+            let resp = ListModelsResponse::from_model_cards(cards);
+            (StatusCode::OK, Json(resp)).into_response()
         }
     }
 

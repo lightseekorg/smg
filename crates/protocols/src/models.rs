@@ -6,8 +6,9 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use super::model_card::ModelCard;
+use super::{model_card::ModelCard, worker::ProviderType};
 
 /// A single model entry in the `/v1/models` response.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -46,5 +47,24 @@ impl ListModelsResponse {
             object: "list".to_owned(),
             data,
         }
+    }
+
+    /// Parse an upstream `/v1/models` JSON response into [`ModelCard`]s.
+    ///
+    /// Handles both OpenAI and Anthropic response schemas — both use
+    /// `data[].id` for the model identifier. Returns an empty vec if
+    /// the JSON does not contain a valid `data` array.
+    pub fn parse_upstream(json: &Value, provider: Option<ProviderType>) -> Vec<ModelCard> {
+        let Some(data) = json.get("data").and_then(|d| d.as_array()) else {
+            return Vec::new();
+        };
+        data.iter()
+            .filter_map(|m| m.get("id").and_then(|id| id.as_str()))
+            .map(|id| {
+                let mut card = ModelCard::new(id);
+                card.provider.clone_from(&provider);
+                card
+            })
+            .collect()
     }
 }
