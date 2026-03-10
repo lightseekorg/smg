@@ -861,6 +861,55 @@ impl ProtoGenerateComplete {
             Self::Sglang(_) | Self::Trtllm(_) => None,
         }
     }
+
+    #[inline]
+    fn engine(&self) -> &'static str {
+        match self {
+            Self::Sglang(_) => "sglang",
+            Self::Vllm(_) => "vllm",
+            Self::Trtllm(_) => "trtllm",
+        }
+    }
+
+    #[inline]
+    fn to_stats_sample(&self) -> Option<EngineRequestStatsSample> {
+        match self {
+            Self::Sglang(c) => Some(basic_stats_sample(
+                c.prompt_tokens,
+                c.completion_tokens,
+                c.cached_tokens,
+            )),
+            Self::Vllm(c) => Some(basic_stats_sample(
+                c.prompt_tokens,
+                c.completion_tokens,
+                c.cached_tokens,
+            )),
+            Self::Trtllm(c) => {
+                let mut sample =
+                    basic_stats_sample(c.prompt_tokens, c.completion_tokens, c.cached_tokens);
+                let (
+                    request_received_timestamp_s,
+                    first_token_generated_timestamp_s,
+                    request_finished_timestamp_s,
+                ) = c
+                    .perf_metrics
+                    .as_ref()
+                    .map(|m| {
+                        normalize_trtllm_timestamps(
+                            Some(m.arrival_time),
+                            Some(m.first_token_time),
+                            Some(m.last_token_time),
+                        )
+                    })
+                    .unwrap_or((None, None, None));
+
+                sample.request_received_timestamp_s = request_received_timestamp_s;
+                sample.first_token_generated_timestamp_s = first_token_generated_timestamp_s;
+                sample.request_finished_timestamp_s = request_finished_timestamp_s;
+                Some(sample)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -875,130 +924,9 @@ struct EngineRequestStatsSample {
     cached_tokens: u64,
 }
 
-trait EngineRequestStatsMapper {
-    const ENGINE: &'static str;
-
-    fn map_complete(complete: &ProtoGenerateComplete) -> Option<EngineRequestStatsSample>;
-}
-
-struct SglangRequestStatsMapper;
-struct VllmRequestStatsMapper;
-struct TrtllmRequestStatsMapper;
-
-impl EngineRequestStatsMapper for SglangRequestStatsMapper {
-    const ENGINE: &'static str = "sglang";
-
-    fn map_complete(complete: &ProtoGenerateComplete) -> Option<EngineRequestStatsSample> {
-        if let ProtoGenerateComplete::Sglang(c) = complete {
-            let prompt_tokens = u64::from(c.prompt_tokens);
-            let completion_tokens = u64::from(c.completion_tokens);
-            let cached_tokens = u64::from(c.cached_tokens);
-            Some(EngineRequestStatsSample {
-                request_received_timestamp_s: None,
-                first_token_generated_timestamp_s: None,
-                request_finished_timestamp_s: None,
-                cache_hit_rate: derive_cache_hit_rate(cached_tokens, prompt_tokens),
-                spec_decoding_acceptance_rate: None,
-                prompt_tokens,
-                completion_tokens,
-                cached_tokens,
-            })
-        } else {
-            None
-        }
-    }
-}
-
-impl EngineRequestStatsMapper for VllmRequestStatsMapper {
-    const ENGINE: &'static str = "vllm";
-
-    fn map_complete(complete: &ProtoGenerateComplete) -> Option<EngineRequestStatsSample> {
-        if let ProtoGenerateComplete::Vllm(c) = complete {
-            let prompt_tokens = u64::from(c.prompt_tokens);
-            let completion_tokens = u64::from(c.completion_tokens);
-            let cached_tokens = u64::from(c.cached_tokens);
-            Some(EngineRequestStatsSample {
-                request_received_timestamp_s: None,
-                first_token_generated_timestamp_s: None,
-                request_finished_timestamp_s: None,
-                cache_hit_rate: derive_cache_hit_rate(cached_tokens, prompt_tokens),
-                spec_decoding_acceptance_rate: None,
-                prompt_tokens,
-                completion_tokens,
-                cached_tokens,
-            })
-        } else {
-            None
-        }
-    }
-}
-
-impl EngineRequestStatsMapper for TrtllmRequestStatsMapper {
-    const ENGINE: &'static str = "trtllm";
-
-    fn map_complete(complete: &ProtoGenerateComplete) -> Option<EngineRequestStatsSample> {
-        if let ProtoGenerateComplete::Trtllm(c) = complete {
-            let prompt_tokens = u64::from(c.prompt_tokens);
-            let completion_tokens = u64::from(c.completion_tokens);
-            let cached_tokens = u64::from(c.cached_tokens);
-            let (
-                request_received_timestamp_s,
-                first_token_generated_timestamp_s,
-                request_finished_timestamp_s,
-            ) = c
-                .perf_metrics
-                .as_ref()
-                .map(|m| {
-                    normalize_trtllm_timestamps(
-                        Some(m.arrival_time),
-                        Some(m.first_token_time),
-                        Some(m.last_token_time),
-                    )
-                })
-                .unwrap_or((None, None, None));
-
-            Some(EngineRequestStatsSample {
-                request_received_timestamp_s,
-                first_token_generated_timestamp_s,
-                request_finished_timestamp_s,
-                cache_hit_rate: derive_cache_hit_rate(cached_tokens, prompt_tokens),
-                spec_decoding_acceptance_rate: None,
-                prompt_tokens,
-                completion_tokens,
-                cached_tokens,
-            })
-        } else {
-            None
-        }
-    }
-}
-
-/// Build unified request-level stats from engine-specific complete responses.
-pub fn collect_unified_request_stats(
-    completes: &[ProtoGenerateComplete],
-) -> Option<UnifiedRequestStats> {
-    let first = completes.first()?;
-    match first {
-        ProtoGenerateComplete::Sglang(_) => {
-            aggregate_request_stats::<SglangRequestStatsMapper>(completes)
-        }
-        ProtoGenerateComplete::Vllm(_) => {
-            aggregate_request_stats::<VllmRequestStatsMapper>(completes)
-        }
-        ProtoGenerateComplete::Trtllm(_) => {
-            aggregate_request_stats::<TrtllmRequestStatsMapper>(completes)
-        }
-    }
-}
-
 /// Build unified request-level stats from complete responses.
 pub fn collect_request_stats(completes: &[ProtoGenerateComplete]) -> Option<UnifiedRequestStats> {
-    collect_unified_request_stats(completes)
-}
-
-fn aggregate_request_stats<M: EngineRequestStatsMapper>(
-    completes: &[ProtoGenerateComplete],
-) -> Option<UnifiedRequestStats> {
+    let engine = completes.first()?.engine();
     let mut seen = 0u64;
     let mut request_received_timestamp_s: Option<f64> = None;
     let mut first_token_generated_timestamp_s: Option<f64> = None;
@@ -1012,7 +940,10 @@ fn aggregate_request_stats<M: EngineRequestStatsMapper>(
     let mut cached_tokens = 0u64;
 
     for complete in completes {
-        let Some(sample) = M::map_complete(complete) else {
+        if complete.engine() != engine {
+            continue;
+        }
+        let Some(sample) = complete.to_stats_sample() else {
             continue;
         };
         seen += 1;
@@ -1059,7 +990,7 @@ fn aggregate_request_stats<M: EngineRequestStatsMapper>(
     };
 
     Some(UnifiedRequestStats {
-        engine: M::ENGINE,
+        engine,
         error_message: None,
         request_received_timestamp_s,
         first_token_generated_timestamp_s,
@@ -1078,6 +1009,27 @@ fn derive_cache_hit_rate(cached_tokens: u64, prompt_tokens: u64) -> Option<f64> 
         None
     } else {
         Some(cached_tokens as f64 / prompt_tokens as f64)
+    }
+}
+
+#[inline]
+fn basic_stats_sample(
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    cached_tokens: u32,
+) -> EngineRequestStatsSample {
+    let prompt_tokens = u64::from(prompt_tokens);
+    let completion_tokens = u64::from(completion_tokens);
+    let cached_tokens = u64::from(cached_tokens);
+    EngineRequestStatsSample {
+        request_received_timestamp_s: None,
+        first_token_generated_timestamp_s: None,
+        request_finished_timestamp_s: None,
+        cache_hit_rate: derive_cache_hit_rate(cached_tokens, prompt_tokens),
+        spec_decoding_acceptance_rate: None,
+        prompt_tokens,
+        completion_tokens,
+        cached_tokens,
     }
 }
 
@@ -1196,7 +1148,6 @@ impl ProtoStream {
             Self::Trtllm(stream) => stream.mark_completed(),
         }
     }
-
 }
 
 /// Unified EmbedRequest that works with both backends

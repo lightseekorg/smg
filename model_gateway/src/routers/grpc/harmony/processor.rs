@@ -7,8 +7,9 @@ use openai_protocol::{
     chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
     common::{ChatLogProbs, ToolCall, Usage},
     responses::{
-        InputTokensDetails, OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
-        ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+        InputTokensDetails, OutputTokensDetails, ResponseContentPart, ResponseOutputItem,
+        ResponseReasoningContent, ResponseStatus, ResponseUsage, ResponsesRequest,
+        ResponsesResponse, ResponsesUsage,
     },
 };
 use tracing::error;
@@ -57,16 +58,12 @@ impl HarmonyResponseProcessor {
         let response_collection::CollectedResponses {
             completes: all_responses,
             request_stats,
-        } = match response_collection::collect_responses(
+        } = response_collection::collect_responses(
             execution_result,
             request_logprobs,
             self.enable_request_statistics,
         )
-        .await
-        {
-            Ok(collected) => collected,
-            Err(err) => return Err(err),
-        };
+        .await?;
         if all_responses.is_empty() {
             return Err(error::internal_error(
                 "no_responses_from_server",
@@ -223,16 +220,12 @@ impl HarmonyResponseProcessor {
         let response_collection::CollectedResponses {
             completes: all_responses,
             request_stats,
-        } = match response_collection::collect_responses(
+        } = response_collection::collect_responses(
             execution_result,
             request_logprobs,
             self.enable_request_statistics,
         )
-        .await
-        {
-            Ok(collected) => collected,
-            Err(err) => return Err(err),
-        };
+        .await?;
         if all_responses.is_empty() {
             return Err(error::internal_error(
                 "no_responses_from_server",

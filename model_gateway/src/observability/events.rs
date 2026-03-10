@@ -101,77 +101,39 @@ pub struct RequestStatsEvent<'a> {
     pub stats: &'a UnifiedRequestStats,
 }
 
+macro_rules! emit_request_stats {
+    ($log_macro:ident, $event:expr, $($prefix:tt)*) => {{
+        let error_message = $event.error_message.or($event.stats.error_message.as_deref());
+        $log_macro!(
+            $($prefix)*
+            request_id = %($event.request_id),
+            model = %($event.model),
+            router_backend = %($event.router_backend),
+            http_status_code = $event.http_status_code,
+            error_message = error_message,
+            engine = %($event.stats.engine),
+            request_received_timestamp_s = $event.stats.request_received_timestamp_s,
+            first_token_generated_timestamp_s = $event.stats.first_token_generated_timestamp_s,
+            request_finished_timestamp_s = $event.stats.request_finished_timestamp_s,
+            cache_hit_rate = $event.stats.cache_hit_rate,
+            spec_decoding_acceptance_rate = $event.stats.spec_decoding_acceptance_rate,
+            prompt_tokens = $event.stats.prompt_tokens,
+            completion_tokens = $event.stats.completion_tokens,
+            cached_tokens = $event.stats.cached_tokens,
+            "request_stats"
+        );
+    }};
+}
+
 impl Event for RequestStatsEvent<'_> {
     #[inline]
     fn emit(&self) {
-        let request_received_timestamp_s =
-            format_optional_f64(self.stats.request_received_timestamp_s);
-        let first_token_generated_timestamp_s =
-            format_optional_f64(self.stats.first_token_generated_timestamp_s);
-        let request_finished_timestamp_s =
-            format_optional_f64(self.stats.request_finished_timestamp_s);
-        let cache_hit_rate = format_optional_f64(self.stats.cache_hit_rate);
-        let spec_decoding_acceptance_rate =
-            format_optional_f64(self.stats.spec_decoding_acceptance_rate);
-        let http_status_code = format_optional_u16(self.http_status_code);
-        let error_message = self
-            .error_message
-            .or(self.stats.error_message.as_deref())
-            .unwrap_or("None");
-
         if is_otel_enabled() {
-            event!(
-                Level::INFO,
-                request_id = %self.request_id,
-                model = %self.model,
-                router_backend = %self.router_backend,
-                http_status_code = %http_status_code,
-                error_message = %error_message,
-                engine = %self.stats.engine,
-                request_received_timestamp_s = %request_received_timestamp_s,
-                first_token_generated_timestamp_s = %first_token_generated_timestamp_s,
-                request_finished_timestamp_s = %request_finished_timestamp_s,
-                cache_hit_rate = %cache_hit_rate,
-                spec_decoding_acceptance_rate = %spec_decoding_acceptance_rate,
-                prompt_tokens = self.stats.prompt_tokens,
-                completion_tokens = self.stats.completion_tokens,
-                cached_tokens = self.stats.cached_tokens,
-                "request_stats"
-            );
+            emit_request_stats!(event, self, Level::INFO,);
         } else {
-            debug!(
-                request_id = %self.request_id,
-                model = %self.model,
-                router_backend = %self.router_backend,
-                http_status_code = %http_status_code,
-                error_message = %error_message,
-                engine = %self.stats.engine,
-                request_received_timestamp_s = %request_received_timestamp_s,
-                first_token_generated_timestamp_s = %first_token_generated_timestamp_s,
-                request_finished_timestamp_s = %request_finished_timestamp_s,
-                cache_hit_rate = %cache_hit_rate,
-                spec_decoding_acceptance_rate = %spec_decoding_acceptance_rate,
-                prompt_tokens = self.stats.prompt_tokens,
-                completion_tokens = self.stats.completion_tokens,
-                cached_tokens = self.stats.cached_tokens,
-                "request_stats"
-            );
+            emit_request_stats!(debug, self,);
         }
     }
-}
-
-#[inline]
-fn format_optional_f64(value: Option<f64>) -> String {
-    value
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "None".to_string())
-}
-
-#[inline]
-fn format_optional_u16(value: Option<u16>) -> String {
-    value
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "None".to_string())
 }
 
 #[cfg(test)]

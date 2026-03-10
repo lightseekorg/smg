@@ -20,7 +20,7 @@ use openai_protocol::{
     },
 };
 use serde_json::json;
-use smg_mcp::{McpToolSession, ResponseFormat};
+use smg_mcp::{McpToolSession, ResponseFormat, DEFAULT_SERVER_LABEL};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
@@ -576,11 +576,11 @@ impl HarmonyStreamingProcessor {
         // Phase 1: Drain prefill stream, collecting cached_tokens from Complete messages
         let mut prefill_cached_tokens_by_index: HashMap<u32, u32> = HashMap::new();
         while let Some(result) = prefill_stream.next().await {
-            let response = result.map_err(|e| format!("Prefill stream error: {e}"))?;
+            let response = result.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
             if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
                 prefill_cached_tokens_by_index
                     .insert(complete_wrapper.index(), complete_wrapper.cached_tokens());
-        }
+            }
         }
         let prefill_cached_tokens: u32 = prefill_cached_tokens_by_index.values().sum();
 
@@ -618,8 +618,8 @@ impl HarmonyStreamingProcessor {
             HashMap::new();
 
         // Metadata from Complete message; seed cached_tokens from prefill phase (dual-stream)
-        let mut finish_reason = String::from("stop");
-        let mut matched_stop: Option<serde_json::Value> = None;
+        let mut finish_reason: String;
+        let mut finalized_analysis: Option<String> = None;
         let mut prompt_tokens: u32 = 0;
         let mut completion_tokens: u32 = 0;
         let mut cached_tokens: u32 = prefill_cached_tokens;
@@ -629,7 +629,7 @@ impl HarmonyStreamingProcessor {
         let mut chunk_count = 0;
         while let Some(result) = decode_stream.next().await {
             chunk_count += 1;
-            let response = result.map_err(|e| format!("Decode stream error: {e}"))?;
+            let response = result.map_err(|e| format!("Decode stream error: {}", e.message()))?;
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
@@ -766,7 +766,7 @@ impl HarmonyStreamingProcessor {
 
                                 let label = session
                                     .map(|s| s.resolve_tool_server_label(tool_name))
-                                    .unwrap_or_else(|| "mcp".to_string());
+                                    .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
                                 attach_mcp_server_label(
                                     &mut item,
                                     Some(label.as_str()),
@@ -855,7 +855,6 @@ impl HarmonyStreamingProcessor {
                 ProtoResponseVariant::Complete(complete_wrapper) => {
                     // Store final metadata
                     finish_reason = complete_wrapper.finish_reason().to_string();
-                    matched_stop = complete_wrapper.matched_stop_json();
                     prompt_tokens = complete_wrapper.prompt_tokens();
                     // Combine decode-stream cached_tokens with any prefill cached_tokens
                     cached_tokens = cached_tokens.saturating_add(complete_wrapper.cached_tokens());
@@ -866,10 +865,12 @@ impl HarmonyStreamingProcessor {
                     }
 
                     // Finalize parser and get complete output
+                    // Responses API: no user-specified stop sequences
                     let final_output = parser.finalize(finish_reason.clone());
 
-                    // Store finalized tool calls and reasoning token count
-                    accumulated_tool_calls.clone_from(&final_output.commentary);
+                    // Store finalized output for later use
+                    finalized_analysis = final_output.analysis;
+                    accumulated_tool_calls = final_output.commentary;
                     reasoning_token_count = final_output.reasoning_token_count;
 
                     // Complete all tool calls if we have commentary
@@ -928,7 +929,7 @@ impl HarmonyStreamingProcessor {
 
                                 let label = session
                                     .map(|s| s.resolve_tool_server_label(tool_name))
-                                    .unwrap_or_else(|| "mcp".to_string());
+                                    .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
                                 attach_mcp_server_label(
                                     &mut item,
                                     Some(label.as_str()),
@@ -1060,7 +1061,7 @@ impl HarmonyStreamingProcessor {
 
                         let label = session
                             .map(|s| s.resolve_tool_server_label(tool_name))
-                            .unwrap_or_else(|| "mcp".to_string());
+                            .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
                         attach_mcp_server_label(
                             &mut item,
                             Some(label.as_str()),
@@ -1082,10 +1083,7 @@ impl HarmonyStreamingProcessor {
         if let Some(tool_calls) = accumulated_tool_calls {
             if !tool_calls.is_empty() {
                 let analysis_content = if has_analysis {
-                    // Get analysis from finalized parser output by calling finalize again
-                    // This is safe because finalize can be called multiple times
-                    let output = parser.finalize(finish_reason.clone());
-                    output.analysis
+                    finalized_analysis
                 } else {
                     None
                 };

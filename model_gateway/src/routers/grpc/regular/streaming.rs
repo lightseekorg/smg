@@ -59,6 +59,51 @@ struct GenerateStreamContext {
     enable_request_statistics: bool,
 }
 
+/// Encapsulates SSE sender state and tracking for client disconnect.
+struct ClientConnection<'a> {
+    tx: &'a UnboundedSender<Result<Bytes, io::Error>>,
+    client_disconnected: bool,
+    client_disconnect_error_message: Option<&'static str>,
+}
+
+impl<'a> ClientConnection<'a> {
+    #[inline]
+    fn new(tx: &'a UnboundedSender<Result<Bytes, io::Error>>) -> Self {
+        Self {
+            tx,
+            client_disconnected: false,
+            client_disconnect_error_message: None,
+        }
+    }
+
+    #[inline]
+    fn is_disconnected(&self) -> bool {
+        self.client_disconnected
+    }
+
+    #[inline]
+    fn disconnect_error_message(&self) -> Option<&'static str> {
+        self.client_disconnect_error_message
+    }
+
+    fn send_or_abort(
+        &mut self,
+        payload: Bytes,
+        send_error_message: &'static str,
+    ) {
+        if self.client_disconnected {
+            return;
+        }
+        if self.tx.send(Ok(payload)).is_err() {
+            debug!("{}", send_error_message);
+            self.client_disconnected = true;
+            if self.client_disconnect_error_message.is_none() {
+                self.client_disconnect_error_message = Some(send_error_message);
+            }
+        }
+    }
+}
+
 impl StreamingProcessor {
     pub fn new(
         tool_parser_factory: ToolParserFactory,
@@ -221,8 +266,9 @@ impl StreamingProcessor {
 
         // Reusable SSE formatting buffer to avoid allocations per chunk
         let mut sse_buffer = Vec::with_capacity(512);
-        let mut client_disconnected = false;
-        let mut client_disconnect_error_message: Option<&'static str> = None;
+
+        // Connection to send SSE chunks to client
+        let mut client_connection = ClientConnection::new(tx);
 
         // Use dispatch metadata for consistent response fields
         let request_id = &dispatch.request_id;
@@ -275,12 +321,11 @@ impl StreamingProcessor {
             let gen_response = match response {
                 Ok(resp) => resp,
                 Err(e) => {
-                    if client_disconnected {
+                    if client_connection.is_disconnected() {
                         break;
                     }
                     if self.enable_request_statistics {
-                        let total_prompt: u64 =
-                            prompt_tokens.values().map(|v| u64::from(*v)).sum();
+                        let total_prompt: u64 = prompt_tokens.values().map(|v| u64::from(*v)).sum();
                         let total_completion = u64::from(completion_tokens.total());
                         if let Some(mut request_stats) = collect_request_stats(&completed_responses)
                         {
@@ -354,14 +399,10 @@ impl StreamingProcessor {
                             .maybe_system_fingerprint(system_fingerprint)
                             .build();
                         Self::format_sse_chunk_into(&mut sse_buffer, &first_chunk);
-                        Self::send_sse_or_abort(
-                            tx,
+                        client_connection.send_or_abort(
                             Bytes::from(sse_buffer.clone()),
-                            &mut client_disconnected,
                             "Failed to send first chunk",
-                            &mut client_disconnect_error_message,
-                        )
-                        .await?;
+                        );
                         is_firsts.insert(index, false);
                     }
 
@@ -384,14 +425,10 @@ impl StreamingProcessor {
                             .await;
                         if let Some(chunk) = reasoning_chunk {
                             Self::format_sse_chunk_into(&mut sse_buffer, &chunk);
-                            Self::send_sse_or_abort(
-                                tx,
+                            client_connection.send_or_abort(
                                 Bytes::from(sse_buffer.clone()),
-                                &mut client_disconnected,
                                 "Failed to send reasoning chunk",
-                                &mut client_disconnect_error_message,
-                            )
-                            .await?;
+                            );
                         }
                         delta = normal_text;
                         in_reasoning
@@ -441,14 +478,10 @@ impl StreamingProcessor {
 
                             for chunk in tool_chunks {
                                 Self::format_sse_chunk_into(&mut sse_buffer, &chunk);
-                                Self::send_sse_or_abort(
-                                    tx,
+                                client_connection.send_or_abort(
                                     Bytes::from(sse_buffer.clone()),
-                                    &mut client_disconnected,
                                     "Failed to send tool call chunk",
-                                    &mut client_disconnect_error_message,
-                                )
-                                .await?;
+                                );
                             }
 
                             // Always skip regular content when tool parsing is active
@@ -471,14 +504,10 @@ impl StreamingProcessor {
                                 .maybe_system_fingerprint(system_fingerprint)
                                 .build();
                         Self::format_sse_chunk_into(&mut sse_buffer, &content_chunk);
-                        Self::send_sse_or_abort(
-                            tx,
+                        client_connection.send_or_abort(
                             Bytes::from(sse_buffer.clone()),
-                            &mut client_disconnected,
                             "Failed to send content chunk",
-                            &mut client_disconnect_error_message,
-                        )
-                        .await?;
+                        );
                     }
                 }
                 ProtoResponseVariant::Complete(complete) => {
@@ -503,14 +532,10 @@ impl StreamingProcessor {
                                     serde_json::to_string(&content_chunk).map_err(|e| {
                                         format!("Failed to serialize content chunk: {e}")
                                     })?;
-                                Self::send_sse_or_abort(
-                                    tx,
+                                client_connection.send_or_abort(
                                     Bytes::from(format!("data: {sse_chunk}\n\n")),
-                                    &mut client_disconnected,
                                     "Failed to send flushed content",
-                                    &mut client_disconnect_error_message,
-                                )
-                                .await?;
+                                );
                             }
                         }
                     }
@@ -529,8 +554,7 @@ impl StreamingProcessor {
                 }
                 ProtoResponseVariant::Error(error) => {
                     if self.enable_request_statistics {
-                        let total_prompt: u64 =
-                            prompt_tokens.values().map(|v| u64::from(*v)).sum();
+                        let total_prompt: u64 = prompt_tokens.values().map(|v| u64::from(*v)).sum();
                         let total_completion = u64::from(completion_tokens.total());
                         if let Some(mut request_stats) = collect_request_stats(&completed_responses)
                         {
@@ -584,14 +608,10 @@ impl StreamingProcessor {
 
                     let sse_chunk = serde_json::to_string(&tool_chunk)
                         .map_err(|e| format!("Failed to serialize tool chunk: {e}"))?;
-                    Self::send_sse_or_abort(
-                        tx,
+                    client_connection.send_or_abort(
                         Bytes::from(format!("data: {sse_chunk}\n\n")),
-                        &mut client_disconnected,
                         "Failed to send unstreamed tool args",
-                        &mut client_disconnect_error_message,
-                    )
-                    .await?;
+                    );
                 }
             }
         }
@@ -615,14 +635,10 @@ impl StreamingProcessor {
 
             let sse_chunk = serde_json::to_string(&finish_chunk)
                 .map_err(|e| format!("Failed to serialize finish chunk: {e}"))?;
-            Self::send_sse_or_abort(
-                tx,
+            client_connection.send_or_abort(
                 Bytes::from(format!("data: {sse_chunk}\n\n")),
-                &mut client_disconnected,
                 "Failed to send finish chunk",
-                &mut client_disconnect_error_message,
-            )
-            .await?;
+            );
         }
 
         // Phase 5: Usage chunk
@@ -643,14 +659,10 @@ impl StreamingProcessor {
 
                 let sse_chunk = serde_json::to_string(&usage_chunk)
                     .map_err(|e| format!("Failed to serialize usage chunk: {e}"))?;
-                Self::send_sse_or_abort(
-                    tx,
+                client_connection.send_or_abort(
                     Bytes::from(format!("data: {sse_chunk}\n\n")),
-                    &mut client_disconnected,
                     "Failed to send usage chunk",
-                    &mut client_disconnect_error_message,
-                )
-                .await?;
+                );
             }
         }
 
@@ -685,9 +697,15 @@ impl StreamingProcessor {
                     request_id,
                     model,
                     router_backend: self.backend_type,
-                    http_status_code: if client_disconnected { Some(499) } else { Some(200) },
-                    error_message: if client_disconnected {
-                        client_disconnect_error_message.or(Some("Client disconnected"))
+                    http_status_code: if client_connection.is_disconnected() {
+                        Some(499)
+                    } else {
+                        Some(200)
+                    },
+                    error_message: if client_connection.is_disconnected() {
+                        client_connection
+                            .disconnect_error_message()
+                            .or(Some("Client disconnected"))
                     } else {
                         None
                     },
@@ -792,13 +810,7 @@ impl StreamingProcessor {
                 )]
                 tokio::spawn(async move {
                     let result =
-                        Self::process_generate_streaming(
-                            tokenizer,
-                            stream,
-                            ctx,
-                            &tx,
-                        )
-                        .await;
+                        Self::process_generate_streaming(tokenizer, stream, ctx, &tx).await;
 
                     if let Err(e) = result {
                         utils::send_error_sse(&tx, &e, "internal_error");
@@ -851,8 +863,7 @@ impl StreamingProcessor {
     ) -> Result<(), String> {
         let start_time = Instant::now();
         let mut first_token_time: Option<Instant> = None;
-        let mut client_disconnected = false;
-        let mut client_disconnect_error_message: Option<&'static str> = None;
+        let mut client_connection = ClientConnection::new(tx);
 
         // Track state per index for n>1 case
         let mut accumulated_texts: HashMap<u32, String> = HashMap::new();
@@ -863,7 +874,7 @@ impl StreamingProcessor {
             let gen_response = match response {
                 Ok(resp) => resp,
                 Err(e) => {
-                    if client_disconnected {
+                    if client_connection.is_disconnected() {
                         break;
                     }
                     if ctx.enable_request_statistics {
@@ -923,14 +934,10 @@ impl StreamingProcessor {
 
                     let sse_data = serde_json::to_string(&chunk_response)
                         .map_err(|e| format!("Failed to serialize generate chunk: {e}"))?;
-                    Self::send_sse_or_abort(
-                        tx,
+                    client_connection.send_or_abort(
                         Bytes::from(format!("data: {sse_data}\n\n")),
-                        &mut client_disconnected,
                         "Failed to send chunk",
-                        &mut client_disconnect_error_message,
-                    )
-                    .await?;
+                    );
                 }
                 ProtoResponseVariant::Complete(complete) => {
                     completed_responses.push(complete.clone());
@@ -959,14 +966,10 @@ impl StreamingProcessor {
 
                     let sse_data = serde_json::to_string(&finish_response)
                         .map_err(|e| format!("Failed to serialize generate finish: {e}"))?;
-                    Self::send_sse_or_abort(
-                        tx,
+                    client_connection.send_or_abort(
                         Bytes::from(format!("data: {sse_data}\n\n")),
-                        &mut client_disconnected,
                         "Failed to send finish chunk",
-                        &mut client_disconnect_error_message,
-                    )
-                    .await?;
+                    );
 
                     // Continue to process all completions if n>1
                 }
@@ -995,9 +998,15 @@ impl StreamingProcessor {
         Self::emit_generate_request_stats(
             &ctx,
             &completed_responses,
-            if client_disconnected { Some(499) } else { Some(200) },
-            if client_disconnected {
-                client_disconnect_error_message.or(Some("Client disconnected"))
+            if client_connection.is_disconnected() {
+                Some(499)
+            } else {
+                Some(200)
+            },
+            if client_connection.is_disconnected() {
+                client_connection
+                    .disconnect_error_message()
+                    .or(Some("Client disconnected"))
             } else {
                 None
             },
@@ -1071,8 +1080,7 @@ impl StreamingProcessor {
     ) -> Result<(), String> {
         let start_time = Instant::now();
         let mut first_token_time: Option<Instant> = None;
-        let mut client_disconnected = false;
-        let mut client_disconnect_error_message: Option<&'static str> = None;
+        let mut client_connection = ClientConnection::new(tx);
 
         // Track state per index for n>1 case
         let mut accumulated_texts: HashMap<u32, String> = HashMap::new();
@@ -1085,7 +1093,7 @@ impl StreamingProcessor {
             let gen_response = match response {
                 Ok(resp) => resp,
                 Err(e) => {
-                    if client_disconnected {
+                    if client_connection.is_disconnected() {
                         break;
                     }
                     if ctx.enable_request_statistics {
@@ -1171,14 +1179,10 @@ impl StreamingProcessor {
 
                     let sse_data = serde_json::to_string(&chunk_response)
                         .map_err(|e| format!("Failed to serialize generate chunk: {e}"))?;
-                    Self::send_sse_or_abort(
-                        tx,
+                    client_connection.send_or_abort(
                         Bytes::from(format!("data: {sse_data}\n\n")),
-                        &mut client_disconnected,
                         "Failed to send chunk",
-                        &mut client_disconnect_error_message,
-                    )
-                    .await?;
+                    );
                 }
                 ProtoResponseVariant::Complete(complete) => {
                     completed_responses.push(complete.clone());
@@ -1221,14 +1225,10 @@ impl StreamingProcessor {
 
                     let sse_data = serde_json::to_string(&finish_response)
                         .map_err(|e| format!("Failed to serialize generate finish: {e}"))?;
-                    Self::send_sse_or_abort(
-                        tx,
+                    client_connection.send_or_abort(
                         Bytes::from(format!("data: {sse_data}\n\n")),
-                        &mut client_disconnected,
                         "Failed to send finish chunk",
-                        &mut client_disconnect_error_message,
-                    )
-                    .await?;
+                    );
 
                     // Continue to process all completions if n>1
                 }
@@ -1257,9 +1257,15 @@ impl StreamingProcessor {
         Self::emit_generate_request_stats(
             &ctx,
             &completed_responses,
-            if client_disconnected { Some(499) } else { Some(200) },
-            if client_disconnected {
-                client_disconnect_error_message.or(Some("Client disconnected"))
+            if client_connection.is_disconnected() {
+                Some(499)
+            } else {
+                Some(200)
+            },
+            if client_connection.is_disconnected() {
+                client_connection
+                    .disconnect_error_message()
+                    .or(Some("Client disconnected"))
             } else {
                 None
             },
@@ -1601,26 +1607,5 @@ impl StreamingProcessor {
             buffer.extend_from_slice(error_msg.as_bytes());
         }
         buffer.extend_from_slice(b"\n\n");
-    }
-
-    async fn send_sse_or_abort(
-        tx: &UnboundedSender<Result<Bytes, io::Error>>,
-        payload: Bytes,
-        client_disconnected: &mut bool,
-        send_error_message: &'static str,
-        client_disconnect_error_message: &mut Option<&'static str>,
-    ) -> Result<(), String> {
-        if *client_disconnected {
-            return Ok(());
-        }
-        if tx.send(Ok(payload)).is_err() {
-            debug!("{}", send_error_message);
-            *client_disconnected = true;
-            if client_disconnect_error_message.is_none() {
-                *client_disconnect_error_message = Some(send_error_message);
-            }
-            return Ok(());
-        }
-        Ok(())
     }
 }
