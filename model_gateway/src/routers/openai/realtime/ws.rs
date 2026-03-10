@@ -1,9 +1,23 @@
 //! WebSocket transport helpers for `/v1/realtime`.
-//!
-//! The handler logic lives in `OpenAIRouter::route_realtime_ws`.
-//! This module provides shared types and URL construction.
 
+use std::sync::Arc;
+
+use axum::{
+    extract::{
+        ws::{WebSocket, WebSocketUpgrade},
+        FromRequestParts,
+    },
+    http::{request::Parts, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+};
 use serde::Deserialize;
+
+use super::{proxy::run_ws_proxy, RealtimeRegistry};
+use crate::{
+    core::Worker,
+    observability::metrics::{metrics_labels, Metrics},
+    routers::header_utils::extract_auth_header,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct RealtimeQueryParams {
@@ -27,4 +41,115 @@ pub(crate) fn build_upstream_ws_url(worker_url: &str, model: &str) -> String {
         .append_pair("model", model)
         .finish();
     format!("{ws_base}/v1/realtime?{query}")
+}
+
+/// Handle a realtime WebSocket upgrade request.
+///
+/// The caller is responsible for extracting the model from the query string
+/// and selecting a worker. This function handles WS upgrade, auth resolution,
+/// and proxy spawning.
+pub(crate) async fn handle_realtime_ws(
+    mut parts: Parts,
+    model: String,
+    worker: Result<Arc<dyn Worker>, Response>,
+    auth_header: Option<HeaderValue>,
+    realtime_registry: Arc<RealtimeRegistry>,
+) -> Response {
+    let worker = match worker {
+        Ok(w) => w,
+        Err(response) => {
+            Metrics::record_router_error(
+                metrics_labels::ROUTER_OPENAI,
+                metrics_labels::BACKEND_EXTERNAL,
+                metrics_labels::CONNECTION_WEBSOCKET,
+                &model,
+                metrics_labels::ENDPOINT_REALTIME,
+                metrics_labels::ERROR_NO_WORKERS,
+            );
+            return response;
+        }
+    };
+
+    let worker_url = worker.url().to_string();
+    let upstream_ws_url = build_upstream_ws_url(&worker_url, &model);
+
+    // Use user auth if available, fall back to worker's API key
+    let effective_auth = auth_header.or_else(|| extract_auth_header(None, worker.api_key()));
+    let auth_str = match effective_auth {
+        Some(v) => match v.to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_WEBSOCKET,
+                    &model,
+                    metrics_labels::ENDPOINT_REALTIME,
+                    metrics_labels::ERROR_VALIDATION,
+                );
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "Authorization header contains invalid UTF-8 characters",
+                )
+                    .into_response();
+            }
+        },
+        None => {
+            Metrics::record_router_error(
+                metrics_labels::ROUTER_OPENAI,
+                metrics_labels::BACKEND_EXTERNAL,
+                metrics_labels::CONNECTION_WEBSOCKET,
+                &model,
+                metrics_labels::ENDPOINT_REALTIME,
+                metrics_labels::ERROR_VALIDATION,
+            );
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    };
+
+    let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            Metrics::record_router_error(
+                metrics_labels::ROUTER_OPENAI,
+                metrics_labels::BACKEND_EXTERNAL,
+                metrics_labels::CONNECTION_WEBSOCKET,
+                &model,
+                metrics_labels::ENDPOINT_REALTIME,
+                metrics_labels::ERROR_VALIDATION,
+            );
+            return e.into_response();
+        }
+    };
+
+    let session_id = uuid::Uuid::now_v7().to_string();
+    let entry =
+        realtime_registry.register_session(session_id.clone(), model.clone(), worker_url.clone());
+    let cancel_token = entry.cancel_token.clone();
+
+    tracing::info!(
+        session_id,
+        model,
+        worker_url,
+        "Upgrading to realtime WebSocket"
+    );
+
+    ws.on_upgrade(move |socket: WebSocket| async move {
+        if let Err(e) = run_ws_proxy(
+            socket,
+            &upstream_ws_url,
+            &auth_str,
+            realtime_registry.clone(),
+            session_id.clone(),
+            cancel_token,
+        )
+        .await
+        {
+            tracing::error!(session_id, error = %e, "Realtime WebSocket proxy error");
+        }
+
+        // Cleanup: remove session on disconnect
+        realtime_registry.remove_session(&session_id);
+        tracing::debug!(session_id, "Realtime session cleaned up");
+    })
 }
