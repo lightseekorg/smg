@@ -23,6 +23,10 @@ use openai_protocol::{
     generate::GenerateRequest,
     interactions::InteractionsRequest,
     messages::CreateMessageRequest,
+    realtime_session::{
+        RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
+        RealtimeTranscriptionSessionCreateRequest,
+    },
     rerank::RerankRequest,
     responses::{ResponsesGetParams, ResponsesRequest},
 };
@@ -743,6 +747,72 @@ impl RouterTrait for RouterManager {
             (
                 StatusCode::NOT_FOUND,
                 "No router available for rerank request",
+            )
+                .into_response()
+        }
+    }
+
+    async fn route_realtime_session(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeSessionCreateRequest,
+    ) -> Response {
+        let router = self.select_router_for_request(headers, None);
+        if let Some(router) = router {
+            router.route_realtime_session(headers, body).await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available for realtime session request",
+            )
+                .into_response()
+        }
+    }
+
+    async fn route_realtime_client_secret(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeClientSecretCreateRequest,
+    ) -> Response {
+        let router = self.select_router_for_request(headers, None);
+        if let Some(router) = router {
+            router.route_realtime_client_secret(headers, body).await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available for realtime client secret request",
+            )
+                .into_response()
+        }
+    }
+
+    async fn route_realtime_transcription_session(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeTranscriptionSessionCreateRequest,
+    ) -> Response {
+        let router = self.select_router_for_request(headers, None);
+        if let Some(router) = router {
+            router
+                .route_realtime_transcription_session(headers, body)
+                .await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available for realtime transcription request",
+            )
+                .into_response()
+        }
+    }
+
+    async fn route_realtime_ws(&self, req: Request<Body>) -> Response {
+        let router = self.select_router_for_request(None, None);
+        if let Some(router) = router {
+            router.route_realtime_ws(req).await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available for realtime WebSocket request",
             )
                 .into_response()
         }

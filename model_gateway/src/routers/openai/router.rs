@@ -18,6 +18,10 @@ use axum::{
 use futures_util::{future::join_all, StreamExt};
 use openai_protocol::{
     chat::ChatCompletionRequest,
+    realtime_session::{
+        RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
+        RealtimeTranscriptionSessionCreateRequest,
+    },
     responses::{
         generate_id, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
         ResponsesGetParams, ResponsesRequest,
@@ -267,6 +271,120 @@ impl OpenAIRouter {
                     error::model_not_found(model_id)
                 }
             })
+    }
+
+    /// Forward a realtime REST request to the upstream worker.
+    ///
+    /// Shared logic for sessions, client_secrets, and transcription_sessions:
+    /// worker selection with lazy refresh, auth, load tracking, metrics, and proxy.
+    async fn forward_realtime_rest(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &(impl serde::Serialize + Sync),
+        model: &str,
+        endpoint: &str,
+        endpoint_label: &'static str,
+    ) -> Response {
+        let start = Instant::now();
+
+        Metrics::record_router_request(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model,
+            endpoint_label,
+            "false",
+        );
+
+        let auth_header = extract_auth_header(headers, None);
+
+        let worker = match self
+            .select_worker_for_model(model, auth_header.as_ref())
+            .await
+        {
+            Ok(w) => w,
+            Err(response) => {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model,
+                    endpoint_label,
+                    metrics_labels::ERROR_NO_WORKERS,
+                );
+                return response;
+            }
+        };
+
+        let auth = match extract_auth_header(headers, worker.api_key()) {
+            Some(v) => v,
+            None => {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model,
+                    endpoint_label,
+                    metrics_labels::ERROR_VALIDATION,
+                );
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+        };
+
+        // Track load for the duration of the upstream request
+        let _guard = WorkerLoadGuard::new(worker.clone(), headers);
+
+        let upstream_url = format!("{}{endpoint}", worker.url().trim_end_matches('/'));
+
+        let result = self
+            .shared_components
+            .client
+            .post(&upstream_url)
+            .header("Authorization", &auth)
+            .json(body)
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) => {
+                let success = resp.status().is_success();
+                let response = proxy_response(resp).await;
+                worker.record_outcome(success);
+                if success {
+                    Metrics::record_router_duration(
+                        metrics_labels::ROUTER_OPENAI,
+                        metrics_labels::BACKEND_EXTERNAL,
+                        metrics_labels::CONNECTION_HTTP,
+                        model,
+                        endpoint_label,
+                        start.elapsed(),
+                    );
+                } else {
+                    Metrics::record_router_error(
+                        metrics_labels::ROUTER_OPENAI,
+                        metrics_labels::BACKEND_EXTERNAL,
+                        metrics_labels::CONNECTION_HTTP,
+                        model,
+                        endpoint_label,
+                        metrics_labels::ERROR_BACKEND,
+                    );
+                }
+                response
+            }
+            Err(e) => {
+                tracing::error!(error = %e, endpoint, "Failed to forward realtime REST request");
+                worker.record_outcome(false);
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model,
+                    endpoint_label,
+                    metrics_labels::ERROR_BACKEND,
+                );
+                StatusCode::BAD_GATEWAY.into_response()
+            }
+        }
     }
 
     /// Deserialize ResponseInputOutputItems from a JSON array value
@@ -1069,145 +1187,54 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         }
     }
 
-    async fn route_realtime_rest(
+    async fn route_realtime_session(
         &self,
         headers: Option<&HeaderMap>,
-        body: &Value,
-        endpoint: &str,
+        body: &RealtimeSessionCreateRequest,
     ) -> Response {
-        let start = Instant::now();
-        let endpoint_label = match endpoint {
-            "/v1/realtime/sessions" => metrics_labels::ENDPOINT_REALTIME_SESSIONS,
-            "/v1/realtime/client_secrets" => metrics_labels::ENDPOINT_REALTIME_CLIENT_SECRETS,
-            "/v1/realtime/transcription_sessions" => {
-                metrics_labels::ENDPOINT_REALTIME_TRANSCRIPTION
-            }
-            _ => metrics_labels::ENDPOINT_REALTIME,
-        };
-
-        // TODO(Phase 3): Inject MCP tool definitions into the request body
-        // - client_secrets: body.session.tools
-        // - sessions: body.tools
-        // - transcription_sessions: config
-
-        // Extract model from body — location depends on endpoint
-        let model = if endpoint == "/v1/realtime/client_secrets" {
-            body.pointer("/session/model").and_then(|v| v.as_str())
-        } else {
-            body.get("model").and_then(|v| v.as_str())
-        };
-        let model = match model {
-            Some(m) => m,
-            None => {
-                return error::bad_request(
-                    "missing_model",
-                    if endpoint == "/v1/realtime/client_secrets" {
-                        "session.model is required"
-                    } else {
-                        "model is required"
-                    },
-                );
-            }
-        };
-
-        Metrics::record_router_request(
-            metrics_labels::ROUTER_OPENAI,
-            metrics_labels::BACKEND_EXTERNAL,
-            metrics_labels::CONNECTION_HTTP,
+        // TODO(Phase 3): Inject MCP tool definitions into body.tools
+        let model = body.model.as_deref().unwrap_or_default();
+        self.forward_realtime_rest(
+            headers,
+            body,
             model,
-            endpoint_label,
-            "false",
-        );
+            "/v1/realtime/sessions",
+            metrics_labels::ENDPOINT_REALTIME_SESSIONS,
+        )
+        .await
+    }
 
-        let auth_header = extract_auth_header(headers, None);
+    async fn route_realtime_client_secret(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeClientSecretCreateRequest,
+    ) -> Response {
+        // TODO(Phase 3): Inject MCP tool definitions into body.session.tools
+        let model = body.session.model.as_deref().unwrap_or_default();
+        self.forward_realtime_rest(
+            headers,
+            body,
+            model,
+            "/v1/realtime/client_secrets",
+            metrics_labels::ENDPOINT_REALTIME_CLIENT_SECRETS,
+        )
+        .await
+    }
 
-        let worker = match self
-            .select_worker_for_model(model, auth_header.as_ref())
-            .await
-        {
-            Ok(w) => w,
-            Err(response) => {
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
-                    metrics_labels::CONNECTION_HTTP,
-                    model,
-                    endpoint_label,
-                    metrics_labels::ERROR_NO_WORKERS,
-                );
-                return response;
-            }
-        };
-
-        let auth = match extract_auth_header(headers, worker.api_key()) {
-            Some(v) => v,
-            None => {
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
-                    metrics_labels::CONNECTION_HTTP,
-                    model,
-                    endpoint_label,
-                    metrics_labels::ERROR_VALIDATION,
-                );
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-        };
-
-        // Track load for the duration of the upstream request
-        let _guard = WorkerLoadGuard::new(worker.clone(), headers);
-
-        let upstream_url = format!("{}{endpoint}", worker.url().trim_end_matches('/'));
-
-        let result = self
-            .shared_components
-            .client
-            .post(&upstream_url)
-            .header("Authorization", &auth)
-            .json(body)
-            .send()
-            .await;
-
-        match result {
-            Ok(resp) => {
-                let success = resp.status().is_success();
-                let response = proxy_response(resp).await;
-                worker.record_outcome(success);
-                if success {
-                    Metrics::record_router_duration(
-                        metrics_labels::ROUTER_OPENAI,
-                        metrics_labels::BACKEND_EXTERNAL,
-                        metrics_labels::CONNECTION_HTTP,
-                        model,
-                        endpoint_label,
-                        start.elapsed(),
-                    );
-                } else {
-                    Metrics::record_router_error(
-                        metrics_labels::ROUTER_OPENAI,
-                        metrics_labels::BACKEND_EXTERNAL,
-                        metrics_labels::CONNECTION_HTTP,
-                        model,
-                        endpoint_label,
-                        metrics_labels::ERROR_BACKEND,
-                    );
-                }
-                response
-            }
-            Err(e) => {
-                tracing::error!(error = %e, endpoint, "Failed to forward realtime REST request");
-                worker.record_outcome(false);
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
-                    metrics_labels::CONNECTION_HTTP,
-                    model,
-                    endpoint_label,
-                    metrics_labels::ERROR_BACKEND,
-                );
-                StatusCode::BAD_GATEWAY.into_response()
-            }
-        }
+    async fn route_realtime_transcription_session(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeTranscriptionSessionCreateRequest,
+    ) -> Response {
+        // Transcription sessions don't require a model field
+        self.forward_realtime_rest(
+            headers,
+            body,
+            "realtime-transcription",
+            "/v1/realtime/transcription_sessions",
+            metrics_labels::ENDPOINT_REALTIME_TRANSCRIPTION,
+        )
+        .await
     }
 
     async fn route_realtime_ws(&self, req: Request<Body>) -> Response {

@@ -17,6 +17,10 @@ use openai_protocol::{
     generate::GenerateRequest,
     interactions::InteractionsRequest,
     messages::CreateMessageRequest,
+    realtime_session::{
+        RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
+        RealtimeTranscriptionSessionCreateRequest,
+    },
     rerank::RerankRequest,
     responses::{ResponsesGetParams, ResponsesRequest},
 };
@@ -233,14 +237,43 @@ pub trait RouterTrait: Send + Sync + Debug {
             .into_response()
     }
 
-    /// Route a realtime REST request (sessions, client_secrets, transcription_sessions)
-    async fn route_realtime_rest(
+    /// Route a realtime session create request (/v1/realtime/sessions)
+    async fn route_realtime_session(
         &self,
         _headers: Option<&HeaderMap>,
-        _body: &serde_json::Value,
-        _endpoint: &str,
+        _body: &RealtimeSessionCreateRequest,
     ) -> Response {
-        (StatusCode::NOT_IMPLEMENTED, "Realtime REST not implemented").into_response()
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Realtime sessions not implemented",
+        )
+            .into_response()
+    }
+
+    /// Route a realtime client secret create request (/v1/realtime/client_secrets)
+    async fn route_realtime_client_secret(
+        &self,
+        _headers: Option<&HeaderMap>,
+        _body: &RealtimeClientSecretCreateRequest,
+    ) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Realtime client secrets not implemented",
+        )
+            .into_response()
+    }
+
+    /// Route a realtime transcription session create request (/v1/realtime/transcription_sessions)
+    async fn route_realtime_transcription_session(
+        &self,
+        _headers: Option<&HeaderMap>,
+        _body: &RealtimeTranscriptionSessionCreateRequest,
+    ) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Realtime transcription sessions not implemented",
+        )
+            .into_response()
     }
 
     /// Route a realtime WebSocket upgrade request

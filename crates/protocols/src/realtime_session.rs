@@ -5,15 +5,20 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use validator::{Validate, ValidationError};
 
-use crate::common::{Redacted, ResponsePrompt, ToolReference};
+use crate::{
+    common::{Redacted, ResponsePrompt, ToolReference},
+    validated::Normalizable,
+};
 
 // ============================================================================
 // Session Configuration
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "validate_session_create_request"))]
 pub struct RealtimeSessionCreateRequest {
     #[serde(rename = "type")]
     pub r#type: RealtimeSessionType,
@@ -29,6 +34,17 @@ pub struct RealtimeSessionCreateRequest {
     pub tools: Option<RealtimeToolsConfig>,
     pub tracing: Option<RealtimeTracingConfig>,
     pub truncation: Option<RealtimeTruncation>,
+}
+
+impl Normalizable for RealtimeSessionCreateRequest {}
+
+fn validate_session_create_request(
+    req: &RealtimeSessionCreateRequest,
+) -> Result<(), ValidationError> {
+    if req.model.is_none() {
+        return Err(ValidationError::new("model is required"));
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -60,12 +76,16 @@ pub struct RealtimeSessionCreateResponse {
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct RealtimeTranscriptionSessionCreateRequest {
     #[serde(rename = "type")]
     pub r#type: RealtimeTranscriptionSessionType,
     pub audio: Option<RealtimeTranscriptionSessionAudio>,
     pub include: Option<Vec<RealtimeIncludeOption>>,
+}
+
+impl Normalizable for RealtimeTranscriptionSessionCreateRequest {
+    // Use default no-op implementation
 }
 
 // ============================================================================
@@ -445,6 +465,24 @@ pub enum RealtimeTruncation {
 // ============================================================================
 // Client Secret
 // ============================================================================
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "validate_client_secret_create_request"))]
+pub struct RealtimeClientSecretCreateRequest {
+    pub session: RealtimeSessionCreateRequest,
+}
+
+impl Normalizable for RealtimeClientSecretCreateRequest {}
+
+fn validate_client_secret_create_request(
+    req: &RealtimeClientSecretCreateRequest,
+) -> Result<(), ValidationError> {
+    if req.session.model.is_none() {
+        return Err(ValidationError::new("session.model is required"));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RealtimeSessionClientSecret {

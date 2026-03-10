@@ -23,6 +23,10 @@ use openai_protocol::{
     interactions::InteractionsRequest,
     messages::CreateMessageRequest,
     parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
+    realtime_session::{
+        RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
+        RealtimeTranscriptionSessionCreateRequest,
+    },
     rerank::{RerankRequest, V1RerankReqInput},
     responses::{ResponsesGetParams, ResponsesRequest},
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
@@ -440,33 +444,33 @@ async fn v1_realtime_ws(State(state): State<Arc<AppState>>, req: Request) -> Res
 async fn v1_realtime_session(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
-    Json(body): Json<Value>,
+    ValidatedJson(body): ValidatedJson<RealtimeSessionCreateRequest>,
 ) -> Response {
     state
         .router
-        .route_realtime_rest(Some(&headers), &body, "/v1/realtime/sessions")
+        .route_realtime_session(Some(&headers), &body)
         .await
 }
 
 async fn v1_realtime_client_secret(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
-    Json(body): Json<Value>,
+    ValidatedJson(body): ValidatedJson<RealtimeClientSecretCreateRequest>,
 ) -> Response {
     state
         .router
-        .route_realtime_rest(Some(&headers), &body, "/v1/realtime/client_secrets")
+        .route_realtime_client_secret(Some(&headers), &body)
         .await
 }
 
 async fn v1_realtime_transcription_session(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
-    Json(body): Json<Value>,
+    ValidatedJson(body): ValidatedJson<RealtimeTranscriptionSessionCreateRequest>,
 ) -> Response {
     state
         .router
-        .route_realtime_rest(Some(&headers), &body, "/v1/realtime/transcription_sessions")
+        .route_realtime_transcription_session(Some(&headers), &body)
         .await
 }
 
