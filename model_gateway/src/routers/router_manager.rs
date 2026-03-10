@@ -23,10 +23,13 @@ use openai_protocol::{
     generate::GenerateRequest,
     interactions::InteractionsRequest,
     messages::CreateMessageRequest,
+    realtime_session::{
+        RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
+        RealtimeTranscriptionSessionCreateRequest,
+    },
     rerank::RerankRequest,
     responses::{ResponsesGetParams, ResponsesRequest},
 };
-use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -404,32 +407,17 @@ impl RouterTrait for RouterManager {
         }
 
         // Fallback: return OpenAI-compatible format from worker registry
-        let model_names = self.worker_registry.get_models();
-
-        if model_names.is_empty() {
+        let cards = self
+            .worker_registry
+            .get_all()
+            .iter()
+            .flat_map(|w| w.models())
+            .collect::<Vec<_>>();
+        if cards.is_empty() {
             (StatusCode::SERVICE_UNAVAILABLE, "No models available").into_response()
         } else {
-            // Convert model names to OpenAI-compatible model objects
-            let models: Vec<Value> = model_names
-                .iter()
-                .map(|name| {
-                    serde_json::json!({
-                        "id": name,
-                        "object": "model",
-                        "owned_by": "local"
-                    })
-                })
-                .collect();
-
-            (
-                StatusCode::OK,
-                serde_json::json!({
-                    "object": "list",
-                    "data": models
-                })
-                .to_string(),
-            )
-                .into_response()
+            let resp = openai_protocol::models::ListModelsResponse::from_model_cards(cards);
+            (StatusCode::OK, axum::Json(resp)).into_response()
         }
     }
 
@@ -743,6 +731,75 @@ impl RouterTrait for RouterManager {
             (
                 StatusCode::NOT_FOUND,
                 "No router available for rerank request",
+            )
+                .into_response()
+        }
+    }
+
+    async fn route_realtime_session(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeSessionCreateRequest,
+    ) -> Response {
+        let model = body.model.as_deref();
+        let router = self.select_router_for_request(headers, model);
+        if let Some(router) = router {
+            router.route_realtime_session(headers, body).await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available for realtime session request",
+            )
+                .into_response()
+        }
+    }
+
+    async fn route_realtime_client_secret(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeClientSecretCreateRequest,
+    ) -> Response {
+        let model = body.session.model.as_deref();
+        let router = self.select_router_for_request(headers, model);
+        if let Some(router) = router {
+            router.route_realtime_client_secret(headers, body).await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available for realtime client secret request",
+            )
+                .into_response()
+        }
+    }
+
+    async fn route_realtime_transcription_session(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeTranscriptionSessionCreateRequest,
+    ) -> Response {
+        let model = body.model.as_deref();
+        let router = self.select_router_for_request(headers, model);
+        if let Some(router) = router {
+            router
+                .route_realtime_transcription_session(headers, body)
+                .await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available for realtime transcription request",
+            )
+                .into_response()
+        }
+    }
+
+    async fn route_realtime_ws(&self, req: Request<Body>, model: &str) -> Response {
+        let router = self.select_router_for_request(None, Some(model));
+        if let Some(router) = router {
+            router.route_realtime_ws(req, model).await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available for realtime WebSocket request",
             )
                 .into_response()
         }
