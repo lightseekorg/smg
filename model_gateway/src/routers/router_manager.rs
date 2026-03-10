@@ -350,9 +350,10 @@ impl RouterManager {
         best_router
     }
 
-    /// Fan out `GET /v1/models` to all healthy external upstreams using the
-    /// caller's bearer token. Returns discovered [`ModelCard`]s (empty on
-    /// total failure). This is ephemeral — nothing is persisted to workers.
+    /// Try each healthy external upstream with the caller's bearer token and
+    /// return the first successful model inventory. This avoids leaking a
+    /// provider key to unrelated upstreams and prevents merging cross-provider
+    /// model lists. Returns an empty vec on total failure.
     async fn fetch_upstream_models(&self, bearer_token: &str) -> Vec<ModelCard> {
         let unique_urls: Vec<_> = self
             .worker_registry
@@ -368,20 +369,20 @@ impl RouterManager {
         }
 
         debug!(
-            "Fanning out to {} upstream(s) for model discovery",
+            "Trying {} upstream(s) for model discovery",
             unique_urls.len()
         );
 
         let auth = HeaderValue::from_str(&format!("Bearer {bearer_token}")).ok();
-        let futs = unique_urls
-            .iter()
-            .map(|base| Self::fetch_models_from(self.client.clone(), base, auth.clone()));
 
-        futures::future::join_all(futs)
-            .await
-            .into_iter()
-            .flatten()
-            .collect()
+        for base_url in &unique_urls {
+            let cards = Self::fetch_models_from(self.client.clone(), base_url, auth.clone()).await;
+            if !cards.is_empty() {
+                return cards;
+            }
+        }
+
+        Vec::new()
     }
 
     /// Fetch models from a single upstream endpoint.
@@ -426,15 +427,9 @@ impl RouterTrait for RouterManager {
     }
 
     async fn health_generate(&self, _req: Request<Body>) -> Response {
-        // IGW readiness: return 200 if at least one router has healthy workers
-        let has_healthy_workers = self
-            .worker_registry
-            .get_all()
-            .iter()
-            .any(|w| w.is_healthy());
-
-        if has_healthy_workers {
-            (StatusCode::OK, "At least one router has healthy workers").into_response()
+        let router = self.select_router_for_request(None, None);
+        if let Some(router) = router {
+            router.health_generate(_req).await
         } else {
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -444,28 +439,25 @@ impl RouterTrait for RouterManager {
         }
     }
 
-    async fn get_server_info(&self, _req: Request<Body>) -> Response {
-        // TODO: Aggregate info from all routers with healthy workers
-        (
-            StatusCode::OK,
-            serde_json::json!({
-                "router_manager": true,
-                "routers_count": self.routers.len(),
-                "workers_count": self.worker_registry.get_all().len()
-            })
-            .to_string(),
-        )
-            .into_response()
+    async fn get_server_info(&self, req: Request<Body>) -> Response {
+        let router = self.select_router_for_request(None, None);
+        if let Some(router) = router {
+            router.get_server_info(req).await
+        } else {
+            (StatusCode::SERVICE_UNAVAILABLE, "No routers available").into_response()
+        }
     }
 
     async fn get_models(&self, req: Request<Body>) -> Response {
-        // Extract bearer token from the request (if present).
+        // Extract bearer token (case-insensitive "Bearer " prefix per RFC 7235).
         let bearer_token = req
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer "))
-            .map(String::from);
+            .and_then(|h| {
+                let lower = h.to_ascii_lowercase();
+                lower.starts_with("bearer ").then(|| h[7..].to_string())
+            });
 
         // If the caller sent a bearer token, try to discover models from upstream
         // providers using that token. This enables BYOK (bring your own key) flows.
@@ -478,11 +470,12 @@ impl RouterTrait for RouterManager {
             // All upstreams failed or returned nothing — fall through to registry.
         }
 
-        // Return self-hosted registry models.
+        // Return self-hosted registry models (exclude external workers).
         let cards: Vec<_> = self
             .worker_registry
             .get_all()
             .iter()
+            .filter(|w| !matches!(w.metadata().spec.runtime_type, RuntimeType::External))
             .flat_map(|w| w.models())
             .collect();
         if cards.is_empty() {
