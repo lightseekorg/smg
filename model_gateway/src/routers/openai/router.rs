@@ -45,7 +45,15 @@ use crate::{
         RetryExecutor, RuntimeType, Worker, WorkerRegistry,
     },
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
-    routers::header_utils::{apply_provider_headers, extract_auth_header},
+    routers::{
+        header_utils::{apply_provider_headers, extract_auth_header},
+        openai::realtime::{
+            proxy::run_ws_proxy,
+            rest::proxy_response,
+            ws::{build_upstream_ws_url, RealtimeQueryParams},
+            RealtimeRegistry,
+        },
+    },
 };
 
 pub struct OpenAIRouter {
@@ -55,7 +63,7 @@ pub struct OpenAIRouter {
     shared_components: Arc<SharedComponents>,
     responses_components: Arc<ResponsesComponents>,
     retry_config: RetryConfig,
-    realtime_registry: Arc<super::realtime::RealtimeRegistry>,
+    realtime_registry: Arc<RealtimeRegistry>,
 }
 
 impl std::fmt::Debug for OpenAIRouter {
@@ -1163,7 +1171,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         match result {
             Ok(resp) => {
                 let success = resp.status().is_success();
-                let response = super::realtime::rest::proxy_response(resp).await;
+                let response = proxy_response(resp).await;
                 worker.record_outcome(success);
                 if success {
                     Metrics::record_router_duration(
@@ -1205,17 +1213,16 @@ impl crate::routers::RouterTrait for OpenAIRouter {
     async fn route_realtime_ws(&self, req: Request<Body>) -> Response {
         let (mut parts, _body) = req.into_parts();
 
-        let params: super::realtime::ws::RealtimeQueryParams =
-            match Query::from_request_parts(&mut parts, &()).await {
-                Ok(Query(p)) => p,
-                Err(_) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        "Missing required 'model' query parameter",
-                    )
-                        .into_response();
-                }
-            };
+        let params: RealtimeQueryParams = match Query::from_request_parts(&mut parts, &()).await {
+            Ok(Query(p)) => p,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "Missing required 'model' query parameter",
+                )
+                    .into_response();
+            }
+        };
 
         let model = match params.model {
             Some(m) => m,
@@ -1259,7 +1266,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         };
 
         let worker_url = worker.url().to_string();
-        let upstream_ws_url = super::realtime::ws::build_upstream_ws_url(&worker_url, &model);
+        let upstream_ws_url = build_upstream_ws_url(&worker_url, &model);
 
         // Use user auth if available, fall back to worker's API key
         let effective_auth = auth_header.or_else(|| extract_auth_header(None, worker.api_key()));
@@ -1325,7 +1332,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         );
 
         ws.on_upgrade(move |socket: WebSocket| async move {
-            if let Err(e) = super::realtime::proxy::run_ws_proxy(
+            if let Err(e) = run_ws_proxy(
                 socket,
                 &upstream_ws_url,
                 &auth_str,
