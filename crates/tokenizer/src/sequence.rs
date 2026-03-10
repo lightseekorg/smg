@@ -17,11 +17,15 @@ fn incremental_text(
     }
 
     let mut split_at = prefix_text.len();
-    while split_at > 0 && (split_at > new_text.len() || !new_text.is_char_boundary(split_at)) {
+    while split_at > 0
+        && (split_at > new_text.len()
+            || !new_text.is_char_boundary(split_at)
+            || !prefix_text.is_char_boundary(split_at))
+    {
         split_at -= 1;
     }
 
-    if new_text.len() > split_at {
+    if new_text.len() > split_at && new_text.starts_with(&prefix_text[..split_at]) {
         let incremental = new_text[split_at..].to_string();
         if !incremental.is_empty() {
             return Some(incremental);
@@ -183,9 +187,13 @@ impl Sequence {
             return Ok(text);
         }
 
+        let decode_window_len = len.saturating_sub(self.prefix_offset);
         if !new_text.ends_with('\u{FFFD}') {
             self.prefix_offset = len.saturating_sub(INCREMENTAL_DETOKENIZATION_OVERLAP);
             self.read_offset = len;
+        } else if decode_window_len > INCREMENTAL_DETOKENIZATION_OVERLAP + 2 {
+            self.prefix_offset = len.saturating_sub(INCREMENTAL_DETOKENIZATION_OVERLAP);
+            self.read_offset = self.prefix_offset;
         }
 
         Ok(String::new())

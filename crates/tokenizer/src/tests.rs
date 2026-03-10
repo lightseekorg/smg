@@ -6,7 +6,7 @@ use crate::{
     Tokenizer,
 };
 
-const MAX_INCREMENTAL_DECODE_WINDOW: usize = 34;
+const MAX_INCREMENTAL_DECODE_WINDOW: usize = 35;
 
 #[test]
 fn test_mock_tokenizer_encode() {
@@ -475,4 +475,142 @@ fn test_sequence_with_tokens_starts_with_bounded_prefix_offset() {
 
     assert_eq!(sequence.prefix_offset(), 32);
     assert_eq!(sequence.read_offset(), 64);
+}
+
+#[test]
+fn test_sequence_append_token_keeps_incomplete_utf8_window_bounded() {
+    use anyhow::Result;
+
+    use crate::{
+        sequence::Sequence,
+        traits::{Decoder, Encoder, Encoding, SpecialTokens, Tokenizer as TokenizerTrait},
+    };
+
+    struct IncompleteUtf8Tokenizer {
+        special_tokens: SpecialTokens,
+    }
+
+    impl Encoder for IncompleteUtf8Tokenizer {
+        fn encode(&self, _input: &str, _add_special_tokens: bool) -> Result<Encoding> {
+            Ok(Encoding::Plain(vec![]))
+        }
+
+        fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>> {
+            inputs
+                .iter()
+                .map(|input| self.encode(input, add_special_tokens))
+                .collect()
+        }
+    }
+
+    impl Decoder for IncompleteUtf8Tokenizer {
+        fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
+            assert!(
+                token_ids.len() <= MAX_INCREMENTAL_DECODE_WINDOW,
+                "incremental decode window grew to {} tokens",
+                token_ids.len()
+            );
+            Ok("\u{FFFD}".into())
+        }
+    }
+
+    impl TokenizerTrait for IncompleteUtf8Tokenizer {
+        fn vocab_size(&self) -> usize {
+            10
+        }
+
+        fn get_special_tokens(&self) -> &SpecialTokens {
+            &self.special_tokens
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            None
+        }
+
+        fn id_to_token(&self, _id: u32) -> Option<String> {
+            None
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    let tokenizer: Arc<dyn TokenizerTrait> = Arc::new(IncompleteUtf8Tokenizer {
+        special_tokens: SpecialTokens::default(),
+    });
+    let mut sequence = Sequence::new(tokenizer);
+
+    for token_id in 0..64 {
+        assert_eq!(sequence.append_token(token_id).unwrap(), "");
+    }
+}
+
+#[test]
+fn test_decode_stream_keeps_incomplete_utf8_window_bounded() {
+    use anyhow::Result;
+
+    use crate::{
+        stream::DecodeStream,
+        traits::{Decoder, Encoder, Encoding, SpecialTokens, Tokenizer as TokenizerTrait},
+    };
+
+    struct IncompleteUtf8Tokenizer {
+        special_tokens: SpecialTokens,
+    }
+
+    impl Encoder for IncompleteUtf8Tokenizer {
+        fn encode(&self, _input: &str, _add_special_tokens: bool) -> Result<Encoding> {
+            Ok(Encoding::Plain(vec![]))
+        }
+
+        fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>> {
+            inputs
+                .iter()
+                .map(|input| self.encode(input, add_special_tokens))
+                .collect()
+        }
+    }
+
+    impl Decoder for IncompleteUtf8Tokenizer {
+        fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
+            assert!(
+                token_ids.len() <= MAX_INCREMENTAL_DECODE_WINDOW,
+                "incremental decode window grew to {} tokens",
+                token_ids.len()
+            );
+            Ok("\u{FFFD}".into())
+        }
+    }
+
+    impl TokenizerTrait for IncompleteUtf8Tokenizer {
+        fn vocab_size(&self) -> usize {
+            10
+        }
+
+        fn get_special_tokens(&self) -> &SpecialTokens {
+            &self.special_tokens
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            None
+        }
+
+        fn id_to_token(&self, _id: u32) -> Option<String> {
+            None
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    let tokenizer: Arc<dyn TokenizerTrait> = Arc::new(IncompleteUtf8Tokenizer {
+        special_tokens: SpecialTokens::default(),
+    });
+    let mut stream = DecodeStream::new(tokenizer, &[], false);
+
+    for token_id in 0..64 {
+        assert_eq!(stream.step(token_id).unwrap(), None);
+    }
 }
