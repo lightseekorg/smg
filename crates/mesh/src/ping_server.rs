@@ -655,13 +655,22 @@ impl Gossip for GossipService {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        // Apply app state directly to the store
+                                                        // Apply app state directly to the store, skipping stale versions
                                                         if let Some(ref stores) = stores {
-                                                            if let Err(err) = stores.app.insert(
-                                                                app_state.key.clone(),
-                                                                app_state,
-                                                            ) {
-                                                                log::warn!(error = %err, "Failed to apply app state update");
+                                                            let dominated = stores
+                                                                .app
+                                                                .get(&app_state.key)
+                                                                .is_some_and(|existing| {
+                                                                    existing.version
+                                                                        >= app_state.version
+                                                                });
+                                                            if !dominated {
+                                                                if let Err(err) = stores.app.insert(
+                                                                    app_state.key.clone(),
+                                                                    app_state,
+                                                                ) {
+                                                                    log::warn!(error = %err, "Failed to apply app state update");
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -916,7 +925,11 @@ impl Gossip for GossipService {
                                                             }
                                                             LocalStoreType::App => {
                                                                 if let Ok(app_state) = serde_json::from_slice::<super::stores::AppState>(&entry.value) {
-                                                                    let _ = stores.app.insert(key, app_state);
+                                                                    let dominated = stores.app.get(&key)
+                                                                        .is_some_and(|existing| existing.version >= app_state.version);
+                                                                    if !dominated {
+                                                                        let _ = stores.app.insert(key, app_state);
+                                                                    }
                                                                 }
                                                             }
                                                             LocalStoreType::Worker => {
