@@ -2,6 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use aho_corasick::AhoCorasick;
 use anyhow::Result;
+use tracing::warn;
 
 use crate::{
     sequence::Sequence,
@@ -258,8 +259,10 @@ impl StopSequenceDecoder {
 
     /// Flush any held text
     pub fn flush(&mut self) -> SequenceDecoderOutput {
-        if let Ok(Some(text)) = self.sequence.flush_pending() {
-            self.jail_buffer.push_str(&text);
+        match self.sequence.flush_pending() {
+            Ok(Some(text)) => self.jail_buffer.push_str(&text),
+            Ok(None) => {}
+            Err(err) => warn!(error = %err, "failed to flush pending sequence suffix"),
         }
 
         if self.jail_buffer.is_empty() {
