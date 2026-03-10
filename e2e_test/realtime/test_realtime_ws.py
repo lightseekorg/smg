@@ -43,6 +43,18 @@ def _make_event(event_type: str, **payload) -> str:
     return json.dumps({"type": event_type, **payload})
 
 
+def _make_user_message(text: str) -> str:
+    """Build a conversation.item.create event with a user text message."""
+    return _make_event(
+        "conversation.item.create",
+        item={
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": text}],
+        },
+    )
+
+
 def _parse_event(raw: str) -> dict | None:
     """Parse a JSON event, returning None on decode errors."""
     try:
@@ -181,21 +193,7 @@ class TestRealtimeWebSocket:
 
         async def _run():
             async with _realtime_session(ws_url, ws_headers) as ws:
-                await ws.send(
-                    _make_event(
-                        "conversation.item.create",
-                        item={
-                            "type": "message",
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "input_text",
-                                    "text": "Say hello in one short sentence.",
-                                }
-                            ],
-                        },
-                    )
-                )
+                await ws.send(_make_user_message("Say hello in one short sentence."))
                 await ws.send(
                     _make_event(
                         "response.create",
@@ -215,32 +213,14 @@ class TestRealtimeWebSocket:
         async def _run():
             async with _realtime_session(ws_url, ws_headers) as ws:
                 # Turn 1
-                await ws.send(
-                    _make_event(
-                        "conversation.item.create",
-                        item={
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": "My name is Alice."}],
-                        },
-                    )
-                )
+                await ws.send(_make_user_message("My name is Alice."))
                 await ws.send(_make_event("response.create", response={"modalities": ["text"]}))
                 text1 = await _collect_response_text(ws)
                 assert len(text1) > 0
                 logger.info("Turn 1: %s", text1[:100])
 
                 # Turn 2 — model should remember the name
-                await ws.send(
-                    _make_event(
-                        "conversation.item.create",
-                        item={
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": "What is my name?"}],
-                        },
-                    )
-                )
+                await ws.send(_make_user_message("What is my name?"))
                 await ws.send(_make_event("response.create", response={"modalities": ["text"]}))
                 text2 = await _collect_response_text(ws)
                 assert "alice" in text2.lower(), f"Expected 'Alice' in response, got: {text2}"
@@ -253,16 +233,7 @@ class TestRealtimeWebSocket:
 
         async def _run():
             async with _realtime_session(ws_url, ws_headers) as ws:
-                await ws.send(
-                    _make_event(
-                        "conversation.item.create",
-                        item={
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": "Hi"}],
-                        },
-                    )
-                )
+                await ws.send(_make_user_message("Hi"))
                 event = await _recv_event(ws, event_type="conversation.item.created")
                 assert event["type"] == "conversation.item.created"
                 assert event["item"]["role"] == "user"
@@ -276,19 +247,7 @@ class TestRealtimeWebSocket:
         async def _run():
             async with _realtime_session(ws_url, ws_headers) as ws:
                 await ws.send(
-                    _make_event(
-                        "conversation.item.create",
-                        item={
-                            "type": "message",
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "input_text",
-                                    "text": "Write a very long essay about the history of computing.",
-                                }
-                            ],
-                        },
-                    )
+                    _make_user_message("Write a very long essay about the history of computing.")
                 )
                 await ws.send(_make_event("response.create", response={"modalities": ["text"]}))
 
@@ -336,16 +295,7 @@ class TestRealtimeWebSocket:
 
         async def _run():
             async with _realtime_session(ws_url, ws_headers) as ws:
-                await ws.send(
-                    _make_event(
-                        "conversation.item.create",
-                        item={
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": "Say hi."}],
-                        },
-                    )
-                )
+                await ws.send(_make_user_message("Say hi."))
                 await ws.send(_make_event("response.create", response={"modalities": ["text"]}))
 
                 event = await _recv_event(ws, event_type="response.done")
@@ -387,16 +337,7 @@ class TestRealtimeWebSocket:
 
         async def _run():
             async with _realtime_session(ws_url, ws_headers) as ws:
-                await ws.send(
-                    _make_event(
-                        "conversation.item.create",
-                        item={
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": "Say hello."}],
-                        },
-                    )
-                )
+                await ws.send(_make_user_message("Say hello."))
                 await ws.send(_make_event("response.create", response={"modalities": ["text"]}))
 
                 # Collect a few deltas and validate schema

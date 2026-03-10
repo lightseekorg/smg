@@ -61,7 +61,7 @@ def _build_command(
         cmd.extend(["-v", f"{hf_home}:{hf_home}", "-e", f"HF_HOME={hf_home}"])
 
     # Pass through environment variables the container may need
-    for var in ("HF_TOKEN", "HF_HOME"):
+    for var in ("HF_TOKEN",):
         if os.environ.get(var):
             cmd.extend(["-e", var])
 
@@ -151,7 +151,7 @@ def _cleanup_procs(procs: list, drain_delay: int) -> None:
         time.sleep(drain_delay)
     for p in procs:
         try:
-            proc = getattr(p, "proc", p) if hasattr(p, "proc") else p
+            proc = getattr(p, "proc", p)
             if isinstance(proc, subprocess.Popen):
                 terminate_process(proc)
         except Exception:
