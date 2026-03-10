@@ -57,25 +57,6 @@ Router image
 {{- end }}
 
 {{/*
-Worker image -- uses provided image config if set, otherwise falls back
-to a default based on the backend name.
-Pass a dict with keys "image" and "backend".
-*/}}
-{{- define "smg.workerImage" -}}
-{{- $img := .image -}}
-{{- if and $img.repository $img.tag -}}
-  {{- printf "%s:%s" $img.repository $img.tag -}}
-{{- else if $img.repository -}}
-  {{- $img.repository -}}
-{{- else -}}
-  {{- if eq .backend "sglang" -}}lmsysorg/sglang:latest
-  {{- else if eq .backend "vllm" -}}vllm/vllm-openai:latest
-  {{- else -}}{{ fail "image.repository is required for trtllm backend" }}
-  {{- end -}}
-{{- end -}}
-{{- end }}
-
-{{/*
 Service account name
 */}}
 {{- define "smg.serviceAccountName" -}}
@@ -97,15 +78,10 @@ Called from the router Deployment template.
 - {{ .Values.router.port | quote }}
 - "--policy"
 - {{ .Values.router.policy | quote }}
-{{- if or .Values.router.workerUrls (eq .Values.mode "router-worker") }}
-{{- if ne .Values.mode "router-pd" }}
+{{- if .Values.router.workerUrls }}
 - "--worker-urls"
-{{- end }}
 {{- range .Values.router.workerUrls }}
 - {{ . | quote }}
-{{- end }}
-{{- if eq .Values.mode "router-worker" }}
-- {{ printf "http://%s-worker:%d" (include "smg.fullname" $) (int .Values.worker.port) | quote }}
 {{- end }}
 {{- end }}
 {{- if .Values.router.serviceDiscovery.enabled }}
@@ -123,28 +99,6 @@ Called from the router Deployment template.
 {{- if .Values.router.serviceDiscovery.modelIdFrom }}
 - "--model-id-from"
 - {{ .Values.router.serviceDiscovery.modelIdFrom | quote }}
-{{- end }}
-{{- end }}
-{{- if eq .Values.mode "router-pd" }}
-- "--pd-disaggregation"
-- "--prefill"
-- {{ printf "http://%s-prefill:%d" (include "smg.fullname" $) (int .Values.pd.prefill.port) | quote }}
-{{- if .Values.pd.prefill.bootstrapPort }}
-- {{ .Values.pd.prefill.bootstrapPort | quote }}
-{{- end }}
-- "--decode"
-- {{ printf "http://%s-decode:%d" (include "smg.fullname" $) (int .Values.pd.decode.port) | quote }}
-- "--prefill-policy"
-- {{ .Values.pd.prefill.policy | quote }}
-- "--decode-policy"
-- {{ .Values.pd.decode.policy | quote }}
-{{- if .Values.router.serviceDiscovery.prefillSelector }}
-- "--prefill-selector"
-- {{ .Values.router.serviceDiscovery.prefillSelector | quote }}
-{{- end }}
-{{- if .Values.router.serviceDiscovery.decodeSelector }}
-- "--decode-selector"
-- {{ .Values.router.serviceDiscovery.decodeSelector | quote }}
 {{- end }}
 {{- end }}
 {{- if .Values.router.model }}

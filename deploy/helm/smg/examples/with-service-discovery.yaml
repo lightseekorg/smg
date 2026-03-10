@@ -1,6 +1,5 @@
 # Router with Kubernetes service discovery (auto-discover worker pods).
 # Usage: helm install smg deploy/helm/smg -f examples/with-service-discovery.yaml
-mode: router
 router:
   policy: cache_aware
   serviceDiscovery:

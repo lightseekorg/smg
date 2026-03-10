@@ -1,11 +1,6 @@
 # =============================================================================
 # SMG Helm Chart - values.yaml
 # =============================================================================
-# Deployment mode: "router" | "router-worker" | "router-pd"
-#   router        - Router only, connect to existing workers
-#   router-worker - Router + inference worker pods
-#   router-pd     - Router + prefill/decode disaggregated workers
-mode: router
 
 # -- Global settings shared across all components
 global:
@@ -26,7 +21,7 @@ router:
   #    consistent_hashing, prefix_hash, manual, random, bucket
   policy: cache_aware
 
-  # -- Explicit worker URLs (used when mode=router or as additional workers)
+  # -- Explicit worker URLs
   workerUrls: []
   #   - http://worker-1:8000
   #   - grpc://worker-2:8001
@@ -37,9 +32,6 @@ router:
     namespace: ""          # defaults to release namespace
     selector: ""           # e.g. "app=sglang-worker"
     port: 80
-    # -- PD-specific selectors (used when mode=router-pd)
-    prefillSelector: ""    # e.g. "component=prefill"
-    decodeSelector: ""     # e.g. "component=decode"
     # -- Extract model ID from pod metadata
     modelIdFrom: ""        # "namespace", "label:key", or "annotation:key"
 
@@ -214,131 +206,6 @@ history:
     password: ""
     existingSecret: ""         # Secret containing oracle-dsn, oracle-user, oracle-password
     poolMax: 10
-
-# =============================================================================
-# Worker Configuration (mode: router-worker)
-# =============================================================================
-worker:
-  replicas: 1
-
-  # -- Inference backend: sglang, vllm, trtllm
-  backend: sglang
-
-  image:
-    # -- Backend-specific image (e.g. lmsysorg/sglang:latest, vllm/vllm-openai:latest)
-    repository: ""
-    tag: ""
-    pullPolicy: IfNotPresent
-
-  # -- Model to serve
-  model: ""                    # e.g. "meta-llama/Llama-3-70b"
-
-  # -- Parallelism
-  tensorParallelSize: 1
-  dataParallelSize: 1
-
-  # -- Worker port
-  port: 8000
-
-  # -- GPU resources
-  resources:
-    limits:
-      nvidia.com/gpu: 1
-
-  # -- Model storage volume
-  modelVolume:
-    # -- Volume type: "emptyDir" (download at start), "hostPath", or "pvc"
-    type: emptyDir
-    hostPath: ""
-    pvcName: ""                # name of an existing PVC
-    pvcSize: 100Gi
-    pvcStorageClass: ""
-
-  # -- Shared memory size for /dev/shm
-  shmSize: "16Gi"
-
-  # -- Extra args passed to the backend CLI (sglang/vllm/trtllm)
-  extraArgs: []
-
-  # -- Extra environment variables
-  extraEnv: []
-
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}
-  podAnnotations: {}
-  podLabels: {}
-
-# =============================================================================
-# PD Disaggregation Configuration (mode: router-pd)
-# =============================================================================
-pd:
-  prefill:
-    replicas: 1
-    policy: cache_aware
-    port: 8000
-    bootstrapPort: 9001
-
-    image:
-      repository: ""
-      tag: ""
-      pullPolicy: IfNotPresent
-    model: ""
-    backend: sglang
-    tensorParallelSize: 1
-
-    resources:
-      limits:
-        nvidia.com/gpu: 1
-
-    modelVolume:
-      type: emptyDir
-      hostPath: ""
-      pvcName: ""
-      pvcSize: 100Gi
-      pvcStorageClass: ""
-
-    shmSize: "16Gi"
-    extraArgs: []
-    extraEnv: []
-    nodeSelector: {}
-    tolerations: []
-    affinity: {}
-    podAnnotations: {}
-    podLabels: {}
-
-  decode:
-    replicas: 1
-    policy: power_of_two
-    port: 8000
-
-    image:
-      repository: ""
-      tag: ""
-      pullPolicy: IfNotPresent
-    model: ""
-    backend: sglang
-    tensorParallelSize: 1
-
-    resources:
-      limits:
-        nvidia.com/gpu: 1
-
-    modelVolume:
-      type: emptyDir
-      hostPath: ""
-      pvcName: ""
-      pvcSize: 100Gi
-      pvcStorageClass: ""
-
-    shmSize: "16Gi"
-    extraArgs: []
-    extraEnv: []
-    nodeSelector: {}
-    tolerations: []
-    affinity: {}
-    podAnnotations: {}
-    podLabels: {}
 
 # =============================================================================
 # Service Account & RBAC
