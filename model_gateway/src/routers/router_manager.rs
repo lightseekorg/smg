@@ -16,6 +16,7 @@ use axum::{
     Json,
 };
 use dashmap::DashMap;
+use futures::future::select_all;
 use openai_protocol::{
     chat::ChatCompletionRequest,
     classify::ClassifyRequest,
@@ -51,6 +52,7 @@ use crate::{
 pub struct RouterManager {
     worker_registry: Arc<WorkerRegistry>,
     client: reqwest::Client,
+    gateway_api_key: Option<String>,
     routers: Arc<DashMap<RouterId, Arc<dyn RouterTrait>>>,
     routers_snapshot: ArcSwap<Vec<Arc<dyn RouterTrait>>>,
     default_router: Arc<std::sync::RwLock<Option<RouterId>>>,
@@ -62,6 +64,7 @@ impl RouterManager {
         Self {
             worker_registry,
             client,
+            gateway_api_key: None,
             routers: Arc::new(DashMap::new()),
             routers_snapshot: ArcSwap::from_pointee(Vec::new()),
             default_router: Arc::new(std::sync::RwLock::new(None)),
@@ -96,6 +99,9 @@ impl RouterManager {
             app_context.client.clone(),
         );
         manager.enable_igw = config.router_config.enable_igw;
+        manager
+            .gateway_api_key
+            .clone_from(&config.router_config.api_key);
         let manager = Arc::new(manager);
 
         if config.router_config.enable_igw {
@@ -350,10 +356,26 @@ impl RouterManager {
         best_router
     }
 
-    /// Try each healthy external upstream with the caller's bearer token and
-    /// return the first successful model inventory. This avoids leaking a
-    /// provider key to unrelated upstreams and prevents merging cross-provider
-    /// model lists. Returns an empty vec on total failure.
+    /// Build a response from self-hosted registry models (excludes external workers).
+    fn registry_models_response(&self) -> Response {
+        let cards: Vec<_> = self
+            .worker_registry
+            .get_all()
+            .iter()
+            .filter(|w| !matches!(w.metadata().spec.runtime_type, RuntimeType::External))
+            .flat_map(|w| w.models())
+            .collect();
+        if cards.is_empty() {
+            (StatusCode::SERVICE_UNAVAILABLE, "No models available").into_response()
+        } else {
+            let resp = ListModelsResponse::from_model_cards(cards);
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+    }
+
+    /// Fan out to all healthy external upstreams concurrently with the caller's
+    /// bearer token and return the first successful model inventory. Returns an
+    /// empty vec on total failure.
     async fn fetch_upstream_models(&self, bearer_token: &str) -> Vec<ModelCard> {
         let unique_urls: Vec<_> = self
             .worker_registry
@@ -373,13 +395,32 @@ impl RouterManager {
             unique_urls.len()
         );
 
-        let auth = HeaderValue::from_str(&format!("Bearer {bearer_token}")).ok();
+        let auth = match HeaderValue::from_str(&format!("Bearer {bearer_token}")) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                warn!("Bearer token contains invalid header characters: {e}");
+                return Vec::new();
+            }
+        };
 
-        for base_url in &unique_urls {
-            let cards = Self::fetch_models_from(self.client.clone(), base_url, auth.clone()).await;
+        // Fan out concurrently; return first non-empty result.
+        let mut pending: Vec<_> = unique_urls
+            .into_iter()
+            .map(|url| {
+                Box::pin(Self::fetch_models_from(
+                    self.client.clone(),
+                    url,
+                    auth.clone(),
+                ))
+            })
+            .collect();
+
+        while !pending.is_empty() {
+            let (cards, _index, remaining) = select_all(pending).await;
             if !cards.is_empty() {
                 return cards;
             }
+            pending = remaining;
         }
 
         Vec::new()
@@ -388,7 +429,7 @@ impl RouterManager {
     /// Fetch models from a single upstream endpoint.
     async fn fetch_models_from(
         client: reqwest::Client,
-        base_url: &str,
+        base_url: String,
         auth: Option<HeaderValue>,
     ) -> Vec<ModelCard> {
         let url = format!("{base_url}/v1/models");
@@ -449,7 +490,8 @@ impl RouterTrait for RouterManager {
     }
 
     async fn get_models(&self, req: Request<Body>) -> Response {
-        // Extract bearer token (case-insensitive "Bearer " prefix per RFC 7235).
+        // Extract token from Authorization header (case-insensitive "Bearer " prefix
+        // per RFC 7235) or Anthropic-style x-api-key header.
         let bearer_token = req
             .headers()
             .get(header::AUTHORIZATION)
@@ -457,10 +499,25 @@ impl RouterTrait for RouterManager {
             .and_then(|h| {
                 let lower = h.to_ascii_lowercase();
                 lower.starts_with("bearer ").then(|| h[7..].to_string())
+            })
+            .or_else(|| {
+                req.headers()
+                    .get("x-api-key")
+                    .and_then(|h| h.to_str().ok())
+                    .map(String::from)
             });
 
-        // If the caller sent a bearer token, try to discover models from upstream
-        // providers using that token. This enables BYOK (bring your own key) flows.
+        // Short-circuit: if the token matches the gateway's own API key, skip
+        // upstream fan-out and return registry models directly.
+        if let Some(ref token) = bearer_token {
+            let is_gateway_key = self.gateway_api_key.as_ref().is_some_and(|gw| gw == token);
+            if is_gateway_key {
+                return self.registry_models_response();
+            }
+        }
+
+        // If the caller sent a provider token, try to discover models from
+        // upstream providers. This enables BYOK (bring your own key) flows.
         if let Some(ref token) = bearer_token {
             let upstream_cards = self.fetch_upstream_models(token).await;
             if !upstream_cards.is_empty() {
@@ -470,20 +527,7 @@ impl RouterTrait for RouterManager {
             // All upstreams failed or returned nothing — fall through to registry.
         }
 
-        // Return self-hosted registry models (exclude external workers).
-        let cards: Vec<_> = self
-            .worker_registry
-            .get_all()
-            .iter()
-            .filter(|w| !matches!(w.metadata().spec.runtime_type, RuntimeType::External))
-            .flat_map(|w| w.models())
-            .collect();
-        if cards.is_empty() {
-            (StatusCode::SERVICE_UNAVAILABLE, "No models available").into_response()
-        } else {
-            let resp = ListModelsResponse::from_model_cards(cards);
-            (StatusCode::OK, Json(resp)).into_response()
-        }
+        self.registry_models_response()
     }
 
     async fn get_model_info(&self, req: Request<Body>) -> Response {

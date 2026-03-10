@@ -26,7 +26,11 @@ use openai_protocol::{
 use serde_json::json;
 use smg::{
     config::{ConfigError, HistoryBackend, OracleConfig, PolicyConfig, RouterConfig, RoutingMode},
-    routers::{openai::OpenAIRouter, RouterFactory, RouterTrait},
+    core::{BasicWorkerBuilder, RuntimeType, Worker, WorkerType},
+    routers::{
+        factory::router_ids, openai::OpenAIRouter, router_manager::RouterManager, RouterFactory,
+        RouterTrait,
+    },
 };
 use smg_data_connector::{ResponseId, StoredResponse};
 use tokio::{
@@ -131,22 +135,28 @@ async fn test_openai_router_server_info() {
     assert!(body_str.contains("openai"));
 }
 
-/// Test models endpoint
+/// Test models endpoint via RouterManager (get_models is centralized there).
+/// A bearer token triggers upstream fan-out to the mock server.
 #[tokio::test]
 async fn test_openai_router_models() {
-    // Use mock server for deterministic models response
     let mock_server = MockOpenAIServer::new().await;
     let ctx = create_test_app_context().await;
     register_external_worker(&ctx, &mock_server.base_url(), None);
-    let router = OpenAIRouter::new(&ctx).await.unwrap();
+    let inner = OpenAIRouter::new(&ctx).await.unwrap();
 
+    let manager = RouterManager::new(ctx.worker_registry.clone(), ctx.client.clone());
+    let manager = Arc::new(manager);
+    manager.register_router(router_ids::HTTP_OPENAI, Arc::from(inner));
+
+    // Send a bearer token to trigger BYOK fan-out to the mock upstream.
     let req = Request::builder()
         .method(Method::GET)
         .uri("/models")
+        .header("Authorization", "Bearer test-key")
         .body(Body::empty())
         .unwrap();
 
-    let response = router.get_models(req).await;
+    let response = manager.get_models(req).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     let (_, body) = response.into_parts();
@@ -826,18 +836,31 @@ async fn test_openai_router_circuit_breaker() {
 #[tokio::test]
 async fn test_openai_router_models_from_registry() {
     let ctx = create_test_app_context().await;
-    // Register a worker with the default model
-    register_external_worker(&ctx, "https://api.example.com", None);
-    let router = OpenAIRouter::new(&ctx).await.unwrap();
+    // Register a non-external worker so the registry path returns it.
+    let worker: Arc<dyn Worker> = Arc::new(
+        BasicWorkerBuilder::new("http://localhost:8000")
+            .worker_type(WorkerType::Regular)
+            .runtime_type(RuntimeType::Sglang)
+            .models(vec![openai_protocol::model_card::ModelCard::new(
+                "gpt-3.5-turbo",
+            )])
+            .build(),
+    );
+    ctx.worker_registry.register(worker);
 
-    // Get models - should return the registered model
+    let inner = OpenAIRouter::new(&ctx).await.unwrap();
+    let manager = RouterManager::new(ctx.worker_registry.clone(), ctx.client.clone());
+    let manager = Arc::new(manager);
+    manager.register_router(router_ids::HTTP_OPENAI, Arc::from(inner));
+
+    // No bearer token → registry path returns local workers' models.
     let req = Request::builder()
         .method(Method::GET)
         .uri("/models")
         .body(Body::empty())
         .unwrap();
 
-    let response = router.get_models(req).await;
+    let response = manager.get_models(req).await;
     assert_eq!(response.status(), StatusCode::OK);
     let (_, body) = response.into_parts();
     let body_bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
@@ -845,7 +868,6 @@ async fn test_openai_router_models_from_registry() {
     let models: serde_json::Value = serde_json::from_str(&body_str).unwrap();
     assert_eq!(models["object"], "list");
 
-    // Should have the default model (gpt-3.5-turbo)
     let data = models["data"].as_array().unwrap();
     assert_eq!(data.len(), 1);
     assert_eq!(data[0]["id"], "gpt-3.5-turbo");
