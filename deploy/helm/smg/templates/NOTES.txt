@@ -1,0 +1,34 @@
+{{- $fullname := include "smg.fullname" . -}}
+
+SMG deployed in "{{ .Values.mode }}" mode.
+
+Router:
+  Endpoint: http://{{ $fullname }}-router:{{ .Values.router.service.port }}
+  Metrics:  http://{{ $fullname }}-router:{{ .Values.router.metrics.port }}/metrics
+  Policy:   {{ .Values.router.policy }}
+
+{{- if eq .Values.mode "router-worker" }}
+
+Workers:
+  Backend:  {{ .Values.worker.backend }}
+  Replicas: {{ .Values.worker.replicas }}
+  Model:    {{ .Values.worker.model }}
+{{- end }}
+
+{{- if eq .Values.mode "router-pd" }}
+
+PD Disaggregation:
+  Prefill:  {{ .Values.pd.prefill.replicas }} replica(s), policy={{ .Values.pd.prefill.policy }}
+  Decode:   {{ .Values.pd.decode.replicas }} replica(s), policy={{ .Values.pd.decode.policy }}
+{{- end }}
+
+{{- if .Values.router.ingress.enabled }}
+
+Ingress:
+{{- range .Values.router.ingress.hosts }}
+  http{{ if $.Values.router.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- end }}
+
+To test the deployment:
+  helm test {{ .Release.Name }}

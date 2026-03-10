@@ -57,7 +57,7 @@ Router image
 {{- end }}
 
 {{/*
-Worker image — uses provided image config if set, otherwise falls back
+Worker image -- uses provided image config if set, otherwise falls back
 to a default based on the backend name.
 Pass a dict with keys "image" and "backend".
 */}}
@@ -87,7 +87,7 @@ Service account name
 {{- end }}
 
 {{/*
-Router CLI arguments — builds the full args list from values.
+Router CLI arguments -- builds the full args list from values.
 Called from the router Deployment template.
 */}}
 {{- define "smg.routerArgs" -}}
@@ -97,7 +97,6 @@ Called from the router Deployment template.
 - {{ .Values.router.port | quote }}
 - "--policy"
 - {{ .Values.router.policy | quote }}
-{{- /* Worker URLs — combine explicit URLs with auto-wired worker service */ -}}
 {{- if or .Values.router.workerUrls (eq .Values.mode "router-worker") }}
 {{- if ne .Values.mode "router-pd" }}
 - "--worker-urls"
@@ -109,7 +108,6 @@ Called from the router Deployment template.
 - {{ printf "http://%s-worker:%d" (include "smg.fullname" $) (int .Values.worker.port) | quote }}
 {{- end }}
 {{- end }}
-{{- /* Service discovery */ -}}
 {{- if .Values.router.serviceDiscovery.enabled }}
 - "--service-discovery"
 {{- if .Values.router.serviceDiscovery.selector }}
@@ -127,7 +125,6 @@ Called from the router Deployment template.
 - {{ .Values.router.serviceDiscovery.modelIdFrom | quote }}
 {{- end }}
 {{- end }}
-{{- /* PD disaggregation */ -}}
 {{- if eq .Values.mode "router-pd" }}
 - "--pd-disaggregation"
 - "--prefill"
@@ -150,7 +147,6 @@ Called from the router Deployment template.
 - {{ .Values.router.serviceDiscovery.decodeSelector | quote }}
 {{- end }}
 {{- end }}
-{{- /* Model / tokenizer */ -}}
 {{- if .Values.router.model }}
 - "--model-path"
 - {{ .Values.router.model | quote }}
@@ -163,7 +159,6 @@ Called from the router Deployment template.
 - "--chat-template"
 - {{ .Values.router.chatTemplate | quote }}
 {{- end }}
-{{- /* Cache tuning */ -}}
 - "--cache-threshold"
 - {{ .Values.router.cacheThreshold | quote }}
 - "--balance-abs-threshold"
@@ -176,7 +171,6 @@ Called from the router Deployment template.
 - {{ .Values.router.maxTreeSize | quote }}
 - "--block-size"
 - {{ .Values.router.blockSize | quote }}
-{{- /* Request handling */ -}}
 - "--max-payload-size"
 - {{ .Values.router.maxPayloadSize | quote }}
 - "--request-timeout-secs"
@@ -187,7 +181,6 @@ Called from the router Deployment template.
 - {{ .Values.router.queueSize | quote }}
 - "--queue-timeout-secs"
 - {{ .Values.router.queueTimeoutSecs | quote }}
-{{- /* Retry */ -}}
 {{- if not .Values.router.retry.enabled }}
 - "--disable-retries"
 {{- else }}
@@ -202,7 +195,6 @@ Called from the router Deployment template.
 - "--retry-jitter-factor"
 - {{ .Values.router.retry.jitterFactor | quote }}
 {{- end }}
-{{- /* Circuit breaker */ -}}
 {{- if not .Values.router.circuitBreaker.enabled }}
 - "--disable-circuit-breaker"
 {{- else }}
@@ -215,7 +207,6 @@ Called from the router Deployment template.
 - "--cb-window-duration-secs"
 - {{ .Values.router.circuitBreaker.windowDurationSecs | quote }}
 {{- end }}
-{{- /* Health checks */ -}}
 {{- if not .Values.router.healthCheck.enabled }}
 - "--disable-health-check"
 {{- else }}
@@ -230,7 +221,6 @@ Called from the router Deployment template.
 - "--health-check-endpoint"
 - {{ .Values.router.healthCheck.endpoint | quote }}
 {{- end }}
-{{- /* Observability */ -}}
 - "--prometheus-port"
 - {{ .Values.router.metrics.port | quote }}
 - "--log-level"
@@ -246,7 +236,6 @@ Called from the router Deployment template.
 - "--otlp-traces-endpoint"
 - {{ .Values.router.tracing.otlpEndpoint | quote }}
 {{- end }}
-{{- /* History backend */ -}}
 {{- if and (ne .Values.history.backend "memory") (ne .Values.history.backend "none") }}
 - "--history-backend"
 - {{ .Values.history.backend | quote }}
@@ -277,12 +266,10 @@ Called from the router Deployment template.
 - "--oracle-pool-max"
 - {{ .Values.history.oracle.poolMax | quote }}
 {{- end }}
-{{- /* Rate limiting */ -}}
 {{- if gt (int .Values.auth.rateLimitTokensPerSecond) 0 }}
 - "--rate-limit-tokens-per-second"
 - {{ .Values.auth.rateLimitTokensPerSecond | quote }}
 {{- end }}
-{{- /* WASM */ -}}
 {{- if .Values.router.wasm.enabled }}
 - "--enable-wasm"
 {{- if .Values.router.wasm.path }}
@@ -290,12 +277,10 @@ Called from the router Deployment template.
 - {{ .Values.router.wasm.path | quote }}
 {{- end }}
 {{- end }}
-{{- /* MCP */ -}}
 {{- if .Values.router.mcp.enabled }}
 - "--mcp-config-path"
 - {{ .Values.router.mcp.configPath | quote }}
 {{- end }}
-{{- /* Parsers */ -}}
 {{- if .Values.router.reasoningParser }}
 - "--reasoning-parser"
 - {{ .Values.router.reasoningParser | quote }}
@@ -304,7 +289,6 @@ Called from the router Deployment template.
 - "--tool-call-parser"
 - {{ .Values.router.toolCallParser | quote }}
 {{- end }}
-{{- /* Extra args (escape hatch) */ -}}
 {{- range .Values.router.extraArgs }}
 - {{ . | quote }}
 {{- end }}

@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "smg.fullname" . }}-router
+  labels:
+    {{- include "smg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+spec:
+  {{- if not .Values.router.autoscaling.enabled }}
+  replicas: {{ .Values.router.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "smg.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: router
+  template:
+    metadata:
+      {{- with .Values.router.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "smg.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: router
+        {{- with .Values.router.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "smg.serviceAccountName" . }}
+      containers:
+        - name: router
+          image: {{ include "smg.routerImage" . }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          args:
+            {{- include "smg.routerArgs" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.router.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.router.metrics.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.router.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- if .Values.auth.apiKey }}
+            - name: SMG_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "smg.fullname" . }}-secrets
+                  key: api-key
+            {{- else if .Values.auth.apiKeySecret }}
+            - name: SMG_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.apiKeySecret }}
+                  key: {{ .Values.auth.apiKeySecretKey }}
+            {{- end }}
+            {{- if and (eq .Values.history.backend "postgres") .Values.history.postgres.existingSecret }}
+            - name: POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.history.postgres.existingSecret }}
+                  key: postgres-url
+            {{- end }}
+            {{- if and (eq .Values.history.backend "redis") .Values.history.redis.existingSecret }}
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.history.redis.existingSecret }}
+                  key: redis-url
+            {{- end }}
+            {{- with .Values.router.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      {{- with .Values.router.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.router.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.router.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
