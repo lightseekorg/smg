@@ -5,7 +5,7 @@
 /model_gateway/benches @slin1237
 
 # Python bindings
-/bindings/python @CatherineSue @key4ng @slin1237
+/bindings/python @CatherineSue @key4ng @gongwei-130 @slin1237
 /bindings/golang @whybeyoung @slin1237
 
 # E2E tests
