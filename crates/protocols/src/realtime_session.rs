@@ -41,7 +41,8 @@ impl Normalizable for RealtimeSessionCreateRequest {}
 fn validate_session_create_request(
     req: &RealtimeSessionCreateRequest,
 ) -> Result<(), ValidationError> {
-    if req.model.is_none() {
+    let has_model = req.model.as_deref().is_some_and(|m| !m.trim().is_empty());
+    if !has_model {
         return Err(ValidationError::new("model is required"));
     }
     Ok(())
@@ -478,7 +479,12 @@ impl Normalizable for RealtimeClientSecretCreateRequest {}
 fn validate_client_secret_create_request(
     req: &RealtimeClientSecretCreateRequest,
 ) -> Result<(), ValidationError> {
-    if req.session.model.is_none() {
+    let has_model = req
+        .session
+        .model
+        .as_deref()
+        .is_some_and(|m| !m.trim().is_empty());
+    if !has_model {
         return Err(ValidationError::new("session.model is required"));
     }
     Ok(())
