@@ -672,12 +672,21 @@ impl RouterTrait for Router {
     }
 
     async fn get_models(&self, _req: Request<Body>) -> Response {
-        let cards = self
+        let cards: Vec<_> = self
             .worker_registry
-            .get_all()
+            .get_workers_filtered(
+                None,
+                Some(WorkerType::Regular),
+                Some(ConnectionMode::Http),
+                None,
+                false,
+            )
             .iter()
             .flat_map(|w| w.models())
-            .collect::<Vec<_>>();
+            .collect();
+        if cards.is_empty() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "No models available").into_response();
+        }
         let resp = openai_protocol::models::ListModelsResponse::from_model_cards(cards);
         (StatusCode::OK, Json(resp)).into_response()
     }

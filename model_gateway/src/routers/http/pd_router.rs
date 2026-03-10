@@ -1245,6 +1245,9 @@ impl RouterTrait for PDRouter {
             .iter()
             .flat_map(|w| w.models())
             .collect::<Vec<_>>();
+        if cards.is_empty() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "No models available").into_response();
+        }
         let resp = openai_protocol::models::ListModelsResponse::from_model_cards(cards);
         (StatusCode::OK, axum::Json(resp)).into_response()
     }
