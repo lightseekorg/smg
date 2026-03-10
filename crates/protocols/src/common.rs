@@ -4,16 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator;
 
-use super::UNKNOWN_MODEL_ID;
-
 // ============================================================================
 // Default value helpers
 // ============================================================================
-
-/// Default model value when not specified
-pub(crate) fn default_model() -> String {
-    UNKNOWN_MODEL_ID.to_string()
-}
 
 /// Helper function for serde default value (returns true)
 pub fn default_true() -> bool {
