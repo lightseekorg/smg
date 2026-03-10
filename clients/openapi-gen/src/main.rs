@@ -604,7 +604,8 @@ fn main() -> anyhow::Result<()> {
     );
 
     // ---- Models ----
-    let resp_name = collect_schema(&schema_for!(ListModelsResponse), &mut schemas)?;
+    use openai_protocol::models::ListModelsResponse as OpenAIListModelsResponse;
+    let resp_name = collect_schema(&schema_for!(OpenAIListModelsResponse), &mut schemas)?;
     paths.insert(
         "/v1/models".to_string(),
         get_endpoint("listModels", "List available models", &resp_name),

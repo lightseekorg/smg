@@ -159,7 +159,7 @@ impl RouterTrait for AnthropicRouter {
 
     /// Get available models from Anthropic API
     async fn get_models(&self, req: Request<Body>) -> Response {
-        models::handle_list_models(self, req).await
+        models::handle_list_models(self, req)
     }
 
     fn router_type(&self) -> &'static str {
