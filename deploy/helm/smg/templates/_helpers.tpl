@@ -168,11 +168,11 @@ Called from the router Deployment template.
 - "--eviction-interval"
 - {{ .Values.router.evictionInterval | quote }}
 - "--max-tree-size"
-- {{ .Values.router.maxTreeSize | quote }}
+- {{ int .Values.router.maxTreeSize | quote }}
 - "--block-size"
 - {{ .Values.router.blockSize | quote }}
 - "--max-payload-size"
-- {{ .Values.router.maxPayloadSize | quote }}
+- {{ int .Values.router.maxPayloadSize | quote }}
 - "--request-timeout-secs"
 - {{ .Values.router.requestTimeoutSecs | quote }}
 - "--max-concurrent-requests"

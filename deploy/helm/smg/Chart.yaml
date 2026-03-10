@@ -1,6 +1,6 @@
 apiVersion: v2
 name: smg
-description: Shepherd Model Gateway — high-performance inference router for LLM deployments
+description: "Shepherd Model Gateway - high-performance inference router for LLM deployments"
 type: application
 version: 0.1.0
 appVersion: "0.7.0"
@@ -17,12 +17,12 @@ keywords:
   - router
   - sglang
   - vllm
-dependencies:
-  - name: postgresql
-    version: "~16"
-    repository: https://charts.bitnami.com/bitnami
-    condition: history.postgres.deploy
-  - name: redis
-    version: "~20"
-    repository: https://charts.bitnami.com/bitnami
-    condition: history.redis.deploy
+# dependencies:
+#   - name: postgresql
+#     version: "~16"
+#     repository: https://charts.bitnami.com/bitnami
+#     condition: history.postgres.deploy
+#   - name: redis
+#     version: "~20"
+#     repository: https://charts.bitnami.com/bitnami
+#     condition: history.redis.deploy

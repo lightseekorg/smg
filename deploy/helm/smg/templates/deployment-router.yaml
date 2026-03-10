@@ -33,7 +33,7 @@ spec:
       serviceAccountName: {{ include "smg.serviceAccountName" . }}
       containers:
         - name: router
-          image: {{ include "smg.routerImage" . }}
+          image: "{{ include "smg.routerImage" . }}"
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
           args:
             {{- include "smg.routerArgs" . | nindent 12 }}
@@ -56,10 +56,9 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
-          {{- with .Values.router.resources }}
           resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- toYaml .Values.router.resources | nindent 12 }}
+          {{- if or .Values.auth.apiKey .Values.auth.apiKeySecret (and (eq .Values.history.backend "postgres") .Values.history.postgres.existingSecret) (and (eq .Values.history.backend "redis") .Values.history.redis.existingSecret) .Values.router.extraEnv }}
           env:
             {{- if .Values.auth.apiKey }}
             - name: SMG_API_KEY
@@ -91,6 +90,7 @@ spec:
             {{- with .Values.router.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- end }}
       {{- with .Values.router.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
