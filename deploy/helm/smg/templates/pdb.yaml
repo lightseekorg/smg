@@ -1,0 +1,14 @@
+{{- if .Values.router.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "smg.fullname" . }}-router
+  labels:
+    {{- include "smg.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.router.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "smg.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: router
+{{- end }}
