@@ -1,0 +1,19 @@
+# Router with 2 sglang workers, each using 4 GPUs.
+# Usage: helm install smg deploy/helm/smg -f examples/router-worker-sglang.yaml
+mode: router-worker
+router:
+  policy: cache_aware
+worker:
+  replicas: 2
+  backend: sglang
+  model: meta-llama/Llama-3-70b
+  tensorParallelSize: 4
+  resources:
+    limits:
+      nvidia.com/gpu: 4
+    requests:
+      cpu: "8"
+      memory: 64Gi
+  modelVolume:
+    type: hostPath
+    hostPath: /models

@@ -1,0 +1,15 @@
+# Router with vLLM workers.
+# Usage: helm install smg deploy/helm/smg -f examples/router-worker-vllm.yaml
+mode: router-worker
+router:
+  policy: round_robin
+worker:
+  replicas: 2
+  backend: vllm
+  model: meta-llama/Llama-3-8b
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+    requests:
+      cpu: "4"
+      memory: 32Gi

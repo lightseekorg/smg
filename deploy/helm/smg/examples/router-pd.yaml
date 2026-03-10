@@ -1,0 +1,18 @@
+# PD disaggregation: 2 prefill workers + 4 decode workers.
+# Usage: helm install smg deploy/helm/smg -f examples/router-pd.yaml
+mode: router-pd
+pd:
+  prefill:
+    replicas: 2
+    model: meta-llama/Llama-3-70b
+    tensorParallelSize: 4
+    resources:
+      limits:
+        nvidia.com/gpu: 4
+  decode:
+    replicas: 4
+    model: meta-llama/Llama-3-70b
+    tensorParallelSize: 2
+    resources:
+      limits:
+        nvidia.com/gpu: 2

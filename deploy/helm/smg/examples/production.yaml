@@ -1,0 +1,66 @@
+# Production-hardened deployment with HPA, PDB, monitoring, and resource limits.
+# Usage: helm install smg deploy/helm/smg -f examples/production.yaml
+mode: router-worker
+router:
+  replicas: 3
+  policy: cache_aware
+  resources:
+    requests:
+      cpu: "4"
+      memory: 8Gi
+    limits:
+      cpu: "8"
+      memory: 16Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+  metrics:
+    serviceMonitor:
+      enabled: true
+      interval: 15s
+  logging:
+    level: info
+    json: true
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "1800"
+    hosts:
+      - host: smg.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: smg-tls
+        hosts:
+          - smg.example.com
+worker:
+  replicas: 4
+  backend: sglang
+  model: meta-llama/Llama-3-70b
+  tensorParallelSize: 4
+  resources:
+    limits:
+      nvidia.com/gpu: 4
+    requests:
+      cpu: "16"
+      memory: 128Gi
+  nodeSelector:
+    nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  modelVolume:
+    type: pvc
+    pvcName: model-storage
+grafana:
+  dashboard:
+    enabled: true
