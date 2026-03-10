@@ -170,54 +170,6 @@ impl RouterManager {
         self.routers.len()
     }
 
-    /// Resolve model_id for a request, inferring from available workers if not specified.
-    ///
-    /// Behavior in IGW mode (must fail fast if model not resolvable):
-    /// - If model_id is provided, use it directly
-    /// - If not provided and only one model exists, use it as implicit default
-    /// - If not provided and multiple models exist, return error requiring specification
-    /// - If no models exist, return service unavailable error
-    fn resolve_model_id(&self, model_id: Option<&str>) -> Result<String, Box<Response>> {
-        // If model_id is provided, use it
-        if let Some(id) = model_id {
-            return Ok(id.to_string());
-        }
-
-        // Get all available models from worker registry
-        let available_models = self.worker_registry.get_models();
-
-        match available_models.len() {
-            0 => Err(Box::new(
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "No models available - no workers registered",
-                )
-                    .into_response(),
-            )),
-            1 => {
-                // Single model: use it as implicit default
-                debug!(
-                    "Model not specified, using implicit default: {}",
-                    available_models[0]
-                );
-                Ok(available_models[0].clone())
-            }
-            _ => {
-                // Multiple models: require explicit model specification
-                Err(Box::new(
-                    (
-                        StatusCode::BAD_REQUEST,
-                        format!(
-                            "Model must be specified. Available models: {}",
-                            available_models.join(", ")
-                        ),
-                    )
-                        .into_response(),
-                ))
-            }
-        }
-    }
-
     pub fn get_router_for_model(&self, model_id: &str) -> Option<Arc<dyn RouterTrait>> {
         let workers = self.worker_registry.get_by_model(model_id);
 
@@ -451,24 +403,10 @@ impl RouterTrait for RouterManager {
         body: &GenerateRequest,
         model_id: Option<&str>,
     ) -> Response {
-        // In IGW mode, resolve model_id and fail fast if not resolvable
-        // In non-IGW mode, pass through to router (router handles validation)
-        let effective_model_id = if self.enable_igw {
-            match self.resolve_model_id(model_id) {
-                Ok(id) => Some(id),
-                Err(err_response) => return *err_response,
-            }
-        } else {
-            None
-        };
-
-        let router =
-            self.select_router_for_request(headers, effective_model_id.as_deref().or(model_id));
+        let router = self.select_router_for_request(headers, model_id);
 
         if let Some(router) = router {
-            router
-                .route_generate(headers, body, effective_model_id.as_deref().or(model_id))
-                .await
+            router.route_generate(headers, body, model_id).await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -484,26 +422,11 @@ impl RouterTrait for RouterManager {
         body: &ChatCompletionRequest,
         model_id: Option<&str>,
     ) -> Response {
-        // In IGW mode, resolve model_id and fail fast if not resolvable
-        // In non-IGW mode, pass through to router (router handles validation)
-        let effective_model_id = if self.enable_igw {
-            // Use provided model_id or fall back to body.model
-            let model = model_id.or(Some(&body.model));
-            match self.resolve_model_id(model) {
-                Ok(id) => Some(id),
-                Err(err_response) => return *err_response,
-            }
-        } else {
-            None
-        };
-
-        let router =
-            self.select_router_for_request(headers, effective_model_id.as_deref().or(model_id));
+        let selected_model = model_id.or(Some(&body.model));
+        let router = self.select_router_for_request(headers, selected_model);
 
         if let Some(router) = router {
-            router
-                .route_chat(headers, body, effective_model_id.as_deref().or(model_id))
-                .await
+            router.route_chat(headers, body, selected_model).await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -519,26 +442,11 @@ impl RouterTrait for RouterManager {
         body: &CompletionRequest,
         model_id: Option<&str>,
     ) -> Response {
-        // In IGW mode, resolve model_id and fail fast if not resolvable
-        // In non-IGW mode, pass through to router (router handles validation)
-        let effective_model_id = if self.enable_igw {
-            // Use provided model_id or fall back to body.model
-            let model = model_id.or(Some(&body.model));
-            match self.resolve_model_id(model) {
-                Ok(id) => Some(id),
-                Err(err_response) => return *err_response,
-            }
-        } else {
-            None
-        };
-
-        let router =
-            self.select_router_for_request(headers, effective_model_id.as_deref().or(model_id));
+        let selected_model = model_id.or(Some(&body.model));
+        let router = self.select_router_for_request(headers, selected_model);
 
         if let Some(router) = router {
-            router
-                .route_completion(headers, body, effective_model_id.as_deref().or(model_id))
-                .await
+            router.route_completion(headers, body, selected_model).await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -554,22 +462,10 @@ impl RouterTrait for RouterManager {
         body: &CreateMessageRequest,
         model_id: &str,
     ) -> Response {
-        // In IGW mode, resolve model_id and fail fast if not resolvable
-        // In non-IGW mode, pass through to router (router handles validation)
-        let effective_model_id: Option<String> = if self.enable_igw {
-            match self.resolve_model_id(Some(model_id)) {
-                Ok(id) => Some(id),
-                Err(err_response) => return *err_response,
-            }
-        } else {
-            None
-        };
-
-        let effective_model = effective_model_id.as_deref().unwrap_or(model_id);
-        let router = self.select_router_for_request(headers, Some(effective_model));
+        let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_messages(headers, body, effective_model).await
+            router.route_messages(headers, body, model_id).await
         } else {
             (
                 StatusCode::NOT_FOUND,
