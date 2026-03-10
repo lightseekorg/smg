@@ -87,6 +87,23 @@ use crate::routers::error;
 impl OpenAIRouter {
     const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
 
+    /// Find the least-loaded healthy external worker that supports the given model.
+    fn find_best_external_worker(&self, model_id: &str) -> Option<Arc<dyn Worker>> {
+        self.worker_registry
+            .get_workers_filtered(None, None, None, Some(RuntimeType::External), true)
+            .into_iter()
+            .filter(|w| w.supports_model(model_id) && w.circuit_breaker().can_execute())
+            .min_by_key(|w| w.load())
+    }
+
+    /// Check if any external worker supports the model (regardless of circuit breaker state).
+    fn any_external_worker_supports_model(&self, model_id: &str) -> bool {
+        self.worker_registry
+            .get_workers_filtered(None, None, None, Some(RuntimeType::External), true)
+            .into_iter()
+            .any(|w| w.supports_model(model_id))
+    }
+
     /// Get all external workers from the registry
     fn external_workers(&self) -> Vec<Arc<dyn Worker>> {
         self.worker_registry
@@ -244,7 +261,7 @@ impl OpenAIRouter {
         auth_header: Option<&HeaderValue>,
     ) -> Result<Arc<dyn Worker>, Response> {
         // Try to find a worker immediately
-        if let Some(worker) = self.worker_registry.find_best_external_worker(model_id) {
+        if let Some(worker) = self.find_best_external_worker(model_id) {
             return Ok(worker);
         }
 
@@ -255,22 +272,17 @@ impl OpenAIRouter {
         );
         self.refresh_external_models(auth_header).await;
 
-        self.worker_registry
-            .find_best_external_worker(model_id)
-            .ok_or_else(|| {
-                // Check if the model exists but all workers are circuit-broken
-                if self
-                    .worker_registry
-                    .any_external_worker_supports_model(model_id)
-                {
-                    error::service_unavailable(
-                        "service_unavailable",
-                        format!("All workers for model '{model_id}' are temporarily unavailable"),
-                    )
-                } else {
-                    error::model_not_found(model_id)
-                }
-            })
+        self.find_best_external_worker(model_id).ok_or_else(|| {
+            // Check if the model exists but all workers are circuit-broken
+            if self.any_external_worker_supports_model(model_id) {
+                error::service_unavailable(
+                    "service_unavailable",
+                    format!("All workers for model '{model_id}' are temporarily unavailable"),
+                )
+            } else {
+                error::model_not_found(model_id)
+            }
+        })
     }
 
     /// Forward a realtime REST request to the upstream worker.
