@@ -14,6 +14,10 @@
 # Github workflows
 /.github/workflows @CatherineSue @key4ng @XinyueZhang369 @slin1237
 
+# Docker, Installation
+/docker @gongwei-130 @CatherineSue @slin1237
+/scripts @gongwei-130 @CatherineSue @key4ng @XinyueZhang369 @slin1237
+
 # Main source code (model_gateway)
 /model_gateway/src/config @slin1237
 /model_gateway/src/core @slin1237
