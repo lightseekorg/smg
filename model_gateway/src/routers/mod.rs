@@ -15,6 +15,7 @@ use openai_protocol::{
     completion::CompletionRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
+    interactions::InteractionsRequest,
     messages::CreateMessageRequest,
     rerank::RerankRequest,
     responses::{ResponsesGetParams, ResponsesRequest},
@@ -214,6 +215,20 @@ pub trait RouterTrait: Send + Sync + Debug {
         (
             StatusCode::NOT_IMPLEMENTED,
             "Messages API not yet implemented for this router",
+        )
+            .into_response()
+    }
+
+    /// Route Gemini Interactions API requests (/v1/interactions)
+    async fn route_interactions(
+        &self,
+        _headers: Option<&HeaderMap>,
+        _body: &InteractionsRequest,
+        _model_id: Option<&str>,
+    ) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Interactions API not implemented for this router",
         )
             .into_response()
     }

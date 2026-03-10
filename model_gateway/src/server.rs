@@ -20,6 +20,7 @@ use openai_protocol::{
     completion::CompletionRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
+    interactions::InteractionsRequest,
     messages::CreateMessageRequest,
     parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
     rerank::{RerankRequest, V1RerankReqInput},
@@ -118,6 +119,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             RoutingMode::Regular { .. } => !healthy_workers.is_empty(),
             RoutingMode::OpenAI { .. } => !healthy_workers.is_empty(),
             RoutingMode::Anthropic { .. } => !healthy_workers.is_empty(),
+            RoutingMode::Gemini { .. } => !healthy_workers.is_empty(),
         }
     };
 
@@ -234,6 +236,18 @@ async fn v1_responses(
     state
         .router
         .route_responses(Some(&headers), &body, Some(&body.model))
+        .await
+}
+
+async fn v1_interactions(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    ValidatedJson(body): ValidatedJson<InteractionsRequest>,
+) -> Response {
+    let model_id = body.model.as_deref().or(body.agent.as_deref());
+    state
+        .router
+        .route_interactions(Some(&headers), &body, model_id)
         .await
 }
 
@@ -580,6 +594,7 @@ pub fn build_app(
         .route("/v1/responses", post(v1_responses))
         .route("/v1/embeddings", post(v1_embeddings))
         .route("/v1/messages", post(v1_messages))
+        .route("/v1/interactions", post(v1_interactions))
         .route("/v1/classify", post(v1_classify))
         .route("/v1/responses/{response_id}", get(v1_responses_get))
         .route(

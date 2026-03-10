@@ -63,6 +63,8 @@ pub enum Backend {
     Openai,
     #[value(name = "anthropic")]
     Anthropic,
+    #[value(name = "gemini")]
+    Gemini,
 }
 
 impl std::fmt::Display for Backend {
@@ -73,6 +75,7 @@ impl std::fmt::Display for Backend {
             Backend::Trtllm => "trtllm",
             Backend::Openai => "openai",
             Backend::Anthropic => "anthropic",
+            Backend::Gemini => "gemini",
         };
         write!(f, "{s}")
     }
@@ -955,6 +958,10 @@ impl CliArgs {
             RoutingMode::Anthropic {
                 worker_urls: self.worker_urls.clone(),
             }
+        } else if matches!(self.backend, Some(Backend::Gemini)) {
+            RoutingMode::Gemini {
+                worker_urls: self.worker_urls.clone(),
+            }
         } else if self.pd_disaggregation {
             RoutingMode::PrefillDecode {
                 prefill_urls,
@@ -1017,6 +1024,9 @@ impl CliArgs {
                 all_urls.extend(worker_urls.clone());
             }
             RoutingMode::Anthropic { worker_urls } => {
+                all_urls.extend(worker_urls.clone());
+            }
+            RoutingMode::Gemini { worker_urls } => {
                 all_urls.extend(worker_urls.clone());
             }
         }
