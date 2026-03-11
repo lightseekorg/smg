@@ -11,15 +11,15 @@ use serde_json::Value;
 use smg_mcp::McpToolSession;
 use tracing::warn;
 
-use super::{
-    mcp::{execute_tool_loop, prepare_mcp_tools_as_functions},
-    utils::{patch_response_with_request_metadata, restore_original_tools},
-};
+use super::utils::{patch_response_with_request_metadata, restore_original_tools};
 use crate::routers::{
     error,
     header_utils::{apply_provider_headers, extract_auth_header},
     mcp_utils::ensure_request_mcp_client,
-    openai::context::{PayloadState, RequestContext},
+    openai::{
+        context::{PayloadState, RequestContext},
+        mcp::{execute_tool_loop, prepare_mcp_tools_as_functions},
+    },
     persistence_utils::persist_conversation_items,
 };
 

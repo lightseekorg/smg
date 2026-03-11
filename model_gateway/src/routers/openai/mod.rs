@@ -10,6 +10,7 @@
 mod chat;
 mod context;
 mod health;
+pub(crate) mod mcp;
 mod provider;
 pub mod realtime;
 pub mod responses;
