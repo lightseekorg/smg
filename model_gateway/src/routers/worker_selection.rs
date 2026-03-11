@@ -19,17 +19,13 @@ use crate::{
     },
 };
 
-// ============================================================================
-// Public Types
-// ============================================================================
-
 /// Holds references to shared infrastructure needed for worker selection.
 ///
 /// Created once per router (or per-request where lifetimes differ) and
 /// reused across calls.
 pub struct WorkerSelector<'a> {
-    pub registry: &'a WorkerRegistry,
-    pub client: &'a reqwest::Client,
+    registry: &'a WorkerRegistry,
+    client: &'a reqwest::Client,
 }
 
 /// Input for [`WorkerSelector::select_worker`].
@@ -60,10 +56,6 @@ pub struct SelectWorkerRequest<'a> {
     /// Filter by runtime type (External, Sglang, Vllm, Trtllm). `None` = any.
     pub runtime_type: Option<RuntimeType>,
 }
-
-// ============================================================================
-// Public API
-// ============================================================================
 
 impl<'a> WorkerSelector<'a> {
     pub fn new(registry: &'a WorkerRegistry, client: &'a reqwest::Client) -> Self {
@@ -108,17 +100,10 @@ impl<'a> WorkerSelector<'a> {
             }
         })
     }
-}
 
-// ============================================================================
-// Internal Helpers
-// ============================================================================
-
-impl WorkerSelector<'_> {
-    /// Get available worker candidates matching the request filters.
     fn get_candidates(&self, req: &SelectWorkerRequest<'_>) -> Vec<Arc<dyn Worker>> {
         let workers = self.registry.get_workers_filtered(
-            None, // model_id index lookup not used here — we filter via supports_model
+            None, // model_id index lookup not used — we filter via supports_model
             req.worker_type,
             req.connection_mode,
             req.runtime_type,
@@ -128,12 +113,11 @@ impl WorkerSelector<'_> {
         let candidates: Vec<_> = workers.into_iter().filter(|w| w.is_available()).collect();
 
         match &req.provider {
-            Some(provider) => filter_by_provider(candidates, provider.clone()),
+            Some(provider) => filter_by_provider(candidates, provider),
             None => candidates,
         }
     }
 
-    /// Find the least-loaded available worker that supports the model.
     fn find_best_worker(&self, req: &SelectWorkerRequest<'_>) -> Option<Arc<dyn Worker>> {
         self.get_candidates(req)
             .into_iter()
@@ -142,7 +126,6 @@ impl WorkerSelector<'_> {
     }
 
     /// Check if any healthy worker supports the model (regardless of circuit breaker).
-    ///
     /// Used to distinguish "model not found" from "all workers circuit-broken".
     fn any_worker_supports_model(&self, req: &SelectWorkerRequest<'_>) -> bool {
         let workers = self.registry.get_workers_filtered(
@@ -153,55 +136,17 @@ impl WorkerSelector<'_> {
             true, // healthy only — model exists even if circuit-broken
         );
         let candidates = match &req.provider {
-            Some(p) => filter_by_provider(workers, p.clone()),
+            Some(p) => filter_by_provider(workers, p),
             None => workers,
         };
         candidates.iter().any(|w| w.supports_model(req.model_id))
     }
-}
 
-// ============================================================================
-// Provider Security Filtering
-// ============================================================================
-
-/// In multi-provider setups, filter to only workers matching the target provider.
-///
-/// In single-provider (or no-provider) setups, returns all workers unchanged.
-/// This prevents credentials from leaking to workers of a different provider.
-fn filter_by_provider(workers: Vec<Arc<dyn Worker>>, target: ProviderType) -> Vec<Arc<dyn Worker>> {
-    let mut first_provider: Option<Option<ProviderType>> = None;
-    let has_multiple_providers = workers.iter().any(|w| {
-        let provider = w.default_provider().cloned();
-        match first_provider {
-            None => {
-                first_provider = Some(provider);
-                false
-            }
-            Some(ref first) => *first != provider,
-        }
-    });
-
-    if has_multiple_providers {
-        workers
-            .into_iter()
-            .filter(|w| matches!(w.default_provider(), Some(p) if *p == target))
-            .collect()
-    } else {
-        workers
-    }
-}
-
-// ============================================================================
-// External Model Refresh
-// ============================================================================
-
-impl WorkerSelector<'_> {
-    /// Refresh model lists for all healthy external workers by calling their
-    /// `/v1/models` endpoints in parallel.
+    /// Refresh model lists for all healthy external workers in parallel.
     ///
-    /// Uses [`ListModelsResponse::parse_upstream`] with provider detection from
-    /// the worker URL so that both OpenAI and Anthropic response formats are
-    /// handled correctly, and the resulting `ModelCard`s carry provider info.
+    /// Uses [`ListModelsResponse::parse_upstream`] for vendor-agnostic response
+    /// parsing and tags each `ModelCard` with the provider inferred from the
+    /// worker URL.
     async fn refresh_external_models(&self, auth_header: Option<&HeaderValue>) {
         let external_workers =
             self.registry
@@ -225,12 +170,39 @@ impl WorkerSelector<'_> {
     }
 }
 
+/// In multi-provider setups, filter to only workers matching the target provider.
+/// In single-provider (or no-provider) setups, returns all workers unchanged.
+fn filter_by_provider(
+    workers: Vec<Arc<dyn Worker>>,
+    target: &ProviderType,
+) -> Vec<Arc<dyn Worker>> {
+    let mut first_provider: Option<Option<ProviderType>> = None;
+    let has_multiple_providers = workers.iter().any(|w| {
+        let provider = w.default_provider().cloned();
+        match first_provider {
+            None => {
+                first_provider = Some(provider);
+                false
+            }
+            Some(ref first) => *first != provider,
+        }
+    });
+
+    if has_multiple_providers {
+        workers
+            .into_iter()
+            .filter(|w| matches!(w.default_provider(), Some(p) if p == target))
+            .collect()
+    } else {
+        workers
+    }
+}
+
 /// Refresh a single worker's model list by calling its `/v1/models` endpoint.
 ///
-/// Parses the response using [`ListModelsResponse::parse_upstream`] which handles
-/// both OpenAI (`{"data": [{"id": "..."}]}`) and Anthropic (`{"data": [{"id": "...",
-/// "type": "model"}]}`) formats, and tags each `ModelCard` with the provider
-/// inferred from the worker URL.
+/// Auth headers are adapted per-vendor via [`apply_provider_headers`] (e.g.
+/// Anthropic uses `x-api-key`, OpenAI uses `Authorization: Bearer`). The
+/// response is parsed via [`ListModelsResponse::parse_upstream`].
 async fn refresh_worker_models(
     client: &reqwest::Client,
     worker: &Arc<dyn Worker>,
