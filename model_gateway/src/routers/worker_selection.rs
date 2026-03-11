@@ -2,7 +2,7 @@
 //!
 //! Single public API: [`WorkerSelector::select_worker`].
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     http::{HeaderMap, HeaderValue},
@@ -84,7 +84,8 @@ impl<'a> WorkerSelector<'a> {
         );
 
         let auth = extract_auth_header(req.headers, None);
-        self.refresh_external_models(auth.as_ref()).await;
+        self.refresh_external_models(auth.as_ref(), req.provider.as_ref())
+            .await;
 
         self.find_best_worker(req).ok_or_else(|| {
             if self.any_worker_supports_model(req) {
@@ -142,15 +143,25 @@ impl<'a> WorkerSelector<'a> {
         candidates.iter().any(|w| w.supports_model(req.model_id))
     }
 
-    /// Refresh model lists for all healthy external workers in parallel.
+    /// Refresh model lists for healthy external workers in parallel.
     ///
-    /// Uses [`ListModelsResponse::parse_upstream`] for vendor-agnostic response
-    /// parsing and tags each `ModelCard` with the provider inferred from the
-    /// worker URL.
-    async fn refresh_external_models(&self, auth_header: Option<&HeaderValue>) {
-        let external_workers =
+    /// When `provider` is set, only workers matching that provider are refreshed
+    /// to prevent credential leakage across providers. Each worker falls back to
+    /// its own configured API key when the caller provides no auth.
+    async fn refresh_external_models(
+        &self,
+        auth_header: Option<&HeaderValue>,
+        provider: Option<&ProviderType>,
+    ) {
+        let mut external_workers =
             self.registry
                 .get_workers_filtered(None, None, None, Some(RuntimeType::External), true);
+
+        // Only refresh workers matching the request's provider to avoid sending
+        // e.g. an OpenAI key to Anthropic workers during model discovery.
+        if let Some(p) = provider {
+            external_workers.retain(|w| matches!(w.default_provider(), Some(wp) if wp == p));
+        }
 
         if external_workers.is_empty() {
             return;
@@ -166,7 +177,10 @@ impl<'a> WorkerSelector<'a> {
             .map(|w| refresh_worker_models(self.client, w, auth_header))
             .collect();
 
-        join_all(futures).await;
+        // Timeout prevents a slow/unresponsive worker from blocking all
+        // requests that trigger refresh-on-miss.
+        const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+        let _ = tokio::time::timeout(REFRESH_TIMEOUT, join_all(futures)).await;
     }
 }
 
@@ -210,7 +224,15 @@ async fn refresh_worker_models(
 ) -> bool {
     let url = format!("{}/v1/models", worker.url());
     let mut backend_req = client.get(&url);
-    if let Some(auth) = auth_header {
+
+    // Use caller's auth if provided, otherwise fall back to worker's configured API key.
+    // This matches how auth is handled in request routing (e.g. openai/router.rs).
+    let worker_auth = auth_header.cloned().or_else(|| {
+        worker
+            .api_key()
+            .and_then(|k| HeaderValue::from_str(&format!("Bearer {k}")).ok())
+    });
+    if let Some(ref auth) = worker_auth {
         backend_req = apply_provider_headers(backend_req, &url, Some(auth));
     }
 

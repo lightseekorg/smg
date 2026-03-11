@@ -133,6 +133,21 @@ impl OpenAIRouter {
         })
     }
 
+    async fn select_worker(
+        &self,
+        model_id: &str,
+        headers: Option<&HeaderMap>,
+    ) -> Result<Arc<dyn Worker>, Response> {
+        WorkerSelector::new(&self.worker_registry, &self.shared_components.client)
+            .select_worker(&SelectWorkerRequest {
+                model_id,
+                headers,
+                provider: Some(ProviderType::OpenAI),
+                ..Default::default()
+            })
+            .await
+    }
+
     fn get_provider_arc_for_worker(
         &self,
         worker: &dyn Worker,
@@ -442,15 +457,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             bool_to_static_str(streaming),
         );
 
-        let selector = WorkerSelector::new(&self.worker_registry, &self.shared_components.client);
-        let worker = match selector
-            .select_worker(&SelectWorkerRequest {
-                model_id: body.model.as_str(),
-                headers,
-                ..Default::default()
-            })
-            .await
-        {
+        let worker = match self.select_worker(body.model.as_str(), headers).await {
             Ok(w) => w,
             Err(response) => {
                 Metrics::record_router_error(
@@ -683,15 +690,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             bool_to_static_str(streaming),
         );
 
-        let selector = WorkerSelector::new(&self.worker_registry, &self.shared_components.client);
-        let worker = match selector
-            .select_worker(&SelectWorkerRequest {
-                model_id: model,
-                headers,
-                ..Default::default()
-            })
-            .await
-        {
+        let worker = match self.select_worker(model, headers).await {
             Ok(w) => w,
             Err(response) => {
                 Metrics::record_router_error(
@@ -906,14 +905,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
     ) -> Response {
         // TODO(Phase 3): Inject MCP tool definitions into body.tools
         let model = body.model.as_deref().unwrap_or_default();
-        let selector = WorkerSelector::new(&self.worker_registry, &self.shared_components.client);
-        let worker = selector
-            .select_worker(&SelectWorkerRequest {
-                model_id: model,
-                headers,
-                ..Default::default()
-            })
-            .await;
+        let worker = self.select_worker(model, headers).await;
         forward_realtime_rest(
             &self.shared_components.client,
             worker,
@@ -933,14 +925,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
     ) -> Response {
         // TODO(Phase 3): Inject MCP tool definitions into body.session.tools
         let model = body.session.model.as_deref().unwrap_or_default();
-        let selector = WorkerSelector::new(&self.worker_registry, &self.shared_components.client);
-        let worker = selector
-            .select_worker(&SelectWorkerRequest {
-                model_id: model,
-                headers,
-                ..Default::default()
-            })
-            .await;
+        let worker = self.select_worker(model, headers).await;
         forward_realtime_rest(
             &self.shared_components.client,
             worker,
@@ -959,14 +944,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         body: &RealtimeTranscriptionSessionCreateRequest,
     ) -> Response {
         let model = body.model.as_deref().unwrap_or_default();
-        let selector = WorkerSelector::new(&self.worker_registry, &self.shared_components.client);
-        let worker = selector
-            .select_worker(&SelectWorkerRequest {
-                model_id: model,
-                headers,
-                ..Default::default()
-            })
-            .await;
+        let worker = self.select_worker(model, headers).await;
         forward_realtime_rest(
             &self.shared_components.client,
             worker,
@@ -992,14 +970,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         );
 
         let auth_header = extract_auth_header(Some(&parts.headers), None);
-        let selector = WorkerSelector::new(&self.worker_registry, &self.shared_components.client);
-        let worker = selector
-            .select_worker(&SelectWorkerRequest {
-                model_id: model,
-                headers: Some(&parts.headers),
-                ..Default::default()
-            })
-            .await;
+        let worker = self.select_worker(model, Some(&parts.headers)).await;
 
         handle_realtime_ws(
             parts,
