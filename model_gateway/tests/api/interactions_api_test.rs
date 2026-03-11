@@ -144,11 +144,22 @@ async fn test_interactions_store_true_model_request_rejected() {
 
 #[tokio::test]
 async fn test_interactions_unknown_model_forwarded_to_upstream() {
-    // Phase 1 uses wildcard selection: any healthy Gemini worker accepts any model.
-    // The upstream decides whether the model is valid; the gateway just proxies.
+    // Wildcard workers (no explicit model list) accept any model —
+    // the upstream decides whether the model is valid.
     let mock = MockGeminiServer::new().await;
     let config = gemini_config(vec![mock.base_url()]);
     let ctx = create_test_context(config.clone()).await;
+
+    // Remove the pre-registered worker and register a wildcard worker instead.
+    ctx.worker_registry.remove_by_url(&mock.base_url());
+    let worker: Arc<dyn smg::core::Worker> = Arc::new(
+        smg::core::BasicWorkerBuilder::new(mock.base_url())
+            .worker_type(smg::core::WorkerType::Regular)
+            .runtime_type(smg::core::RuntimeType::External)
+            .build(),
+    );
+    ctx.worker_registry.register(worker);
+
     let router = RouterFactory::create_gemini_router(&ctx)
         .await
         .expect("create gemini router");
@@ -166,7 +177,7 @@ async fn test_interactions_unknown_model_forwarded_to_upstream() {
         .route_interactions(None, &request, request.model.as_deref())
         .await;
 
-    // Mock accepts any model, so this succeeds
+    // Wildcard worker forwards any model to upstream
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
     assert_eq!(body["model"], "nonexistent-model-xyz");

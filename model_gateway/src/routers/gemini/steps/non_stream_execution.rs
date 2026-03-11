@@ -65,6 +65,7 @@ pub(crate) async fn non_stream_request_execution(
     let response = match request_builder.send().await {
         Ok(r) => r,
         Err(e) => {
+            worker.circuit_breaker().record_failure();
             tracing::warn!(url = %upstream_url, error = %e, "Request to worker failed");
 
             return if e.is_timeout() {
