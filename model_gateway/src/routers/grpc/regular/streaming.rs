@@ -864,12 +864,7 @@ impl StreamingProcessor {
         // Record streaming metrics
         let total_completion: u32 = completion_tokens_map.values().sum();
         Self::record_generate_metrics(start_time, first_token_time, total_completion, &ctx);
-        Self::emit_generate_request_stats(
-            &ctx,
-            stream.take_request_stats(),
-            Some(200),
-            None,
-        );
+        Self::emit_generate_request_stats(&ctx, stream.take_request_stats(), Some(200), None);
 
         Ok(())
     }
@@ -1099,12 +1094,7 @@ impl StreamingProcessor {
         // Record streaming metrics
         let total_completion: u32 = completion_tokens_map.values().sum();
         Self::record_generate_metrics(start_time, first_token_time, total_completion, &ctx);
-        Self::emit_generate_request_stats(
-            &ctx,
-            stream.take_request_stats(),
-            Some(200),
-            None,
-        );
+        Self::emit_generate_request_stats(&ctx, stream.take_request_stats(), Some(200), None);
 
         Ok(())
     }

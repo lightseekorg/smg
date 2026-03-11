@@ -498,13 +498,14 @@ impl ProtoGenerateResponse {
     fn backend_request_stats_index(&self) -> Option<u32> {
         match self {
             Self::Sglang(resp) => match resp.response.as_ref() {
-                Some(sglang::generate_response::Response::Complete(complete)) => Some(complete.index),
+                Some(sglang::generate_response::Response::Complete(complete)) => {
+                    Some(complete.index)
+                }
                 _ => None,
             },
             Self::Vllm(_) | Self::Trtllm(_) => None,
         }
     }
-
 }
 
 /// Response variant extracted from GenerateResponse

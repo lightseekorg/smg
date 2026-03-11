@@ -51,8 +51,7 @@ pub(crate) async fn collect_responses(
 
             // Collect decode for actual output (don't mark completed yet)
             let mut decode_stream = *decode;
-            let mut decode_batch =
-                collect_stream_responses(&mut decode_stream, "Decode").await?;
+            let mut decode_batch = collect_stream_responses(&mut decode_stream, "Decode").await?;
 
             // Mark both streams as completed now that both succeeded
             prefill.mark_completed();
@@ -60,15 +59,10 @@ pub(crate) async fn collect_responses(
 
             // Merge prefill input_logprobs if requested
             if merge_logprobs {
-                merge_prefill_logprobs(
-                    &prefill_batch.completes,
-                    &mut decode_batch.completes,
-                );
+                merge_prefill_logprobs(&prefill_batch.completes, &mut decode_batch.completes);
             }
 
-            let request_stats = decode_batch
-                .request_stats
-                .or(prefill_batch.request_stats);
+            let request_stats = decode_batch.request_stats.or(prefill_batch.request_stats);
 
             CollectedGenerateBatchWithStats {
                 completes: decode_batch.completes,
