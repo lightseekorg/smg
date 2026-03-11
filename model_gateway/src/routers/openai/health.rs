@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
+    Json,
 };
 use serde_json::json;
 
@@ -65,5 +66,5 @@ pub(super) fn get_server_info(registry: &WorkerRegistry) -> Response {
         "total_models": stats.total_models,
         "worker_urls": worker_urls
     });
-    (StatusCode::OK, info.to_string()).into_response()
+    (StatusCode::OK, Json(info)).into_response()
 }

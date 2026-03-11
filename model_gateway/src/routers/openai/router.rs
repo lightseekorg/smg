@@ -56,15 +56,13 @@ use crate::{
 pub(super) fn resolve_provider(
     registry: &ProviderRegistry,
     worker: &dyn Worker,
-    model_id: Option<&str>,
+    model: &str,
 ) -> Arc<dyn super::provider::Provider> {
-    if let Some(model) = model_id {
-        if let Some(pt) = worker.provider_for_model(model) {
-            return registry.get_arc(pt);
-        }
-        if let Some(pt) = ProviderType::from_model_name(model) {
-            return registry.get_arc(&pt);
-        }
+    if let Some(pt) = worker.provider_for_model(model) {
+        return registry.get_arc(pt);
+    }
+    if let Some(pt) = ProviderType::from_model_name(model) {
+        return registry.get_arc(&pt);
     }
     registry.default_provider_arc()
 }
@@ -489,7 +487,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             }
         };
 
-        let provider = resolve_provider(&self.provider_registry, worker.as_ref(), model_id);
+        let provider = resolve_provider(&self.provider_registry, worker.as_ref(), model);
         if let Err(e) = provider.transform_request(&mut payload, Endpoint::Responses) {
             Metrics::record_router_error(
                 metrics_labels::ROUTER_OPENAI,

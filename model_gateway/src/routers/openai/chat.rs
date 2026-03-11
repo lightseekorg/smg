@@ -61,7 +61,7 @@ pub(super) async fn route_chat(
     let selector = WorkerSelector::new(deps.worker_registry, deps.client);
     let worker = match selector
         .select_worker(&SelectWorkerRequest {
-            model_id: body.model.as_str(),
+            model_id: model,
             headers,
             provider: Some(ProviderType::OpenAI),
             ..Default::default()
@@ -100,7 +100,13 @@ pub(super) async fn route_chat(
         }
     };
 
-    let provider = resolve_provider(deps.provider_registry, worker.as_ref(), model_id);
+    // When model_id overrides the body model, patch the serialized payload
+    // so the upstream request uses the effective model consistently.
+    if model_id.is_some() {
+        payload["model"] = serde_json::Value::String(model.to_owned());
+    }
+
+    let provider = resolve_provider(deps.provider_registry, worker.as_ref(), model);
     if let Err(e) = provider.transform_request(&mut payload, Endpoint::Chat) {
         Metrics::record_router_error(
             metrics_labels::ROUTER_OPENAI,
