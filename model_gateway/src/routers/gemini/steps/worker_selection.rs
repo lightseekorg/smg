@@ -9,8 +9,7 @@ use crate::routers::{
         context::RequestContext,
         state::{RequestState, StepResult},
     },
-    header_utils::extract_auth_header,
-    worker_selection as ws,
+    worker_selection::{SelectWorkerRequest, WorkerSelector},
 };
 
 /// Select a healthy upstream worker for the requested model.
@@ -33,17 +32,14 @@ pub(crate) async fn worker_selection(ctx: &mut RequestContext) -> Result<StepRes
         .or(ctx.input.original_request.agent.as_deref())
         .unwrap_or_default();
 
-    let auth = extract_auth_header(ctx.input.headers.as_ref(), None);
-    let query = ws::WorkerQuery::default();
-
-    let worker = ws::select_worker(
-        &ctx.components.worker_registry,
-        &ctx.components.client,
-        &query,
-        model,
-        auth.as_ref(),
-    )
-    .await?;
+    let selector = WorkerSelector::new(&ctx.components.worker_registry, &ctx.components.client);
+    let worker = selector
+        .select_worker(&SelectWorkerRequest {
+            model_id: model,
+            headers: ctx.input.headers.as_ref(),
+            ..Default::default()
+        })
+        .await?;
 
     ctx.processing.upstream_url = Some(format!("{}/v1/interactions", worker.url()));
     ctx.processing.worker = Some(worker);
