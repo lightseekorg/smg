@@ -627,6 +627,20 @@ struct CliArgs {
 
     #[arg(long, num_args = 0..)]
     mesh_peer_urls: Vec<String>,
+
+    // ==================== WebRTC ====================
+    /// Bind address for WebRTC UDP sockets (client-facing ICE candidate IP).
+    /// Default: 0.0.0.0 (auto-detect via routing table).
+    /// Set to 127.0.0.1 for local development on the same machine.
+    #[arg(long, help_heading = "WebRTC")]
+    webrtc_bind_addr: Option<std::net::IpAddr>,
+
+    /// STUN server for ICE candidate gathering (host:port).
+    /// Set to your own STUN server for enterprise deployments that
+    /// restrict outbound traffic to external STUN servers.
+    /// Defaults to `stun.l.google.com:19302` at runtime when omitted.
+    #[arg(long, help_heading = "WebRTC")]
+    webrtc_stun_server: Option<String>,
 }
 
 enum OracleConnectSource {
@@ -1248,6 +1262,8 @@ impl CliArgs {
             shutdown_grace_period_secs: self.shutdown_grace_period_secs,
             control_plane_auth,
             mesh_server_config,
+            webrtc_bind_addr: self.webrtc_bind_addr,
+            webrtc_stun_server: self.webrtc_stun_server.clone(),
         })
     }
 }

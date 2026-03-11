@@ -622,6 +622,12 @@ pub struct ServerConfig {
     /// Control plane authentication configuration
     pub control_plane_auth: Option<smg_auth::ControlPlaneAuthConfig>,
     pub mesh_server_config: Option<MeshServerConfig>,
+    /// Bind address for WebRTC UDP sockets.
+    /// `None` means use the default (0.0.0.0, auto-detect candidate IP).
+    pub webrtc_bind_addr: Option<std::net::IpAddr>,
+    /// STUN server for ICE candidate gathering (host:port).
+    /// `None` means use the default (stun.l.google.com:19302).
+    pub webrtc_stun_server: Option<String>,
 }
 
 pub fn build_app(
@@ -887,7 +893,13 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     );
 
     let app_context = Arc::new(
-        AppContext::from_config(config.router_config.clone(), config.request_timeout_secs).await?,
+        AppContext::from_config(
+            config.router_config.clone(),
+            config.request_timeout_secs,
+            config.webrtc_bind_addr,
+            config.webrtc_stun_server.clone(),
+        )
+        .await?,
     );
 
     if config.prometheus_config.is_some() {

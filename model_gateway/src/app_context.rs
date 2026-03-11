@@ -64,6 +64,10 @@ pub struct AppContext {
     pub inflight_tracker: Arc<InFlightRequestTracker>,
     pub kv_event_monitor: Option<Arc<KvEventMonitor>>,
     pub realtime_registry: Arc<RealtimeRegistry>,
+    /// Bind address for WebRTC UDP sockets (`None` = `0.0.0.0`, auto-detect).
+    pub webrtc_bind_addr: Option<std::net::IpAddr>,
+    /// STUN server for ICE candidate gathering (`None` = `stun.l.google.com:19302`).
+    pub webrtc_stun_server: Option<String>,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -93,6 +97,8 @@ pub struct AppContextBuilder {
     mcp_orchestrator: Option<Arc<OnceLock<Arc<McpOrchestrator>>>>,
     wasm_manager: Option<Arc<WasmModuleManager>>,
     kv_event_monitor: Option<Arc<KvEventMonitor>>,
+    webrtc_bind_addr: Option<std::net::IpAddr>,
+    webrtc_stun_server: Option<String>,
 }
 
 impl AppContext {
@@ -105,11 +111,15 @@ impl AppContext {
     pub fn from_config(
         router_config: RouterConfig,
         request_timeout_secs: u64,
+        webrtc_bind_addr: Option<std::net::IpAddr>,
+        webrtc_stun_server: Option<String>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self, String>> + Send>> {
         Box::pin(async move {
             Box::pin(AppContextBuilder::from_config(
                 router_config,
                 request_timeout_secs,
+                webrtc_bind_addr,
+                webrtc_stun_server,
             ))
             .await?
             .build()
@@ -139,6 +149,8 @@ impl AppContextBuilder {
             mcp_orchestrator: None,
             wasm_manager: None,
             kv_event_monitor: None,
+            webrtc_bind_addr: None,
+            webrtc_stun_server: None,
         }
     }
 
@@ -244,6 +256,16 @@ impl AppContextBuilder {
         self
     }
 
+    pub fn webrtc_bind_addr(mut self, addr: Option<std::net::IpAddr>) -> Self {
+        self.webrtc_bind_addr = addr;
+        self
+    }
+
+    pub fn webrtc_stun_server(mut self, server: Option<String>) -> Self {
+        self.webrtc_stun_server = server;
+        self
+    }
+
     pub fn build(self) -> Result<AppContext, AppContextBuildError> {
         let router_config = self
             .router_config
@@ -303,6 +325,8 @@ impl AppContextBuilder {
             inflight_tracker: InFlightRequestTracker::new(),
             kv_event_monitor: self.kv_event_monitor,
             realtime_registry: Arc::new(RealtimeRegistry::new()),
+            webrtc_bind_addr: self.webrtc_bind_addr,
+            webrtc_stun_server: self.webrtc_stun_server,
         })
     }
 
@@ -311,6 +335,8 @@ impl AppContextBuilder {
     pub async fn from_config(
         router_config: RouterConfig,
         request_timeout_secs: u64,
+        webrtc_bind_addr: Option<std::net::IpAddr>,
+        webrtc_stun_server: Option<String>,
     ) -> Result<Self, String> {
         Ok(Self::new()
             .with_client(&router_config, request_timeout_secs)?
@@ -329,6 +355,8 @@ impl AppContextBuilder {
             .await?
             .with_wasm_manager(&router_config)
             .with_kv_event_monitor(&router_config)
+            .webrtc_bind_addr(webrtc_bind_addr)
+            .webrtc_stun_server(webrtc_stun_server)
             .router_config(router_config))
     }
 
