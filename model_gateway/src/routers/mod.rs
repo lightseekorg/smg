@@ -286,6 +286,15 @@ pub trait RouterTrait: Send + Sync + Debug {
             .into_response()
     }
 
+    /// Route a realtime WebRTC upgrade request
+    async fn route_realtime_webrtc(&self, _req: Request<Body>, _model_id: &str) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Realtime WebRTC not implemented",
+        )
+            .into_response()
+    }
+
     /// Get router type name
     fn router_type(&self) -> &'static str;
 

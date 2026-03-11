@@ -396,6 +396,7 @@ pub mod metrics_labels {
 
     // Connection modes
     pub const CONNECTION_WEBSOCKET: &str = "websocket";
+    pub const CONNECTION_WEBRTC: &str = "webrtc";
 
     // Worker types
     pub const WORKER_REGULAR: &str = "regular";

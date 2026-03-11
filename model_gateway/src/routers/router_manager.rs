@@ -914,6 +914,19 @@ impl RouterTrait for RouterManager {
         }
     }
 
+    async fn route_realtime_webrtc(&self, req: Request<Body>, model: &str) -> Response {
+        let router = self.select_router_for_request(None, Some(model));
+        if let Some(router) = router {
+            router.route_realtime_webrtc(req, model).await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available for realtime WebRTC request",
+            )
+                .into_response()
+        }
+    }
+
     fn router_type(&self) -> &'static str {
         "manager"
     }

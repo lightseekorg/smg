@@ -394,6 +394,7 @@ jobs:
               - 'crates/data_connector/**'
               - 'e2e_test/responses/**'
               - 'e2e_test/messages/**'
+              - 'e2e_test/realtime/**'
               - 'scripts/ci_agentic_svc_deps.sh'
               - 'scripts/oracle_flyway/**'
             embeddings:

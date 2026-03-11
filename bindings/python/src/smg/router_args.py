@@ -149,6 +149,9 @@ class RouterArgs:
     jwt_audience: str | None = None
     jwt_jwks_uri: str | None = None
     jwt_role_mapping: dict[str, str] = dataclasses.field(default_factory=dict)
+    # WebRTC configuration
+    webrtc_bind_addr: str | None = None
+    webrtc_stun_server: str | None = "stun.l.google.com:19302"
 
     @staticmethod
     def add_cli_args(
@@ -995,6 +998,28 @@ class RouterArgs:
                 "Mapping from IDP role/group names to gateway roles."
                 " Format: 'idp_role=gateway_role'."
                 " Example: --jwt-role-mapping 'Gateway.Admin=admin' 'Gateway.User=user'"
+            ),
+        )
+
+        # WebRTC configuration
+        webrtc_group = parser.add_argument_group("WebRTC", "WebRTC signaling and ICE configuration")
+        webrtc_group.add_argument(
+            f"--{prefix}webrtc-bind-addr",
+            type=str,
+            default=None,
+            help=(
+                "Bind address for WebRTC UDP sockets (client-facing ICE candidate IP)."
+                " Default: 0.0.0.0 (auto-detect via routing table)."
+                " Set to 127.0.0.1 for local development on the same machine."
+            ),
+        )
+        webrtc_group.add_argument(
+            f"--{prefix}webrtc-stun-server",
+            type=str,
+            default="stun.l.google.com:19302",
+            help=(
+                "STUN server for ICE candidate gathering (host:port)."
+                " Set to your own STUN server for enterprise deployments."
             ),
         )
 
