@@ -493,7 +493,7 @@ class RouterArgs:
             f"--{prefix}router-selector",
             type=str,
             nargs="+",
-            default={},
+            default=[],
             help=(
                 "Label selector for router pod discovery in HA mesh mode (format: key1=value1 key2=value2)"
             ),
