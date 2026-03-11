@@ -13,7 +13,6 @@ pub(crate) enum RequestState {
     /// Entry state for every request.
     SelectWorker,
     /// A healthy worker has been selected for this model.
-    #[expect(dead_code, reason = "used once worker_selection step is implemented")]
     LoadPreviousInteraction,
     /// Previous interaction loading is complete (or was not needed).
     BuildRequest,

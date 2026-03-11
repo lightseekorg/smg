@@ -52,7 +52,6 @@ pub(crate) struct SharedComponents {
 /// here — it lives inside the background task spawned by the terminal
 /// streaming step, following the same pattern as `process_streaming_response`
 /// in the gRPC router.
-#[expect(dead_code)]
 pub(crate) struct RequestContext {
     /// Immutable request data from the client.
     pub input: RequestInput,
@@ -68,7 +67,6 @@ pub(crate) struct RequestContext {
 }
 
 /// Immutable request data captured at the start of processing.
-#[expect(dead_code)]
 pub(crate) struct RequestInput {
     /// Original client request (`Arc` for cheap cloning into spawned tasks).
     pub original_request: Arc<InteractionsRequest>,
@@ -83,7 +81,6 @@ pub(crate) struct RequestInput {
 
 /// Mutable processing state populated incrementally by steps.
 #[derive(Default)]
-#[expect(dead_code)]
 pub(crate) struct ProcessingState {
     /// Selected upstream worker (set by `WorkerSelection`).
     pub worker: Option<Arc<dyn Worker>>,
