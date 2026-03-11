@@ -13,6 +13,7 @@ mod accumulator;
 mod common;
 pub(crate) mod history;
 mod non_streaming;
+pub(crate) mod route;
 mod streaming;
 mod utils;
 
