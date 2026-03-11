@@ -30,7 +30,7 @@ use crate::{
 };
 
 /// Shared context passed to chat routing functions.
-pub(super) struct RouterContext<'a> {
+pub(super) struct ChatRouterContext<'a> {
     pub worker_registry: &'a WorkerRegistry,
     pub provider_registry: &'a ProviderRegistry,
     pub shared_components: &'a Arc<SharedComponents>,
@@ -40,7 +40,7 @@ pub(super) struct RouterContext<'a> {
 
 /// Route a chat completion request to the appropriate upstream worker.
 pub(super) async fn route_chat(
-    deps: &RouterContext<'_>,
+    deps: &ChatRouterContext<'_>,
     headers: Option<&HeaderMap>,
     body: &ChatCompletionRequest,
     model_id: Option<&str>,
