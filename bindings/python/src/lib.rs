@@ -453,6 +453,8 @@ struct Router {
     otlp_traces_endpoint: String,
     control_plane_auth: Option<PyControlPlaneAuthConfig>,
     schema_config: Option<String>,
+    webrtc_bind_addr: Option<String>,
+    webrtc_stun_server: Option<String>,
 }
 
 impl Router {
@@ -806,6 +808,8 @@ impl Router {
         otlp_traces_endpoint = String::from("localhost:4317"),
         control_plane_auth = None,
         schema_config = None,
+        webrtc_bind_addr = None,
+        webrtc_stun_server = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -902,6 +906,8 @@ impl Router {
         otlp_traces_endpoint: String,
         control_plane_auth: Option<PyControlPlaneAuthConfig>,
         schema_config: Option<String>,
+        webrtc_bind_addr: Option<String>,
+        webrtc_stun_server: Option<String>,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -1008,6 +1014,8 @@ impl Router {
             otlp_traces_endpoint,
             control_plane_auth,
             schema_config,
+            webrtc_bind_addr,
+            webrtc_stun_server,
         })
     }
 
@@ -1084,6 +1092,17 @@ impl Router {
                     .as_ref()
                     .map(|c| c.to_auth_control_plane_config()),
                 mesh_server_config: None,
+                webrtc_bind_addr: self
+                    .webrtc_bind_addr
+                    .as_deref()
+                    .map(|s| s.parse::<std::net::IpAddr>())
+                    .transpose()
+                    .map_err(|e| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "Invalid webrtc-bind-addr: {e}"
+                        ))
+                    })?,
+                webrtc_stun_server: self.webrtc_stun_server.clone(),
             })
             .await
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))

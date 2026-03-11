@@ -42,7 +42,7 @@ use tracing::{debug, error, info, warn, Level};
 use wfaas::LoggingSubscriber;
 
 use crate::{
-    app_context::AppContext,
+    app_context::{AppContext, AppContextBuilder},
     config::{RouterConfig, RoutingMode},
     core::{
         job_queue::{JobQueue, JobQueueConfig},
@@ -438,6 +438,17 @@ async fn v1_conversations_delete_item(
     .await
 }
 
+async fn v1_realtime_webrtc(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RealtimeQueryParams>,
+    req: Request,
+) -> Response {
+    // Model may come from query param (application/sdp) or session body
+    // (multipart/form-data). Let the handler validate per content type.
+    let model = params.model.unwrap_or_default();
+    state.router.route_realtime_webrtc(req, &model).await
+}
+
 async fn v1_realtime_ws(
     State(state): State<Arc<AppState>>,
     Query(params): Query<RealtimeQueryParams>,
@@ -622,6 +633,12 @@ pub struct ServerConfig {
     /// Control plane authentication configuration
     pub control_plane_auth: Option<smg_auth::ControlPlaneAuthConfig>,
     pub mesh_server_config: Option<MeshServerConfig>,
+    /// Bind address for WebRTC UDP sockets.
+    /// `None` means use the default (0.0.0.0, auto-detect candidate IP).
+    pub webrtc_bind_addr: Option<std::net::IpAddr>,
+    /// STUN server for ICE candidate gathering (host:port).
+    /// `None` means use the default (stun.l.google.com:19302).
+    pub webrtc_stun_server: Option<String>,
 }
 
 pub fn build_app(
@@ -707,6 +724,7 @@ pub fn build_app(
     // dropping the response extensions that carry the WebSocket upgrade future.
     let ws_routes = Router::new()
         .route("/v1/realtime", get(v1_realtime_ws))
+        .route("/v1/realtime/calls", post(v1_realtime_webrtc))
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::concurrency_limit_middleware,
@@ -887,7 +905,16 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     );
 
     let app_context = Arc::new(
-        AppContext::from_config(config.router_config.clone(), config.request_timeout_secs).await?,
+        Box::pin(AppContextBuilder::from_config(
+            config.router_config.clone(),
+            config.request_timeout_secs,
+            config.webrtc_bind_addr,
+            config.webrtc_stun_server.clone(),
+        ))
+        .await
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?,
     );
 
     if config.prometheus_config.is_some() {

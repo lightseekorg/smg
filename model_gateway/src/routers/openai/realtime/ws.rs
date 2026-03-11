@@ -11,8 +11,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
+use tracing::{debug, error};
 
-use super::{proxy::run_ws_proxy, RealtimeRegistry};
+use super::{proxy, RealtimeRegistry};
 use crate::{
     core::Worker,
     observability::metrics::{metrics_labels, Metrics},
@@ -116,7 +117,7 @@ pub(crate) async fn handle_realtime_ws(
     );
 
     ws.on_upgrade(move |socket: WebSocket| async move {
-        if let Err(e) = run_ws_proxy(
+        let success = match proxy::run_ws_proxy(
             socket,
             &upstream_ws_url,
             &auth_str,
@@ -126,12 +127,16 @@ pub(crate) async fn handle_realtime_ws(
         )
         .await
         {
-            tracing::error!(session_id, error = %e, "Realtime WebSocket proxy error");
-        }
+            Ok(()) => true,
+            Err(e) => {
+                error!(session_id, error = %e, "Realtime WebSocket proxy error");
+                false
+            }
+        };
 
-        // Cleanup: remove session on disconnect
+        worker.record_outcome(success);
         realtime_registry.remove_session(&session_id);
-        tracing::debug!(session_id, "Realtime session cleaned up");
+        debug!(session_id, "Realtime session cleaned up");
     })
 }
 
