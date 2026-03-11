@@ -55,6 +55,7 @@ class RouterArgs:
     # PD service discovery configuration
     prefill_selector: dict[str, str] = dataclasses.field(default_factory=dict)
     decode_selector: dict[str, str] = dataclasses.field(default_factory=dict)
+    router_selector: dict[str, str] = dataclasses.field(default_factory=dict)
     bootstrap_port_annotation: str = "sglang.ai/bootstrap-port"
     model_id_from: str | None = None
     # Prometheus configuration
@@ -486,6 +487,15 @@ class RouterArgs:
             default={},
             help=(
                 "Label selector for decode server pods in PD mode (format: key1=value1 key2=value2)"
+            ),
+        )
+        k8s_group.add_argument(
+            f"--{prefix}router-selector",
+            type=str,
+            nargs="+",
+            default={},
+            help=(
+                "Label selector for router pod discovery in HA mesh mode (format: key1=value1 key2=value2)"
             ),
         )
         k8s_group.add_argument(
@@ -1049,6 +1059,9 @@ class RouterArgs:
         )
         args_dict["decode_selector"] = cls._parse_selector(
             cli_args_dict.get(f"{prefix}decode_selector", None)
+        )
+        args_dict["router_selector"] = cls._parse_selector(
+            cli_args_dict.get(f"{prefix}router_selector", None)
         )
 
         # Mooncake-specific annotation
