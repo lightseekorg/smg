@@ -29,11 +29,18 @@ pub(crate) async fn load_input_history(
     request_body: &mut ResponsesRequest,
     model: &str,
 ) -> Result<Option<String>, Response> {
-    let original_previous_response_id = request_body.previous_response_id.clone();
+    let original_previous_response_id = request_body
+        .previous_response_id
+        .clone()
+        .filter(|id| !id.is_empty());
 
     // Load items from previous response chain if specified
     let mut chain_items: Option<Vec<ResponseInputOutputItem>> = None;
-    if let Some(prev_id_str) = request_body.previous_response_id.take() {
+    if let Some(prev_id_str) = request_body
+        .previous_response_id
+        .take()
+        .filter(|id| !id.is_empty())
+    {
         let prev_id = ResponseId::from(prev_id_str.as_str());
         match components
             .response_storage
@@ -67,7 +74,7 @@ pub(crate) async fn load_input_history(
     }
 
     // Load conversation history if specified
-    if let Some(conv_id_str) = body.conversation.clone() {
+    if let Some(conv_id_str) = body.conversation.clone().filter(|id| !id.is_empty()) {
         let conv_id = ConversationId::from(conv_id_str.as_str());
 
         if let Ok(None) = components
@@ -105,9 +112,7 @@ pub(crate) async fn load_input_history(
                 for item in stored_items {
                     match item.item_type.as_str() {
                         "message" => {
-                            match serde_json::from_value::<Vec<ResponseContentPart>>(
-                                item.content.clone(),
-                            ) {
+                            match serde_json::from_value::<Vec<ResponseContentPart>>(item.content) {
                                 Ok(content_parts) => {
                                     items.push(ResponseInputOutputItem::Message {
                                         id: item.id.0.clone(),
@@ -125,9 +130,7 @@ pub(crate) async fn load_input_history(
                             }
                         }
                         "function_call" => {
-                            match serde_json::from_value::<ResponseInputOutputItem>(
-                                item.content.clone(),
-                            ) {
+                            match serde_json::from_value::<ResponseInputOutputItem>(item.content) {
                                 Ok(func_call) => items.push(func_call),
                                 Err(e) => {
                                     tracing::error!("Failed to deserialize function_call: {}", e);
@@ -136,13 +139,10 @@ pub(crate) async fn load_input_history(
                         }
                         "function_call_output" => {
                             tracing::debug!(
-                                "Loading function_call_output from DB - content: {}",
-                                serde_json::to_string_pretty(&item.content)
-                                    .unwrap_or_else(|_| "failed to serialize".to_string())
+                                item_id = %item.id.0,
+                                "Loading function_call_output from DB"
                             );
-                            match serde_json::from_value::<ResponseInputOutputItem>(
-                                item.content.clone(),
-                            ) {
+                            match serde_json::from_value::<ResponseInputOutputItem>(item.content) {
                                 Ok(func_output) => {
                                     tracing::debug!(
                                         "Successfully deserialized function_call_output"
