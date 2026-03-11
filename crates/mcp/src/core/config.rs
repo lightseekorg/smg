@@ -282,6 +282,8 @@ pub enum ConfigValidationError {
     MissingServerPrecedence,
     /// Server precedence entries must not be blank.
     EmptyServerPrecedenceEntry,
+    /// Server precedence entries must not contain leading/trailing whitespace.
+    InvalidServerPrecedenceEntry { server: String },
     /// Server precedence entries must be unique.
     DuplicateServerPrecedenceEntry { server: String },
     /// Server precedence entries must refer to configured server names.
@@ -356,6 +358,12 @@ impl fmt::Display for ConfigValidationError {
                 write!(
                     f,
                     "resolution.server_precedence must not contain blank server names"
+                )
+            }
+            ConfigValidationError::InvalidServerPrecedenceEntry { server } => {
+                write!(
+                    f,
+                    "resolution.server_precedence entry '{server}' must not contain leading/trailing whitespace"
                 )
             }
             ConfigValidationError::DuplicateServerPrecedenceEntry { server } => {
@@ -854,18 +862,22 @@ impl McpConfig {
 
         let mut seen_precedence = HashSet::new();
         for server in &self.resolution.server_precedence {
-            let trimmed = server.trim();
-            if trimmed.is_empty() {
+            if server.trim().is_empty() {
                 return Err(ConfigValidationError::EmptyServerPrecedenceEntry);
             }
-            if !seen_precedence.insert(trimmed) {
-                return Err(ConfigValidationError::DuplicateServerPrecedenceEntry {
-                    server: trimmed.to_string(),
+            if server.trim() != server {
+                return Err(ConfigValidationError::InvalidServerPrecedenceEntry {
+                    server: server.clone(),
                 });
             }
-            if !configured_servers.contains(trimmed) {
+            if !seen_precedence.insert(server.as_str()) {
+                return Err(ConfigValidationError::DuplicateServerPrecedenceEntry {
+                    server: server.clone(),
+                });
+            }
+            if !configured_servers.contains(server.as_str()) {
                 return Err(ConfigValidationError::UnknownServerPrecedenceServer {
-                    server: trimmed.to_string(),
+                    server: server.clone(),
                 });
             }
         }
@@ -1981,6 +1993,37 @@ servers:
             err,
             ConfigValidationError::EmptyServerPrecedenceEntry
         ));
+    }
+
+    #[test]
+    fn test_validate_server_precedence_rejects_surrounding_whitespace() {
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "brave".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+            }],
+            resolution: ToolResolutionConfig {
+                server_precedence: vec!["brave ".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigValidationError::InvalidServerPrecedenceEntry { .. }
+        ));
+        assert!(err.to_string().contains("leading/trailing whitespace"));
     }
 
     #[test]

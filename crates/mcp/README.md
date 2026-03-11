@@ -242,7 +242,7 @@ Validation rules:
 - `resolution.confidence_threshold` must be between `0.0` and `1.0`
 - `resolution.fallback_policy: on_no_exact_match` requires `semantic_search.enabled: true`
 - `resolution.conflict_policy: server_precedence` requires a non-empty `server_precedence`
-- `resolution.server_precedence` entries must be non-blank, unique, and match configured server names
+- `resolution.server_precedence` entries must be non-blank, canonical (no leading/trailing whitespace), unique, and match configured server names
 - `semantic_search.refresh_interval` and `semantic_search.min_description_chars` must be greater than `0` when semantic search is enabled
 
 ## Tool Configuration
