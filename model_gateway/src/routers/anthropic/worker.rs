@@ -1,13 +1,10 @@
-//! Worker selection and HTTP transport layer for Anthropic router
+//! HTTP transport layer for Anthropic router
 //!
-//! Contains the core primitives for selecting workers, building requests,
-//! sending them, and processing responses. These functions are composed
-//! by the streaming and non-streaming processors.
+//! Contains the core primitives for building requests, sending them,
+//! and processing responses. These functions are composed by the
+//! streaming and non-streaming processors.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use axum::{
     http::HeaderMap,
@@ -18,50 +15,13 @@ use tracing::{debug, error, info, warn};
 
 use super::utils::{read_response_body_limited, should_propagate_header, ReadBodyResult};
 use crate::{
-    core::{ProviderType, Worker, WorkerRegistry},
+    core::Worker,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
-    routers::{error, header_utils::extract_auth_header, worker_selection},
+    routers::error,
 };
 
 /// Maximum error response body size to prevent DoS (1 MB)
 const MAX_ERROR_RESPONSE_SIZE: usize = 1024 * 1024;
-
-/// Select the best worker for the given model.
-///
-/// Uses the shared worker_selection module with Anthropic provider filtering
-/// to prevent credential leakage in multi-provider setups. Includes
-/// refresh-on-miss for external workers.
-pub(crate) async fn select_worker(
-    worker_registry: &WorkerRegistry,
-    client: &reqwest::Client,
-    headers: Option<&HeaderMap>,
-    model_id: &str,
-) -> Result<Arc<dyn Worker>, Response> {
-    debug!(model = %model_id, "Selecting worker for request");
-
-    let auth_header = extract_auth_header(headers, None);
-    let query = worker_selection::WorkerQuery {
-        provider: Some(ProviderType::Anthropic),
-        ..Default::default()
-    };
-
-    let worker = worker_selection::select_worker(
-        worker_registry,
-        client,
-        &query,
-        model_id,
-        auth_header.as_ref(),
-    )
-    .await?;
-
-    debug!(
-        model = %model_id,
-        worker_url = %worker.url(),
-        worker_load = %worker.load(),
-        "Selected worker for request"
-    );
-    Ok(worker)
-}
 
 /// Build the target URL and propagated headers for a worker request.
 pub(crate) fn build_request(

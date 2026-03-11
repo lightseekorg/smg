@@ -14,11 +14,12 @@ use tracing::{error, info};
 
 use super::{
     context::{RequestContext, RouterContext},
-    mcp, non_streaming, streaming, worker,
+    mcp, non_streaming, streaming,
 };
 use crate::{
     app_context::AppContext,
-    routers::{error::bad_gateway, header_utils, mcp_utils, RouterTrait},
+    core::ProviderType,
+    routers::{error::bad_gateway, header_utils, mcp_utils, worker_selection, RouterTrait},
 };
 
 /// Router for Anthropic-specific APIs
@@ -136,11 +137,17 @@ impl RouterTrait for AnthropicRouter {
             "Processing Messages API request"
         );
 
-        let selected_worker = match worker::select_worker(
+        let auth_header = header_utils::extract_auth_header(headers, None);
+        let query = worker_selection::WorkerQuery {
+            provider: Some(ProviderType::Anthropic),
+            ..Default::default()
+        };
+        let selected_worker = match worker_selection::select_worker(
             &self.router_ctx.worker_registry,
             &self.router_ctx.http_client,
-            headers,
+            &query,
             model_id,
+            auth_header.as_ref(),
         )
         .await
         {
