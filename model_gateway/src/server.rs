@@ -438,6 +438,17 @@ async fn v1_conversations_delete_item(
     .await
 }
 
+async fn v1_realtime_webrtc(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RealtimeQueryParams>,
+    req: Request,
+) -> Response {
+    // Model may come from query param (application/sdp) or session body
+    // (multipart/form-data). Let the handler validate per content type.
+    let model = params.model.unwrap_or_default();
+    state.router.route_realtime_webrtc(req, &model).await
+}
+
 async fn v1_realtime_ws(
     State(state): State<Arc<AppState>>,
     Query(params): Query<RealtimeQueryParams>,
@@ -702,11 +713,12 @@ pub fn build_app(
             middleware::wasm_middleware,
         ));
 
-    // WebSocket route: auth + concurrency but NO WASM middleware.
+    // WebSocket and WebRTC routes: auth + concurrency but NO WASM middleware.
     // WASM OnResponse reconstructs the response from status/headers/body,
     // dropping the response extensions that carry the WebSocket upgrade future.
-    let ws_routes = Router::new()
+    let realtime_routes = Router::new()
         .route("/v1/realtime", get(v1_realtime_ws))
+        .route("/v1/realtime/calls", post(v1_realtime_webrtc))
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::concurrency_limit_middleware,
@@ -795,7 +807,7 @@ pub fn build_app(
 
     Router::new()
         .merge(protected_routes)
-        .merge(ws_routes)
+        .merge(realtime_routes)
         .merge(public_routes)
         .merge(admin_routes)
         .merge(worker_routes)
