@@ -71,13 +71,19 @@ impl PolicyRegistry {
 
         Self::maybe_inject_mesh_sync(&self.default_policy, mesh_sync.as_ref());
         if let Some(policy) = self.prefill_policy.get() {
-            Self::maybe_inject_mesh_sync(policy, mesh_sync.as_ref());
+            if !Arc::ptr_eq(policy, &self.default_policy) {
+                Self::maybe_inject_mesh_sync(policy, mesh_sync.as_ref());
+            }
         }
         if let Some(policy) = self.decode_policy.get() {
-            Self::maybe_inject_mesh_sync(policy, mesh_sync.as_ref());
+            if !Arc::ptr_eq(policy, &self.default_policy) {
+                Self::maybe_inject_mesh_sync(policy, mesh_sync.as_ref());
+            }
         }
         for entry in self.model_policies.iter() {
-            Self::maybe_inject_mesh_sync(entry.value(), mesh_sync.as_ref());
+            if !Arc::ptr_eq(entry.value(), &self.default_policy) {
+                Self::maybe_inject_mesh_sync(entry.value(), mesh_sync.as_ref());
+            }
         }
     }
 

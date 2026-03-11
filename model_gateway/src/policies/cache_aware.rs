@@ -257,8 +257,10 @@ impl CacheAwarePolicy {
         };
 
         if let Some(tree_states) = tree_states {
-            for tree_state in tree_states {
-                self.apply_tree_state(&tree_state.model_id, &tree_state.operations);
+            for tree_state in &tree_states {
+                // Use the merge path (not replace) so concurrent live updates
+                // arriving via subscriber callbacks are not overwritten.
+                self.apply_remote_tree_state(&tree_state.model_id, tree_state);
             }
         }
     }
@@ -287,27 +289,6 @@ impl CacheAwarePolicy {
                 );
             }
         }
-    }
-
-    fn apply_tree_state(&self, model_id: &str, operations: &[TreeOperation]) {
-        let model_id = Self::normalize_mesh_model_id(model_id);
-        let string_tree = Arc::new(Tree::new());
-        let token_tree = Arc::new(TokenTree::new());
-
-        for operation in operations {
-            if let TreeOperation::Insert(insert_op) = operation {
-                Self::apply_insert_to_trees(&string_tree, &token_tree, insert_op);
-            }
-        }
-
-        self.string_trees.insert(model_id.to_string(), string_tree);
-        self.token_trees.insert(model_id.to_string(), token_tree);
-
-        debug!(
-            "Restored tree state for model {} with {} operations",
-            model_id,
-            operations.len()
-        );
     }
 
     fn apply_insert_operation(&self, model_id: &str, insert_op: &TreeInsertOp) {
@@ -351,7 +332,7 @@ impl CacheAwarePolicy {
     }
 
     /// Merge remote tree state into local trees incrementally.
-    /// Unlike `apply_tree_state` (which replaces), this preserves local routing state.
+    /// Uses entry-based insertion to preserve existing local routing state.
     pub fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
         let model_id = Self::normalize_mesh_model_id(model_id);
         for operation in &tree_state.operations {
