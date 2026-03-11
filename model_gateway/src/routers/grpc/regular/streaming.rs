@@ -313,15 +313,7 @@ impl StreamingProcessor {
                     if client_connection.is_disconnected() {
                         break;
                     }
-                    let total_prompt: u64 = prompt_tokens.values().map(|v| u64::from(*v)).sum();
-                    let total_completion = u64::from(completion_tokens.total());
-                    if let Some(mut request_stats) = grpc_stream.take_request_stats() {
-                        if total_prompt > 0 {
-                            request_stats.prompt_tokens = total_prompt;
-                        }
-                        if total_completion > 0 {
-                            request_stats.completion_tokens = total_completion;
-                        }
+                    if let Some(request_stats) = grpc_stream.take_request_stats() {
                         let stream_error = format!("Stream error: {}", e.message());
                         RequestStatsEvent {
                             request_id,
@@ -538,15 +530,7 @@ impl StreamingProcessor {
                     // Don't break - continue reading all Complete messages for n>1
                 }
                 ProtoResponseVariant::Error(error) => {
-                    let total_prompt: u64 = prompt_tokens.values().map(|v| u64::from(*v)).sum();
-                    let total_completion = u64::from(completion_tokens.total());
-                    if let Some(mut request_stats) = grpc_stream.take_request_stats() {
-                        if total_prompt > 0 {
-                            request_stats.prompt_tokens = total_prompt;
-                        }
-                        if total_completion > 0 {
-                            request_stats.completion_tokens = total_completion;
-                        }
+                    if let Some(request_stats) = grpc_stream.take_request_stats() {
                         RequestStatsEvent {
                             request_id,
                             model,
@@ -665,13 +649,7 @@ impl StreamingProcessor {
             output_tokens: total_completion as u64,
         });
 
-        if let Some(mut request_stats) = grpc_stream.take_request_stats() {
-            if total_prompt > 0 {
-                request_stats.prompt_tokens = total_prompt as u64;
-            }
-            if total_completion > 0 {
-                request_stats.completion_tokens = total_completion as u64;
-            }
+        if let Some(request_stats) = grpc_stream.take_request_stats() {
             RequestStatsEvent {
                 request_id,
                 model,

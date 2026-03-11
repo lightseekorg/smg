@@ -85,9 +85,9 @@ pub struct UnifiedRequestStats {
     pub request_finished_timestamp_s: Option<f64>,
     pub cache_hit_rate: Option<f64>,
     pub spec_decoding_acceptance_rate: Option<f64>,
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub cached_tokens: u64,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
 }
 
 /// Unified request-stats event emitted once per backend request.

@@ -503,49 +503,6 @@ impl ProtoGenerateResponse {
         }
     }
 
-    #[inline]
-    fn to_stats_sample(&self) -> Option<(&'static str, RequestStatsSample)> {
-        match self {
-            Self::Sglang(resp) => match resp.response.as_ref() {
-                Some(sglang::generate_response::Response::Complete(complete)) => Some((
-                    "sglang",
-                    basic_stats_sample(
-                        complete.prompt_tokens,
-                        complete.completion_tokens,
-                        complete.cached_tokens,
-                    ),
-                )),
-                _ => None,
-            },
-            Self::Vllm(resp) => match resp.response.as_ref() {
-                Some(vllm::generate_response::Response::Complete(complete)) => Some((
-                    "vllm",
-                    basic_stats_sample(
-                        complete.prompt_tokens,
-                        complete.completion_tokens,
-                        complete.cached_tokens,
-                    ),
-                )),
-                _ => None,
-            },
-            Self::Trtllm(resp) => match resp.response.as_ref() {
-                Some(trtllm::generate_response::Response::Complete(complete)) => {
-                    let mut sample = basic_stats_sample(
-                        complete.prompt_tokens,
-                        complete.completion_tokens,
-                        complete.cached_tokens,
-                    );
-                    if let Some(m) = complete.perf_metrics.as_ref() {
-                        sample.request_received_timestamp_s = Some(m.arrival_time);
-                        sample.first_token_generated_timestamp_s = Some(m.first_token_time);
-                        sample.request_finished_timestamp_s = Some(m.last_token_time);
-                    }
-                    Some(("trtllm", sample))
-                }
-                _ => None,
-            },
-        }
-    }
 }
 
 /// Response variant extracted from GenerateResponse
@@ -937,45 +894,15 @@ struct RequestStatsSample {
     request_finished_timestamp_s: Option<f64>,
     cache_hit_rate: Option<f64>,
     spec_decoding_acceptance_rate: Option<f64>,
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    cached_tokens: u64,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
 }
 
 struct IndexedRequestStatsSample {
     engine: &'static str,
     index: u32,
     sample: RequestStatsSample,
-}
-
-#[inline]
-fn derive_cache_hit_rate(cached_tokens: u64, prompt_tokens: u64) -> Option<f64> {
-    if prompt_tokens == 0 {
-        None
-    } else {
-        Some(cached_tokens as f64 / prompt_tokens as f64)
-    }
-}
-
-#[inline]
-fn basic_stats_sample(
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    cached_tokens: u32,
-) -> RequestStatsSample {
-    let prompt_tokens = u64::from(prompt_tokens);
-    let completion_tokens = u64::from(completion_tokens);
-    let cached_tokens = u64::from(cached_tokens);
-    RequestStatsSample {
-        request_received_timestamp_s: None,
-        first_token_generated_timestamp_s: None,
-        request_finished_timestamp_s: None,
-        cache_hit_rate: derive_cache_hit_rate(cached_tokens, prompt_tokens),
-        spec_decoding_acceptance_rate: None,
-        prompt_tokens,
-        completion_tokens,
-        cached_tokens,
-    }
 }
 
 #[inline]
@@ -986,9 +913,9 @@ fn request_stats_sample_from_proto(stats: sglang::RequestStats) -> RequestStatsS
         request_finished_timestamp_s: stats.request_finished_timestamp_s,
         cache_hit_rate: stats.cache_hit_rate,
         spec_decoding_acceptance_rate: stats.spec_decoding_acceptance_rate,
-        prompt_tokens: u64::from(stats.prompt_tokens.unwrap_or_default()),
-        completion_tokens: u64::from(stats.completion_tokens.unwrap_or_default()),
-        cached_tokens: u64::from(stats.cached_tokens.unwrap_or_default()),
+        prompt_tokens: stats.prompt_tokens.map(Into::into),
+        completion_tokens: stats.completion_tokens.map(Into::into),
+        cached_tokens: stats.cached_tokens.map(Into::into),
     }
 }
 
@@ -1043,13 +970,11 @@ struct RequestStatsCollector {
     request_received_timestamp_s: Option<f64>,
     first_token_generated_timestamp_s: Option<f64>,
     request_finished_timestamp_s: Option<f64>,
-    cache_hit_rate_sum: f64,
-    cache_hit_rate_count: u64,
-    spec_acceptance_rate_sum: f64,
-    spec_acceptance_rate_count: u64,
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    cached_tokens: u64,
+    cache_hit_rate: Option<f64>,
+    spec_decoding_acceptance_rate: Option<f64>,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
 }
 
 impl RequestStatsCollector {
@@ -1059,13 +984,11 @@ impl RequestStatsCollector {
         self.request_received_timestamp_s = None;
         self.first_token_generated_timestamp_s = None;
         self.request_finished_timestamp_s = None;
-        self.cache_hit_rate_sum = 0.0;
-        self.cache_hit_rate_count = 0;
-        self.spec_acceptance_rate_sum = 0.0;
-        self.spec_acceptance_rate_count = 0;
-        self.prompt_tokens = 0;
-        self.completion_tokens = 0;
-        self.cached_tokens = 0;
+        self.cache_hit_rate = None;
+        self.spec_decoding_acceptance_rate = None;
+        self.prompt_tokens = None;
+        self.completion_tokens = None;
+        self.cached_tokens = None;
     }
 
     #[inline]
@@ -1082,11 +1005,15 @@ impl RequestStatsCollector {
             self.engine = Some(engine);
         }
 
-        self.prompt_tokens = self.prompt_tokens.saturating_add(sample.prompt_tokens);
-        self.completion_tokens = self
-            .completion_tokens
-            .saturating_add(sample.completion_tokens);
-        self.cached_tokens = self.cached_tokens.saturating_add(sample.cached_tokens);
+        if let Some(pt) = sample.prompt_tokens {
+            self.prompt_tokens.get_or_insert(pt);
+        }
+        if let Some(ct) = sample.completion_tokens {
+            self.completion_tokens = Some(self.completion_tokens.unwrap_or(0).saturating_add(ct));
+        }
+        if let Some(ct) = sample.cached_tokens {
+            self.cached_tokens.get_or_insert(ct);
+        }
 
         self.request_received_timestamp_s = min_timestamp(
             self.request_received_timestamp_s,
@@ -1102,12 +1029,10 @@ impl RequestStatsCollector {
         );
 
         if let Some(rate) = sample.cache_hit_rate {
-            self.cache_hit_rate_sum += rate;
-            self.cache_hit_rate_count += 1;
+            self.cache_hit_rate.get_or_insert(rate);
         }
         if let Some(rate) = sample.spec_decoding_acceptance_rate {
-            self.spec_acceptance_rate_sum += rate;
-            self.spec_acceptance_rate_count += 1;
+            self.spec_decoding_acceptance_rate.get_or_insert(rate);
         }
     }
 
@@ -1118,25 +1043,14 @@ impl RequestStatsCollector {
         }
         let engine = self.engine?;
 
-        let cache_hit_rate = if self.cache_hit_rate_count > 0 {
-            Some(self.cache_hit_rate_sum / self.cache_hit_rate_count as f64)
-        } else {
-            derive_cache_hit_rate(self.cached_tokens, self.prompt_tokens)
-        };
-        let spec_decoding_acceptance_rate = if self.spec_acceptance_rate_count > 0 {
-            Some(self.spec_acceptance_rate_sum / self.spec_acceptance_rate_count as f64)
-        } else {
-            None
-        };
-
         let stats = Some(UnifiedRequestStats {
             engine,
             error_message: None,
             request_received_timestamp_s: self.request_received_timestamp_s,
             first_token_generated_timestamp_s: self.first_token_generated_timestamp_s,
             request_finished_timestamp_s: self.request_finished_timestamp_s,
-            cache_hit_rate,
-            spec_decoding_acceptance_rate,
+            cache_hit_rate: self.cache_hit_rate,
+            spec_decoding_acceptance_rate: self.spec_decoding_acceptance_rate,
             prompt_tokens: self.prompt_tokens,
             completion_tokens: self.completion_tokens,
             cached_tokens: self.cached_tokens,
@@ -1213,7 +1127,6 @@ impl ProtoStream {
 pub struct StatsProtoStream {
     stream: ProtoStream,
     request_stats: RequestStatsCollector,
-    backend_request_stats: Option<HashMap<u32, (&'static str, RequestStatsSample)>>,
 }
 
 impl StatsProtoStream {
@@ -1224,7 +1137,6 @@ impl StatsProtoStream {
                 enabled: enable_request_statistics,
                 ..RequestStatsCollector::default()
             },
-            backend_request_stats: None,
         }
     }
 
@@ -1246,20 +1158,16 @@ impl StatsProtoStream {
             return None;
         }
 
-        if self.backend_request_stats.is_none() {
-            let fetched = self.stream.fetch_backend_request_stats().await;
-            self.backend_request_stats = Some(Self::build_backend_request_stats_index(
-                fetched.unwrap_or_default(),
-            ));
-        }
+        let index = gen_response.backend_request_stats_index();
+        let fetched = self.stream.fetch_backend_request_stats().await?;
+        let mut by_index = Self::build_backend_request_stats_index(fetched);
 
-        let stats_by_index = self.backend_request_stats.as_mut()?;
-        if let Some(index) = gen_response.backend_request_stats_index() {
-            return stats_by_index.remove(&index);
+        if let Some(idx) = index {
+            return by_index.remove(&idx);
         }
-        if stats_by_index.len() == 1 {
-            let only_index = *stats_by_index.keys().next()?;
-            return stats_by_index.remove(&only_index);
+        if by_index.len() == 1 {
+            let only_index = *by_index.keys().next()?;
+            return by_index.remove(&only_index);
         }
         None
     }
@@ -1273,9 +1181,7 @@ impl StatsProtoStream {
             _ => None,
         };
 
-        if let Some((engine, sample)) =
-            rpc_sample.or_else(|| gen_response.and_then(ProtoGenerateResponse::to_stats_sample))
-        {
+        if let Some((engine, sample)) = rpc_sample {
             self.request_stats.record(engine, sample);
         }
         response
