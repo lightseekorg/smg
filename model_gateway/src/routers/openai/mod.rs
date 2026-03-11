@@ -7,7 +7,9 @@
 //! - Multi-turn tool execution loops
 //! - SSE (Server-Sent Events) streaming
 
+mod chat;
 mod context;
+mod health;
 mod provider;
 pub mod realtime;
 pub mod responses;
