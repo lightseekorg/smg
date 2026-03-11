@@ -16,5 +16,6 @@ mod driver;
 mod router;
 mod state;
 mod steps;
+mod utils;
 
 pub use router::GeminiRouter;

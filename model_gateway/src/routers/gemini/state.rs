@@ -21,10 +21,6 @@ pub(crate) enum RequestState {
     /// The upstream payload is ready for a non-streaming POST.
     NonStreamRequest,
     /// The upstream response has been received (no more tool calls to execute).
-    #[expect(
-        dead_code,
-        reason = "used once non_stream_execution step is implemented"
-    )]
     ProcessResponse,
 
     // ── Streaming path ──────────────────────────────────────────

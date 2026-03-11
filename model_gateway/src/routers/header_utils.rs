@@ -174,7 +174,24 @@ pub fn apply_provider_headers(
                 }
             }
         }
-        ApiProvider::Gemini | ApiProvider::Xai | ApiProvider::OpenAi | ApiProvider::Generic => {
+        ApiProvider::Gemini => {
+            // Gemini uses x-goog-api-key for authentication
+            if let Some(auth) = auth_header {
+                if let Ok(auth_str) = auth.to_str() {
+                    // Strip Bearer scheme case-insensitively
+                    let api_key = auth_str
+                        .split_once(' ')
+                        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+                        .map(|(_, token)| token)
+                        .unwrap_or(auth_str)
+                        .trim();
+                    if !api_key.is_empty() {
+                        req = req.header("x-goog-api-key", api_key);
+                    }
+                }
+            }
+        }
+        ApiProvider::Xai | ApiProvider::OpenAi | ApiProvider::Generic => {
             // Standard OpenAI-compatible: use Authorization header as-is
             if let Some(auth) = auth_header {
                 req = req.header("Authorization", auth);
