@@ -8,13 +8,13 @@
 use std::{any::Any, collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
+use axum::{http::HeaderMap, response::Response};
 use openai_protocol::messages::CreateMessageRequest;
 use tracing::{error, info};
 
 use super::{
     context::{RequestContext, RouterContext},
-    mcp, models, non_streaming, streaming, worker,
+    mcp, non_streaming, streaming, worker,
 };
 use crate::{
     app_context::AppContext,
@@ -155,11 +155,6 @@ impl RouterTrait for AnthropicRouter {
         } else {
             non_streaming::execute(&self.router_ctx, req_ctx).await
         }
-    }
-
-    /// Get available models from Anthropic API
-    async fn get_models(&self, req: Request<Body>) -> Response {
-        models::handle_list_models(self, req)
     }
 
     fn router_type(&self) -> &'static str {

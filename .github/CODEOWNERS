@@ -5,7 +5,7 @@
 /model_gateway/benches @slin1237
 
 # Python bindings
-/bindings/python @CatherineSue @key4ng @slin1237
+/bindings/python @CatherineSue @key4ng @gongwei-130 @slin1237
 /bindings/golang @whybeyoung @slin1237
 
 # E2E tests
@@ -13,6 +13,10 @@
 
 # Github workflows
 /.github/workflows @CatherineSue @key4ng @XinyueZhang369 @slin1237
+
+# Docker, Installation
+/docker @gongwei-130 @CatherineSue @slin1237
+/scripts @gongwei-130 @CatherineSue @key4ng @XinyueZhang369 @slin1237
 
 # Main source code (model_gateway)
 /model_gateway/src/config @slin1237

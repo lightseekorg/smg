@@ -7,13 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use axum::{
-    body::Body,
-    extract::Request,
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-    Json,
-};
+use axum::{http::HeaderMap, response::Response};
 use openai_protocol::interactions::InteractionsRequest;
 
 use super::{
@@ -70,21 +64,6 @@ impl RouterTrait for GeminiRouter {
 
     fn router_type(&self) -> &'static str {
         "gemini"
-    }
-
-    async fn get_models(&self, _req: Request<Body>) -> Response {
-        let cards = self
-            .shared_components
-            .worker_registry
-            .get_all()
-            .iter()
-            .flat_map(|w| w.models())
-            .collect::<Vec<_>>();
-        if cards.is_empty() {
-            return (StatusCode::SERVICE_UNAVAILABLE, "No models available").into_response();
-        }
-        let resp = openai_protocol::models::ListModelsResponse::from_model_cards(cards);
-        (StatusCode::OK, Json(resp)).into_response()
     }
 
     async fn route_interactions(

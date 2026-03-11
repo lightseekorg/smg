@@ -49,7 +49,7 @@ uuid = { version = "1.10", features = ["v7", "serde"] }
 wasmtime = { version = "41.0", features = ["component-model", "async"] }
 wasmtime-wasi = "41.0"
 tokio-util = { version = "0.7", features = ["rt"] }
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 webpki-roots = "1.0"
 multer = "3"
 scopeguard = "1.2"

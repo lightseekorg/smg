@@ -33,7 +33,7 @@ use smg::{
     },
     middleware::TokenBucket,
     policies::PolicyRegistry,
-    routers::{RouterFactory, RouterTrait},
+    routers::{router_manager::RouterManager, RouterFactory, RouterTrait},
 };
 use smg_data_connector::{
     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
@@ -275,8 +275,16 @@ impl AppTestContext {
                 }
             }
 
-            let router = RouterFactory::create_router(&app_context).await.unwrap();
-            let router = Arc::from(router);
+            let inner_router = RouterFactory::create_router(&app_context).await.unwrap();
+            let manager = RouterManager::new(
+                app_context.worker_registry.clone(),
+                app_context.client.clone(),
+            );
+            let router_id =
+                RouterManager::determine_router_id(&config.mode, config.connection_mode);
+            let manager = Arc::new(manager);
+            manager.register_router(router_id, Arc::from(inner_router));
+            let router: Arc<dyn RouterTrait> = manager;
 
             Self {
                 workers,
