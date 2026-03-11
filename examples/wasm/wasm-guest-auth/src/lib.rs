@@ -7,7 +7,7 @@
 //! - API Key authentication
 
 wit_bindgen::generate!({
-    path: "../../../wasm/src/interface",
+    path: "../../../crates/wasm/src/interface",
     world: "smg",
 });
 

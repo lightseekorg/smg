@@ -32,6 +32,59 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
 };
 
+/// Source for per-worker model_id override during Kubernetes service discovery.
+#[derive(Debug, Clone)]
+pub enum ModelIdSource {
+    /// Use the pod's namespace as the model_id.
+    Namespace,
+    /// Use a specific pod label value as the model_id.
+    Label(String),
+    /// Use a specific pod annotation value as the model_id.
+    Annotation(String),
+}
+
+impl ModelIdSource {
+    /// Parse a CLI string like `"namespace"`, `"label:key"`, or `"annotation:key"`.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        if s.eq_ignore_ascii_case("namespace") {
+            Ok(Self::Namespace)
+        } else if let Some(key) = s.strip_prefix("label:") {
+            if key.is_empty() {
+                Err("label: requires a key name".to_string())
+            } else {
+                Ok(Self::Label(key.to_string()))
+            }
+        } else if let Some(key) = s.strip_prefix("annotation:") {
+            if key.is_empty() {
+                Err("annotation: requires a key name".to_string())
+            } else {
+                Ok(Self::Annotation(key.to_string()))
+            }
+        } else {
+            Err(format!(
+                "Invalid model-id-from value '{s}'. Expected: namespace, label:<key>, or annotation:<key>"
+            ))
+        }
+    }
+
+    /// Extract the model_id value from a Kubernetes Pod object.
+    pub fn extract(&self, pod: &Pod) -> Option<String> {
+        match self {
+            Self::Namespace => pod.metadata.namespace.clone(),
+            Self::Label(key) => pod
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(key).cloned()),
+            Self::Annotation(key) => pod
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(key).cloned()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ServiceDiscoveryConfig {
     pub enabled: bool,
@@ -48,6 +101,8 @@ pub struct ServiceDiscoveryConfig {
     // Router node discovery for mesh
     pub router_selector: HashMap<String, String>,
     pub router_mesh_port_annotation: String,
+    /// Per-worker model_id override source from pod metadata.
+    pub model_id_source: Option<ModelIdSource>,
 }
 
 impl Default for ServiceDiscoveryConfig {
@@ -64,6 +119,7 @@ impl Default for ServiceDiscoveryConfig {
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: "sglang.ai/ha-port".to_string(),
+            model_id_source: None,
         }
     }
 }
@@ -85,6 +141,7 @@ pub struct PodInfo {
     pub bootstrap_port: Option<u16>,
     pub is_router: bool,
     pub mesh_port: Option<u16>,
+    pub model_id_override: Option<String>,
 }
 
 impl PodInfo {
@@ -184,6 +241,11 @@ impl PodInfo {
             None
         };
 
+        // Extract model_id override from pod metadata if source is configured
+        let model_id_override = config
+            .and_then(|c| c.model_id_source.as_ref())
+            .and_then(|source| source.extract(pod));
+
         Some(PodInfo {
             name,
             ip: pod_ip,
@@ -193,6 +255,7 @@ impl PodInfo {
             bootstrap_port,
             is_router,
             mesh_port,
+            model_id_override,
         })
     }
 
@@ -462,6 +525,13 @@ async fn handle_pod_event(
             let mut spec = WorkerSpec::new(worker_url.clone());
             spec.worker_type = worker_type;
             spec.bootstrap_port = bootstrap_port;
+            // Inject pod-metadata model_id as a label so the existing
+            // resolution chain in create_worker.rs picks it up at
+            // priority #2 (served_model_name).
+            if let Some(ref override_id) = pod_info.model_id_override {
+                spec.labels
+                    .insert("served_model_name".to_string(), override_id.clone());
+            }
             spec.api_key.clone_from(&app_context.router_config.api_key);
             // Health config is resolved at worker build time from router
             // defaults + per-worker overrides (spec.health).
@@ -817,6 +887,7 @@ mod tests {
         use crate::{
             config::RouterConfig, core::WorkerService, middleware::TokenBucket,
             observability::inflight_tracker::InFlightRequestTracker,
+            routers::openai::realtime::RealtimeRegistry,
         };
 
         let router_config = RouterConfig::builder()
@@ -858,6 +929,8 @@ mod tests {
                 router_config,
             )),
             inflight_tracker: InFlightRequestTracker::new(),
+            kv_event_monitor: None,
+            realtime_registry: Arc::new(RealtimeRegistry::new()),
         })
     }
 
@@ -882,6 +955,7 @@ mod tests {
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: "sglang.ai/ha-port".to_string(),
+            model_id_source: None,
         }
     }
 
@@ -1085,6 +1159,7 @@ mod tests {
             bootstrap_port: None,
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
         assert!(healthy_pod.is_healthy());
 
@@ -1097,6 +1172,7 @@ mod tests {
             bootstrap_port: None,
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
         assert!(!not_ready_pod.is_healthy());
 
@@ -1109,6 +1185,7 @@ mod tests {
             bootstrap_port: None,
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
         assert!(!not_running_pod.is_healthy());
     }
@@ -1124,6 +1201,7 @@ mod tests {
             bootstrap_port: Some(8081),
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
 
         let pod2 = PodInfo {
@@ -1135,6 +1213,7 @@ mod tests {
             bootstrap_port: Some(8081),
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
 
         let pod3 = PodInfo {
@@ -1146,6 +1225,7 @@ mod tests {
             bootstrap_port: None,
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
 
         assert_eq!(pod1, pod2);
@@ -1165,6 +1245,7 @@ mod tests {
             bootstrap_port: None,
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
         let port = 8080u16;
 
@@ -1193,6 +1274,7 @@ mod tests {
             bootstrap_port: None,
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
         let port = 8080u16;
 
@@ -1220,6 +1302,7 @@ mod tests {
             bootstrap_port: Some(8081),
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
         let port = 8080u16;
 
@@ -1253,6 +1336,7 @@ mod tests {
             bootstrap_port: None,
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
         let port = 8080u16;
 
@@ -1286,6 +1370,7 @@ mod tests {
             bootstrap_port: Some(8081),
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
 
         // Add pod to tracked set first
@@ -1321,6 +1406,7 @@ mod tests {
             bootstrap_port: None,
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
         let port = 8080u16;
 
@@ -1351,6 +1437,7 @@ mod tests {
             bootstrap_port: None,
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
         let port = 8080u16;
 
@@ -1385,6 +1472,7 @@ mod tests {
             bootstrap_port: Some(8081),
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
         let port = 8080u16;
 
@@ -1418,6 +1506,7 @@ mod tests {
             bootstrap_port: None,
             is_router: false,
             mesh_port: None,
+            model_id_override: None,
         };
 
         // Add pod to tracked set first
@@ -1438,5 +1527,172 @@ mod tests {
 
         // Pod should be removed from tracking
         assert!(!tracked_pods.lock().unwrap().contains(&pod_info));
+    }
+
+    // ========== ModelIdSource tests ==========
+
+    #[test]
+    fn test_model_id_source_parse_namespace() {
+        let source = ModelIdSource::parse("namespace").unwrap();
+        assert!(matches!(source, ModelIdSource::Namespace));
+    }
+
+    #[test]
+    fn test_model_id_source_parse_namespace_case_insensitive() {
+        let source = ModelIdSource::parse("Namespace").unwrap();
+        assert!(matches!(source, ModelIdSource::Namespace));
+    }
+
+    #[test]
+    fn test_model_id_source_parse_label() {
+        let source = ModelIdSource::parse("label:model-name").unwrap();
+        match source {
+            ModelIdSource::Label(key) => assert_eq!(key, "model-name"),
+            _ => panic!("Expected Label variant"),
+        }
+    }
+
+    #[test]
+    fn test_model_id_source_parse_annotation() {
+        let source = ModelIdSource::parse("annotation:serving.example.com/model-id").unwrap();
+        match source {
+            ModelIdSource::Annotation(key) => {
+                assert_eq!(key, "serving.example.com/model-id");
+            }
+            _ => panic!("Expected Annotation variant"),
+        }
+    }
+
+    #[test]
+    fn test_model_id_source_parse_label_empty_key() {
+        assert!(ModelIdSource::parse("label:").is_err());
+    }
+
+    #[test]
+    fn test_model_id_source_parse_annotation_empty_key() {
+        assert!(ModelIdSource::parse("annotation:").is_err());
+    }
+
+    #[test]
+    fn test_model_id_source_parse_invalid() {
+        assert!(ModelIdSource::parse("hostname").is_err());
+        assert!(ModelIdSource::parse("").is_err());
+    }
+
+    #[test]
+    fn test_model_id_source_extract_namespace() {
+        let source = ModelIdSource::Namespace;
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("pod1".to_string()),
+                namespace: Some("team-a-serving".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: None,
+        };
+        assert_eq!(source.extract(&pod), Some("team-a-serving".to_string()));
+    }
+
+    #[test]
+    fn test_model_id_source_extract_namespace_missing() {
+        let source = ModelIdSource::Namespace;
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("pod1".to_string()),
+                namespace: None,
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: None,
+        };
+        assert_eq!(source.extract(&pod), None);
+    }
+
+    #[test]
+    fn test_model_id_source_extract_label() {
+        let source = ModelIdSource::Label("model-name".to_string());
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("model-name".to_string(), "llama-70b".to_string());
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("pod1".to_string()),
+                labels: Some(labels),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: None,
+        };
+        assert_eq!(source.extract(&pod), Some("llama-70b".to_string()));
+    }
+
+    #[test]
+    fn test_model_id_source_extract_label_missing() {
+        let source = ModelIdSource::Label("model-name".to_string());
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("pod1".to_string()),
+                labels: None,
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: None,
+        };
+        assert_eq!(source.extract(&pod), None);
+    }
+
+    #[test]
+    fn test_model_id_source_extract_annotation() {
+        let source = ModelIdSource::Annotation("serving.example.com/model-id".to_string());
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            "serving.example.com/model-id".to_string(),
+            "my-model".to_string(),
+        );
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("pod1".to_string()),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: None,
+        };
+        assert_eq!(source.extract(&pod), Some("my-model".to_string()));
+    }
+
+    #[test]
+    fn test_pod_info_from_pod_with_model_id_override() {
+        let mut pod = create_k8s_pod(
+            Some("test-pod"),
+            Some("10.0.0.1"),
+            Some("Running"),
+            Some("True"),
+            None,
+        );
+        pod.metadata.namespace = Some("team-a".to_string());
+
+        let config = ServiceDiscoveryConfig {
+            model_id_source: Some(ModelIdSource::Namespace),
+            ..Default::default()
+        };
+
+        let info = PodInfo::from_pod(&pod, Some(&config)).unwrap();
+        assert_eq!(info.model_id_override, Some("team-a".to_string()));
+    }
+
+    #[test]
+    fn test_pod_info_from_pod_without_model_id_source() {
+        let pod = create_k8s_pod(
+            Some("test-pod"),
+            Some("10.0.0.1"),
+            Some("Running"),
+            Some("True"),
+            None,
+        );
+
+        let config = ServiceDiscoveryConfig::default();
+        let info = PodInfo::from_pod(&pod, Some(&config)).unwrap();
+        assert_eq!(info.model_id_override, None);
     }
 }

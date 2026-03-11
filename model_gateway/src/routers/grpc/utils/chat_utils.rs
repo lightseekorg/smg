@@ -1,0 +1,867 @@
+//! Chat message processing, tool constraints, and shared utilities for gRPC routers.
+
+use std::{collections::HashMap, io, sync::Arc};
+
+use axum::response::Response;
+use bytes::Bytes;
+use llm_tokenizer::{
+    chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
+    stop::StopSequenceDecoderBuilder,
+    traits::Tokenizer,
+    StopSequenceDecoder,
+};
+use openai_protocol::{
+    chat::{ChatCompletionRequest, ChatMessage},
+    common::{FunctionCallResponse, StringOrArray, Tool, ToolCall, ToolChoice, ToolChoiceValue},
+    generate::GenerateFinishReason,
+};
+use serde_json::{json, Map, Value};
+use tokio::sync::mpsc;
+use tracing::error;
+use uuid::Uuid;
+
+use crate::routers::{
+    error,
+    grpc::{context::RequestContext, ProcessedMessages},
+};
+
+/// Type alias for the SSE channel sender used across streaming endpoints.
+pub(crate) type SseSender = mpsc::UnboundedSender<Result<Bytes, io::Error>>;
+
+/// Send an SSE error event with a typed error body.
+///
+/// Produces `data: {"error":{"message":"...","type":"..."}}\n\n` using
+/// `serde_json` so that quotes, newlines, and other special characters in the
+/// error message are properly escaped.
+pub(crate) fn send_error_sse(tx: &SseSender, message: impl ToString, error_type: &str) {
+    let chunk = format!(
+        "data: {}\n\n",
+        json!({
+            "error": {
+                "message": message.to_string(),
+                "type": error_type,
+            }
+        })
+    );
+    let _ = tx.send(Ok(Bytes::from(chunk)));
+}
+
+/// Resolve tokenizer from registry and cache it in request context.
+///
+/// This is a helper to avoid duplicating tokenizer resolution logic across
+/// preparation stages (chat, generate, embedding).
+///
+/// Returns the tokenizer Arc, which is also cached in `ctx.state.tokenizer`.
+pub(crate) fn resolve_tokenizer(
+    ctx: &mut RequestContext,
+    stage_name: &str,
+) -> Result<Arc<dyn Tokenizer>, Box<Response>> {
+    let model_id = ctx.input.model_id.as_deref().ok_or_else(|| {
+        error!(
+            function = %stage_name,
+            "model_id not set in request context"
+        );
+        Box::new(error::internal_error(
+            "model_id_not_set",
+            "model_id not set in request context - this is a bug in request routing",
+        ))
+    })?;
+
+    let tokenizer = ctx
+        .components
+        .tokenizer_registry
+        .get(model_id)
+        .ok_or_else(|| {
+            error!(
+                function = %stage_name,
+                model = %model_id,
+                "Tokenizer not found for model"
+            );
+            Box::new(error::internal_error(
+                "tokenizer_not_found",
+                format!("Tokenizer not found for model: {model_id}"),
+            ))
+        })?;
+
+    // Cache tokenizer in context for reuse in response processing stage
+    ctx.state.tokenizer = Some(tokenizer.clone());
+
+    Ok(tokenizer)
+}
+
+/// Process tool call arguments in messages
+/// Per Transformers docs, tool call arguments in assistant messages should be dicts
+fn process_tool_call_arguments(messages: &mut [Value]) -> Result<(), String> {
+    for msg in messages {
+        let role = msg.get("role").and_then(|v| v.as_str());
+        if role != Some("assistant") {
+            continue;
+        }
+
+        let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) else {
+            continue;
+        };
+
+        for call in tool_calls {
+            let Some(function) = call.get_mut("function") else {
+                continue;
+            };
+            let Some(args) = function.get_mut("arguments") else {
+                continue;
+            };
+            let Some(args_str) = args.as_str() else {
+                continue;
+            };
+
+            // Parse JSON string to object (like Python json.loads)
+            match serde_json::from_str::<Value>(args_str) {
+                Ok(parsed) => *args = parsed,
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to parse tool call arguments as JSON: '{args_str}'. Error: {e}"
+                    ))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Process messages based on content format for ANY message type
+pub(crate) fn process_content_format(
+    messages: &[ChatMessage],
+    content_format: ChatTemplateContentFormat,
+) -> Result<Vec<Value>, String> {
+    messages
+        .iter()
+        .map(|message| {
+            let mut message_json = serde_json::to_value(message)
+                .map_err(|e| format!("Failed to serialize message: {e}"))?;
+
+            if let Some(obj) = message_json.as_object_mut() {
+                if let Some(content_value) = obj.get_mut("content") {
+                    transform_content_field(content_value, content_format);
+                }
+            }
+
+            Ok(message_json)
+        })
+        .collect()
+}
+
+/// Transform a single content field based on content format
+fn transform_content_field(content_value: &mut Value, content_format: ChatTemplateContentFormat) {
+    let Some(content_array) = content_value.as_array() else {
+        return; // Not multimodal, keep as-is
+    };
+
+    match content_format {
+        ChatTemplateContentFormat::String => {
+            // Extract and join text parts only
+            let text_parts: Vec<String> = content_array
+                .iter()
+                .filter_map(|part| {
+                    part.as_object()?
+                        .get("type")?
+                        .as_str()
+                        .filter(|&t| t == "text")
+                        .and_then(|_| part.as_object()?.get("text")?.as_str())
+                        .map(String::from)
+                })
+                .collect();
+
+            if !text_parts.is_empty() {
+                *content_value = Value::String(text_parts.join(" "));
+            }
+        }
+        ChatTemplateContentFormat::OpenAI => {
+            // Replace media URLs with simple type placeholders
+            let processed_parts: Vec<Value> = content_array
+                .iter()
+                .map(|part| {
+                    part.as_object()
+                        .and_then(|obj| obj.get("type")?.as_str())
+                        .and_then(|type_str| match type_str {
+                            "image_url" => Some(json!({"type": "image"})),
+                            "video_url" => Some(json!({"type": "video"})),
+                            "audio_url" => Some(json!({"type": "audio"})),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| part.clone())
+                })
+                .collect();
+
+            *content_value = Value::Array(processed_parts);
+        }
+    }
+}
+
+/// Generate tool constraints for structured generation
+/// Note: tools should already be filtered if needed (by allowed_tools or specific function)
+pub fn generate_tool_constraints(
+    tools: &[Tool],
+    tool_choice: Option<&ToolChoice>,
+    _model: &str,
+) -> Result<Option<(String, String)>, String> {
+    let Some(choice) = tool_choice else {
+        return Ok(None);
+    };
+
+    match choice {
+        // Specific function: Return parameters schema directly
+        // tools should already be filtered to contain only the specific function
+        ToolChoice::Function { .. } => {
+            if tools.is_empty() {
+                return Ok(None);
+            }
+            let tool = &tools[0];
+
+            // Return the tool's parameters schema directly (not wrapped in array)
+            let params_schema = serde_json::to_string(&tool.function.parameters)
+                .map_err(|e| format!("Failed to serialize tool parameters: {e}"))?;
+            Ok(Some((String::from("json_schema"), params_schema)))
+        }
+
+        // Required: Array of tool calls with minItems: 1
+        ToolChoice::Value(ToolChoiceValue::Required) => {
+            let schema = build_required_array_schema(tools)?;
+            Ok(Some(("json_schema".to_string(), schema)))
+        }
+
+        // AllowedTools with required mode: tools are already filtered
+        ToolChoice::AllowedTools { mode, .. } => {
+            if mode == "required" {
+                if tools.is_empty() {
+                    return Ok(None);
+                }
+                let schema = build_required_array_schema(tools)?;
+                Ok(Some(("json_schema".to_string(), schema)))
+            } else {
+                // "auto" mode - no constraint needed
+                Ok(None)
+            }
+        }
+
+        // "auto" or "none" - no constraint
+        ToolChoice::Value(_) => Ok(None),
+    }
+}
+
+/// Build JSON schema for required tool calls (array with minItems: 1)
+/// Includes $defs consolidation from all tools (matching Python's behavior)
+fn build_required_array_schema(tools: &[Tool]) -> Result<String, String> {
+    let mut any_of_schemas = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let tool_schema = json!({
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "enum": [tool.function.name]
+                },
+                "parameters": tool.function.parameters
+            },
+            "required": ["name", "parameters"]
+        });
+        any_of_schemas.push(tool_schema);
+    }
+
+    // Consolidate $defs from all tools (matching Python's _get_tool_schema_defs)
+    let mut all_defs: Map<String, Value> = Map::new();
+    for tool in tools {
+        if let Value::Object(params) = &tool.function.parameters {
+            if let Some(Value::Object(defs)) = params.get("$defs") {
+                for (def_name, def_schema) in defs {
+                    if let Some(existing) = all_defs.get(def_name) {
+                        // Check for conflicts
+                        if existing != def_schema {
+                            let error_msg = format!(
+                                "Tool definition '{def_name}' has multiple conflicting schemas, which is not supported"
+                            );
+                            error!("{}", error_msg);
+                            return Err(error_msg);
+                        }
+                    } else {
+                        all_defs.insert(def_name.clone(), def_schema.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Build the full array schema
+    let mut array_schema = json!({
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "object",
+            "anyOf": any_of_schemas
+        }
+    });
+
+    // Add $defs if any were found (matching Python's behavior)
+    if !all_defs.is_empty() {
+        if let Value::Object(ref mut schema_obj) = array_schema {
+            schema_obj.insert("$defs".to_string(), Value::Object(all_defs));
+        }
+    }
+
+    serde_json::to_string(&array_schema)
+        .map_err(|e| format!("Failed to serialize tool schema: {e}"))
+}
+
+/// Filter tools based on tool_choice (generic helper)
+///
+/// Returns filtered tools if filtering is needed, otherwise returns None.
+/// Used by both Chat API and Responses API (Harmony) for constraint generation.
+pub(crate) fn filter_tools_by_tool_choice(
+    tools: &[Tool],
+    tool_choice: Option<&ToolChoice>,
+) -> Option<Vec<Tool>> {
+    match tool_choice {
+        Some(ToolChoice::AllowedTools { tools: allowed, .. }) => {
+            let allowed_names: std::collections::HashSet<&str> =
+                allowed.iter().filter_map(|t| t.function_name()).collect();
+            let filtered: Vec<Tool> = tools
+                .iter()
+                .filter(|t| allowed_names.contains(t.function.name.as_str()))
+                .cloned()
+                .collect();
+            Some(filtered)
+        }
+        Some(ToolChoice::Function { function, .. }) => {
+            let filtered: Vec<Tool> = tools
+                .iter()
+                .filter(|t| t.function.name == function.name)
+                .cloned()
+                .collect();
+            Some(filtered)
+        }
+        _ => None, // No filtering needed
+    }
+}
+
+/// Filter ChatCompletionRequest by tool_choice
+///
+/// Returns a reference to the original request if no filtering needed,
+/// otherwise returns a cloned request with filtered tools.
+///
+/// Note: Tool existence is validated earlier in ChatCompletionRequest::validate(),
+/// so this function assumes tool_choice references valid tools.
+pub(crate) fn filter_chat_request_by_tool_choice(
+    body: &ChatCompletionRequest,
+) -> std::borrow::Cow<'_, ChatCompletionRequest> {
+    if let Some(tools) = &body.tools {
+        if let Some(filtered_tools) = filter_tools_by_tool_choice(tools, body.tool_choice.as_ref())
+        {
+            let mut filtered_body = body.clone();
+            filtered_body.tools = Some(filtered_tools);
+            return std::borrow::Cow::Owned(filtered_body);
+        }
+    }
+
+    // No filtering needed - return original request
+    std::borrow::Cow::Borrowed(body)
+}
+
+/// Process chat messages and apply template (shared by both routers)
+/// Requires HuggingFace tokenizer with chat template support
+pub fn process_chat_messages(
+    request: &ChatCompletionRequest,
+    tokenizer: &dyn Tokenizer,
+) -> Result<ProcessedMessages, String> {
+    let formatted_text = {
+        // Get content format and transform messages accordingly
+        let content_format = tokenizer.chat_template_content_format();
+        let mut transformed_messages = process_content_format(&request.messages, content_format)?;
+
+        // Process tool call arguments in assistant messages
+        process_tool_call_arguments(&mut transformed_messages)?;
+
+        // Convert tools to JSON values for template processing
+        let tools_json: Option<Vec<Value>> = request
+            .tools
+            .as_ref()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()
+            .map_err(|e| format!("Failed to serialize tools: {e}"))?;
+
+        let kwargs_capacity = 1 + request.chat_template_kwargs.as_ref().map_or(0, |k| k.len());
+        let mut combined_template_kwargs = HashMap::with_capacity(kwargs_capacity);
+
+        // Add reasoning_effort if present (like Python does)
+        if let Some(reasoning_effort) = &request.reasoning_effort {
+            combined_template_kwargs.insert(
+                "reasoning_effort".to_string(),
+                Value::String(reasoning_effort.clone()),
+            );
+        }
+
+        // Add any additional template kwargs from request
+        if let Some(template_kwargs) = &request.chat_template_kwargs {
+            for (key, value) in template_kwargs {
+                combined_template_kwargs.insert(key.clone(), value.clone());
+            }
+        }
+
+        let final_template_kwargs = if combined_template_kwargs.is_empty() {
+            None
+        } else {
+            Some(&combined_template_kwargs)
+        };
+
+        let params = ChatTemplateParams {
+            add_generation_prompt: true,
+            tools: tools_json.as_deref(),
+            template_kwargs: final_template_kwargs,
+            ..Default::default()
+        };
+
+        // Handle assistant prefix for continue_final_message
+        let assistant_prefix = if request.continue_final_message
+            && !transformed_messages.is_empty()
+            && transformed_messages
+                .last()
+                .and_then(|msg| msg.get("role"))
+                .and_then(|v| v.as_str())
+                == Some("assistant")
+        {
+            // Pop the last message to handle it separately — guarded by !is_empty() check above
+            let Some(last_msg) = transformed_messages.pop() else {
+                return Ok(ProcessedMessages {
+                    text: String::new(),
+                    multimodal_intermediate: None,
+                    stop_sequences: request.stop.clone(),
+                });
+            };
+            last_msg
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+
+        // Apply chat template with the (now possibly shorter) list of messages
+        let rendered = tokenizer
+            .apply_chat_template(&transformed_messages, params)
+            .map_err(|e| format!("Failed to apply chat template: {e}"))?;
+
+        // Append assistant prefix if we have one
+        if let Some(prefix) = assistant_prefix {
+            format!("{rendered}{prefix}")
+        } else {
+            rendered
+        }
+    };
+
+    Ok(ProcessedMessages {
+        text: formatted_text,
+        multimodal_intermediate: None,
+        stop_sequences: request.stop.clone(),
+    })
+}
+
+/// Create a StopSequenceDecoder from stop parameters
+pub fn create_stop_decoder(
+    tokenizer: &Arc<dyn Tokenizer>,
+    stop: Option<&StringOrArray>,
+    stop_token_ids: Option<&Vec<u32>>,
+    skip_special_tokens: bool,
+    no_stop_trim: bool,
+) -> StopSequenceDecoder {
+    // Extract stop sequences
+    let stop_sequences: Vec<String> = match stop {
+        Some(StringOrArray::String(s)) => vec![s.clone()],
+        Some(StringOrArray::Array(arr)) => arr.clone(),
+        None => vec![],
+    };
+
+    // Build stop sequence decoder
+    let mut builder =
+        StopSequenceDecoderBuilder::new(tokenizer.clone()).skip_special_tokens(skip_special_tokens);
+
+    // Add stop sequences (visible if no_stop_trim is true, hidden otherwise)
+    for seq in stop_sequences {
+        builder = if no_stop_trim {
+            builder.visible_stop_sequence(seq)
+        } else {
+            builder.stop_sequence(seq)
+        };
+    }
+
+    // Add stop token IDs (visible if no_stop_trim is true, hidden otherwise)
+    if let Some(token_ids) = stop_token_ids {
+        for &token_id in token_ids {
+            builder = if no_stop_trim {
+                builder.visible_stop_token(token_id)
+            } else {
+                builder.stop_token(token_id)
+            };
+        }
+    }
+
+    builder.build()
+}
+
+/// Parse tool calls from JSON schema constrained response
+pub(crate) fn parse_json_schema_response(
+    processed_text: &str,
+    tool_choice: Option<&ToolChoice>,
+    model: &str,
+    history_tool_calls_count: usize,
+) -> (Option<Vec<ToolCall>>, String) {
+    match tool_choice {
+        Some(ToolChoice::Function { function, .. }) => {
+            // Specific function: Parse parameters directly
+            match serde_json::from_str::<Value>(processed_text) {
+                Ok(params) => {
+                    let tool_call = ToolCall {
+                        id: generate_tool_call_id(
+                            model,
+                            &function.name,
+                            0,
+                            history_tool_calls_count,
+                        ),
+                        tool_type: "function".to_string(),
+                        function: FunctionCallResponse {
+                            name: function.name.clone(),
+                            arguments: Some(
+                                serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string()),
+                            ),
+                        },
+                    };
+                    (Some(vec![tool_call]), String::new())
+                }
+                Err(e) => {
+                    error!("Failed to parse specific function parameters: {}", e);
+                    (None, processed_text.to_string())
+                }
+            }
+        }
+        Some(ToolChoice::Value(ToolChoiceValue::Required))
+        | Some(ToolChoice::AllowedTools { .. }) => {
+            // Required mode: Parse array of tool calls
+            match serde_json::from_str::<Vec<Value>>(processed_text) {
+                Ok(parsed_array) => {
+                    let spec_tool_calls: Vec<ToolCall> = parsed_array
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(i, item)| {
+                            let obj = item.as_object()?;
+                            let name = obj.get("name")?.as_str()?.to_string();
+                            let parameters = obj.get("parameters")?;
+
+                            Some(ToolCall {
+                                id: generate_tool_call_id(
+                                    model,
+                                    &name,
+                                    i,
+                                    history_tool_calls_count,
+                                ),
+                                tool_type: "function".to_string(),
+                                function: FunctionCallResponse {
+                                    name,
+                                    arguments: Some(
+                                        serde_json::to_string(parameters)
+                                            .unwrap_or_else(|_| "{}".to_string()),
+                                    ),
+                                },
+                            })
+                        })
+                        .collect();
+                    (Some(spec_tool_calls), String::new())
+                }
+                Err(e) => {
+                    error!("Failed to parse required tool call array: {}", e);
+                    (None, processed_text.to_string())
+                }
+            }
+        }
+        _ => (None, processed_text.to_string()),
+    }
+}
+
+/// Count the number of tool calls in the request message history
+/// This is used for KimiK2 format which needs globally unique indices
+pub(crate) fn get_history_tool_calls_count(request: &ChatCompletionRequest) -> usize {
+    request
+        .messages
+        .iter()
+        .filter_map(|msg| {
+            if let ChatMessage::Assistant { tool_calls, .. } = msg {
+                tool_calls.as_ref().map(|calls| calls.len())
+            } else {
+                None
+            }
+        })
+        .sum()
+}
+
+/// Generate a tool call ID based on model format
+///
+/// # Arguments
+/// * `model` - Model name to determine ID format
+/// * `tool_name` - Name of the tool being called
+/// * `tool_index` - Index of this tool call within the current message
+/// * `history_count` - Number of tool calls in previous messages
+///
+/// # Returns
+/// A unique ID string. KimiK2 uses `functions.{name}:{global_index}`, others use `call_{uuid}`
+pub(crate) fn generate_tool_call_id(
+    model: &str,
+    tool_name: &str,
+    tool_index: usize,
+    history_count: usize,
+) -> String {
+    // Case-insensitive check without allocation (search for "kimi" substring)
+    let is_kimi = model
+        .as_bytes()
+        .windows(4) // "kimi".len()
+        .any(|window| window.eq_ignore_ascii_case(b"kimi"));
+
+    if is_kimi {
+        // KimiK2 format: functions.{name}:{global_index}
+        format!("functions.{}:{}", tool_name, history_count + tool_index)
+    } else {
+        // Standard OpenAI format: call_{24-char-uuid}
+        format!("call_{}", &Uuid::now_v7().simple().to_string()[..24])
+    }
+}
+
+/// Parse finish_reason string into GenerateFinishReason enum
+///
+/// Uses serde to deserialize the finish_reason, which handles all tagged variants automatically.
+/// The GenerateFinishReason enum is tagged with `#[serde(tag = "type", rename_all = "lowercase")]`,
+/// so it expects JSON objects like:
+/// - `{"type":"stop"}` -> Stop
+/// - `{"type":"length","length":100}` -> Length { length: 100 }
+/// - Any other JSON -> Other(...)
+///
+/// For backward compatibility, also handles simple string "stop" -> Stop
+pub(crate) fn parse_finish_reason(
+    reason_str: &str,
+    completion_tokens: u32,
+) -> GenerateFinishReason {
+    if reason_str == "stop" {
+        return GenerateFinishReason::Stop {
+            finish_type: openai_protocol::generate::GenerateFinishType::Stop,
+        };
+    }
+
+    if reason_str == "length" {
+        return GenerateFinishReason::Length {
+            finish_type: openai_protocol::generate::GenerateFinishType::Length,
+            length: completion_tokens,
+        };
+    }
+
+    match serde_json::from_str::<GenerateFinishReason>(reason_str) {
+        Ok(finish_reason) => finish_reason,
+        Err(_) => match serde_json::from_str::<Value>(reason_str) {
+            Ok(json_value) => GenerateFinishReason::Other(json_value),
+            Err(_) => GenerateFinishReason::Other(Value::String(reason_str.to_string())),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use llm_tokenizer::chat_template::ChatTemplateContentFormat;
+    use openai_protocol::{
+        chat::{ChatMessage, MessageContent},
+        common::{ContentPart, ImageUrl},
+    };
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn test_transform_messages_string_format() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "Hello".to_string(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/image.jpg".to_string(),
+                        detail: None,
+                    },
+                },
+                ContentPart::Text {
+                    text: "World".to_string(),
+                },
+            ]),
+            name: None,
+        }];
+
+        let result = process_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+
+        assert_eq!(result.len(), 1);
+        let transformed_message = &result[0];
+
+        // Should flatten multimodal content to text only
+        assert_eq!(
+            transformed_message["content"].as_str().unwrap(),
+            "Hello World"
+        );
+        assert_eq!(transformed_message["role"].as_str().unwrap(), "user");
+    }
+
+    #[test]
+    fn test_transform_messages_openai_format() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "Describe this image:".to_string(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/image.jpg".to_string(),
+                        detail: Some("high".to_string()),
+                    },
+                },
+            ]),
+            name: None,
+        }];
+
+        let result = process_content_format(&messages, ChatTemplateContentFormat::OpenAI).unwrap();
+
+        assert_eq!(result.len(), 1);
+        let transformed_message = &result[0];
+
+        // Should replace media URLs with simple type placeholders
+        let content_array = transformed_message["content"].as_array().unwrap();
+        assert_eq!(content_array.len(), 2);
+
+        // Text part should remain unchanged
+        assert_eq!(content_array[0]["type"], "text");
+        assert_eq!(content_array[0]["text"], "Describe this image:");
+
+        // Image part should be replaced with simple type placeholder
+        assert_eq!(content_array[1], json!({"type": "image"}));
+    }
+
+    #[test]
+    fn test_transform_messages_simple_string_content() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Text("Simple text message".to_string()),
+            name: None,
+        }];
+
+        let result = process_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+
+        assert_eq!(result.len(), 1);
+        let transformed_message = &result[0];
+
+        // Simple string content should remain unchanged
+        assert_eq!(
+            transformed_message["content"].as_str().unwrap(),
+            "Simple text message"
+        );
+    }
+
+    #[test]
+    fn test_transform_messages_multiple_messages() {
+        let messages = vec![
+            ChatMessage::System {
+                content: MessageContent::Text("System prompt".to_string()),
+                name: None,
+            },
+            ChatMessage::User {
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "User message".to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "https://example.com/image.jpg".to_string(),
+                            detail: None,
+                        },
+                    },
+                ]),
+                name: None,
+            },
+        ];
+
+        let result = process_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+
+        assert_eq!(result.len(), 2);
+
+        // System message should remain unchanged
+        assert_eq!(result[0]["role"].as_str().unwrap(), "system");
+        assert_eq!(result[0]["content"].as_str().unwrap(), "System prompt");
+
+        // User message should be flattened to text only
+        assert_eq!(result[1]["role"].as_str().unwrap(), "user");
+        assert_eq!(result[1]["content"].as_str().unwrap(), "User message");
+    }
+
+    #[test]
+    fn test_transform_messages_empty_text_parts() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "https://example.com/image.jpg".to_string(),
+                    detail: None,
+                },
+            }]),
+            name: None,
+        }];
+
+        let result = process_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+
+        assert_eq!(result.len(), 1);
+        let transformed_message = &result[0];
+
+        // Should keep original multimodal content when no text parts exist
+        assert!(transformed_message["content"].is_array());
+    }
+
+    #[test]
+    fn test_transform_messages_mixed_content_types() {
+        let messages = vec![
+            ChatMessage::User {
+                content: MessageContent::Text("Plain text".to_string()),
+                name: None,
+            },
+            ChatMessage::User {
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "With image".to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "https://example.com/image.jpg".to_string(),
+                            detail: Some("low".to_string()),
+                        },
+                    },
+                ]),
+                name: None,
+            },
+        ];
+
+        let result_string =
+            process_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+
+        assert_eq!(result_string.len(), 2);
+        assert_eq!(result_string[0]["content"].as_str().unwrap(), "Plain text");
+        assert_eq!(result_string[1]["content"].as_str().unwrap(), "With image");
+
+        let result_openai =
+            process_content_format(&messages, ChatTemplateContentFormat::OpenAI).unwrap();
+
+        assert_eq!(result_openai.len(), 2);
+        assert_eq!(result_openai[0]["content"].as_str().unwrap(), "Plain text");
+
+        let content_array = result_openai[1]["content"].as_array().unwrap();
+        assert_eq!(content_array.len(), 2);
+        assert_eq!(content_array[0]["type"], "text");
+        assert_eq!(content_array[1], json!({"type": "image"}));
+    }
+}

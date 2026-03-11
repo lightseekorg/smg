@@ -8,19 +8,25 @@ use tracing::debug;
 use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::core::{
-    circuit_breaker::CircuitBreakerConfig, steps::workflow_data::LocalWorkerWorkflowData,
-    worker::RuntimeType, BasicWorkerBuilder, ConnectionMode, Worker, UNKNOWN_MODEL_ID,
+    circuit_breaker::CircuitBreakerConfig,
+    steps::workflow_data::{WorkerKind, WorkerWorkflowData},
+    worker::RuntimeType,
+    BasicWorkerBuilder, ConnectionMode, Worker, UNKNOWN_MODEL_ID,
 };
 
 /// Step 3: Create worker object(s) with merged configuration + metadata.
 pub struct CreateLocalWorkerStep;
 
 #[async_trait]
-impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
+impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
     async fn execute(
         &self,
-        context: &mut WorkflowContext<LocalWorkerWorkflowData>,
+        context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
+        if context.data.worker_kind != Some(WorkerKind::Local) {
+            return Ok(StepResult::Skip);
+        }
+
         let config = &context.data.config;
         let app_context = context
             .data

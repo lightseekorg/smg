@@ -1,0 +1,25 @@
+# SMG SchemaConfig for genai-data-plane Oracle tables (Flyway-managed)
+version: 3
+auto_migrate: false
+
+conversations:
+  table: CONVERSATIONS
+  columns:
+    id: CONVERSATION_ID
+  extra_columns:
+    EXPIRES_AT:
+      sql_type: "TIMESTAMP WITH TIME ZONE"
+      default_value: "31-DEC-99 11.59.59.000000 PM +00:00"
+
+responses:
+  table: RESPONSES
+  columns:
+    id: RESPONSE_ID
+    input: INPUT_ITEMS
+    raw_response: RESPONSE_OBJECT
+
+conversation_items:
+  table: CONVERSATION_ITEMS
+
+conversation_item_links:
+  table: CONVERSATION_ITEM_LINKS

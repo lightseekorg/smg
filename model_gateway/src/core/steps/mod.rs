@@ -33,21 +33,21 @@ pub use wasm_module_removal::{
     RemoveModuleStep, WasmModuleRemovalRequest,
 };
 pub use worker::{
-    // Workflow builders
-    create_external_worker_workflow,
-    // Workflow data helpers
-    create_external_worker_workflow_data,
-    create_local_worker_workflow,
-    create_local_worker_workflow_data,
+    // Unified workflow builder + data factory
+    create_worker_registration_workflow,
+    // Removal/update workflow builders
     create_worker_removal_workflow,
     create_worker_removal_workflow_data,
     create_worker_update_workflow,
     create_worker_update_workflow_data,
+    create_worker_workflow_data,
     // Utility functions
     group_models_into_cards,
     infer_model_type_from_id,
     // Shared steps
     ActivateWorkersStep,
+    // Classification step
+    ClassifyWorkerTypeStep,
     // External registration steps
     CreateExternalWorkersStep,
     // Local registration steps
@@ -75,10 +75,9 @@ pub use worker::{
 };
 // Typed workflow data structures
 pub use workflow_data::{
-    ExternalWorkerWorkflowData, LocalWorkerWorkflowData, McpWorkflowData, ProtocolUpdateRequest,
-    TokenizerWorkflowData, WasmRegistrationWorkflowData, WasmRemovalWorkflowData,
-    WorkerList as WorkflowWorkerList, WorkerRegistrationData, WorkerRemovalWorkflowData,
-    WorkerSpec, WorkerUpdateWorkflowData,
+    McpWorkflowData, ProtocolUpdateRequest, TokenizerWorkflowData, WasmRegistrationWorkflowData,
+    WasmRemovalWorkflowData, WorkerKind, WorkerList as WorkflowWorkerList, WorkerRegistrationData,
+    WorkerRemovalWorkflowData, WorkerSpec, WorkerUpdateWorkflowData, WorkerWorkflowData,
 };
 // Typed workflow engines
 pub use workflow_engines::WorkflowEngines;

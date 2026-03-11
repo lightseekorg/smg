@@ -1,7 +1,7 @@
 use openai_protocol::{
     common::{Function, StringOrArray, ToolChoice, ToolChoiceValue},
     responses::{
-        IncludeField, ResponseInput, ResponseInputOutputItem, ResponseTool, ResponseToolType,
+        FunctionTool, IncludeField, McpTool, ResponseInput, ResponseInputOutputItem, ResponseTool,
         ResponsesRequest, StringOrContentParts, TextConfig, TextFormat,
     },
 };
@@ -601,26 +601,32 @@ fn test_validate_stop_sequences_non_empty() {
 /// Test tools validation (function tool must have function)
 #[test]
 fn test_validate_tools_function_missing() {
-    let request = ResponsesRequest {
-        input: ResponseInput::Text("test".to_string()),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Function,
-            function: None, // Missing function definition
-            server_url: None,
-            authorization: None,
-            headers: None,
-            server_label: None,
-            server_description: None,
-            require_approval: None,
-            allowed_tools: None,
-        }]),
-        ..Default::default()
-    };
-    let result = request.validate();
-    assert!(
-        result.is_err(),
-        "Function tool without function definition should be invalid"
-    );
+    // With type-discriminated tools, a function tool without the required fields
+    // should fail deserialization.
+    let v = json!({
+        "input": "test",
+        "tools": [{ "type": "function" }]
+    });
+    let parsed: Result<ResponsesRequest, _> = serde_json::from_value(v);
+    assert!(parsed.is_err(), "Expected deserialization to fail");
+}
+
+#[test]
+fn test_deserialize_function_tool_rejects_unknown_fields() {
+    let v = json!({
+        "input": "test",
+        "tools": [
+            {
+                "type": "function",
+                "name": "test_func",
+                "parameters": {},
+                "extra_field": 1
+            }
+        ]
+    });
+
+    let parsed: Result<ResponsesRequest, _> = serde_json::from_value(v);
+    assert!(parsed.is_err(), "Expected deserialization to fail");
 }
 
 /// Test tools validation (valid MCP tool should pass)
@@ -628,17 +634,15 @@ fn test_validate_tools_function_missing() {
 fn test_validate_tools_mcp_valid_ok() {
     let request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
-            function: None,
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: None, // server_url is optional when server_label is provided
             authorization: None,
             headers: None,
-            server_label: Some("mock".to_string()),
+            server_label: "mock".to_string(),
             server_description: None,
             require_approval: None,
             allowed_tools: None,
-        }]),
+        })]),
         ..Default::default()
     };
 
@@ -651,37 +655,12 @@ fn test_validate_tools_mcp_valid_ok() {
 /// Test tools validation (MCP tool must have server_label; server_url is optional)
 #[test]
 fn test_validate_tools_mcp_missing_server_label() {
-    let request = ResponsesRequest {
-        input: ResponseInput::Text("test".to_string()),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
-            function: None,
-            server_url: None,
-            authorization: None,
-            headers: None,
-            server_label: None, // Missing required server_label
-            server_description: None,
-            require_approval: None,
-            allowed_tools: None,
-        }]),
-        ..Default::default()
-    };
-    let result = request.validate();
-    assert!(
-        result.is_err(),
-        "MCP tool without server_label should be invalid"
-    );
-
-    let err = result.unwrap_err();
-    let s = format!("{err:?}");
-    assert!(
-        s.contains("missing_required_parameter"),
-        "Expected error code missing_required_parameter, got: {err:?}",
-    );
-    assert!(
-        s.contains("tools[0].server_label"),
-        "Expected error to reference tools[0].server_label, got: {err:?}",
-    );
+    let v = json!({
+        "input": "test",
+        "tools": [{ "type": "mcp" }]
+    });
+    let parsed: Result<ResponsesRequest, _> = serde_json::from_value(v);
+    assert!(parsed.is_err(), "Expected deserialization to fail");
 }
 
 /// Test tools validation (MCP tool server_label must be unique; case-insensitive)
@@ -690,28 +669,24 @@ fn test_validate_tools_mcp_duplicate_server_label() {
     let request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
         tools: Some(vec![
-            ResponseTool {
-                r#type: ResponseToolType::Mcp,
-                function: None,
+            ResponseTool::Mcp(McpTool {
                 server_url: None,
                 authorization: None,
                 headers: None,
-                server_label: Some("Foo".to_string()),
+                server_label: "Foo".to_string(),
                 server_description: None,
                 require_approval: None,
                 allowed_tools: None,
-            },
-            ResponseTool {
-                r#type: ResponseToolType::Mcp,
-                function: None,
+            }),
+            ResponseTool::Mcp(McpTool {
                 server_url: None,
                 authorization: None,
                 headers: None,
-                server_label: Some("foo".to_string()),
+                server_label: "foo".to_string(),
                 server_description: None,
                 require_approval: None,
                 allowed_tools: None,
-            },
+            }),
         ]),
         ..Default::default()
     };
@@ -737,17 +712,15 @@ fn test_validate_tools_mcp_server_label_invalid_cases() {
     for label in invalid_labels {
         let request = ResponsesRequest {
             input: ResponseInput::Text("test".to_string()),
-            tools: Some(vec![ResponseTool {
-                r#type: ResponseToolType::Mcp,
-                function: None,
+            tools: Some(vec![ResponseTool::Mcp(McpTool {
                 server_url: Some("https://example.com/mcp".to_string()),
                 authorization: None,
                 headers: None,
-                server_label: Some(label.to_string()),
+                server_label: label.to_string(),
                 server_description: None,
                 require_approval: None,
                 allowed_tools: None,
-            }]),
+            })]),
             ..Default::default()
         };
 
@@ -797,22 +770,14 @@ fn test_validate_tool_choice_requires_tools() {
     // Valid: tool_choice with tools
     let request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Function,
-            function: Some(Function {
+        tools: Some(vec![ResponseTool::Function(FunctionTool {
+            function: Function {
                 name: "test_func".to_string(),
                 description: None,
                 parameters: json!({}),
                 strict: None,
-            }),
-            server_url: None,
-            authorization: None,
-            headers: None,
-            server_label: None,
-            server_description: None,
-            require_approval: None,
-            allowed_tools: None,
-        }]),
+            },
+        })]),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
         ..Default::default()
     };
@@ -1056,22 +1021,14 @@ fn test_normalize_tool_choice_auto() {
 
     let mut request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Function,
-            function: Some(Function {
+        tools: Some(vec![ResponseTool::Function(FunctionTool {
+            function: Function {
                 name: "test_func".to_string(),
                 description: None,
                 parameters: json!({}),
                 strict: None,
-            }),
-            server_url: None,
-            authorization: None,
-            headers: None,
-            server_label: None,
-            server_description: None,
-            require_approval: None,
-            allowed_tools: None,
-        }]),
+            },
+        })]),
         tool_choice: None,
         ..Default::default()
     };
@@ -1125,22 +1082,14 @@ fn test_normalize_tool_choice_no_override() {
 
     let mut request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Function,
-            function: Some(Function {
+        tools: Some(vec![ResponseTool::Function(FunctionTool {
+            function: Function {
                 name: "test_func".to_string(),
                 description: None,
                 parameters: json!({}),
                 strict: None,
-            }),
-            server_url: None,
-            authorization: None,
-            headers: None,
-            server_label: None,
-            server_description: None,
-            require_approval: None,
-            allowed_tools: None,
-        }]),
+            },
+        })]),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
         ..Default::default()
     };
@@ -1163,22 +1112,14 @@ fn test_normalize_parallel_tool_calls() {
 
     let mut request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Function,
-            function: Some(Function {
+        tools: Some(vec![ResponseTool::Function(FunctionTool {
+            function: Function {
                 name: "test_func".to_string(),
                 description: None,
                 parameters: json!({}),
                 strict: None,
-            }),
-            server_url: None,
-            authorization: None,
-            headers: None,
-            server_label: None,
-            server_description: None,
-            require_approval: None,
-            allowed_tools: None,
-        }]),
+            },
+        })]),
         parallel_tool_calls: None,
         ..Default::default()
     };
@@ -1223,22 +1164,14 @@ fn test_normalize_parallel_tool_calls_no_override() {
 
     let mut request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Function,
-            function: Some(Function {
+        tools: Some(vec![ResponseTool::Function(FunctionTool {
+            function: Function {
                 name: "test_func".to_string(),
                 description: None,
                 parameters: json!({}),
                 strict: None,
-            }),
-            server_url: None,
-            authorization: None,
-            headers: None,
-            server_label: None,
-            server_description: None,
-            require_approval: None,
-            allowed_tools: None,
-        }]),
+            },
+        })]),
         parallel_tool_calls: Some(false),
         ..Default::default()
     };

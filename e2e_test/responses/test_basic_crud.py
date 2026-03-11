@@ -12,6 +12,7 @@ import time
 
 import openai
 import pytest
+from conftest import smg_compare
 from openai import OpenAI
 from openai.types import responses
 
@@ -60,11 +61,13 @@ def wait_for_background_task(
 # =============================================================================
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestResponseCRUD:
     """Tests for Response API CRUD operations."""
 
-    def test_create_and_get_response(self, setup_backend):
+    def test_create_and_get_response(self, setup_backend, smg):
         """Test creating response and retrieving it."""
         _, model, client, gateway = setup_backend
 
@@ -86,8 +89,24 @@ class TestResponseCRUD:
         assert input_resp.data is not None
         assert len(input_resp.data) > 0
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_create = smg.responses.create(model=model, input="Hello, world!")
+            assert smg_create.id is not None
+            assert smg_create.error is None
+            assert smg_create.status == "completed"
+            assert len(smg_create.output_text) > 0
+            # Get response
+            smg_get = smg.responses.retrieve(response_id=smg_create.id)
+            assert smg_get.id == smg_create.id
+            assert smg_get.status == "completed"
+            # List input items (same assertions as OpenAI SDK)
+            smg_items = smg.responses.input_items.list(response_id=smg_create.id)
+            assert smg_items.data is not None
+            assert len(smg_items.data) > 0
+
     @pytest.mark.skip(reason="TODO: Add delete response feature")
-    def test_delete_response(self, setup_backend):
+    def test_delete_response(self, setup_backend, smg):
         """Test deleting response."""
         _, model, client, gateway = setup_backend
 
@@ -108,7 +127,7 @@ class TestResponseCRUD:
             client.responses.retrieve(response_id=response_id)
 
     @pytest.mark.skip(reason="TODO: Add background response feature")
-    def test_background_response(self, setup_backend):
+    def test_background_response(self, setup_backend, smg):
         """Test background response execution."""
         _, model, client, gateway = setup_backend
 
@@ -135,12 +154,14 @@ class TestResponseCRUD:
 # =============================================================================
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.storage("oracle")
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestResponseCRUDOracleStorage:
     """Tests for Response API CRUD operations with Oracle history backend."""
 
-    def test_create_and_get_response(self, setup_backend):
+    def test_create_and_get_response(self, setup_backend, smg):
         """Test creating response and retrieving it."""
         _, model, client, gateway = setup_backend
 
@@ -162,8 +183,24 @@ class TestResponseCRUDOracleStorage:
         assert input_resp.data is not None
         assert len(input_resp.data) > 0
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_create = smg.responses.create(model=model, input="Hello, world!")
+            assert smg_create.id is not None
+            assert smg_create.error is None
+            assert smg_create.status == "completed"
+            assert len(smg_create.output_text) > 0
+            # Get response
+            smg_get = smg.responses.retrieve(response_id=smg_create.id)
+            assert smg_get.id == smg_create.id
+            assert smg_get.status == "completed"
+            # List input items (same assertions as OpenAI SDK)
+            smg_items = smg.responses.input_items.list(response_id=smg_create.id)
+            assert smg_items.data is not None
+            assert len(smg_items.data) > 0
+
     @pytest.mark.skip(reason="TODO: Add delete response feature")
-    def test_delete_response(self, setup_backend):
+    def test_delete_response(self, setup_backend, smg):
         """Test deleting response."""
         _, model, client, gateway = setup_backend
 
@@ -184,7 +221,7 @@ class TestResponseCRUDOracleStorage:
             client.responses.retrieve(response_id=response_id)
 
     @pytest.mark.skip(reason="TODO: Add background response feature")
-    def test_background_response(self, setup_backend):
+    def test_background_response(self, setup_backend, smg):
         """Test background response execution."""
         _, model, client, gateway = setup_backend
 
@@ -211,6 +248,8 @@ class TestResponseCRUDOracleStorage:
 # =============================================================================
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestConversationCRUD:
     """Tests for Conversation API CRUD operations."""
@@ -327,6 +366,8 @@ class TestConversationCRUD:
 # =============================================================================
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.storage("oracle")
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestConversationCRUDOracleStorage:

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::response::Response;
 use openai_protocol::{
     common::Tool,
-    responses::{ResponseTool, ResponseToolType, ResponsesRequest, ResponsesResponse},
+    responses::{ResponseTool, ResponsesRequest, ResponsesResponse},
 };
 use serde_json::to_value;
 use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
@@ -32,10 +32,7 @@ pub(crate) async fn ensure_mcp_connection(
 ) -> Result<(bool, Vec<McpServerBinding>), Response> {
     // Check for explicit MCP tools (must error if connection fails)
     let has_explicit_mcp_tools = tools
-        .map(|t| {
-            t.iter()
-                .any(|tool| matches!(tool.r#type, ResponseToolType::Mcp))
-        })
+        .map(|t| t.iter().any(|tool| matches!(tool, ResponseTool::Mcp(_))))
         .unwrap_or(false);
 
     // Check for builtin tools that MAY have MCP routing configured
@@ -43,8 +40,8 @@ pub(crate) async fn ensure_mcp_connection(
         .map(|t| {
             t.iter().any(|tool| {
                 matches!(
-                    tool.r#type,
-                    ResponseToolType::WebSearchPreview | ResponseToolType::CodeInterpreter
+                    tool,
+                    ResponseTool::WebSearchPreview(_) | ResponseTool::CodeInterpreter(_)
                 )
             })
         })
@@ -107,23 +104,19 @@ pub(crate) fn validate_worker_availability(
     None
 }
 
-/// Extract function tools (and optionally MCP tools) from ResponseTools
+/// Extract function tools from ResponseTools
 ///
 /// This utility consolidates the logic for extracting tools with schemas from ResponseTools.
 /// It's used by both Harmony and Regular routers for different purposes:
 ///
-/// - **Harmony router**: Extracts both Function and MCP tools (with `include_mcp: true`)
-///   because MCP schemas are populated by convert_mcp_tools_to_response_tools() before the
-///   pipeline runs. These tools are used to generate structural constraints in the
-///   Harmony preparation stage.
+/// - **Harmony router**: Extracts function tools because MCP tools are exposed to the model as
+///   function tools (via `convert_mcp_tools_to_response_tools()`), and those are used to
+///   generate structural constraints in the Harmony preparation stage.
 ///
-/// - **Regular router**: Extracts only Function tools (with `include_mcp: false`) during
-///   the initial conversion from ResponsesRequest to ChatCompletionRequest. MCP tools
-///   are merged later by the tool loop before being sent to the chat pipeline, where
-///   tool_choice constraints are generated for ALL tools (function + MCP combined).
+/// - **Regular router**: Extracts function tools during the initial conversion from
+///   ResponsesRequest to ChatCompletionRequest. MCP tools are merged later by the tool loop.
 pub(crate) fn extract_tools_from_response_tools(
     response_tools: Option<&[ResponseTool]>,
-    include_mcp: bool,
 ) -> Vec<Tool> {
     let Some(tools) = response_tools else {
         return Vec::new();
@@ -131,22 +124,12 @@ pub(crate) fn extract_tools_from_response_tools(
 
     tools
         .iter()
-        .filter_map(|rt| {
-            match rt.r#type {
-                // Function tools: Schema in request
-                ResponseToolType::Function => rt.function.as_ref().map(|f| Tool {
-                    tool_type: "function".to_string(),
-                    function: f.clone(),
-                }),
-                // MCP tools: Schema populated by convert_mcp_tools_to_response_tools()
-                // Only include if requested (Harmony case)
-                ResponseToolType::Mcp if include_mcp => rt.function.as_ref().map(|f| Tool {
-                    tool_type: "function".to_string(),
-                    function: f.clone(),
-                }),
-                // Hosted tools: No schema available, skip
-                _ => None,
-            }
+        .filter_map(|rt| match rt {
+            ResponseTool::Function(ft) => Some(Tool {
+                tool_type: "function".to_string(),
+                function: ft.function.clone(),
+            }),
+            _ => None,
         })
         .collect()
 }
@@ -167,18 +150,12 @@ pub(crate) async fn persist_response_if_needed(
     }
 
     if let Ok(response_json) = to_value(response) {
-        let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
-            .try_with(|id| id.clone())
-            .ok()
-            .flatten();
-
         if let Err(e) = persist_conversation_items(
             conversation_storage,
             conversation_item_storage,
             response_storage,
             &response_json,
             original_request,
-            conversation_store_id,
         )
         .await
         {

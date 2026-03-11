@@ -21,7 +21,7 @@ use openai_protocol::{
         is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
         FunctionCallEvent, ItemType, McpEvent, OutputItemEvent, ResponseEvent, WebSearchCallEvent,
     },
-    responses::{ResponseToolType, ResponsesRequest},
+    responses::{ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, Value};
 use smg_mcp::{McpOrchestrator, McpServerBinding, McpToolSession, ResponseFormat};
@@ -103,11 +103,7 @@ pub(super) fn apply_event_transformations_inplace(
                     .original_request
                     .tools
                     .as_ref()
-                    .map(|tools| {
-                        tools
-                            .iter()
-                            .any(|t| matches!(t.r#type, ResponseToolType::Mcp))
-                    })
+                    .map(|tools| tools.iter().any(|t| matches!(t, ResponseTool::Mcp(_))))
                     .unwrap_or(false);
 
                 if requested_mcp {
@@ -192,7 +188,7 @@ fn build_mcp_tools_value(original_body: &ResponsesRequest) -> Option<Value> {
     let tools = original_body.tools.as_ref()?;
     let mcp_tools: Vec<Value> = tools
         .iter()
-        .filter(|t| matches!(t.r#type, ResponseToolType::Mcp))
+        .filter(|t| matches!(t, ResponseTool::Mcp(_)))
         .filter_map(response_tool_to_value)
         .collect();
 
@@ -565,12 +561,6 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let previous_response_id = req.previous_response_id;
     let storage = req.storage;
 
-    // Capture task-local context before spawning.
-    let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
-        .try_with(|id| id.clone())
-        .ok()
-        .flatten();
-
     #[expect(
         clippy::disallowed_methods,
         reason = "fire-and-forget stream processing; gateway shutdown need not wait for individual response streams"
@@ -644,7 +634,6 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     storage.response.clone(),
                     &response_json,
                     &original_request,
-                    conversation_store_id.clone(),
                 )
                 .await
                 {
@@ -691,12 +680,6 @@ pub(super) fn handle_streaming_with_tool_interception(
     let previous_response_id = req.previous_response_id;
     let url = req.url;
     let storage = req.storage;
-
-    // Capture task-local context before spawning.
-    let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
-        .try_with(|id| id.clone())
-        .ok()
-        .flatten();
 
     let client_clone = client.clone();
     let url_clone = url.clone();
@@ -937,7 +920,6 @@ pub(super) fn handle_streaming_with_tool_interception(
                         storage.response.clone(),
                         &response_json,
                         &original_request,
-                        conversation_store_id.clone(),
                     )
                     .await
                     {

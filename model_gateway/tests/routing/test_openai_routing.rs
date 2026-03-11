@@ -26,7 +26,11 @@ use openai_protocol::{
 use serde_json::json;
 use smg::{
     config::{ConfigError, HistoryBackend, OracleConfig, PolicyConfig, RouterConfig, RoutingMode},
-    routers::{openai::OpenAIRouter, RouterFactory, RouterTrait},
+    core::{BasicWorkerBuilder, RuntimeType, Worker, WorkerType},
+    routers::{
+        factory::router_ids, openai::OpenAIRouter, router_manager::RouterManager, RouterFactory,
+        RouterTrait,
+    },
 };
 use smg_data_connector::{ResponseId, StoredResponse};
 use tokio::{
@@ -131,22 +135,28 @@ async fn test_openai_router_server_info() {
     assert!(body_str.contains("openai"));
 }
 
-/// Test models endpoint
+/// Test models endpoint via RouterManager (get_models is centralized there).
+/// A bearer token triggers upstream fan-out to the mock server.
 #[tokio::test]
 async fn test_openai_router_models() {
-    // Use mock server for deterministic models response
     let mock_server = MockOpenAIServer::new().await;
     let ctx = create_test_app_context().await;
     register_external_worker(&ctx, &mock_server.base_url(), None);
-    let router = OpenAIRouter::new(&ctx).await.unwrap();
+    let inner = OpenAIRouter::new(&ctx).await.unwrap();
 
+    let manager = RouterManager::new(ctx.worker_registry.clone(), ctx.client.clone());
+    let manager = Arc::new(manager);
+    manager.register_router(router_ids::HTTP_OPENAI, Arc::from(inner));
+
+    // Send a bearer token to trigger BYOK fan-out to the mock upstream.
     let req = Request::builder()
         .method(Method::GET)
         .uri("/models")
+        .header("Authorization", "Bearer test-key")
         .body(Body::empty())
         .unwrap();
 
-    let response = router.get_models(req).await;
+    let response = manager.get_models(req).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     let (_, body) = response.into_parts();
@@ -266,9 +276,10 @@ async fn test_openai_router_responses_with_mock() {
     assert_eq!(input_items[0]["role"], "user");
     assert_eq!(input_items[0]["content"][0]["text"], "Say hi");
 
-    // Output is now stored as a JSON array of items
-    assert!(stored1.output.is_array());
-    let output_items = stored1.output.as_array().unwrap();
+    // Output is now stored in raw_response["output"] as a JSON array of items
+    let output_val = &stored1.raw_response["output"];
+    assert!(output_val.is_array());
+    let output_items = output_val.as_array().unwrap();
     assert_eq!(output_items.len(), 1);
     assert_eq!(output_items[0]["content"][0]["text"], "mock_output_1");
 
@@ -281,9 +292,10 @@ async fn test_openai_router_responses_with_mock() {
         .expect("second response missing");
     assert_eq!(stored2.previous_response_id.unwrap().0, resp1_id);
 
-    // Output is now stored as a JSON array
-    assert!(stored2.output.is_array());
-    let output_items2 = stored2.output.as_array().unwrap();
+    // Output is now stored in raw_response["output"] as a JSON array
+    let output_val2 = &stored2.raw_response["output"];
+    assert!(output_val2.is_array());
+    let output_items2 = output_val2.as_array().unwrap();
     assert_eq!(output_items2.len(), 1);
     assert_eq!(output_items2[0]["content"][0]["text"], "mock_output_2");
 
@@ -485,7 +497,7 @@ async fn test_openai_router_responses_streaming_with_mock() {
     let mut previous = StoredResponse::new(None);
     previous.id = ResponseId::from("resp_prev_chain");
     previous.input = serde_json::json!("Earlier bedtime question");
-    previous.output = serde_json::json!("Earlier answer");
+    previous.raw_response = serde_json::json!({"output": [{"type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "Earlier answer", "annotations": []}]}]});
     storage.store_response(previous).await.unwrap();
 
     let mut metadata = HashMap::new();
@@ -541,9 +553,10 @@ async fn test_openai_router_responses_streaming_with_mock() {
         "Tell me a bedtime story."
     );
 
-    // Output is now stored as a JSON array of items
-    assert!(stored.output.is_array());
-    let output_items = stored.output.as_array().unwrap();
+    // Output is now stored in raw_response["output"] as a JSON array of items
+    let output_val = &stored.raw_response["output"];
+    assert!(output_val.is_array());
+    let output_items = output_val.as_array().unwrap();
     assert_eq!(output_items.len(), 1);
     assert_eq!(
         output_items[0]["content"][0]["text"],
@@ -557,8 +570,6 @@ async fn test_openai_router_responses_streaming_with_mock() {
             .0,
         "resp_prev_chain"
     );
-    assert_eq!(stored.metadata.get("topic"), Some(&json!("unicorns")));
-    assert_eq!(stored.instructions.as_deref(), Some("Be kind"));
     assert_eq!(stored.model.as_deref(), Some("gpt-5-nano"));
     assert_eq!(stored.safety_identifier, None);
     assert_eq!(stored.raw_response["store"], json!(true));
@@ -801,7 +812,7 @@ async fn test_openai_router_chat_streaming_with_mock() {
 #[tokio::test]
 async fn test_openai_router_circuit_breaker() {
     let ctx = create_test_app_context().await;
-    register_external_worker(&ctx, "http://127.0.0.1:9", None);
+    register_external_worker(&ctx, "http://invalid-url-that-will-fail", None);
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     let chat_request = create_minimal_chat_request();
@@ -825,18 +836,31 @@ async fn test_openai_router_circuit_breaker() {
 #[tokio::test]
 async fn test_openai_router_models_from_registry() {
     let ctx = create_test_app_context().await;
-    // Register a worker with the default model
-    register_external_worker(&ctx, "https://api.example.com", None);
-    let router = OpenAIRouter::new(&ctx).await.unwrap();
+    // Register a non-external worker so the registry path returns it.
+    let worker: Arc<dyn Worker> = Arc::new(
+        BasicWorkerBuilder::new("http://localhost:8000")
+            .worker_type(WorkerType::Regular)
+            .runtime_type(RuntimeType::Sglang)
+            .models(vec![openai_protocol::model_card::ModelCard::new(
+                "gpt-3.5-turbo",
+            )])
+            .build(),
+    );
+    ctx.worker_registry.register(worker);
 
-    // Get models - should return the registered model
+    let inner = OpenAIRouter::new(&ctx).await.unwrap();
+    let manager = RouterManager::new(ctx.worker_registry.clone(), ctx.client.clone());
+    let manager = Arc::new(manager);
+    manager.register_router(router_ids::HTTP_OPENAI, Arc::from(inner));
+
+    // No bearer token → registry path returns local workers' models.
     let req = Request::builder()
         .method(Method::GET)
         .uri("/models")
         .body(Body::empty())
         .unwrap();
 
-    let response = router.get_models(req).await;
+    let response = manager.get_models(req).await;
     assert_eq!(response.status(), StatusCode::OK);
     let (_, body) = response.into_parts();
     let body_bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
@@ -844,7 +868,6 @@ async fn test_openai_router_models_from_registry() {
     let models: serde_json::Value = serde_json::from_str(&body_str).unwrap();
     assert_eq!(models["object"], "list");
 
-    // Should have the default model (gpt-3.5-turbo)
     let data = models["data"].as_array().unwrap();
     assert_eq!(data.len(), 1);
     assert_eq!(data[0]["id"], "gpt-3.5-turbo");
@@ -882,6 +905,7 @@ fn oracle_config_validation_accepts_dsn_only() {
             pool_min: 1,
             pool_max: 4,
             pool_timeout_secs: 30,
+            schema: None,
         })
         .build_unchecked();
 
@@ -901,6 +925,7 @@ fn oracle_config_validation_accepts_wallet_alias() {
             pool_min: 1,
             pool_max: 8,
             pool_timeout_secs: 45,
+            schema: None,
         })
         .build_unchecked();
 
@@ -922,6 +947,7 @@ fn oracle_config_validation_for_external_auth() {
             pool_min: 1,
             pool_max: 4,
             pool_timeout_secs: 30,
+            schema: None,
         })
         .build_unchecked();
 
@@ -940,6 +966,7 @@ fn oracle_config_validation_for_external_auth() {
             pool_min: 1,
             pool_max: 4,
             pool_timeout_secs: 30,
+            schema: None,
         })
         .build_unchecked();
 

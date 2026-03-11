@@ -6,7 +6,8 @@ use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, Wo
 
 use super::discover_metadata::get_server_info;
 use crate::core::{
-    steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode, UNKNOWN_MODEL_ID,
+    steps::workflow_data::{WorkerKind, WorkerWorkflowData},
+    ConnectionMode, UNKNOWN_MODEL_ID,
 };
 
 /// DP (Data Parallel) information for a worker.
@@ -41,11 +42,15 @@ pub async fn get_dp_info(url: &str, api_key: Option<&str>) -> Result<DpInfo, Str
 pub struct DiscoverDPInfoStep;
 
 #[async_trait]
-impl StepExecutor<LocalWorkerWorkflowData> for DiscoverDPInfoStep {
+impl StepExecutor<WorkerWorkflowData> for DiscoverDPInfoStep {
     async fn execute(
         &self,
-        context: &mut WorkflowContext<LocalWorkerWorkflowData>,
+        context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
+        if context.data.worker_kind != Some(WorkerKind::Local) {
+            return Ok(StepResult::Skip);
+        }
+
         let config = &context.data.config;
         let app_context = context
             .data

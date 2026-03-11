@@ -63,10 +63,11 @@ impl ToolLoopState {
         _success: bool,
     ) {
         // Add function_tool_call item with both arguments and output
+        let id = call_id.clone();
         self.conversation_history
             .push(ResponseInputOutputItem::FunctionToolCall {
-                id: call_id.clone(),
-                call_id: call_id.clone(),
+                id,
+                call_id,
                 name: tool_name,
                 arguments: args_json_str,
                 output: Some(output_str),
@@ -89,7 +90,7 @@ pub(super) fn prepare_chat_tools_and_choice(
     iteration: usize,
 ) {
     // Merge function tools from request with MCP tools
-    let mut all_tools = chat_request.tools.clone().unwrap_or_default();
+    let mut all_tools = chat_request.tools.take().unwrap_or_default();
     all_tools.extend(mcp_chat_tools.iter().cloned());
     chat_request.tools = Some(all_tools);
 
@@ -99,7 +100,7 @@ pub(super) fn prepare_chat_tools_and_choice(
     chat_request.tool_choice = if iteration == 0 {
         chat_request
             .tool_choice
-            .clone()
+            .take()
             .or(Some(ToolChoice::Value(ToolChoiceValue::Auto)))
     } else {
         Some(ToolChoice::Value(ToolChoiceValue::Auto))
@@ -187,8 +188,10 @@ pub(super) async fn load_conversation_history(
                         }
                     }
 
-                    // Convert output items from stored output (which is now a JSON array)
-                    if let Some(output_arr) = stored.output.as_array() {
+                    // Convert output items from stored raw_response["output"] (which is a JSON array)
+                    if let Some(output_arr) =
+                        stored.raw_response.get("output").and_then(|v| v.as_array())
+                    {
                         for item in output_arr {
                             match serde_json::from_value::<ResponseInputOutputItem>(item.clone()) {
                                 Ok(output_item) => {
@@ -337,7 +340,7 @@ pub(super) async fn load_conversation_history(
 /// Build next request with updated conversation history
 pub(super) fn build_next_request(
     state: &ToolLoopState,
-    current_request: &ResponsesRequest,
+    current_request: ResponsesRequest,
 ) -> ResponsesRequest {
     // Start with original input
     let mut input_items = match &state.original_input {
@@ -353,12 +356,12 @@ pub(super) fn build_next_request(
     // Append all conversation history (function calls and outputs)
     input_items.extend_from_slice(&state.conversation_history);
 
-    // Build new request for next iteration
+    // Build new request for next iteration, moving fields from old request to avoid cloning
     ResponsesRequest {
         input: ResponseInput::Items(input_items),
-        model: current_request.model.clone(),
-        instructions: current_request.instructions.clone(),
-        tools: current_request.tools.clone(),
+        model: current_request.model,
+        instructions: current_request.instructions,
+        tools: current_request.tools,
         max_output_tokens: current_request.max_output_tokens,
         temperature: current_request.temperature,
         top_p: current_request.top_p,
@@ -366,23 +369,23 @@ pub(super) fn build_next_request(
         store: Some(false), // Don't store intermediate responses
         background: Some(false),
         max_tool_calls: current_request.max_tool_calls,
-        tool_choice: current_request.tool_choice.clone(),
+        tool_choice: current_request.tool_choice,
         parallel_tool_calls: current_request.parallel_tool_calls,
         previous_response_id: None,
         conversation: None,
-        user: current_request.user.clone(),
-        metadata: current_request.metadata.clone(),
-        include: current_request.include.clone(),
-        reasoning: current_request.reasoning.clone(),
-        service_tier: current_request.service_tier.clone(),
+        user: current_request.user,
+        metadata: current_request.metadata,
+        include: current_request.include,
+        reasoning: current_request.reasoning,
+        service_tier: current_request.service_tier,
         top_logprobs: current_request.top_logprobs,
-        truncation: current_request.truncation.clone(),
-        text: current_request.text.clone(),
+        truncation: current_request.truncation,
+        text: current_request.text,
         request_id: None,
         priority: current_request.priority,
         frequency_penalty: current_request.frequency_penalty,
         presence_penalty: current_request.presence_penalty,
-        stop: current_request.stop.clone(),
+        stop: current_request.stop,
         top_k: current_request.top_k,
         min_p: current_request.min_p,
         repetition_penalty: current_request.repetition_penalty,

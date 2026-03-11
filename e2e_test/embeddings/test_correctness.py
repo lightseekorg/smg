@@ -18,19 +18,18 @@ Requirements:
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Any
 
 import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
+from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
-# Thread-safe storage for HF reference embeddings
+# Cached HF reference embeddings
 _hf_embeddings_cache: dict[str, Any] | None = None
-_hf_embeddings_lock = threading.Lock()
 
 
 # Test data for semantic similarity checks
@@ -166,55 +165,54 @@ def get_input_texts(test_json: dict) -> list[str]:
 def hf_reference_embeddings(request):
     """Pre-compute HuggingFace reference embeddings on CPU.
 
-    This is done once per session with thread-safe initialization to support
-    pytest-parallel execution. Uses CPU to avoid GPU memory conflicts.
+    Computed once per session and cached. Uses CPU to avoid GPU memory conflicts.
     """
     global _hf_embeddings_cache
 
-    # Thread-safe initialization - only one thread computes embeddings
-    with _hf_embeddings_lock:
-        if _hf_embeddings_cache is not None:
-            return _hf_embeddings_cache
-
-        from infra.model_specs import MODEL_SPECS
-
-        # Get model path from MODEL_SPECS for the embedding model
-        model_path = MODEL_SPECS.get("embedding", {}).get("model")
-        if model_path is None:
-            pytest.skip("Embedding model not found in MODEL_SPECS")
-
-        logger.info("Pre-computing HuggingFace reference embeddings (CPU) for %s", model_path)
-
-        # Flatten all test texts for semantic similarity
-        all_semantic_texts = []
-        for text_set in SEMANTIC_TEST_SETS:
-            all_semantic_texts.extend(text_set)
-
-        # Get relevance test texts
-        query = (
-            f"Instruct: Given a search query, retrieve relevant passages that answer the query\n"
-            f"Query: {RELEVANCE_TEST_DATA['sample_query']}"
-        )
-        docs = get_input_texts(RELEVANCE_TEST_DATA)
-
-        # Compute all reference embeddings at once
-        hf_semantic = get_hf_st_embeddings(all_semantic_texts, model_path)
-        hf_query = get_hf_st_embeddings(query, model_path)
-        hf_docs = get_hf_st_embeddings(docs, model_path)
-
-        logger.info("Reference embeddings computed on CPU")
-
-        _hf_embeddings_cache = {
-            "semantic": hf_semantic,
-            "query": hf_query,
-            "docs": hf_docs,
-        }
-
+    if _hf_embeddings_cache is not None:
         return _hf_embeddings_cache
 
+    from infra.model_specs import MODEL_SPECS
 
+    # Get model path from MODEL_SPECS for the embedding model
+    model_path = MODEL_SPECS.get("embedding", {}).get("model")
+    if model_path is None:
+        pytest.skip("Embedding model not found in MODEL_SPECS")
+
+    logger.info("Pre-computing HuggingFace reference embeddings (CPU) for %s", model_path)
+
+    # Flatten all test texts for semantic similarity
+    all_semantic_texts = []
+    for text_set in SEMANTIC_TEST_SETS:
+        all_semantic_texts.extend(text_set)
+
+    # Get relevance test texts
+    query = (
+        f"Instruct: Given a search query, retrieve relevant passages that answer the query\n"
+        f"Query: {RELEVANCE_TEST_DATA['sample_query']}"
+    )
+    docs = get_input_texts(RELEVANCE_TEST_DATA)
+
+    # Compute all reference embeddings at once
+    hf_semantic = get_hf_st_embeddings(all_semantic_texts, model_path)
+    hf_query = get_hf_st_embeddings(query, model_path)
+    hf_docs = get_hf_st_embeddings(docs, model_path)
+
+    logger.info("Reference embeddings computed on CPU")
+
+    _hf_embeddings_cache = {
+        "semantic": hf_semantic,
+        "query": hf_query,
+        "docs": hf_docs,
+    }
+
+    return _hf_embeddings_cache
+
+
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
+@pytest.mark.model("intfloat/e5-mistral-7b-instruct")
 @pytest.mark.e2e
-@pytest.mark.model("embedding")
 @pytest.mark.parametrize("setup_backend", ["grpc", "http"], indirect=True)
 class TestEmbeddingCorrectness:
     """Test embedding correctness by comparing gateway output against HuggingFace reference.
@@ -223,7 +221,7 @@ class TestEmbeddingCorrectness:
     worker on GPU and compare. Using CPU for reference avoids GPU memory conflicts.
     """
 
-    def test_semantic_similarity(self, setup_backend, hf_reference_embeddings):
+    def test_semantic_similarity(self, setup_backend, smg, hf_reference_embeddings):
         """Check if gateway and HF embeddings give similar results.
 
         For each text in the semantic test sets, the gateway embedding should
@@ -258,7 +256,26 @@ class TestEmbeddingCorrectness:
 
             logger.info("Semantic similarity test set %d passed", i + 1)
 
-    def test_relevance_scores(self, setup_backend, hf_reference_embeddings):
+        # SmgClient comparison - verify SmgClient embeddings also match HF reference
+        with smg_compare():
+            embed_idx_smg = 0
+            for i, input_texts in enumerate(SEMANTIC_TEST_SETS):
+                smg_embeddings = []
+                for text in input_texts:
+                    smg_resp = smg.embeddings.create(model=model_path, input=text)
+                    smg_embeddings.append(smg_resp.data[0].embedding)
+                num_texts = len(input_texts)
+                embedding_hf = hf_reference_embeddings["semantic"][
+                    embed_idx_smg : embed_idx_smg + num_texts
+                ].tolist()
+                embed_idx_smg += num_texts
+                smg_similarities = compare_embeddings(smg_embeddings, embedding_hf)
+                for j, sim in enumerate(smg_similarities):
+                    assert abs(sim - 1.0) < tolerance, (
+                        f"SmgClient set {i + 1}, text {j + 1}: similarity {sim:.4f} not close to 1.0"
+                    )
+
+    def test_relevance_scores(self, setup_backend, smg, hf_reference_embeddings):
         """Compare relevance scores between gateway and HF implementations.
 
         The relevance scores (query @ docs) should match between the gateway
@@ -292,3 +309,16 @@ class TestEmbeddingCorrectness:
         )
 
         logger.info("Relevance scores comparison passed")
+
+        # SmgClient comparison
+        with smg_compare():
+            smg_query_resp = smg.embeddings.create(model=model_path, input=query)
+            smg_query_emb = [smg_query_resp.data[0].embedding]
+            smg_doc_embs = []
+            for doc in docs:
+                smg_doc_resp = smg.embeddings.create(model=model_path, input=doc)
+                smg_doc_embs.append(smg_doc_resp.data[0].embedding)
+            smg_scores = (np.array(smg_query_emb) @ np.array(smg_doc_embs).T) * 100
+            assert np.allclose(smg_scores, scores_hf, atol=tolerance), (
+                f"SmgClient scores differ beyond tolerance:\nSmgClient: {smg_scores}\nHF: {scores_hf}"
+            )

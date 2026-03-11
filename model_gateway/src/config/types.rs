@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use openai_protocol::worker::HealthCheckConfig as ProtocolHealthCheckConfig;
 use serde::{Deserialize, Serialize};
 // Re-export storage config types from data_connector
-pub use smg_data_connector::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
+pub use smg_data_connector::{
+    HistoryBackend, OracleConfig, PostgresConfig, RedisConfig, SchemaConfig,
+};
 
 use super::{validation::ConfigValidator, ConfigResult};
 use crate::core::ConnectionMode;
@@ -21,6 +23,8 @@ pub struct RouterConfig {
     pub request_timeout_secs: u64,
     pub worker_startup_timeout_secs: u64,
     pub worker_startup_check_interval_secs: u64,
+    #[serde(default = "default_load_monitor_interval_secs")]
+    pub load_monitor_interval_secs: u64,
     pub dp_aware: bool,
     pub api_key: Option<String>,
     pub discovery: Option<DiscoveryConfig>,
@@ -87,6 +91,10 @@ pub struct RouterConfig {
     /// Enable WASM support
     #[serde(default)]
     pub enable_wasm: bool,
+    /// Path to a WASM component implementing storage hooks.
+    /// When set, wraps all storage backends with hook-based interceptors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_hook_wasm_path: Option<String>,
 }
 
 /// Tokenizer cache configuration
@@ -102,6 +110,10 @@ pub struct TokenizerCacheConfig {
     pub enable_l1: bool,
     #[serde(default = "default_l1_max_memory")]
     pub l1_max_memory: usize,
+}
+
+fn default_load_monitor_interval_secs() -> u64 {
+    10
 }
 
 fn default_enable_l0() -> bool {
@@ -167,6 +179,8 @@ pub enum RoutingMode {
     OpenAI { worker_urls: Vec<String> },
     #[serde(rename = "anthropic")]
     Anthropic { worker_urls: Vec<String> },
+    #[serde(rename = "gemini")]
+    Gemini { worker_urls: Vec<String> },
 }
 
 impl RoutingMode {
@@ -184,6 +198,7 @@ impl RoutingMode {
             } => prefill_urls.len() + decode_urls.len(),
             RoutingMode::OpenAI { worker_urls } => worker_urls.len(),
             RoutingMode::Anthropic { worker_urls } => worker_urls.len(),
+            RoutingMode::Gemini { worker_urls } => worker_urls.len(),
         }
     }
 
@@ -240,6 +255,8 @@ pub enum PolicyConfig {
         balance_rel_threshold: f32,
         eviction_interval_secs: u64,
         max_tree_size: usize,
+        #[serde(default = "default_block_size")]
+        block_size: usize,
     },
 
     #[serde(rename = "power_of_two")]
@@ -297,6 +314,10 @@ pub enum PolicyConfig {
     },
 }
 
+fn default_block_size() -> usize {
+    16
+}
+
 fn default_prefix_token_count() -> usize {
     256
 }
@@ -349,6 +370,9 @@ pub struct DiscoveryConfig {
     /// Annotation key to read mesh port from Router Pods
     #[serde(default = "default_router_mesh_port_annotation")]
     pub router_mesh_port_annotation: String,
+    /// Source for per-worker model_id override: "namespace", "label:<key>", or "annotation:<key>"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id_source: Option<String>,
 }
 
 fn default_router_mesh_port_annotation() -> String {
@@ -368,6 +392,7 @@ impl Default for DiscoveryConfig {
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: default_router_mesh_port_annotation(),
+            model_id_source: None,
         }
     }
 }
@@ -501,6 +526,7 @@ impl Default for RouterConfig {
             request_timeout_secs: 1800,        // 30 minutes
             worker_startup_timeout_secs: 1800, // 30 minutes for large model loading
             worker_startup_check_interval_secs: 30,
+            load_monitor_interval_secs: 10,
             dp_aware: false,
             api_key: None,
             discovery: None,
@@ -535,6 +561,7 @@ impl Default for RouterConfig {
             ca_certificates: vec![],
             mcp_config: None,
             enable_wasm: false,
+            storage_hook_wasm_path: None,
             server_cert: None,
             server_key: None,
         }
@@ -563,6 +590,7 @@ impl RouterConfig {
             RoutingMode::PrefillDecode { .. } => "prefill_decode",
             RoutingMode::OpenAI { .. } => "openai",
             RoutingMode::Anthropic { .. } => "anthropic",
+            RoutingMode::Gemini { .. } => "gemini",
         }
     }
 
@@ -626,6 +654,7 @@ mod tests {
         assert_eq!(config.request_timeout_secs, 1800);
         assert_eq!(config.worker_startup_timeout_secs, 1800);
         assert_eq!(config.worker_startup_check_interval_secs, 30);
+        assert_eq!(config.load_monitor_interval_secs, 10);
         assert!(config.discovery.is_none());
         assert!(config.metrics.is_none());
         assert!(config.trace_config.is_none());
@@ -760,6 +789,7 @@ mod tests {
             balance_rel_threshold: 1.5,
             eviction_interval_secs: 300,
             max_tree_size: 1000,
+            block_size: 16,
         };
         assert_eq!(cache_aware.name(), "cache_aware");
 
@@ -781,6 +811,7 @@ mod tests {
             balance_rel_threshold: 1.5,
             eviction_interval_secs: 300,
             max_tree_size: 1000,
+            block_size: 16,
         };
         let json = serde_json::to_string(&cache_aware).unwrap();
         assert!(json.contains("\"type\":\"cache_aware\""));
@@ -803,6 +834,7 @@ mod tests {
             balance_rel_threshold: 2.0,
             eviction_interval_secs: 600,
             max_tree_size: 5000,
+            block_size: 16,
         };
 
         match cache_aware {
@@ -812,6 +844,7 @@ mod tests {
                 balance_rel_threshold,
                 eviction_interval_secs,
                 max_tree_size,
+                ..
             } => {
                 assert!((cache_threshold - 0.75).abs() < 0.0001);
                 assert_eq!(balance_abs_threshold, 20);
@@ -892,6 +925,7 @@ mod tests {
             bootstrap_port_annotation: "custom.io/port".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
+            model_id_source: None,
         };
 
         assert!(config.enabled);
@@ -1170,6 +1204,7 @@ mod tests {
                 bootstrap_port_annotation: "mycompany.io/bootstrap".to_string(),
                 router_selector: HashMap::new(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
+                model_id_source: None,
             })
             .enable_metrics("::", 9999) // IPv6 any
             .enable_trace("localhost:4317")
@@ -1205,6 +1240,7 @@ mod tests {
                 balance_rel_threshold: 1.1,
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
+                block_size: 16,
             }),
             decode_policy: Some(PolicyConfig::PowerOfTwo {
                 load_check_interval_secs: 60,
@@ -1235,6 +1271,7 @@ mod tests {
                 balance_rel_threshold: 1.1,
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
+                block_size: 16,
             }),
             decode_policy: None,
         };
@@ -1291,6 +1328,7 @@ mod tests {
             balance_rel_threshold: 1.5,
             eviction_interval_secs: 300,
             max_tree_size: 2000,
+            block_size: 16,
         };
 
         match pd.get_prefill_policy(&main_policy) {

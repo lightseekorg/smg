@@ -151,6 +151,18 @@ class TestAddServeArgs:
         args = parser.parse_args([])
         assert args.host == "127.0.0.1"
 
+    def test_enable_token_usage_details_default_false(self):
+        parser = argparse.ArgumentParser()
+        add_serve_args(parser)
+        args = parser.parse_args([])
+        assert args.enable_token_usage_details is False
+
+    def test_enable_token_usage_details_enabled(self):
+        parser = argparse.ArgumentParser()
+        add_serve_args(parser)
+        args = parser.parse_args(["--enable-token-usage-details"])
+        assert args.enable_token_usage_details is True
+
 
 class TestImportBackendArgs:
     """Test _import_backend_args for each backend."""
@@ -161,7 +173,7 @@ class TestImportBackendArgs:
         args, backend_args = parser.parse_known_args(
             ["--model", "/path/to/model", "--config", "/path/to/config.yml"]
         )
-        assert args.model == "/path/to/model"
+        assert args.model_path == "/path/to/model"
         assert "--config" in backend_args
         assert "/path/to/config.yml" in backend_args
 
@@ -187,13 +199,13 @@ class TestAddTrtllmStubArgs:
         parser = argparse.ArgumentParser()
         _add_trtllm_stub_args(parser)
         args = parser.parse_args(["--model", "/tmp/model"])
-        assert args.model == "/tmp/model"
+        assert args.model_path == "/tmp/model"
 
     def test_model_default_is_none(self):
         parser = argparse.ArgumentParser()
         _add_trtllm_stub_args(parser)
         args = parser.parse_args([])
-        assert args.model is None
+        assert args.model_path is None
 
 
 class TestParseServeArgs:
@@ -205,7 +217,7 @@ class TestParseServeArgs:
         )
         assert backend == "trtllm"
         assert args.backend == "trtllm"
-        assert args.model == "/tmp/m"
+        assert args.model_path == "/tmp/m"
         assert "--config" in backend_args  # config should be in backend_args
         assert "/tmp/config.yml" in backend_args
 
@@ -302,7 +314,7 @@ class TestParseServeArgs:
             ]
         )
         assert backend == "trtllm"
-        assert args.model == "/some/path"
+        assert args.model_path == "/some/path"
 
     def test_unknown_arg_rejected_in_pass2(self):
         """Unknown args should be rejected by the full parser in pass 2."""
@@ -316,34 +328,98 @@ class TestParseServeArgs:
 
 
 class TestWorkerLauncherGpuEnv:
-    """Test GPU assignment via _get_tp_size() and gpu_env()."""
+    """Test GPU assignment via _get_tp_size() and gpu_env().
+
+    Integration tests go through parse_serve_args to verify that CLI flags
+    actually produce the correct attribute names for each launcher.
+    """
+
+    # -- Integration: CLI flags → _get_tp_size → gpu_env ---------------------
+
+    @pytest.mark.parametrize(
+        "backend, cli_flag, tp_value, expected_devices",
+        [
+            ("sglang", "--tp-size", "4", "0,1,2,3"),
+            ("sglang", "--tensor-parallel-size", "2", "0,1"),
+        ],
+    )
+    def test_sglang_tp_from_cli(self, backend, cli_flag, tp_value, expected_devices):
+        """CLI --tp-size / --tensor-parallel-size flows through to CUDA_VISIBLE_DEVICES."""
+
+        def _mock_sglang_args(b, parser):
+            if b == "sglang":
+                parser.add_argument("--tensor-parallel-size", "--tp-size", type=int, default=1)
+                parser.add_argument("--model-path", type=str)
+            else:
+                _import_backend_args(b, parser)
+
+        with patch("smg.serve._import_backend_args", side_effect=_mock_sglang_args):
+            _, args, _ = parse_serve_args(
+                ["--backend", backend, "--model-path", "/tmp/m", cli_flag, tp_value]
+            )
+        launcher = SglangWorkerLauncher()
+        env = launcher.gpu_env(args, dp_rank=0, env={})
+        assert env["CUDA_VISIBLE_DEVICES"] == expected_devices
+
+    @pytest.mark.parametrize(
+        "cli_flag, tp_value, expected_devices",
+        [
+            ("--tensor-parallel-size", "2", "0,1"),
+        ],
+    )
+    def test_vllm_tp_from_cli(self, cli_flag, tp_value, expected_devices):
+        """CLI --tensor-parallel-size flows through to CUDA_VISIBLE_DEVICES for vllm."""
+
+        def _mock_vllm_args(b, parser):
+            if b == "vllm":
+                parser.add_argument("--tensor-parallel-size", type=int, default=1)
+                parser.add_argument("--model", type=str)
+            else:
+                _import_backend_args(b, parser)
+
+        with patch("smg.serve._import_backend_args", side_effect=_mock_vllm_args):
+            _, args, _ = parse_serve_args(
+                ["--backend", "vllm", "--model", "/tmp/m", cli_flag, tp_value]
+            )
+        launcher = VllmWorkerLauncher()
+        env = launcher.gpu_env(args, dp_rank=0, env={})
+        assert env["CUDA_VISIBLE_DEVICES"] == expected_devices
+
+    def test_trtllm_tp_from_cli(self):
+        """CLI --tp_size flows through to CUDA_VISIBLE_DEVICES for trtllm."""
+        _, args, _ = parse_serve_args(
+            ["--backend", "trtllm", "--model-path", "/tmp/m", "--tp_size", "4"]
+        )
+        launcher = TrtllmWorkerLauncher()
+        env = launcher.gpu_env(args, dp_rank=0, env={})
+        assert env["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
+
+    # -- Unit: _get_tp_size with direct Namespace (TRT-LLM config paths) ------
 
     @pytest.mark.parametrize(
         "launcher_class, args, expected_tp",
         [
-            (SglangWorkerLauncher, argparse.Namespace(tp_size=4), 4),
-            (SglangWorkerLauncher, argparse.Namespace(), 1),
-            (VllmWorkerLauncher, argparse.Namespace(tensor_parallel_size=2), 2),
-            (VllmWorkerLauncher, argparse.Namespace(), 1),
             (TrtllmWorkerLauncher, argparse.Namespace(tp_size=8), 8),
             (TrtllmWorkerLauncher, argparse.Namespace(tensor_parallel_size=8), 8),
             (TrtllmWorkerLauncher, argparse.Namespace(), 1),
         ],
     )
-    def test_get_tp_size(self, launcher_class, args, expected_tp):
-        """_get_tp_size returns the correct value from args or defaults to 1."""
+    def test_get_tp_size_trtllm(self, launcher_class, args, expected_tp):
+        """TRT-LLM _get_tp_size supports both tp_size and tensor_parallel_size attrs."""
         launcher = launcher_class()
         assert launcher._get_tp_size(args) == expected_tp
 
+    # -- Unit: gpu_env math ---------------------------------------------------
+
     def test_gpu_env_dp_rank_0_tp_2(self):
         launcher = SglangWorkerLauncher()
-        args = argparse.Namespace(tp_size=2)
+        args = argparse.Namespace(tensor_parallel_size=2)
         env = launcher.gpu_env(args, dp_rank=0, env={})
         assert env["CUDA_VISIBLE_DEVICES"] == "0,1"
 
     def test_gpu_env_dp_rank_1_tp_2(self):
         launcher = SglangWorkerLauncher()
-        args = argparse.Namespace(tp_size=2)
+        args = argparse.Namespace(tensor_parallel_size=2)
         env = launcher.gpu_env(args, dp_rank=1, env={})
         assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
 
@@ -361,7 +437,7 @@ class TestWorkerLauncherGpuEnv:
 
     def test_gpu_env_preserves_existing_env(self):
         launcher = SglangWorkerLauncher()
-        args = argparse.Namespace(tp_size=1)
+        args = argparse.Namespace(tensor_parallel_size=1)
         base_env = {"PATH": "/usr/bin", "HOME": "/root"}
         env = launcher.gpu_env(args, dp_rank=0, env=base_env)
         assert env["PATH"] == "/usr/bin"
@@ -370,7 +446,7 @@ class TestWorkerLauncherGpuEnv:
 
     def test_gpu_env_does_not_mutate_input(self):
         launcher = SglangWorkerLauncher()
-        args = argparse.Namespace(tp_size=1)
+        args = argparse.Namespace(tensor_parallel_size=1)
         base_env = {"FOO": "bar"}
         env = launcher.gpu_env(args, dp_rank=0, env=base_env)
         assert "CUDA_VISIBLE_DEVICES" not in base_env
@@ -378,7 +454,7 @@ class TestWorkerLauncherGpuEnv:
 
     def test_gpu_env_none_copies_os_environ(self):
         launcher = SglangWorkerLauncher()
-        args = argparse.Namespace(tp_size=1)
+        args = argparse.Namespace(tensor_parallel_size=1)
         with patch.dict("os.environ", {"TEST_VAR": "123"}, clear=False):
             env = launcher.gpu_env(args, dp_rank=0)
         assert env["TEST_VAR"] == "123"
@@ -444,6 +520,21 @@ class TestSglangWorkerLauncher:
         assert "--grpc-mode" not in cmd
         for arg in backend_args:
             assert arg in cmd
+        assert "--enable-cache-report" not in cmd
+
+    def test_build_command_http_mode_with_token_usage_details(self):
+        """When connection_mode is http and enable_token_usage_details is True,
+        --enable-cache-report should be present."""
+        launcher = SglangWorkerLauncher()
+        args = argparse.Namespace(
+            model_path="/tmp/model", connection_mode="http", enable_token_usage_details=True
+        )
+        backend_args = ["--trust-remote-code"]
+        cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
+        assert "--grpc-mode" not in cmd
+        for arg in backend_args:
+            assert arg in cmd
+        assert "--enable-cache-report" in cmd
 
     def test_worker_url_grpc_mode(self):
         launcher = SglangWorkerLauncher()
@@ -503,13 +594,40 @@ class TestVllmWorkerLauncher:
         assert result is True
         mock.assert_called_once_with("127.0.0.1", 32000, 5.0)
 
+    def test_build_command_http_mode(self):
+        """When connection_mode is http, --grpc-mode should not be present."""
+        launcher = VllmWorkerLauncher()
+        args = argparse.Namespace(model_path="/tmp/model", connection_mode="http")
+        backend_args = ["--trust-remote-code"]
+        cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
+        assert "vllm.entrypoints.openai.api_server" in cmd
+        assert "vllm.entrypoints.grpc_server" not in cmd
+        for arg in backend_args:
+            assert arg in cmd
+        assert "--enable-prompt-tokens-details" not in cmd
+
+    def test_build_command_http_mode_with_token_usage_details(self):
+        """When connection_mode is http and enable_token_usage_details is True,
+        --enable-prompt-tokens-details should be present."""
+        launcher = VllmWorkerLauncher()
+        args = argparse.Namespace(
+            model="/tmp/model", connection_mode="http", enable_token_usage_details=True
+        )
+        backend_args = ["--trust-remote-code"]
+        cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
+        assert "vllm.entrypoints.openai.api_server" in cmd
+        assert "vllm.entrypoints.grpc_server" not in cmd
+        for arg in backend_args:
+            assert arg in cmd
+        assert "--enable-prompt-tokens-details" in cmd
+
 
 class TestTrtllmWorkerLauncher:
     """Test TrtllmWorkerLauncher.build_command()."""
 
     def test_build_command(self):
         launcher = TrtllmWorkerLauncher()
-        args = argparse.Namespace(model="/tmp/model", connection_mode="grpc")
+        args = argparse.Namespace(model_path="/tmp/model", connection_mode="grpc")
         backend_args = ["--config", "/tmp/config.yml"]
         cmd = launcher.build_command(args, backend_args, "0.0.0.0", 50051)
         assert "tensorrt_llm.commands.serve" in cmd
@@ -524,7 +642,7 @@ class TestTrtllmWorkerLauncher:
 
     def test_build_command_rejects_http_mode(self):
         launcher = TrtllmWorkerLauncher()
-        args = argparse.Namespace(model="/tmp/model", connection_mode="http")
+        args = argparse.Namespace(model_path="/tmp/model", connection_mode="http")
         backend_args = ["--config", "/tmp/config.yml"]
         with pytest.raises(ValueError, match="TensorRT-LLM backend only supports grpc"):
             launcher.build_command(args, backend_args, "0.0.0.0", 50051)
@@ -934,7 +1052,7 @@ class TestServeOrchestrator:
 
     def test_launch_workers_passes_gpu_env(self):
         """_launch_workers passes CUDA_VISIBLE_DEVICES via gpu_env for each dp_rank."""
-        args = _make_args(data_parallel_size=2, tp_size=2, connection_mode="grpc")
+        args = _make_args(data_parallel_size=2, tensor_parallel_size=2, connection_mode="grpc")
         backend_args = ["--model-path", "/tmp/model"]
         orch = ServeOrchestrator("sglang", args, backend_args)
 

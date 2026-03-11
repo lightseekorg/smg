@@ -6,7 +6,7 @@ use smg::*;
 use smg_auth as auth;
 
 // Define the enums with PyO3 bindings
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug)]
 pub enum PolicyType {
     Random,
@@ -19,7 +19,7 @@ pub enum PolicyType {
     PrefixHash,
 }
 
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug)]
 pub enum BackendType {
     Sglang,
@@ -27,7 +27,7 @@ pub enum BackendType {
     Anthropic,
 }
 
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug)]
 pub enum HistoryBackendType {
     Memory,
@@ -37,7 +37,7 @@ pub enum HistoryBackendType {
     Redis,
 }
 
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug, Default)]
 pub enum PyRole {
     Admin,
@@ -54,7 +54,7 @@ impl PyRole {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyApiKeyEntry {
     #[pyo3(get, set)]
@@ -87,7 +87,7 @@ impl PyApiKeyEntry {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyJwtConfig {
     #[pyo3(get, set)]
@@ -146,7 +146,7 @@ impl PyJwtConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PyControlPlaneAuthConfig {
     #[pyo3(get, set)]
@@ -188,7 +188,7 @@ impl PyControlPlaneAuthConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, PartialEq)]
 pub struct PyOracleConfig {
     #[pyo3(get, set)]
@@ -283,11 +283,12 @@ impl PyOracleConfig {
             pool_min: self.pool_min,
             pool_max: self.pool_max,
             pool_timeout_secs: self.pool_timeout_secs,
+            schema: None,
         }
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PyRedisConfig {
     #[pyo3(get, set)]
@@ -321,11 +322,12 @@ impl PyRedisConfig {
             url: self.url.clone(),
             pool_max: self.pool_max,
             retention_days: self.retention_days,
+            schema: None,
         }
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PyPostgresConfig {
     #[pyo3(get, set)]
@@ -353,11 +355,12 @@ impl PyPostgresConfig {
         config::PostgresConfig {
             db_url: self.db_url.clone().unwrap_or_default(),
             pool_max: self.pool_max,
+            schema: None,
         }
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone, PartialEq)]
 struct Router {
     host: String,
@@ -366,11 +369,13 @@ struct Router {
     policy: PolicyType,
     worker_startup_timeout_secs: u64,
     worker_startup_check_interval: u64,
+    load_monitor_interval: u64,
     cache_threshold: f32,
     balance_abs_threshold: usize,
     balance_rel_threshold: f32,
     eviction_interval_secs: u64,
     max_tree_size: usize,
+    block_size: usize,
     max_idle_secs: u64,
     assignment_mode: String,
     max_payload_size: usize,
@@ -386,6 +391,7 @@ struct Router {
     prefill_selector: HashMap<String, String>,
     decode_selector: HashMap<String, String>,
     bootstrap_port_annotation: String,
+    model_id_from: Option<String>,
     prometheus_port: Option<u16>,
     prometheus_host: Option<String>,
     prometheus_duration_buckets: Option<Vec<f64>>,
@@ -432,6 +438,7 @@ struct Router {
     reasoning_parser: Option<String>,
     tool_call_parser: Option<String>,
     mcp_config_path: Option<String>,
+    storage_hook_wasm_path: Option<String>,
     backend: BackendType,
     history_backend: HistoryBackendType,
     oracle_config: Option<PyOracleConfig>,
@@ -445,6 +452,7 @@ struct Router {
     enable_trace: bool,
     otlp_traces_endpoint: String,
     control_plane_auth: Option<PyControlPlaneAuthConfig>,
+    schema_config: Option<String>,
 }
 
 impl Router {
@@ -472,6 +480,7 @@ impl Router {
                     balance_rel_threshold: self.balance_rel_threshold,
                     eviction_interval_secs: self.eviction_interval_secs,
                     max_tree_size: self.max_tree_size,
+                    block_size: self.block_size,
                 },
                 PolicyType::PowerOfTwo => ConfigPolicyConfig::PowerOfTwo {
                     load_check_interval_secs: 5,
@@ -552,6 +561,7 @@ impl Router {
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
                 router_selector: HashMap::new(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
+                model_id_source: self.model_id_from.clone(),
             })
         } else {
             None
@@ -578,24 +588,49 @@ impl Router {
             HistoryBackendType::Redis => config::HistoryBackend::Redis,
         };
 
+        // Load schema config from YAML file if provided
+        let schema = if let Some(ref path) = self.schema_config {
+            let content = std::fs::read_to_string(path).map_err(|e| {
+                config::ConfigError::ValidationFailed {
+                    reason: format!("Failed to read schema config file '{path}': {e}"),
+                }
+            })?;
+            let schema: config::SchemaConfig = serde_yaml::from_str(&content).map_err(|e| {
+                config::ConfigError::ValidationFailed {
+                    reason: format!("Failed to parse schema config file '{path}': {e}"),
+                }
+            })?;
+            Some(schema)
+        } else {
+            None
+        };
+
         let oracle = if matches!(self.history_backend, HistoryBackendType::Oracle) {
-            self.oracle_config
-                .as_ref()
-                .map(|cfg| cfg.to_config_oracle())
+            self.oracle_config.as_ref().map(|cfg| {
+                let mut c = cfg.to_config_oracle();
+                c.schema.clone_from(&schema);
+                c
+            })
         } else {
             None
         };
 
         let postgres_config = if matches!(self.history_backend, HistoryBackendType::Postgres) {
-            self.postgres_config
-                .as_ref()
-                .map(|cfg| cfg.to_config_postgres())
+            self.postgres_config.as_ref().map(|cfg| {
+                let mut c = cfg.to_config_postgres();
+                c.schema.clone_from(&schema);
+                c
+            })
         } else {
             None
         };
 
         let redis_config = if matches!(self.history_backend, HistoryBackendType::Redis) {
-            self.redis_config.as_ref().map(|cfg| cfg.to_config_redis())
+            self.redis_config.as_ref().map(|cfg| {
+                let mut c = cfg.to_config_redis();
+                c.schema = schema;
+                c
+            })
         } else {
             None
         };
@@ -610,6 +645,7 @@ impl Router {
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
+            .load_monitor_interval_secs(self.load_monitor_interval)
             .max_concurrent_requests(self.max_concurrent_requests)
             .queue_size(self.queue_size)
             .queue_timeout_secs(self.queue_timeout_secs)
@@ -659,6 +695,7 @@ impl Router {
             .maybe_reasoning_parser(self.reasoning_parser.as_ref())
             .maybe_tool_call_parser(self.tool_call_parser.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())
+            .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .dp_aware(self.dp_aware)
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
@@ -686,11 +723,13 @@ impl Router {
         port = 3001,
         worker_startup_timeout_secs = 600,
         worker_startup_check_interval = 30,
+        load_monitor_interval = 10,
         cache_threshold = 0.3,
         balance_abs_threshold = 64,
         balance_rel_threshold = 1.5,
         eviction_interval_secs = 120,
         max_tree_size = 2usize.pow(26),
+        block_size = 16,
         max_idle_secs = 14400,
         assignment_mode = String::from("random"),
         max_payload_size = 512 * 1024 * 1024,
@@ -706,6 +745,7 @@ impl Router {
         prefill_selector = HashMap::new(),
         decode_selector = HashMap::new(),
         bootstrap_port_annotation = String::from("sglang.ai/bootstrap-port"),
+        model_id_from = None,
         prometheus_port = None,
         prometheus_host = None,
         prometheus_duration_buckets = None,
@@ -751,6 +791,7 @@ impl Router {
         reasoning_parser = None,
         tool_call_parser = None,
         mcp_config_path = None,
+        storage_hook_wasm_path = None,
         backend = BackendType::Sglang,
         history_backend = HistoryBackendType::Memory,
         oracle_config = None,
@@ -764,6 +805,7 @@ impl Router {
         enable_trace = false,
         otlp_traces_endpoint = String::from("localhost:4317"),
         control_plane_auth = None,
+        schema_config = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -777,11 +819,13 @@ impl Router {
         port: u16,
         worker_startup_timeout_secs: u64,
         worker_startup_check_interval: u64,
+        load_monitor_interval: u64,
         cache_threshold: f32,
         balance_abs_threshold: usize,
         balance_rel_threshold: f32,
         eviction_interval_secs: u64,
         max_tree_size: usize,
+        block_size: usize,
         max_idle_secs: u64,
         assignment_mode: String,
         max_payload_size: usize,
@@ -797,6 +841,7 @@ impl Router {
         prefill_selector: HashMap<String, String>,
         decode_selector: HashMap<String, String>,
         bootstrap_port_annotation: String,
+        model_id_from: Option<String>,
         prometheus_port: Option<u16>,
         prometheus_host: Option<String>,
         prometheus_duration_buckets: Option<Vec<f64>>,
@@ -842,6 +887,7 @@ impl Router {
         reasoning_parser: Option<String>,
         tool_call_parser: Option<String>,
         mcp_config_path: Option<String>,
+        storage_hook_wasm_path: Option<String>,
         backend: BackendType,
         history_backend: HistoryBackendType,
         oracle_config: Option<PyOracleConfig>,
@@ -855,6 +901,7 @@ impl Router {
         enable_trace: bool,
         otlp_traces_endpoint: String,
         control_plane_auth: Option<PyControlPlaneAuthConfig>,
+        schema_config: Option<String>,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -877,11 +924,13 @@ impl Router {
             policy,
             worker_startup_timeout_secs,
             worker_startup_check_interval,
+            load_monitor_interval,
             cache_threshold,
             balance_abs_threshold,
             balance_rel_threshold,
             eviction_interval_secs,
             max_tree_size,
+            block_size,
             max_idle_secs,
             assignment_mode,
             max_payload_size,
@@ -897,6 +946,7 @@ impl Router {
             prefill_selector,
             decode_selector,
             bootstrap_port_annotation,
+            model_id_from,
             prometheus_port,
             prometheus_host,
             prometheus_duration_buckets,
@@ -943,6 +993,7 @@ impl Router {
             reasoning_parser,
             tool_call_parser,
             mcp_config_path,
+            storage_hook_wasm_path,
             backend,
             history_backend,
             oracle_config,
@@ -956,6 +1007,7 @@ impl Router {
             enable_trace,
             otlp_traces_endpoint,
             control_plane_auth,
+            schema_config,
         })
     }
 
@@ -970,6 +1022,18 @@ impl Router {
             pyo3::exceptions::PyValueError::new_err(format!("Configuration validation failed: {e}"))
         })?;
 
+        let model_id_source = self
+            .model_id_from
+            .as_deref()
+            .map(|s| {
+                service_discovery::ModelIdSource::parse(s).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Invalid --model-id-from value '{s}': {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+
         let service_discovery_config = if self.service_discovery {
             Some(service_discovery::ServiceDiscoveryConfig {
                 enabled: true,
@@ -983,6 +1047,7 @@ impl Router {
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
                 router_selector: HashMap::new(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
+                model_id_source,
             })
         } else {
             None

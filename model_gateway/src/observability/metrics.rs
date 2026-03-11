@@ -389,6 +389,13 @@ pub mod metrics_labels {
     pub const ENDPOINT_RERANK: &str = "rerank";
     pub const ENDPOINT_EMBEDDINGS: &str = "embeddings";
     pub const ENDPOINT_CLASSIFY: &str = "classify";
+    pub const ENDPOINT_REALTIME: &str = "realtime";
+    pub const ENDPOINT_REALTIME_SESSIONS: &str = "realtime_sessions";
+    pub const ENDPOINT_REALTIME_CLIENT_SECRETS: &str = "realtime_client_secrets";
+    pub const ENDPOINT_REALTIME_TRANSCRIPTION: &str = "realtime_transcription";
+
+    // Connection modes
+    pub const CONNECTION_WEBSOCKET: &str = "websocket";
 
     // Worker types
     pub const WORKER_REGULAR: &str = "regular";

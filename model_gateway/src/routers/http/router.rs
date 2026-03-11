@@ -317,7 +317,7 @@ impl Router {
         events::RequestReceivedEvent {}.emit();
 
         let status = response.status();
-        worker.record_outcome(status.is_success());
+        worker.record_outcome(!is_retryable_status(status));
 
         // Record worker errors for server errors (5xx)
         if status.is_server_error() {
@@ -669,10 +669,6 @@ impl RouterTrait for Router {
 
     async fn get_server_info(&self, req: Request<Body>) -> Response {
         self.proxy_get_request(req, "get_server_info").await
-    }
-
-    async fn get_models(&self, req: Request<Body>) -> Response {
-        self.proxy_get_request(req, "v1/models").await
     }
 
     async fn get_model_info(&self, req: Request<Body>) -> Response {

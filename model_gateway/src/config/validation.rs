@@ -157,6 +157,12 @@ impl ConfigValidator {
                     Self::validate_urls(worker_urls)?;
                 }
             }
+            RoutingMode::Gemini { worker_urls } => {
+                // Allow empty URLs to support dynamic worker addition
+                if !worker_urls.is_empty() {
+                    Self::validate_urls(worker_urls)?;
+                }
+            }
         }
         Ok(())
     }
@@ -173,7 +179,16 @@ impl ConfigValidator {
                 balance_rel_threshold,
                 eviction_interval_secs,
                 max_tree_size,
+                block_size,
             } => {
+                if *block_size == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "block_size".to_string(),
+                        value: block_size.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+
                 if !(0.0..=1.0).contains(cache_threshold) {
                     return Err(ConfigError::InvalidValue {
                         field: "cache_threshold".to_string(),
@@ -329,6 +344,14 @@ impl ConfigValidator {
             });
         }
 
+        if config.load_monitor_interval_secs == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "load_monitor_interval_secs".to_string(),
+                value: config.load_monitor_interval_secs.to_string(),
+                reason: "Must be > 0".to_string(),
+            });
+        }
+
         Ok(())
     }
 
@@ -377,6 +400,11 @@ impl ConfigValidator {
             RoutingMode::Anthropic { .. } => {
                 return Err(ConfigError::ValidationFailed {
                     reason: "Anthropic mode does not support service discovery".to_string(),
+                });
+            }
+            RoutingMode::Gemini { .. } => {
+                return Err(ConfigError::ValidationFailed {
+                    reason: "Gemini mode does not support service discovery".to_string(),
                 });
             }
         }
@@ -734,6 +762,7 @@ mod tests {
                 balance_rel_threshold: 1.1,
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
+                block_size: 16,
             },
         );
 
@@ -753,6 +782,7 @@ mod tests {
                 balance_rel_threshold: 1.1,
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
+                block_size: 16,
             },
         );
 
@@ -807,6 +837,7 @@ mod tests {
                 balance_rel_threshold: 1.1,
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
+                block_size: 16,
             },
         );
 
@@ -851,6 +882,7 @@ mod tests {
                     balance_rel_threshold: 1.1,
                     eviction_interval_secs: 60,
                     max_tree_size: 1000,
+                    block_size: 16,
                 }),
                 decode_policy: Some(PolicyConfig::PowerOfTwo {
                     load_check_interval_secs: 60,

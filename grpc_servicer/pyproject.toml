@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smg-grpc-servicer"
+version = "0.4.2"
+description = "SMG gRPC servicer implementations for vLLM (and future backends)"
+requires-python = ">=3.10"
+dependencies = [
+    "smg-grpc-proto>=0.4.2",
+    "vllm>=0.16.0",
+    "grpcio>=1.78.0",
+    "grpcio-reflection>=1.78.0",
+]
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [
+    {name = "Chang Su", email = "mckvtl@gmail.com"},
+    {name = "Simo Lin", email = "linsimo.mark@gmail.com"},
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/lightseekorg/smg"
+Repository = "https://github.com/lightseekorg/smg"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["smg_grpc_servicer*"]

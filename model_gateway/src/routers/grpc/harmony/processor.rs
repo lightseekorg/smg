@@ -7,8 +7,9 @@ use openai_protocol::{
     chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
     common::{ChatLogProbs, ToolCall, Usage},
     responses::{
-        OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
-        ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+        InputTokensDetails, OutputTokensDetails, ResponseContentPart, ResponseOutputItem,
+        ResponseReasoningContent, ResponseStatus, ResponseUsage, ResponsesRequest,
+        ResponsesResponse, ResponsesUsage,
     },
 };
 use tracing::error;
@@ -73,13 +74,9 @@ impl HarmonyResponseProcessor {
                 )
             })?;
 
-            // Parse Harmony channels with finish_reason and matched_stop
+            // Parse Harmony channels with finish_reason
             let parsed = parser
-                .parse_complete(
-                    complete.output_ids(),
-                    complete.finish_reason().to_string(),
-                    matched_stop.clone(),
-                )
+                .parse_complete(complete.output_ids(), complete.finish_reason().to_string())
                 .map_err(|e| {
                     error!(
                         function = "process_non_streaming_chat_response",
@@ -218,14 +215,8 @@ impl HarmonyResponseProcessor {
             )
         })?;
 
-        let matched_stop = complete.matched_stop_json();
-
         let parsed = parser
-            .parse_complete(
-                complete.output_ids(),
-                complete.finish_reason().to_string(),
-                matched_stop,
-            )
+            .parse_complete(complete.output_ids(), complete.finish_reason().to_string())
             .map_err(|e| {
                 error!(
                     function = "process_responses_iteration",
@@ -316,7 +307,10 @@ impl HarmonyResponseProcessor {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
                 total_tokens: usage.total_tokens,
-                input_tokens_details: None,
+                input_tokens_details: usage
+                    .prompt_tokens_details
+                    .as_ref()
+                    .map(InputTokensDetails::from),
                 output_tokens_details: usage.completion_tokens_details.as_ref().and_then(|d| {
                     d.reasoning_tokens.map(|tokens| OutputTokensDetails {
                         reasoning_tokens: tokens,

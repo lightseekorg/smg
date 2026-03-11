@@ -1,0 +1,21 @@
+pub mod error;
+pub mod hasher;
+pub mod media;
+pub mod registry;
+pub mod tracker;
+pub mod types;
+pub mod vision;
+
+pub use error::{MediaConnectorError, MultiModalError, MultiModalResult};
+pub use media::{ImageFetchConfig, MediaConnector, MediaConnectorConfig, MediaSource};
+pub use registry::{ModelMetadata, ModelProcessorSpec, ModelRegistry};
+pub use tracker::{AsyncMultiModalTracker, TrackerOutput};
+pub use types::{
+    ChatContentPart, FieldLayout, ImageDetail, ImageFrame, ImageSize, ImageSource, Modality,
+    MultiModalData, MultiModalUUIDs, PlaceholderRange, PromptReplacement, TokenId, TrackedMedia,
+};
+// Re-export vision processing components
+pub use vision::{
+    ImagePreProcessor, ImageProcessorRegistry, LlavaNextProcessor, LlavaProcessor,
+    ModelSpecificValue, PreProcessorConfig, PreprocessedImages, TransformError,
+};

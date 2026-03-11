@@ -9,28 +9,24 @@ Source: Migrated from e2e_grpc/validation/test_openai_server_ignore_eos.py
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
 # Lazy load tokenizer to avoid import errors if transformers not installed
 _tokenizer_cache: dict = {}
-_tokenizer_lock = threading.Lock()
 
 
 def get_tokenizer(model_path: str):
     """Get tokenizer for a model, with caching."""
     if model_path not in _tokenizer_cache:
-        with _tokenizer_lock:
-            # Re-check after acquiring the lock to handle race conditions
-            if model_path not in _tokenizer_cache:
-                from transformers import AutoTokenizer
+        from transformers import AutoTokenizer
 
-                _tokenizer_cache[model_path] = AutoTokenizer.from_pretrained(model_path)
+        _tokenizer_cache[model_path] = AutoTokenizer.from_pretrained(model_path)
     return _tokenizer_cache[model_path]
 
 
@@ -39,6 +35,8 @@ def get_tokenizer(model_path: str):
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support ignore_eos parameter")
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
@@ -46,7 +44,7 @@ def get_tokenizer(model_path: str):
 class TestIgnoreEOS:
     """Tests for ignore_eos feature."""
 
-    def test_ignore_eos(self, setup_backend):
+    def test_ignore_eos(self, setup_backend, smg):
         """Test that ignore_eos=True allows generation to continue beyond EOS token.
 
         When ignore_eos=True, the model should generate until max_tokens is reached,
@@ -97,6 +95,39 @@ class TestIgnoreEOS:
             f"got {response_ignore_eos.choices[0].finish_reason}"
         )
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp_default = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Count from 1 to 20."},
+                ],
+                temperature=0,
+                max_tokens=max_tokens,
+                extra_body={"ignore_eos": False},
+            )
+            smg_resp_ignore = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Count from 1 to 20."},
+                ],
+                temperature=0,
+                max_tokens=max_tokens,
+                extra_body={"ignore_eos": True},
+            )
+            smg_default_tokens = len(tokenizer.encode(smg_resp_default.choices[0].message.content))
+            smg_ignore_tokens = len(tokenizer.encode(smg_resp_ignore.choices[0].message.content))
+            assert smg_ignore_tokens > smg_default_tokens or smg_ignore_tokens >= max_tokens, (
+                f"SmgClient: ignore_eos did not generate more tokens: "
+                f"{smg_ignore_tokens} vs {smg_default_tokens}"
+            )
+            assert smg_resp_ignore.choices[0].finish_reason == "length", (
+                f"SmgClient: Expected finish_reason='length', "
+                f"got {smg_resp_ignore.choices[0].finish_reason}"
+            )
+
 
 # =============================================================================
 # Large Max New Tokens Tests (Llama 8B)
@@ -108,13 +139,15 @@ class TestIgnoreEOS:
 # =============================================================================
 
 
+@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestLargeMaxNewTokens:
     """Tests for handling large max_new_tokens with concurrent requests."""
 
-    def test_concurrent_chat_completions(self, setup_backend):
+    def test_concurrent_chat_completions(self, setup_backend, smg):
         """Test that multiple concurrent requests with large token generation complete.
 
         This test sends multiple requests that ask for long outputs concurrently
@@ -158,4 +191,20 @@ class TestLargeMaxNewTokens:
             assert response.choices[0].message.content, f"Request {i} returned empty content"
             assert response.choices[0].finish_reason in ("stop", "length"), (
                 f"Request {i} had unexpected finish_reason: {response.choices[0].finish_reason}"
+            )
+
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {"role": "user", "content": "Please repeat the word 'hello' for 100 times."},
+                ],
+                temperature=0,
+                max_tokens=256,
+            )
+            assert smg_resp.choices[0].message.content, "SmgClient: returned empty content"
+            assert smg_resp.choices[0].finish_reason in ("stop", "length"), (
+                f"SmgClient: unexpected finish_reason: {smg_resp.choices[0].finish_reason}"
             )

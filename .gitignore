@@ -124,6 +124,9 @@ target/
 # Rust lib
 Cargo.lock
 
+# uv lock files
+uv.lock
+
 # Generated vision test fixtures (regenerate with: python multimodal/scripts/generate_vision_golden.py)
 multimodal/tests/fixtures/golden/
 
@@ -144,3 +147,16 @@ outputs/
 
 # MkDocs build output
 site/
+
+# Compiled WASM test fixtures (rebuild with: ./wasm/tests/fixtures/build_fixtures.sh)
+wasm/tests/fixtures/*.wasm
+
+# Generated client SDK files (run `make generate-clients` to regenerate)
+clients/openapi/smg-openapi.yaml
+clients/python/smg_client/types/_generated.py
+clients/java/src/
+clients/java/.openapi-generator/
+clients/java/target/
+clients/java/build.sbt
+clients/java/gradle.properties
+openapitools.json

@@ -11,12 +11,14 @@ use reqwest::Client;
 use tracing::debug;
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use super::{
-    detect_connection::do_grpc_health_check, discover_metadata::ModelsResponse, grpc_base_url,
-    http_base_url,
-};
+use super::discover_metadata::ModelsResponse;
 use crate::core::{
-    steps::workflow_data::LocalWorkerWorkflowData, worker::RuntimeType, ConnectionMode,
+    steps::{
+        worker::util::{do_grpc_health_check, grpc_base_url, http_base_url},
+        workflow_data::{WorkerKind, WorkerWorkflowData},
+    },
+    worker::RuntimeType,
+    ConnectionMode,
 };
 
 // ─── gRPC backend detection ────────────────────────────────────────────────
@@ -227,11 +229,15 @@ async fn detect_http_backend(
 pub struct DetectBackendStep;
 
 #[async_trait]
-impl StepExecutor<LocalWorkerWorkflowData> for DetectBackendStep {
+impl StepExecutor<WorkerWorkflowData> for DetectBackendStep {
     async fn execute(
         &self,
-        context: &mut WorkflowContext<LocalWorkerWorkflowData>,
+        context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
+        if context.data.worker_kind != Some(WorkerKind::Local) {
+            return Ok(StepResult::Skip);
+        }
+
         let config = &context.data.config;
         let connection_mode =
             context.data.connection_mode.as_ref().ok_or_else(|| {

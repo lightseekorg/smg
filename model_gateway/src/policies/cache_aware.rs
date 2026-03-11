@@ -1,68 +1,51 @@
 /*
     Cache-Aware Load Balancing Router
 
-    This router combines two strategies to optimize both cache utilization and request distribution:
+    When load is balanced, uses cache-aware routing. When imbalanced, uses
+    shortest-queue. A system is imbalanced when both:
+        (max - min) > abs_threshold  AND  max > rel_threshold * min
 
-    1. Cache-Aware Routing (Approximate Tree)
-    2. Load Balancing (Shortest Queue with Balance Thresholds)
+    Three types of cache-aware routing (mutually exclusive, selected by
+    worker connection mode and KV event availability):
 
-    The router dynamically switches between these strategies based on load conditions:
-    - Uses load balancing when the system is imbalanced
-    - Uses cache-aware routing when the system is balanced
-
-    A system is considered imbalanced if both conditions are met:
-    1. (max - min) > abs_threshold
-    2. max > rel_threshold * min
-
-    Strategy Details:
-
-    1. Cache-Aware Routing (Approximate Tree)
+    1. Event-Driven (gRPC + KV events)
     -------------------------------------------
-    This strategy maintains an approximate radix tree for each worker based on request history,
-    eliminating the need for direct cache state queries. The tree stores raw text characters
-    instead of token IDs to avoid tokenization overhead.
+    Uses PositionalIndexer overlap scoring from KvEventMonitor. Routes based
+    on actual backend KV cache state. Selects the worker with the highest
+    overlap count; tie-breaks by load (lower) then tree size (smaller).
+    Falls back to min-load when no cache overlap exists.
 
-    Process:
-    a. For each request, find the worker with the highest prefix match
-    b. If match rate > cache_threshold:
-    Route to the worker with highest match (likely has relevant data cached)
-    c. If match rate ≤ cache_threshold:
-    Route to the worker with smallest tree size (most available cache capacity)
-    d. Background maintenance:
-    Periodically evict least recently used leaf nodes to prevent memory overflow
-
-    2. Load Balancing (Shortest Queue)
+    2. Approximate Token Tree (gRPC, no KV events)
     -------------------------------------------
-    This strategy tracks pending request counts per worker and routes new requests
-    to the least busy worker when the system is detected to be imbalanced.
+    Maintains a TokenTree per model tracking which token prefixes were routed
+    where. If match_rate > cache_threshold, routes to the best-matching worker.
+    Otherwise routes to the worker with the smallest tree (most cache capacity).
+
+    3. Approximate String Tree (HTTP)
+    -------------------------------------------
+    Same algorithm as (2) but operates on raw text characters instead of
+    token IDs, avoiding tokenization overhead.
+
+    Load Balancing (Shortest Queue)
+    -------------------------------------------
+    When the system is imbalanced, routes to the least busy worker regardless
+    of cache affinity.
 
     Configuration Parameters:
     ------------------------
-    1. cache_threshold: (float, 0.0 to 1.0)
-    Minimum prefix match ratio to use highest-match routing.
-    Below this threshold, routes to worker with most available cache space.
-
-    2. balance_abs_threshold: (integer)
-    Absolute difference threshold for load imbalance detection.
-    System is potentially imbalanced if (max_load - min_load) > abs_threshold
-
-    3. balance_rel_threshold: (float)
-    Relative ratio threshold for load imbalance detection.
-    System is potentially imbalanced if max_load > min_load * rel_threshold
-    Used in conjunction with abs_threshold to determine final imbalance state.
-
-    4. eviction_interval_secs: (integer)
-    Interval between LRU eviction cycles for the approximate trees.
-
-    5. max_tree_size: (integer)
-    Maximum nodes per tree. When exceeded, LRU leaf nodes are evicted
-    during the next eviction cycle.
+    cache_threshold:         Min prefix match ratio for highest-match routing (0.0-1.0)
+    balance_abs_threshold:   Absolute load diff threshold for imbalance detection
+    balance_rel_threshold:   Relative load ratio threshold for imbalance detection
+    eviction_interval_secs:  Interval between LRU eviction cycles
+    max_tree_size:           Max nodes per approximate tree before eviction
+    block_size:              Backend KV cache block size for event-driven routing
 */
 
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use kv_index::{TokenTree, Tree};
+use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
+use parking_lot::RwLock;
 use rand::Rng;
 use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeOperation};
 use tracing::{debug, warn};
@@ -71,7 +54,7 @@ use super::{
     get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, CacheAwareConfig,
     LoadBalancingPolicy, SelectWorkerInfo,
 };
-use crate::core::{Worker, UNKNOWN_MODEL_ID};
+use crate::core::{KvEventMonitor, Worker, UNKNOWN_MODEL_ID};
 
 /// Cache-aware routing policy
 ///
@@ -93,6 +76,12 @@ pub struct CacheAwarePolicy {
     token_trees: Arc<DashMap<String, Arc<TokenTree>>>,
     mesh_sync: OptionalMeshSyncManager,
     _eviction_task: Option<PeriodicTask>,
+    /// Event-driven KV cache monitor for overlap scoring (gRPC workers only).
+    /// Set via `set_kv_event_monitor`. When present and the indexer has data for
+    /// a model, event-driven routing takes priority over approximate trees.
+    /// Uses `RwLock` for interior mutability so the monitor can be injected into
+    /// policies already behind `Arc<dyn LoadBalancingPolicy>`.
+    kv_monitor: RwLock<Option<Arc<KvEventMonitor>>>,
 }
 
 impl CacheAwarePolicy {
@@ -148,6 +137,7 @@ impl CacheAwarePolicy {
             token_trees,
             mesh_sync: None,
             _eviction_task: eviction_task,
+            kv_monitor: RwLock::new(None),
         }
     }
 
@@ -157,6 +147,12 @@ impl CacheAwarePolicy {
         if mesh_sync.is_some() {
             self.restore_tree_state_from_mesh();
         }
+    }
+
+    /// Set event-driven KV cache monitor (thread-safe, can be called after construction).
+    /// Uses interior mutability so this works on policies behind `Arc<dyn LoadBalancingPolicy>`.
+    pub fn set_kv_event_monitor(&self, monitor: Option<Arc<KvEventMonitor>>) {
+        *self.kv_monitor.write() = monitor;
     }
 
     /// Initialize the trees with worker URLs (used only during initial setup)
@@ -451,13 +447,17 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
             return self.select_worker_min_load(workers, info, &healthy_indices, model_id);
         }
 
-        // Use cache-aware routing when balanced
-        // gRPC requests use token tree, HTTP requests use string tree
+        // Cache-aware routing when balanced — three types (mutually exclusive):
+        //   1. Event-driven: PositionalIndexer overlap scoring (gRPC + KV events)
+        //   2. Approximate token tree: TokenTree prefix matching (gRPC, no events)
+        //   3. Approximate string tree: Tree prefix matching (HTTP)
         if let Some(tokens) = request_tokens {
-            // gRPC path: use token-based tree
-            self.select_worker_with_tokens(workers, tokens, &healthy_indices, model_id)
+            if self.has_event_indexer(model_id) {
+                self.select_worker_event_driven(workers, tokens, &healthy_indices, model_id)
+            } else {
+                self.select_worker_with_tokens(workers, tokens, &healthy_indices, model_id)
+            }
         } else {
-            // HTTP path: use string-based tree
             let text = request_text.unwrap_or("");
             self.select_worker_with_text(workers, text, &healthy_indices, model_id)
         }
@@ -490,6 +490,120 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
 
 // Private helper methods for select_worker
 impl CacheAwarePolicy {
+    /// Check if an event-driven indexer exists with data for this model.
+    /// Returns false when the indexer is empty (startup, reconnect) so
+    /// routing falls through to the approximate token tree instead of
+    /// taking the event-driven path with no data and landing on min-load.
+    fn has_event_indexer(&self, model_id: &str) -> bool {
+        let guard = self.kv_monitor.read();
+        guard
+            .as_ref()
+            .and_then(|m| m.get_indexer(model_id))
+            .is_some_and(|indexer| indexer.current_size() > 0)
+    }
+
+    /// Event-driven routing: PositionalIndexer overlap scoring (Type 1).
+    ///
+    /// Self-contained — when overlap is found, selects the worker with the best
+    /// cache match. When no overlap (cold start, novel tokens, short request),
+    /// falls back to min-load. Does NOT fall back to approximate token tree.
+    fn select_worker_event_driven(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        tokens: &[u32],
+        healthy_indices: &[usize],
+        model_id: &str,
+    ) -> Option<usize> {
+        let guard = self.kv_monitor.read();
+        let monitor = guard.as_ref()?;
+        let indexer = monitor.get_indexer(model_id)?;
+
+        // Per-model block_size: learned from events > config default
+        let block_size = monitor
+            .block_size(model_id)
+            .unwrap_or(self.config.block_size);
+
+        if let Some(idx) =
+            Self::score_overlap(workers, tokens, healthy_indices, &indexer, block_size)
+        {
+            return Some(idx);
+        }
+
+        // No cache overlap — min-load fallback (no token tree involved)
+        let min_idx = healthy_indices
+            .iter()
+            .min_by_key(|&&idx| workers[idx].load())
+            .copied()?;
+        debug!(
+            worker = workers[min_idx].url(),
+            model_id, "Event-driven routing: no overlap, min-load fallback"
+        );
+        workers[min_idx].increment_processed();
+        Some(min_idx)
+    }
+
+    /// Score healthy workers by PositionalIndexer overlap and select the best.
+    ///
+    /// Returns `Some(idx)` if at least one worker has cached blocks matching the
+    /// request. Returns `None` if the request is too short for a full block or
+    /// no workers have matching data.
+    fn score_overlap(
+        workers: &[Arc<dyn Worker>],
+        tokens: &[u32],
+        healthy_indices: &[usize],
+        indexer: &PositionalIndexer,
+        block_size: usize,
+    ) -> Option<usize> {
+        let content_hashes = compute_request_content_hashes(tokens, block_size);
+        if content_hashes.is_empty() {
+            return None;
+        }
+
+        let overlap = indexer.find_matches(&content_hashes, false);
+        if overlap.scores.is_empty() {
+            return None;
+        }
+
+        // Select worker with best overlap among those that actually match.
+        // Tie-break: lower load, then smaller tree size.
+        let best_idx = healthy_indices
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                indexer
+                    .worker_id(workers[idx].url())
+                    .and_then(|id| overlap.scores.get(&id))
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+            })
+            .max_by_key(|&idx| {
+                let wid = indexer.worker_id(workers[idx].url());
+                let score = wid
+                    .and_then(|id| overlap.scores.get(&id))
+                    .copied()
+                    .unwrap_or(0);
+                let load = workers[idx].load();
+                let tree_size = wid
+                    .and_then(|id| overlap.tree_sizes.get(&id))
+                    .copied()
+                    .unwrap_or(0);
+                (score, std::cmp::Reverse(load), std::cmp::Reverse(tree_size))
+            })?;
+
+        debug!(
+            worker = workers[best_idx].url(),
+            score = indexer
+                .worker_id(workers[best_idx].url())
+                .and_then(|id| overlap.scores.get(&id))
+                .copied()
+                .unwrap_or(0),
+            "Event-driven routing: overlap match"
+        );
+        workers[best_idx].increment_processed();
+        Some(best_idx)
+    }
+
     /// Select worker using token-based tree (gRPC path)
     fn select_worker_with_tokens(
         &self,
@@ -620,6 +734,8 @@ impl Default for CacheAwarePolicy {
 
 #[cfg(test)]
 mod tests {
+    use kv_index::{compute_content_hash, SequenceHash, StoredBlock, WorkerBlockMap};
+
     use super::*;
     use crate::core::{BasicWorkerBuilder, WorkerType};
 
@@ -693,6 +809,7 @@ mod tests {
             balance_rel_threshold: 2.0,
             eviction_interval_secs: 0, // Disable eviction thread
             max_tree_size: 10000,
+            block_size: 16,
         });
 
         let worker1 = BasicWorkerBuilder::new("http://w1:8000")
@@ -972,5 +1089,604 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Event-driven routing tests (Type 1: PositionalIndexer overlap scoring)
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a PositionalIndexer and store blocks for a worker.
+    /// `token_chunks` is a list of token-id slices — each becomes one block.
+    fn setup_indexer_with_blocks(
+        worker_url: &str,
+        token_chunks: &[&[u32]],
+        jump_size: usize,
+    ) -> Arc<PositionalIndexer> {
+        let indexer = Arc::new(PositionalIndexer::new(jump_size));
+        let worker_id = indexer.intern_worker(worker_url);
+        let mut wb = WorkerBlockMap::default();
+        let blocks: Vec<StoredBlock> = token_chunks
+            .iter()
+            .enumerate()
+            .map(|(i, tokens)| StoredBlock {
+                seq_hash: SequenceHash(i as u64 + 1),
+                content_hash: compute_content_hash(tokens),
+            })
+            .collect();
+        indexer
+            .apply_stored(worker_id, &blocks, None, &mut wb)
+            .unwrap();
+        indexer
+    }
+
+    fn test_config() -> CacheAwareConfig {
+        CacheAwareConfig {
+            eviction_interval_secs: 0,
+            block_size: 4, // small block size for easy test setup
+            ..Default::default()
+        }
+    }
+
+    // -- score_overlap unit tests (scoring helper) --
+
+    #[test]
+    fn test_score_overlap_selects_best_match() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        // Store 4 blocks for w1: tokens [1..16] in blocks of 4
+        let indexer = setup_indexer_with_blocks(
+            "http://w1:8000",
+            &[
+                &[1, 2, 3, 4],
+                &[5, 6, 7, 8],
+                &[9, 10, 11, 12],
+                &[13, 14, 15, 16],
+            ],
+            4,
+        );
+
+        // Query with matching tokens — should select w1
+        let result = CacheAwarePolicy::score_overlap(
+            &workers,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            &[0, 1],
+            &indexer,
+            4,
+        );
+        assert_eq!(result, Some(0)); // w1
+    }
+
+    #[test]
+    fn test_score_overlap_no_match_returns_none() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .worker_type(WorkerType::Regular)
+                .build(),
+        )];
+        policy.init_workers(&workers);
+
+        let indexer =
+            setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4], &[5, 6, 7, 8]], 4);
+
+        // Completely different tokens — no overlap → None
+        let result = CacheAwarePolicy::score_overlap(
+            &workers,
+            &[100, 200, 300, 400, 500, 600, 700, 800],
+            &[0],
+            &indexer,
+            4,
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_score_overlap_load_tiebreak() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+
+        let w1 = BasicWorkerBuilder::new("http://w1:8000")
+            .worker_type(WorkerType::Regular)
+            .build();
+        let w2 = BasicWorkerBuilder::new("http://w2:8000")
+            .worker_type(WorkerType::Regular)
+            .build();
+
+        // Give w1 higher load
+        for _ in 0..10 {
+            w1.increment_load();
+        }
+
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(w1), Arc::new(w2)];
+        policy.init_workers(&workers);
+
+        // Store same blocks for both workers (equal overlap)
+        let indexer = Arc::new(PositionalIndexer::new(4));
+        let w1_id = indexer.intern_worker("http://w1:8000");
+        let w2_id = indexer.intern_worker("http://w2:8000");
+        let mut wb1 = WorkerBlockMap::default();
+        let mut wb2 = WorkerBlockMap::default();
+        let blocks = vec![StoredBlock {
+            seq_hash: SequenceHash(1),
+            content_hash: compute_content_hash(&[1, 2, 3, 4]),
+        }];
+        indexer
+            .apply_stored(w1_id, &blocks, None, &mut wb1)
+            .unwrap();
+        let blocks2 = vec![StoredBlock {
+            seq_hash: SequenceHash(1),
+            content_hash: compute_content_hash(&[1, 2, 3, 4]),
+        }];
+        indexer
+            .apply_stored(w2_id, &blocks2, None, &mut wb2)
+            .unwrap();
+
+        // Equal overlap → tie-break by load → w2 wins (lower load)
+        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4);
+        assert_eq!(result, Some(1)); // w2 (lower load)
+    }
+
+    #[test]
+    fn test_score_overlap_tree_size_tiebreak() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        let indexer = Arc::new(PositionalIndexer::new(4));
+        let w1_id = indexer.intern_worker("http://w1:8000");
+        let w2_id = indexer.intern_worker("http://w2:8000");
+        let mut wb1 = WorkerBlockMap::default();
+        let mut wb2 = WorkerBlockMap::default();
+
+        // Both workers have block [1,2,3,4] (equal overlap, equal load)
+        let block = vec![StoredBlock {
+            seq_hash: SequenceHash(1),
+            content_hash: compute_content_hash(&[1, 2, 3, 4]),
+        }];
+        indexer.apply_stored(w1_id, &block, None, &mut wb1).unwrap();
+
+        // w2 has the same block plus extra blocks → larger tree
+        let block2 = vec![StoredBlock {
+            seq_hash: SequenceHash(1),
+            content_hash: compute_content_hash(&[1, 2, 3, 4]),
+        }];
+        indexer
+            .apply_stored(w2_id, &block2, None, &mut wb2)
+            .unwrap();
+        let extra = vec![StoredBlock {
+            seq_hash: SequenceHash(2),
+            content_hash: compute_content_hash(&[5, 6, 7, 8]),
+        }];
+        indexer
+            .apply_stored(w2_id, &extra, Some(SequenceHash(1)), &mut wb2)
+            .unwrap();
+
+        // Equal overlap, equal load → tie-break by tree size → w1 wins (smaller)
+        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4);
+        assert_eq!(result, Some(0)); // w1 (smaller tree)
+    }
+
+    #[test]
+    fn test_score_overlap_short_request_returns_none() {
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .worker_type(WorkerType::Regular)
+                .build(),
+        )];
+
+        let indexer = setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4]], 4);
+
+        // Request shorter than block_size → no full blocks → None
+        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3], &[0], &indexer, 4);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_score_overlap_partial_match() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        let indexer = Arc::new(PositionalIndexer::new(4));
+        let w1_id = indexer.intern_worker("http://w1:8000");
+        let w2_id = indexer.intern_worker("http://w2:8000");
+        let mut wb1 = WorkerBlockMap::default();
+        let mut wb2 = WorkerBlockMap::default();
+
+        // w1 has 4 blocks cached
+        let blocks_w1: Vec<StoredBlock> = (0..4)
+            .map(|i| StoredBlock {
+                seq_hash: SequenceHash(i as u64 + 1),
+                content_hash: compute_content_hash(&[
+                    (i * 4 + 1) as u32,
+                    (i * 4 + 2) as u32,
+                    (i * 4 + 3) as u32,
+                    (i * 4 + 4) as u32,
+                ]),
+            })
+            .collect();
+        indexer
+            .apply_stored(w1_id, &blocks_w1, None, &mut wb1)
+            .unwrap();
+
+        // w2 has only the first 2 blocks (partial overlap with same request)
+        let blocks_w2: Vec<StoredBlock> = (0..2)
+            .map(|i| StoredBlock {
+                seq_hash: SequenceHash(i as u64 + 1),
+                content_hash: compute_content_hash(&[
+                    (i * 4 + 1) as u32,
+                    (i * 4 + 2) as u32,
+                    (i * 4 + 3) as u32,
+                    (i * 4 + 4) as u32,
+                ]),
+            })
+            .collect();
+        indexer
+            .apply_stored(w2_id, &blocks_w2, None, &mut wb2)
+            .unwrap();
+
+        // Query with all 4 blocks worth of tokens → w1 wins (higher overlap: 4 vs 2)
+        let result = CacheAwarePolicy::score_overlap(
+            &workers,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            &[0, 1],
+            &indexer,
+            4,
+        );
+        assert_eq!(result, Some(0)); // w1 (higher overlap)
+    }
+
+    // -- select_worker_event_driven integration tests --
+
+    #[test]
+    fn test_event_driven_overlap_selects_cached_worker() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        // Set up monitor with indexer data for "unknown" model
+        let monitor = Arc::new(KvEventMonitor::new(Some(4)));
+        let indexer =
+            setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4], &[5, 6, 7, 8]], 4);
+        monitor.indexers.insert("unknown".to_string(), indexer);
+        policy.set_kv_event_monitor(Some(monitor));
+
+        // Full dispatch: should use event-driven and select w1
+        let idx = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&[1, 2, 3, 4, 5, 6, 7, 8]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(idx, 0); // w1 (has cached blocks)
+    }
+
+    #[test]
+    fn test_event_driven_no_overlap_uses_min_load() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+
+        let w1 = BasicWorkerBuilder::new("http://w1:8000")
+            .worker_type(WorkerType::Regular)
+            .build();
+        let w2 = BasicWorkerBuilder::new("http://w2:8000")
+            .worker_type(WorkerType::Regular)
+            .build();
+        // Give w1 higher load so min-load picks w2
+        for _ in 0..3 {
+            w1.increment_load();
+        }
+
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(w1), Arc::new(w2)];
+        policy.init_workers(&workers);
+
+        // Monitor has indexer with data, but tokens don't match
+        let monitor = Arc::new(KvEventMonitor::new(Some(4)));
+        let indexer = setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4]], 4);
+        monitor.indexers.insert("unknown".to_string(), indexer);
+        policy.set_kv_event_monitor(Some(monitor));
+
+        // No overlap → event-driven falls back to min-load (not token tree)
+        let idx = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&[100, 200, 300, 400]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(idx, 1); // w2 (min load), NOT token tree result
+    }
+
+    #[test]
+    fn test_event_driven_short_request_uses_min_load() {
+        let policy = CacheAwarePolicy::with_config(test_config()); // block_size=4
+
+        let w1 = BasicWorkerBuilder::new("http://w1:8000")
+            .worker_type(WorkerType::Regular)
+            .build();
+        let w2 = BasicWorkerBuilder::new("http://w2:8000")
+            .worker_type(WorkerType::Regular)
+            .build();
+        for _ in 0..3 {
+            w1.increment_load();
+        }
+
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(w1), Arc::new(w2)];
+        policy.init_workers(&workers);
+
+        let monitor = Arc::new(KvEventMonitor::new(Some(4)));
+        let indexer = setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4]], 4);
+        monitor.indexers.insert("unknown".to_string(), indexer);
+        policy.set_kv_event_monitor(Some(monitor));
+
+        // Request shorter than block_size → no full blocks → min-load fallback
+        let idx = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&[1, 2, 3]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(idx, 1); // w2 (min load)
+    }
+
+    #[test]
+    fn test_no_monitor_uses_token_tree() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        // No kv_monitor → has_event_indexer returns false → uses token tree
+        assert!(!policy.has_event_indexer("unknown"));
+
+        // Should still route (via token tree, not event-driven)
+        let idx = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&[1, 2, 3, 4]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(idx < 2); // valid worker selected
+    }
+
+    #[test]
+    fn test_set_kv_event_monitor() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+
+        // Initially no monitor
+        assert!(policy.kv_monitor.read().is_none());
+
+        // Set monitor (works via &self thanks to interior mutability)
+        let monitor = Arc::new(KvEventMonitor::new(Some(4)));
+        policy.set_kv_event_monitor(Some(Arc::clone(&monitor)));
+        assert!(policy.kv_monitor.read().is_some());
+
+        // get_indexer returns None for unknown model
+        assert!(monitor.get_indexer("nonexistent").is_none());
+
+        // Clear monitor
+        policy.set_kv_event_monitor(None);
+        assert!(policy.kv_monitor.read().is_none());
+    }
+
+    #[test]
+    fn test_event_driven_uses_monitor_block_size() {
+        // Test that event-driven routing uses monitor's learned block_size
+        // instead of config default when available.
+        let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+            block_size: 4, // config default
+            eviction_interval_secs: 0,
+            ..Default::default()
+        });
+
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        let monitor = Arc::new(KvEventMonitor::new(Some(4)));
+
+        // Store blocks using block_size=8 (tokens chunked in groups of 8)
+        let indexer = Arc::new(PositionalIndexer::new(4));
+        let w1_id = indexer.intern_worker("http://w1:8000");
+        let mut wb = WorkerBlockMap::default();
+        let block = vec![StoredBlock {
+            seq_hash: SequenceHash(1),
+            content_hash: compute_content_hash(&[1, 2, 3, 4, 5, 6, 7, 8]),
+        }];
+        indexer.apply_stored(w1_id, &block, None, &mut wb).unwrap();
+        monitor
+            .indexers
+            .insert("unknown".to_string(), indexer.clone());
+
+        // Set block_size=8 in monitor (simulating learned from events)
+        monitor.set_block_size("unknown", 8);
+
+        policy.set_kv_event_monitor(Some(monitor));
+
+        // Query with 8 tokens — with block_size=8, this is one full block
+        // With config block_size=4, this would be two blocks and wouldn't match
+        let idx = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&[1, 2, 3, 4, 5, 6, 7, 8]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(idx, 0); // w1 has the cached block
+    }
+
+    #[test]
+    fn test_imbalanced_skips_event_driven() {
+        let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+            balance_abs_threshold: 5,
+            balance_rel_threshold: 2.0,
+            eviction_interval_secs: 0,
+            block_size: 4,
+            ..Default::default()
+        });
+
+        let w1 = BasicWorkerBuilder::new("http://w1:8000")
+            .worker_type(WorkerType::Regular)
+            .build();
+        let w2 = BasicWorkerBuilder::new("http://w2:8000")
+            .worker_type(WorkerType::Regular)
+            .build();
+
+        // Create heavy imbalance: w1 has 20 load, w2 has 0
+        for _ in 0..20 {
+            w1.increment_load();
+        }
+
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(w1), Arc::new(w2)];
+        policy.init_workers(&workers);
+
+        // Even though we set up event monitor, imbalance check fires first
+        let monitor = Arc::new(KvEventMonitor::new(Some(4)));
+        policy.set_kv_event_monitor(Some(monitor));
+
+        // With imbalance, select_worker should pick min-load (w2), not event-driven
+        let idx = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&[1, 2, 3, 4]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(idx, 1); // w2 (min load), regardless of event data
+    }
+
+    #[test]
+    fn test_empty_indexer_falls_through_to_token_tree() {
+        // When the monitor has an indexer for a model but the indexer is empty
+        // (startup, reconnect), routing should fall through to the token tree
+        // instead of taking the event-driven path and landing on min-load.
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        // Set up monitor with an empty indexer
+        let monitor = Arc::new(KvEventMonitor::new(Some(4)));
+        let empty_indexer = Arc::new(PositionalIndexer::new(4));
+        monitor
+            .indexers
+            .insert("unknown".to_string(), empty_indexer);
+        policy.set_kv_event_monitor(Some(monitor));
+
+        // Empty indexer → has_event_indexer returns false → falls through to token tree
+        assert!(!policy.has_event_indexer("unknown"));
+
+        // Route a request — should use token tree, not event-driven min-load
+        let idx = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&[1, 2, 3, 4]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(idx < 2); // valid worker via token tree
+
+        // Route the same tokens again — token tree should route to same worker (cache hit)
+        let idx2 = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&[1, 2, 3, 4]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(idx, idx2); // token tree cache affinity preserved
     }
 }

@@ -8,7 +8,7 @@ use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowRe
 
 use crate::core::{
     circuit_breaker::CircuitBreakerConfig,
-    steps::workflow_data::{ExternalWorkerWorkflowData, WorkerList},
+    steps::workflow_data::{WorkerKind, WorkerList, WorkerWorkflowData},
     worker::{RuntimeType, WorkerType},
     BasicWorkerBuilder, ConnectionMode, Worker,
 };
@@ -26,11 +26,15 @@ fn normalize_external_url(url: &str) -> String {
 pub struct CreateExternalWorkersStep;
 
 #[async_trait]
-impl StepExecutor<ExternalWorkerWorkflowData> for CreateExternalWorkersStep {
+impl StepExecutor<WorkerWorkflowData> for CreateExternalWorkersStep {
     async fn execute(
         &self,
-        context: &mut WorkflowContext<ExternalWorkerWorkflowData>,
+        context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
+        if context.data.worker_kind != Some(WorkerKind::External) {
+            return Ok(StepResult::Skip);
+        }
+
         let config = &context.data.config;
         let app_context = context
             .data
@@ -161,7 +165,7 @@ impl StepExecutor<ExternalWorkerWorkflowData> for CreateExternalWorkersStep {
         // Store results in workflow data
         context.data.workers = Some(WorkerList::from_workers(&workers));
         context.data.actual_workers = Some(workers);
-        context.data.labels = labels;
+        context.data.final_labels = labels;
         Ok(StepResult::Success)
     }
 

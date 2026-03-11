@@ -14,32 +14,6 @@ mod update_worker_properties;
 
 use std::{sync::Arc, time::Duration};
 
-/// Strip protocol prefix (http://, https://, grpc://) from URL.
-pub(crate) fn strip_protocol(url: &str) -> String {
-    url.trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .trim_start_matches("grpc://")
-        .to_string()
-}
-
-/// Ensure URL has an HTTP(S) scheme — handles bare `host:port` and `grpc://` inputs.
-pub(super) fn http_base_url(url: &str) -> String {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        url.trim_end_matches('/').to_string()
-    } else {
-        format!("http://{}", strip_protocol(url).trim_end_matches('/'))
-    }
-}
-
-/// Ensure URL has a gRPC scheme — handles bare `host:port` and `http://` inputs.
-pub(super) fn grpc_base_url(url: &str) -> String {
-    if url.starts_with("grpc://") {
-        url.trim_end_matches('/').to_string()
-    } else {
-        format!("grpc://{}", strip_protocol(url).trim_end_matches('/'))
-    }
-}
-
 pub use create_worker::CreateLocalWorkerStep;
 pub use detect_backend::DetectBackendStep;
 pub use detect_connection::DetectConnectionModeStep;
@@ -47,23 +21,19 @@ pub use discover_dp::{get_dp_info, DiscoverDPInfoStep, DpInfo};
 pub use discover_metadata::DiscoverMetadataStep;
 pub use find_worker_to_update::FindWorkerToUpdateStep;
 pub use find_workers_to_remove::{FindWorkersToRemoveStep, WorkerRemovalRequest};
-use openai_protocol::worker::{WorkerSpec, WorkerUpdateRequest};
+use openai_protocol::worker::WorkerUpdateRequest;
 pub use remove_from_policy_registry::RemoveFromPolicyRegistryStep;
 pub use remove_from_worker_registry::RemoveFromWorkerRegistryStep;
 pub use submit_tokenizer_job::SubmitTokenizerJobStep;
 pub use update_policies_for_worker::UpdatePoliciesForWorkerStep;
 pub use update_remaining_policies::UpdateRemainingPoliciesStep;
 pub use update_worker_properties::UpdateWorkerPropertiesStep;
-use wfaas::{BackoffStrategy, FailureAction, RetryPolicy, StepDefinition, WorkflowDefinition};
+use wfaas::{BackoffStrategy, RetryPolicy, StepDefinition, WorkflowDefinition};
 
-use super::shared::{ActivateWorkersStep, RegisterWorkersStep, UpdatePoliciesStep};
 use crate::{
     app_context::AppContext,
-    config::RouterConfig,
     core::{
-        steps::workflow_data::{
-            LocalWorkerWorkflowData, WorkerRemovalWorkflowData, WorkerUpdateWorkflowData,
-        },
+        steps::workflow_data::{WorkerRemovalWorkflowData, WorkerUpdateWorkflowData},
         Worker, WorkerRegistry,
     },
 };
@@ -91,139 +61,6 @@ pub(crate) fn find_workers_by_url(
             None => Vec::new(),
         }
     }
-}
-
-pub fn create_local_worker_workflow(
-    router_config: &RouterConfig,
-) -> WorkflowDefinition<LocalWorkerWorkflowData> {
-    let detect_timeout = Duration::from_secs(router_config.worker_startup_timeout_secs);
-
-    // Calculate max_attempts based on timeout
-    let timeout_secs = detect_timeout.as_secs() as f64;
-    let effective_timeout = timeout_secs * 0.9;
-    let max_attempts = if effective_timeout > 10.0 {
-        (5 + ((effective_timeout - 10.0) / 5.0).ceil() as u32).max(3)
-    } else {
-        3
-    };
-
-    WorkflowDefinition::new("local_worker_registration", "Local Worker Registration")
-        // Step 1: Detect connection mode (HTTP vs gRPC)
-        .add_step(
-            StepDefinition::new(
-                "detect_connection_mode",
-                "Detect Connection Mode",
-                Arc::new(DetectConnectionModeStep),
-            )
-            .with_retry(RetryPolicy {
-                max_attempts,
-                backoff: BackoffStrategy::Linear {
-                    increment: Duration::from_secs(1),
-                    max: Duration::from_secs(5),
-                },
-            })
-            .with_timeout(detect_timeout)
-            .with_failure_action(FailureAction::FailWorkflow),
-        )
-        // Step 1.5: Detect backend runtime (sglang, vllm, trtllm)
-        .add_step(
-            StepDefinition::new(
-                "detect_backend",
-                "Detect Backend",
-                Arc::new(DetectBackendStep),
-            )
-            .with_retry(RetryPolicy {
-                max_attempts: 2,
-                backoff: BackoffStrategy::Fixed(Duration::from_secs(1)),
-            })
-            .with_timeout(Duration::from_secs(10))
-            .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["detect_connection_mode"]),
-        )
-        // Step 2a: Discover metadata (parallel with DP discovery)
-        .add_step(
-            StepDefinition::new(
-                "discover_metadata",
-                "Discover Metadata",
-                Arc::new(DiscoverMetadataStep),
-            )
-            .with_retry(RetryPolicy {
-                max_attempts: 3,
-                backoff: BackoffStrategy::Fixed(Duration::from_secs(1)),
-            })
-            .with_timeout(Duration::from_secs(10))
-            .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["detect_backend"]),
-        )
-        // Step 2b: Discover DP info (after metadata to avoid concurrent /server_info calls)
-        .add_step(
-            StepDefinition::new(
-                "discover_dp_info",
-                "Discover DP Info",
-                Arc::new(DiscoverDPInfoStep),
-            )
-            .with_retry(RetryPolicy {
-                max_attempts: 3,
-                backoff: BackoffStrategy::Fixed(Duration::from_secs(1)),
-            })
-            .with_timeout(Duration::from_secs(10))
-            .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["discover_metadata"]),
-        )
-        // Step 3: Create worker(s)
-        .add_step(
-            StepDefinition::new(
-                "create_worker",
-                "Create Worker",
-                Arc::new(CreateLocalWorkerStep),
-            )
-            .with_timeout(Duration::from_secs(5))
-            .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["discover_dp_info"]),
-        )
-        // Step 4: Register workers (shared step)
-        .add_step(
-            StepDefinition::new(
-                "register_workers",
-                "Register Workers",
-                Arc::new(RegisterWorkersStep),
-            )
-            .with_timeout(Duration::from_secs(5))
-            .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["create_worker"]),
-        )
-        .add_step(
-            StepDefinition::new(
-                "submit_tokenizer_job",
-                "Submit Tokenizer Job",
-                Arc::new(SubmitTokenizerJobStep),
-            )
-            .with_timeout(Duration::from_secs(5))
-            .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["register_workers"]),
-        )
-        // Step 5a: Update policies (parallel with activation)
-        .add_step(
-            StepDefinition::new(
-                "update_policies",
-                "Update Policies",
-                Arc::new(UpdatePoliciesStep),
-            )
-            .with_timeout(Duration::from_secs(5))
-            .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["register_workers"]),
-        )
-        // Step 5b: Activate workers (parallel with policy update)
-        .add_step(
-            StepDefinition::new(
-                "activate_workers",
-                "Activate Workers",
-                Arc::new(ActivateWorkersStep),
-            )
-            .with_timeout(Duration::from_secs(5))
-            .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["register_workers"]),
-        )
 }
 
 /// Create a worker removal workflow definition.
@@ -343,24 +180,6 @@ pub fn create_worker_update_workflow() -> WorkflowDefinition<WorkerUpdateWorkflo
             })
             .depends_on(&["update_worker_properties"]),
         )
-}
-
-/// Helper to create initial workflow data for local worker registration
-pub fn create_local_worker_workflow_data(
-    config: WorkerSpec,
-    app_context: Arc<AppContext>,
-) -> LocalWorkerWorkflowData {
-    LocalWorkerWorkflowData {
-        config,
-        connection_mode: None,
-        discovered_labels: std::collections::HashMap::new(),
-        dp_info: None,
-        workers: None,
-        final_labels: std::collections::HashMap::new(),
-        detected_runtime_type: None,
-        app_context: Some(app_context),
-        actual_workers: None,
-    }
 }
 
 /// Helper to create initial workflow data for worker removal

@@ -226,21 +226,10 @@ impl HarmonyParserAdapter {
     ///
     /// Parses all output token IDs and returns the complete channel output
     /// containing analysis, commentary (tool calls), and final text.
-    ///
-    /// # Arguments
-    ///
-    /// * `output_ids` - The complete output token IDs from the model
-    /// * `finish_reason` - The finish reason from GenerateComplete ("stop", "length", etc.)
-    /// * `matched_stop` - Optional matched stop token information from GenerateComplete
-    ///
-    /// # Returns
-    ///
-    /// Complete HarmonyChannelOutput with all three channels parsed
     pub fn parse_complete(
         &mut self,
         output_ids: &[u32],
         finish_reason: String,
-        matched_stop: Option<serde_json::Value>,
     ) -> Result<HarmonyChannelOutput, String> {
         let mut reasoning_token_count = 0u32;
 
@@ -279,7 +268,6 @@ impl HarmonyParserAdapter {
             commentary,
             final_text,
             finish_reason: final_finish_reason,
-            matched_stop,
             reasoning_token_count,
         })
     }
@@ -356,10 +344,9 @@ impl HarmonyParserAdapter {
         &mut self,
         chunk_ids: &[u32],
     ) -> Result<Option<HarmonyChannelDelta>, String> {
-        let mut has_delta = false;
-        let mut analysis_delta = None;
+        let mut analysis_delta: Option<String> = None;
         let mut commentary_delta = None;
-        let mut final_delta = None;
+        let mut final_delta: Option<String> = None;
 
         // Track message count before processing
         let prev_message_count = self.parser.messages().len();
@@ -382,16 +369,18 @@ impl HarmonyParserAdapter {
 
             // Check for content delta
             if let Ok(Some(delta_text)) = self.parser.last_content_delta() {
-                has_delta = true;
-
                 // Determine which channel this delta belongs to
                 let channel = self.parser.current_channel();
                 match channel.as_deref() {
                     Some("analysis") => {
-                        analysis_delta = Some(delta_text);
+                        analysis_delta
+                            .get_or_insert_with(String::new)
+                            .push_str(&delta_text);
                     }
                     Some("final") | None => {
-                        final_delta = Some(delta_text);
+                        final_delta
+                            .get_or_insert_with(String::new)
+                            .push_str(&delta_text);
                     }
                     Some("commentary") => {
                         // Accumulate delta for commentary
@@ -406,8 +395,6 @@ impl HarmonyParserAdapter {
         if self.parser.current_channel().as_deref() == Some("commentary") {
             if let Some(cur_recipient) = self.parser.current_recipient() {
                 if let Some(tool_name) = cur_recipient.strip_prefix("functions.") {
-                    has_delta = true;
-
                     // Count completed tool calls for index
                     let base_index = self
                         .parser
@@ -459,6 +446,10 @@ impl HarmonyParserAdapter {
         let current_message_count = self.parser.messages().len();
         let is_final = current_message_count > prev_message_count;
 
+        // Only emit a delta if at least one channel produced output
+        let has_delta =
+            analysis_delta.is_some() || commentary_delta.is_some() || final_delta.is_some();
+
         if has_delta {
             Ok(Some(HarmonyChannelDelta {
                 analysis_delta,
@@ -479,16 +470,10 @@ impl HarmonyParserAdapter {
     /// # Arguments
     ///
     /// * `finish_reason` - The finish reason from GenerateComplete ("stop", "length", etc.)
-    /// * `matched_stop` - Optional matched stop token information from GenerateComplete
-    ///
     /// # Returns
     ///
     /// Final HarmonyChannelOutput with complete parsed content
-    pub fn finalize(
-        &mut self,
-        finish_reason: String,
-        matched_stop: Option<serde_json::Value>,
-    ) -> HarmonyChannelOutput {
+    pub fn finalize(&mut self, finish_reason: String) -> HarmonyChannelOutput {
         // Extract all completed messages
         let messages = self.parser.messages();
 
@@ -510,7 +495,6 @@ impl HarmonyParserAdapter {
             commentary,
             final_text,
             finish_reason: final_finish_reason,
-            matched_stop,
             reasoning_token_count: self.reasoning_token_count,
         }
     }

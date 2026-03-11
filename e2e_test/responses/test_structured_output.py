@@ -11,6 +11,7 @@ import json
 import logging
 
 import pytest
+from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +21,13 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestStructuredOutputCloud:
     """Structured output tests against cloud APIs."""
 
-    def test_structured_output_json_schema(self, setup_backend):
+    def test_structured_output_json_schema(self, setup_backend, smg):
         """Test structured output with json_schema format."""
         _, model, client, gateway = setup_backend
 
@@ -108,12 +111,21 @@ class TestStructuredOutputCloud:
             assert "explanation" in step
             assert "output" in step
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(**params)
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
+
 
 # =============================================================================
 # Local Backend Tests (gRPC with Harmony model - complex schema)
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
@@ -121,7 +133,7 @@ class TestStructuredOutputCloud:
 class TestStructuredOutputHarmony:
     """Structured output tests against local gRPC backend with Harmony model."""
 
-    def test_structured_output_json_schema(self, setup_backend):
+    def test_structured_output_json_schema(self, setup_backend, smg):
         """Test structured output with json_schema format."""
         _, model, client, gateway = setup_backend
 
@@ -205,12 +217,21 @@ class TestStructuredOutputHarmony:
             assert "explanation" in step
             assert "output" in step
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(**params)
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
+
 
 # =============================================================================
 # Local Backend Tests (gRPC with Qwen model - simple schema)
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
@@ -220,7 +241,7 @@ class TestSimpleSchemaStructuredOutput:
     handle complex schemas well.
     """
 
-    def test_structured_output_json_schema(self, setup_backend):
+    def test_structured_output_json_schema(self, setup_backend, smg):
         """Test structured output with simple json_schema format."""
         _, model, client, gateway = setup_backend
 
@@ -286,3 +307,10 @@ class TestSimpleSchemaStructuredOutput:
         assert "answer" in output_json
         assert isinstance(output_json["answer"], str)
         assert output_json["answer"], "Answer is empty"
+
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(**params)
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"

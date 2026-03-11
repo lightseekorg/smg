@@ -20,8 +20,13 @@ use openai_protocol::{
     completion::CompletionRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
+    interactions::InteractionsRequest,
     messages::CreateMessageRequest,
     parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
+    realtime_session::{
+        RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
+        RealtimeTranscriptionSessionCreateRequest,
+    },
     rerank::{RerankRequest, V1RerankReqInput},
     responses::{ResponsesGetParams, ResponsesRequest},
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
@@ -59,6 +64,7 @@ use crate::{
             get_mesh_health, get_policy_state, get_policy_states, get_worker_state,
             get_worker_states, set_global_rate_limit, trigger_graceful_shutdown, update_app_config,
         },
+        openai::realtime::ws::RealtimeQueryParams,
         parse,
         router_manager::RouterManager,
         tokenize, RouterTrait,
@@ -117,6 +123,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             RoutingMode::Regular { .. } => !healthy_workers.is_empty(),
             RoutingMode::OpenAI { .. } => !healthy_workers.is_empty(),
             RoutingMode::Anthropic { .. } => !healthy_workers.is_empty(),
+            RoutingMode::Gemini { .. } => !healthy_workers.is_empty(),
         }
     };
 
@@ -233,6 +240,18 @@ async fn v1_responses(
     state
         .router
         .route_responses(Some(&headers), &body, Some(&body.model))
+        .await
+}
+
+async fn v1_interactions(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    ValidatedJson(body): ValidatedJson<InteractionsRequest>,
+) -> Response {
+    let model_id = body.model.as_deref().or(body.agent.as_deref());
+    state
+        .router
+        .route_interactions(Some(&headers), &body, model_id)
         .await
 }
 
@@ -419,6 +438,57 @@ async fn v1_conversations_delete_item(
     .await
 }
 
+async fn v1_realtime_ws(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RealtimeQueryParams>,
+    req: Request,
+) -> Response {
+    let model = match params.model {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing required 'model' query parameter",
+            )
+                .into_response();
+        }
+    };
+    state.router.route_realtime_ws(req, &model).await
+}
+
+async fn v1_realtime_session(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    ValidatedJson(body): ValidatedJson<RealtimeSessionCreateRequest>,
+) -> Response {
+    state
+        .router
+        .route_realtime_session(Some(&headers), &body)
+        .await
+}
+
+async fn v1_realtime_client_secret(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    ValidatedJson(body): ValidatedJson<RealtimeClientSecretCreateRequest>,
+) -> Response {
+    state
+        .router
+        .route_realtime_client_secret(Some(&headers), &body)
+        .await
+}
+
+async fn v1_realtime_transcription_session(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    ValidatedJson(body): ValidatedJson<RealtimeTranscriptionSessionCreateRequest>,
+) -> Response {
+    state
+        .router
+        .route_realtime_transcription_session(Some(&headers), &body)
+        .await
+}
+
 async fn flush_cache(State(state): State<Arc<AppState>>, _req: Request) -> Response {
     WorkerManager::flush_cache_all(&state.context.worker_registry, &state.context.client)
         .await
@@ -562,6 +632,14 @@ pub fn build_app(
     request_id_headers: Vec<String>,
     cors_allowed_origins: Vec<String>,
 ) -> Router {
+    // Pending (upgrade not completed): 30s TTL
+    // Disconnected: 60 min TTL
+    app_state.context.realtime_registry.start_reaper(
+        Duration::from_secs(3600),
+        Duration::from_secs(30),
+        Duration::from_secs(60),
+    );
+
     let protected_routes = Router::new()
         .route("/generate", post(generate))
         .route("/v1/chat/completions", post(v1_chat_completions))
@@ -571,6 +649,7 @@ pub fn build_app(
         .route("/v1/responses", post(v1_responses))
         .route("/v1/embeddings", post(v1_embeddings))
         .route("/v1/messages", post(v1_messages))
+        .route("/v1/interactions", post(v1_interactions))
         .route("/v1/classify", post(v1_classify))
         .route("/v1/responses/{response_id}", get(v1_responses_get))
         .route(
@@ -600,6 +679,16 @@ pub fn build_app(
         // Tokenize / Detokenize endpoints
         .route("/v1/tokenize", post(v1_tokenize))
         .route("/v1/detokenize", post(v1_detokenize))
+        // Realtime REST endpoints (same middleware as other protected routes)
+        .route("/v1/realtime/sessions", post(v1_realtime_session))
+        .route(
+            "/v1/realtime/client_secrets",
+            post(v1_realtime_client_secret),
+        )
+        .route(
+            "/v1/realtime/transcription_sessions",
+            post(v1_realtime_transcription_session),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::concurrency_limit_middleware,
@@ -611,6 +700,20 @@ pub fn build_app(
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::wasm_middleware,
+        ));
+
+    // WebSocket route: auth + concurrency but NO WASM middleware.
+    // WASM OnResponse reconstructs the response from status/headers/body,
+    // dropping the response extensions that carry the WebSocket upgrade future.
+    let ws_routes = Router::new()
+        .route("/v1/realtime", get(v1_realtime_ws))
+        .route_layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::concurrency_limit_middleware,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            auth_config.clone(),
+            middleware::auth_middleware,
         ));
 
     let public_routes = Router::new()
@@ -692,15 +795,11 @@ pub fn build_app(
 
     Router::new()
         .merge(protected_routes)
+        .merge(ws_routes)
         .merge(public_routes)
         .merge(admin_routes)
         .merge(worker_routes)
         .merge(mesh_routes)
-        .layer(axum::middleware::from_fn(
-            middleware::create_header_extraction_middleware(vec![
-                middleware::CONVERSATION_STORE_ID_HEADER.to_string(),
-            ]),
-        ))
         .layer(axum::extract::DefaultBodyLimit::max(max_payload_size))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             max_payload_size,
@@ -931,9 +1030,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         Some(hc)
     };
 
-    if let Some(ref load_monitor) = app_context.load_monitor {
-        load_monitor.start().await;
-        debug!("Started LoadMonitor for PowerOfTwo policies");
+    // LoadMonitor groups are started dynamically when workers are registered.
+    // No explicit start() needed — see RegisterWorkersStep.
+    if app_context.load_monitor.is_some() {
+        debug!("LoadMonitor initialized (groups start on worker registration)");
     }
 
     let (limiter, processor) = middleware::ConcurrencyLimiter::new(
