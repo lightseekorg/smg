@@ -2,7 +2,7 @@
 //!
 //! Defines serializable tree operations that can be synchronized across mesh cluster nodes
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum TreeKey {
@@ -11,10 +11,28 @@ pub enum TreeKey {
 }
 
 /// Tree insert operation
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TreeInsertOp {
     pub key: TreeKey,
     pub tenant: String, // worker URL
+}
+
+/// Custom Serialize that writes both `key` (new format) and `text` (legacy format)
+/// so old nodes can still deserialize during rolling upgrades.
+impl Serialize for TreeInsertOp {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("TreeInsertOp", 3)?;
+        state.serialize_field("key", &self.key)?;
+        match &self.key {
+            TreeKey::Text(text) => state.serialize_field("text", text)?,
+            TreeKey::Tokens(_) => state.serialize_field("text", "")?,
+        }
+        state.serialize_field("tenant", &self.tenant)?;
+        state.end()
+    }
 }
 
 impl<'de> Deserialize<'de> for TreeInsertOp {
@@ -57,6 +75,10 @@ pub enum TreeOperation {
     Remove(TreeRemoveOp),
 }
 
+/// Maximum number of operations stored in a TreeState before compaction.
+/// Prevents unbounded growth of the operation log, especially with token payloads.
+const MAX_TREE_OPERATIONS: usize = 2048;
+
 /// Tree state for a specific model
 /// Contains a sequence of operations that can be applied to reconstruct the tree
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -78,6 +100,11 @@ impl TreeState {
     pub fn add_operation(&mut self, operation: TreeOperation) {
         self.operations.push(operation);
         self.version += 1;
+        if self.operations.len() > MAX_TREE_OPERATIONS {
+            // Keep the most recent half — oldest operations are least relevant for routing
+            let drain_count = self.operations.len() - MAX_TREE_OPERATIONS / 2;
+            self.operations.drain(..drain_count);
+        }
     }
 }
 

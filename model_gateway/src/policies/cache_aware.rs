@@ -350,8 +350,15 @@ impl CacheAwarePolicy {
         }
     }
 
+    /// Merge remote tree state into local trees incrementally.
+    /// Unlike `apply_tree_state` (which replaces), this preserves local routing state.
     pub fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
-        self.apply_tree_state(model_id, &tree_state.operations);
+        let model_id = Self::normalize_mesh_model_id(model_id);
+        for operation in &tree_state.operations {
+            if let TreeOperation::Insert(insert_op) = operation {
+                self.apply_insert_operation(model_id, insert_op);
+            }
+        }
     }
 
     /// Run cache eviction to prevent unbounded growth

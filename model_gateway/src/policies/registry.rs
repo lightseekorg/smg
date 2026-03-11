@@ -473,8 +473,9 @@ impl PolicyRegistry {
     /// Apply remote tree operation to cache-aware policy for a model
     /// This is called when receiving tree state updates from mesh
     pub fn apply_remote_tree_operation(&self, model_id: &str, operation: &smg_mesh::TreeOperation) {
-        // Try to find the policy for this model
-        if let Some(policy) = self.get_policy(model_id) {
+        let model_policy = self.get_policy(model_id);
+
+        if let Some(ref policy) = model_policy {
             if policy.name() == "cache_aware" {
                 if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
                     cache_aware.apply_remote_tree_operation(model_id, operation);
@@ -482,8 +483,12 @@ impl PolicyRegistry {
             }
         }
 
-        // Also check default policy if it's cache-aware
-        if self.default_policy.name() == "cache_aware" {
+        // Skip default if same Arc as model policy (avoid double application)
+        if !model_policy
+            .as_ref()
+            .is_some_and(|p| Arc::ptr_eq(p, &self.default_policy))
+            && self.default_policy.name() == "cache_aware"
+        {
             if let Some(cache_aware) = self
                 .default_policy
                 .as_any()
@@ -493,7 +498,6 @@ impl PolicyRegistry {
             }
         }
 
-        // Check prefill and decode policies for PD mode
         if let Some(prefill_policy) = self.prefill_policy.get() {
             if prefill_policy.name() == "cache_aware" {
                 if let Some(cache_aware) =
@@ -515,7 +519,9 @@ impl PolicyRegistry {
     }
 
     pub fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
-        if let Some(policy) = self.get_policy(model_id) {
+        let model_policy = self.get_policy(model_id);
+
+        if let Some(ref policy) = model_policy {
             if policy.name() == "cache_aware" {
                 if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
                     cache_aware.apply_remote_tree_state(model_id, tree_state);
@@ -523,7 +529,12 @@ impl PolicyRegistry {
             }
         }
 
-        if self.default_policy.name() == "cache_aware" {
+        // Skip default if same Arc as model policy (avoid double application)
+        if !model_policy
+            .as_ref()
+            .is_some_and(|p| Arc::ptr_eq(p, &self.default_policy))
+            && self.default_policy.name() == "cache_aware"
+        {
             if let Some(cache_aware) = self
                 .default_policy
                 .as_any()
