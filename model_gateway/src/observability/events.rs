@@ -76,7 +76,7 @@ impl Event for RequestReceivedEvent {
 }
 
 /// Normalized request-level stats collected from engine-specific responses.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UnifiedRequestStats {
     pub engine: &'static str,
     pub error_message: Option<String>,
@@ -92,27 +92,7 @@ pub struct UnifiedRequestStats {
 }
 
 impl UnifiedRequestStats {
-    /// Construct and emit a [`RequestStatsEvent`] from these stats.
-    pub fn emit_event(
-        &self,
-        request_id: &str,
-        model: &str,
-        router_backend: &str,
-        http_status_code: Option<u16>,
-        error_message: Option<&str>,
-    ) {
-        RequestStatsEvent {
-            request_id,
-            model,
-            router_backend,
-            http_status_code,
-            error_message,
-            stats: self,
-        }
-        .emit();
-    }
-
-    /// Emit a [`RequestStatsEvent`] if valid stats are provided, otherwise no-op.
+    /// Emit a [`RequestStatsEvent`] if stats are present, otherwise no-op.
     pub fn maybe_emit_event(
         stats: Option<Self>,
         request_id: &str,
@@ -121,15 +101,48 @@ impl UnifiedRequestStats {
         http_status_code: Option<u16>,
         error_message: Option<&str>,
     ) {
-        if let Some(s) = stats {
-            s.emit_event(
+        if let Some(ref s) = stats {
+            RequestStatsEvent {
                 request_id,
                 model,
                 router_backend,
                 http_status_code,
                 error_message,
-            );
+                stats: s,
+            }
+            .emit();
         }
+    }
+
+    /// Emit a success [`RequestStatsEvent`] if stats are present.
+    pub fn emit_for_success(
+        stats: Option<Self>,
+        request_id: &str,
+        model: &str,
+        router_backend: &str,
+    ) {
+        Self::maybe_emit_event(stats, request_id, model, router_backend, Some(200), None);
+    }
+
+    /// Emit an error [`RequestStatsEvent`] if stats are present, and return the
+    /// error message as a `String`. Designed for use in `map_err` closures.
+    pub fn emit_for_error(
+        stats: Option<Self>,
+        request_id: &str,
+        model: &str,
+        router_backend: &str,
+        http_status_code: Option<u16>,
+        error_message: &str,
+    ) -> String {
+        Self::maybe_emit_event(
+            stats,
+            request_id,
+            model,
+            router_backend,
+            http_status_code,
+            Some(error_message),
+        );
+        error_message.to_string()
     }
 
     /// Merge another stats sample into this one (for multi-sample aggregation).
@@ -239,14 +252,213 @@ impl Event for RequestStatsEvent<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::mem::size_of;
+    use std::{
+        mem::size_of,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+
+    use tracing_subscriber::layer::SubscriberExt;
 
     use super::*;
+    use crate::observability::metrics::metrics_labels;
 
     #[test]
     fn test_event_sizes() {
         assert_eq!(size_of::<RequestReceivedEvent>(), 0);
         assert_eq!(size_of::<RequestSentEvent>(), 16);
         assert_eq!(size_of::<RequestPDSentEvent>(), 32);
+    }
+
+    /// Build a dummy request stats sample for tests.
+    #[expect(clippy::too_many_arguments)]
+    fn dummy_request_stats(
+        received: f64,
+        first_token: f64,
+        finished: f64,
+        sent: f64,
+        prompt: u64,
+        completion: u64,
+        cached: u64,
+        hit_rate: f64,
+        spec_rate: f64,
+    ) -> UnifiedRequestStats {
+        UnifiedRequestStats {
+            engine: "sglang",
+            request_received_timestamp_s: Some(received),
+            first_token_generated_timestamp_s: Some(first_token),
+            request_finished_timestamp_s: Some(finished),
+            response_sent_timestamp_s: Some(sent),
+            prompt_tokens: Some(prompt),
+            completion_tokens: Some(completion),
+            cached_tokens: Some(cached),
+            cache_hit_rate: Some(hit_rate),
+            spec_decoding_acceptance_rate: Some(spec_rate),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_merge_different_engines_is_noop() {
+        let mut a = UnifiedRequestStats {
+            engine: "sglang",
+            request_received_timestamp_s: Some(1.0),
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+            ..Default::default()
+        };
+        let original = a.clone();
+        let b = UnifiedRequestStats {
+            engine: "vllm",
+            request_received_timestamp_s: Some(0.5),
+            prompt_tokens: Some(5),
+            completion_tokens: Some(30),
+            ..Default::default()
+        };
+        a.merge(&b);
+        assert_eq!(
+            a.request_received_timestamp_s,
+            original.request_received_timestamp_s
+        );
+        assert_eq!(a.prompt_tokens, original.prompt_tokens);
+        assert_eq!(a.completion_tokens, original.completion_tokens);
+    }
+
+    #[test]
+    fn test_merge_both_fully_populated() {
+        let mut a = dummy_request_stats(2.0, 3.0, 8.0, 9.0, 100, 50, 10, 0.8, 0.9);
+        let b = dummy_request_stats(1.0, 4.0, 10.0, 7.0, 200, 30, 20, 0.6, 0.5);
+        a.merge(&b);
+
+        assert_eq!(a.request_received_timestamp_s, Some(1.0));
+        assert_eq!(a.first_token_generated_timestamp_s, Some(3.0));
+        assert_eq!(a.request_finished_timestamp_s, Some(10.0));
+        assert_eq!(a.response_sent_timestamp_s, Some(9.0));
+        assert_eq!(a.completion_tokens, Some(80));
+        assert_eq!(a.prompt_tokens, Some(100));
+        assert_eq!(a.cached_tokens, Some(10));
+        assert_eq!(a.cache_hit_rate, Some(0.8));
+        assert_eq!(a.spec_decoding_acceptance_rate, Some(0.9));
+    }
+
+    #[test]
+    fn test_merge_with_default_is_identity() {
+        let populated = dummy_request_stats(1.0, 2.0, 5.0, 6.0, 10, 20, 5, 0.5, 0.7);
+        let empty = UnifiedRequestStats {
+            engine: "sglang",
+            ..Default::default()
+        };
+
+        let mut a = populated.clone();
+        a.merge(&empty);
+        assert_eq!(a.request_received_timestamp_s, Some(1.0));
+        assert_eq!(a.completion_tokens, Some(20));
+        assert_eq!(a.cache_hit_rate, Some(0.5));
+
+        let mut b = empty;
+        b.merge(&populated);
+        assert_eq!(b.request_received_timestamp_s, Some(1.0));
+        assert_eq!(b.completion_tokens, Some(20));
+        assert_eq!(b.cache_hit_rate, Some(0.5));
+    }
+
+    #[test]
+    fn test_merge_three_samples_sequential() {
+        let mut a = dummy_request_stats(3.0, 4.0, 7.0, 8.0, 100, 10, 5, 0.8, 0.9);
+        let b = dummy_request_stats(1.0, 5.0, 9.0, 6.0, 200, 20, 15, 0.6, 0.5);
+        let c = dummy_request_stats(2.0, 3.5, 8.0, 10.0, 300, 30, 25, 0.4, 0.3);
+        a.merge(&b);
+        a.merge(&c);
+
+        assert_eq!(a.request_received_timestamp_s, Some(1.0));
+        assert_eq!(a.first_token_generated_timestamp_s, Some(3.5));
+        assert_eq!(a.request_finished_timestamp_s, Some(9.0));
+        assert_eq!(a.response_sent_timestamp_s, Some(10.0));
+        assert_eq!(a.completion_tokens, Some(60));
+        assert_eq!(a.prompt_tokens, Some(100));
+        assert_eq!(a.cached_tokens, Some(5));
+        assert_eq!(a.cache_hit_rate, Some(0.8));
+        assert_eq!(a.spec_decoding_acceptance_rate, Some(0.9));
+    }
+
+    /// Helper to count the number of events emitted.
+    struct EventCounter(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCounter {
+        fn on_event(
+            &self,
+            _event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn count_events(f: impl FnOnce()) -> usize {
+        let count = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(EventCounter(count.clone()));
+        tracing::subscriber::with_default(subscriber, f);
+        count.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn test_maybe_emit_event_emits_nothing() {
+        let n = count_events(|| {
+            UnifiedRequestStats::maybe_emit_event(
+                None,
+                "req-id",
+                "test-model",
+                metrics_labels::BACKEND_REGULAR,
+                Some(200),
+                None,
+            );
+        });
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_maybe_emit_event_emits_one_event() {
+        let stats = UnifiedRequestStats {
+            engine: "sglang",
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+            error_message: Some("engine error".into()),
+            ..Default::default()
+        };
+        let n = count_events(|| {
+            UnifiedRequestStats::maybe_emit_event(
+                Some(stats),
+                "req-id",
+                "test-model",
+                metrics_labels::BACKEND_REGULAR,
+                Some(500),
+                Some("caller error"),
+            );
+        });
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn test_maybe_emit_event_multiple() {
+        let n = count_events(|| {
+            for i in 0..5 {
+                let stats = UnifiedRequestStats {
+                    engine: "sglang",
+                    completion_tokens: Some(i),
+                    ..Default::default()
+                };
+                UnifiedRequestStats::maybe_emit_event(
+                    Some(stats),
+                    &format!("req-id-{i}"),
+                    "test-model",
+                    metrics_labels::BACKEND_REGULAR,
+                    Some(200),
+                    None,
+                );
+            }
+        });
+        assert_eq!(n, 5);
     }
 }

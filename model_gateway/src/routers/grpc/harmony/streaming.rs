@@ -301,15 +301,14 @@ impl HarmonyStreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Error(error_wrapper) => {
-                    UnifiedRequestStats::maybe_emit_event(
+                    return Err(UnifiedRequestStats::emit_for_error(
                         decode_stream.take_request_stats(),
                         &dispatch.request_id,
                         &original_request.model,
                         metrics_labels::BACKEND_HARMONY,
                         error_wrapper.http_status_code(),
-                        Some(error_wrapper.message()),
-                    );
-                    return Err(format!("Server error: {}", error_wrapper.message()));
+                        &format!("Server error: {}", error_wrapper.message()),
+                    ));
                 }
                 ProtoResponseVariant::None => {}
             }
@@ -347,13 +346,11 @@ impl HarmonyStreamingProcessor {
             output_tokens: total_completion as u64,
         });
 
-        UnifiedRequestStats::maybe_emit_event(
+        UnifiedRequestStats::emit_for_success(
             decode_stream.take_request_stats(),
             &dispatch.request_id,
             &original_request.model,
             metrics_labels::BACKEND_HARMONY,
-            Some(200),
-            None,
         );
 
         Ok(())

@@ -48,7 +48,7 @@ impl HarmonyResponseProcessor {
         let request_logprobs = chat_request.logprobs;
 
         // Collect all completed responses (one per choice)
-        let response_collection::CollectedGenerateBatchWithStats {
+        let response_collection::CollectedResponsesWithStats {
             completes: all_responses,
             request_stats,
         } = response_collection::collect_responses(execution_result, request_logprobs).await?;
@@ -130,13 +130,11 @@ impl HarmonyResponseProcessor {
         let usage = response_formatting::build_usage(&all_responses)
             .with_reasoning_tokens(total_reasoning_tokens);
 
-        UnifiedRequestStats::maybe_emit_event(
+        UnifiedRequestStats::emit_for_success(
             request_stats,
             &dispatch.request_id,
             &chat_request.model,
             metrics_labels::BACKEND_HARMONY,
-            Some(200),
-            None,
         );
 
         // Final ChatCompletionResponse
@@ -202,7 +200,7 @@ impl HarmonyResponseProcessor {
         let request_logprobs = responses_request.top_logprobs.is_some();
 
         // Collect all completed responses
-        let response_collection::CollectedGenerateBatchWithStats {
+        let response_collection::CollectedResponsesWithStats {
             completes: all_responses,
             request_stats,
         } = response_collection::collect_responses(execution_result, request_logprobs).await?;
@@ -265,13 +263,11 @@ impl HarmonyResponseProcessor {
         let usage = response_formatting::build_usage(std::slice::from_ref(complete))
             .with_reasoning_tokens(parsed.reasoning_token_count);
 
-        UnifiedRequestStats::maybe_emit_event(
+        UnifiedRequestStats::emit_for_success(
             request_stats,
             &dispatch.request_id,
             &responses_request.model,
             metrics_labels::BACKEND_HARMONY,
-            Some(200),
-            None,
         );
 
         // Check for tool calls in commentary channel

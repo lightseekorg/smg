@@ -6,17 +6,19 @@
 use axum::response::Response;
 use tracing::{error as trace_error, warn};
 
-use crate::observability::events::UnifiedRequestStats;
-use crate::routers::{
-    error,
-    grpc::{
-        context::ExecutionResult,
-        proto_wrapper::{ProtoGenerateComplete, ProtoResponseVariant, StatsProtoStream},
-        utils::tonic_ext::TonicStatusExt,
+use crate::{
+    observability::events::UnifiedRequestStats,
+    routers::{
+        error,
+        grpc::{
+            context::ExecutionResult,
+            proto_wrapper::{ProtoGenerateComplete, ProtoResponseVariant, StatsProtoStream},
+            utils::tonic_ext::TonicStatusExt,
+        },
     },
 };
 
-pub(crate) struct CollectedGenerateBatchWithStats {
+pub(crate) struct CollectedResponsesWithStats {
     pub completes: Vec<ProtoGenerateComplete>,
     pub request_stats: Option<UnifiedRequestStats>,
 }
@@ -35,8 +37,8 @@ pub(crate) struct CollectedGenerateBatchWithStats {
 pub(crate) async fn collect_responses(
     execution_result: ExecutionResult,
     merge_logprobs: bool,
-) -> Result<CollectedGenerateBatchWithStats, Response> {
-    let collected_batch = match execution_result {
+) -> Result<CollectedResponsesWithStats, Response> {
+    let all_responses = match execution_result {
         ExecutionResult::Single { mut stream } => {
             let responses = collect_stream_responses(&mut stream, "Single").await?;
             stream.mark_completed();
@@ -64,7 +66,7 @@ pub(crate) async fn collect_responses(
 
             let request_stats = decode_batch.request_stats.or(prefill_batch.request_stats);
 
-            CollectedGenerateBatchWithStats {
+            CollectedResponsesWithStats {
                 completes: decode_batch.completes,
                 request_stats,
             }
@@ -78,14 +80,14 @@ pub(crate) async fn collect_responses(
         }
     };
 
-    if collected_batch.completes.is_empty() {
+    if all_responses.completes.is_empty() {
         return Err(error::internal_error(
             "no_responses_from_server",
             "No responses from server",
         ));
     }
 
-    Ok(collected_batch)
+    Ok(all_responses)
 }
 
 /// Merge prefill input_logprobs into decode responses
@@ -115,7 +117,7 @@ fn merge_prefill_logprobs(
 async fn collect_stream_responses(
     stream: &mut StatsProtoStream,
     worker_name: &str,
-) -> Result<CollectedGenerateBatchWithStats, Response> {
+) -> Result<CollectedResponsesWithStats, Response> {
     let mut all_responses = Vec::new();
 
     while let Some(response) = stream.next().await {
@@ -154,7 +156,7 @@ async fn collect_stream_responses(
         }
     }
 
-    Ok(CollectedGenerateBatchWithStats {
+    Ok(CollectedResponsesWithStats {
         completes: all_responses,
         request_stats: stream.take_request_stats(),
     })

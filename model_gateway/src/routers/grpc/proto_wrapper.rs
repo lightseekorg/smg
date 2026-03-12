@@ -867,7 +867,7 @@ impl ProtoGenerateComplete {
 fn unified_stats_from_sglang(stats: sglang::RequestStats) -> UnifiedRequestStats {
     UnifiedRequestStats {
         engine: "sglang",
-        error_message: None,
+        error_message: stats.error_message,
         request_received_timestamp_s: stats.request_received_timestamp_s,
         first_token_generated_timestamp_s: stats.first_token_generated_timestamp_s,
         request_finished_timestamp_s: stats.request_finished_timestamp_s,
@@ -902,33 +902,6 @@ impl ProtoGenerateError {
         match self {
             Self::Sglang(e) => e.http_status_code.parse::<u16>().ok(),
             Self::Trtllm(_) => None,
-        }
-    }
-}
-
-struct RequestStatsCollector {
-    enabled: bool,
-    stats: Option<UnifiedRequestStats>,
-}
-
-impl RequestStatsCollector {
-    #[inline]
-    fn record(&mut self, sample: &UnifiedRequestStats) {
-        if !self.enabled {
-            return;
-        }
-        match &mut self.stats {
-            Some(existing) => existing.merge(sample),
-            None => self.stats = Some(sample.clone()),
-        }
-    }
-
-    #[inline]
-    fn take_stats(&mut self) -> Option<UnifiedRequestStats> {
-        if self.enabled {
-            self.stats.take()
-        } else {
-            None
         }
     }
 }
@@ -997,17 +970,16 @@ impl ProtoStream {
 /// Optional stats-collecting wrapper around `ProtoStream`.
 pub struct StatsProtoStream {
     stream: ProtoStream,
-    request_stats: RequestStatsCollector,
+    enable_request_statistics: bool,
+    stats: Option<UnifiedRequestStats>,
 }
 
 impl StatsProtoStream {
     pub fn new(stream: ProtoStream, enable_request_statistics: bool) -> Self {
         Self {
             stream,
-            request_stats: RequestStatsCollector {
-                enabled: enable_request_statistics,
-                stats: None,
-            },
+            enable_request_statistics,
+            stats: None,
         }
     }
 
@@ -1015,10 +987,13 @@ impl StatsProtoStream {
     pub async fn next(&mut self) -> Option<Result<ProtoGenerateResponse, tonic::Status>> {
         let response = self.stream.next().await;
 
-        if response.is_none() && self.request_stats.enabled {
+        if response.is_none() && self.enable_request_statistics {
             if let Some(samples) = self.stream.fetch_backend_request_stats().await {
                 for sample in &samples {
-                    self.request_stats.record(sample);
+                    match &mut self.stats {
+                        Some(existing) => existing.merge(sample),
+                        None => self.stats = Some(sample.clone()),
+                    }
                 }
             }
         }
@@ -1031,7 +1006,11 @@ impl StatsProtoStream {
     }
 
     pub fn take_request_stats(&mut self) -> Option<UnifiedRequestStats> {
-        self.request_stats.take_stats()
+        if self.enable_request_statistics {
+            self.stats.take()
+        } else {
+            None
+        }
     }
 }
 
@@ -1158,5 +1137,51 @@ impl ProtoEmbedError {
         match self {
             Self::Sglang(e) => &e.code,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unified_stats_from_sglang() {
+        let stats = sglang::RequestStats {
+            request_received_timestamp_s: Some(1.0),
+            first_token_generated_timestamp_s: Some(2.0),
+            request_finished_timestamp_s: Some(3.0),
+            response_sent_timestamp_s: Some(4.0),
+            cache_hit_rate: Some(0.5),
+            spec_decoding_acceptance_rate: Some(0.8),
+            prompt_tokens: Some(100),
+            completion_tokens: Some(200),
+            cached_tokens: Some(50),
+            error_message: Some("some error".to_string()),
+            ..Default::default()
+        };
+        let unified = unified_stats_from_sglang(stats);
+
+        assert_eq!(unified.engine, "sglang");
+        assert_eq!(unified.error_message.as_deref(), Some("some error"));
+        assert_eq!(unified.request_received_timestamp_s, Some(1.0));
+        assert_eq!(unified.first_token_generated_timestamp_s, Some(2.0));
+        assert_eq!(unified.request_finished_timestamp_s, Some(3.0));
+        assert_eq!(unified.response_sent_timestamp_s, Some(4.0));
+        assert_eq!(unified.cache_hit_rate, Some(0.5));
+        assert_eq!(unified.spec_decoding_acceptance_rate, Some(0.8));
+        assert_eq!(unified.prompt_tokens, Some(100u64));
+        assert_eq!(unified.completion_tokens, Some(200u64));
+        assert_eq!(unified.cached_tokens, Some(50u64));
+
+        // None fields in the proto stay None in the unified struct
+        let partial = unified_stats_from_sglang(sglang::RequestStats {
+            prompt_tokens: Some(42),
+            ..Default::default()
+        });
+        assert_eq!(partial.engine, "sglang");
+        assert_eq!(partial.prompt_tokens, Some(42u64));
+        assert_eq!(partial.completion_tokens, None);
+        assert_eq!(partial.first_token_generated_timestamp_s, None);
+        assert_eq!(partial.error_message, None);
     }
 }

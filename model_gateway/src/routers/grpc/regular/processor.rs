@@ -203,7 +203,7 @@ impl ResponseProcessor {
         request_logprobs: bool,
     ) -> Result<ChatCompletionResponse, axum::response::Response> {
         // Collect all responses from the execution result
-        let response_collection::CollectedGenerateBatchWithStats {
+        let response_collection::CollectedResponsesWithStats {
             completes: all_responses,
             request_stats,
         } = response_collection::collect_responses(execution_result, request_logprobs).await?;
@@ -275,13 +275,11 @@ impl ResponseProcessor {
         // Build usage
         let usage = response_formatting::build_usage(&all_responses);
 
-        UnifiedRequestStats::maybe_emit_event(
+        UnifiedRequestStats::emit_for_success(
             request_stats,
             &dispatch.request_id,
             &dispatch.model,
             metrics_labels::BACKEND_REGULAR,
-            Some(200),
-            None,
         );
 
         // Build final ChatCompletionResponse
@@ -363,18 +361,16 @@ impl ResponseProcessor {
         start_time: Instant,
     ) -> Result<Vec<GenerateResponse>, axum::response::Response> {
         // Collect all responses from the execution result
-        let response_collection::CollectedGenerateBatchWithStats {
+        let response_collection::CollectedResponsesWithStats {
             completes: all_responses,
             request_stats,
         } = response_collection::collect_responses(execution_result, request_logprobs).await?;
 
-        UnifiedRequestStats::maybe_emit_event(
+        UnifiedRequestStats::emit_for_success(
             request_stats,
             &dispatch.request_id,
             &dispatch.model,
             metrics_labels::BACKEND_REGULAR,
-            Some(200),
-            None,
         );
 
         // Process each completion
