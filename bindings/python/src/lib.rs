@@ -791,7 +791,6 @@ impl Router {
         model_path = None,
         tokenizer_path = None,
         chat_template = None,
-        disable_tokenizer_autoload = false,
         tokenizer_cache_enable_l0 = false,
         tokenizer_cache_l0_max_entries = 10000,
         tokenizer_cache_enable_l1 = false,
@@ -814,6 +813,7 @@ impl Router {
         otlp_traces_endpoint = String::from("localhost:4317"),
         control_plane_auth = None,
         schema_config = None,
+        disable_tokenizer_autoload = false,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
