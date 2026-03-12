@@ -61,6 +61,7 @@ use crate::{
 pub(super) fn apply_event_transformations_inplace(
     parsed_data: &mut Value,
     ctx: &StreamingEventContext<'_>,
+    is_mcp_args_done: bool,
 ) -> bool {
     let mut changed = false;
 
@@ -136,9 +137,7 @@ pub(super) fn apply_event_transformations_inplace(
                         .to_string();
 
                     // Only transform if this is an MCP tool; keep function_call unchanged
-                    if let Some(session) =
-                        ctx.session.filter(|s| s.has_exposed_tool(&tool_name))
-                    {
+                    if let Some(session) = ctx.session.filter(|s| s.has_exposed_tool(&tool_name)) {
                         let response_format = session.tool_response_format(&tool_name);
 
                         // Determine item type and ID prefix based on response_format
@@ -166,7 +165,9 @@ pub(super) fn apply_event_transformations_inplace(
                 }
             }
         }
-    } else if is_args_done {
+    } else if is_args_done && is_mcp_args_done {
+        // Only transform arguments_done to MCP format for MCP-exposed tools;
+        // regular function tools pass through unchanged.
         parsed_data["type"] = json!(McpEvent::CALL_ARGUMENTS_DONE);
 
         // Transform item_id from fc_* to mcp_*
@@ -348,9 +349,16 @@ pub(super) fn forward_streaming_event(
         return true;
     }
 
-    // Handle function_call_arguments.done - send buffered args first
+    // Determine if this arguments_done event is for an MCP-exposed tool.
+    // Regular function tool events should pass through without MCP transformation.
+    let is_mcp_args_done = event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
+        && extract_output_index(&parsed_data)
+            .and_then(|idx| handler.pending_calls.iter().find(|c| c.output_index == idx))
+            .is_some_and(|call| ctx.session.is_some_and(|s| s.has_exposed_tool(&call.name)));
+
+    // Handle function_call_arguments.done - send buffered args only for MCP tools
     let mut mapped_output_index: Option<usize> = None;
-    if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
+    if is_mcp_args_done
         && !send_buffered_arguments(
             &mut parsed_data,
             handler,
@@ -371,7 +379,7 @@ pub(super) fn forward_streaming_event(
         parsed_data["output_index"] = json!(mapped);
     }
 
-    apply_event_transformations_inplace(&mut parsed_data, ctx);
+    apply_event_transformations_inplace(&mut parsed_data, ctx, is_mcp_args_done);
 
     if let Some(response_obj) = parsed_data
         .get_mut("response")
@@ -396,7 +404,15 @@ pub(super) fn forward_streaming_event(
     };
 
     let final_block = match event_name {
-        Some(evt) => format!("event: {}\ndata: {}\n\n", map_event_name(evt), final_data),
+        Some(evt) => {
+            // Only remap function_call event names to mcp_call for MCP-exposed tools
+            let mapped = if is_mcp_args_done {
+                map_event_name(evt)
+            } else {
+                evt
+            };
+            format!("event: {mapped}\ndata: {final_data}\n\n")
+        }
         None => format!("data: {final_data}\n\n"),
     };
 
