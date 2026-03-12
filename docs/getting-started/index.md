@@ -228,8 +228,13 @@ Use these when workers are not started via `smg serve`.
       --model meta-llama/Llama-3.1-8B-Instruct \
       --host 0.0.0.0 \
       --port 50051 \
-      --tensor-parallel-size 1
+      --tensor-parallel-size 1 \
+      --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"topic":""}'
     ```
+
+    Add `--kv-events-config` when you want upstream vLLM to expose KV cache
+    events over `SubscribeKvEvents` for SMG features like cache-aware routing.
+    Basic gRPC inference does not require it.
 
 === "TensorRT-LLM (gRPC)"
 

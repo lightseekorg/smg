@@ -29,6 +29,28 @@ Or directly:
 python -m vllm.entrypoints.grpc_server --model meta-llama/Llama-2-7b-hf --port 50051
 ```
 
+### Upstream vLLM and KV Event Streaming
+
+`smg-grpc-servicer` can stream KV cache events from upstream vLLM without any
+changes to the vLLM repository. To do that, start the stock vLLM gRPC server
+with `--kv-events-config` enabled:
+
+```bash
+python -m vllm.entrypoints.grpc_server \
+  --model meta-llama/Llama-2-7b-hf \
+  --host 0.0.0.0 \
+  --port 50051 \
+  --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"topic":""}'
+```
+
+This is only required if you want SMG to consume `SubscribeKvEvents`, for
+example with cache-aware routing or KV cache monitoring. Basic gRPC inference
+works without it.
+
+If you carry a local vLLM patch that auto-enables KV events for gRPC mode, that
+patch is only a convenience feature. It is not required for compatibility with
+SMG.
+
 ## Architecture
 
 ```
