@@ -91,15 +91,37 @@ pub struct UnifiedRequestStats {
     pub cached_tokens: Option<u64>,
 }
 
+impl UnifiedRequestStats {
+    /// Construct and emit a [`RequestStatsEvent`] from these stats.
+    pub fn emit_event(
+        &self,
+        request_id: &str,
+        model: &str,
+        router_backend: &str,
+        http_status_code: Option<u16>,
+        error_message: Option<&str>,
+    ) {
+        RequestStatsEvent {
+            request_id,
+            model,
+            router_backend,
+            http_status_code,
+            error_message,
+            stats: self,
+        }
+        .emit();
+    }
+}
+
 /// Unified request-stats event emitted once per backend request.
 #[derive(Debug, Clone)]
-pub struct RequestStatsEvent<'a> {
-    pub request_id: &'a str,
-    pub model: &'a str,
-    pub router_backend: &'a str,
-    pub http_status_code: Option<u16>,
-    pub error_message: Option<&'a str>,
-    pub stats: &'a UnifiedRequestStats,
+struct RequestStatsEvent<'a> {
+    request_id: &'a str,
+    model: &'a str,
+    router_backend: &'a str,
+    http_status_code: Option<u16>,
+    error_message: Option<&'a str>,
+    stats: &'a UnifiedRequestStats,
 }
 
 macro_rules! emit_request_stats {

@@ -25,7 +25,7 @@ use tracing::{debug, error, warn};
 
 use crate::{
     observability::{
-        events::{Event, RequestStatsEvent, UnifiedRequestStats},
+        events::UnifiedRequestStats,
         metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     },
     routers::grpc::{
@@ -268,15 +268,13 @@ impl StreamingProcessor {
                 Err(e) => {
                     if let Some(request_stats) = grpc_stream.take_request_stats() {
                         let stream_error = format!("Stream error: {}", e.message());
-                        RequestStatsEvent {
+                        request_stats.emit_event(
                             request_id,
                             model,
-                            router_backend: self.backend_type,
-                            http_status_code: None,
-                            error_message: Some(&stream_error),
-                            stats: &request_stats,
-                        }
-                        .emit();
+                            self.backend_type,
+                            None,
+                            Some(&stream_error),
+                        );
                     }
                     return Err(format!("Stream error: {}", e.message()));
                 }
@@ -474,15 +472,13 @@ impl StreamingProcessor {
                 }
                 ProtoResponseVariant::Error(error) => {
                     if let Some(request_stats) = grpc_stream.take_request_stats() {
-                        RequestStatsEvent {
+                        request_stats.emit_event(
                             request_id,
                             model,
-                            router_backend: self.backend_type,
-                            http_status_code: error.http_status_code(),
-                            error_message: Some(error.message()),
-                            stats: &request_stats,
-                        }
-                        .emit();
+                            self.backend_type,
+                            error.http_status_code(),
+                            Some(error.message()),
+                        );
                     }
                     return Err(error.message().to_string());
                 }
@@ -587,15 +583,7 @@ impl StreamingProcessor {
         });
 
         if let Some(request_stats) = grpc_stream.take_request_stats() {
-            RequestStatsEvent {
-                request_id,
-                model,
-                router_backend: self.backend_type,
-                http_status_code: Some(200),
-                error_message: None,
-                stats: &request_stats,
-            }
-            .emit();
+            request_stats.emit_event(request_id, model, self.backend_type, Some(200), None);
         }
 
         Ok(())
@@ -1128,16 +1116,14 @@ impl StreamingProcessor {
         http_status_code: Option<u16>,
         error_message: Option<&str>,
     ) {
-        if let Some(request_stats) = request_stats {
-            RequestStatsEvent {
-                request_id: &ctx.request_id,
-                model: &ctx.model,
-                router_backend: ctx.backend_type,
+        if let Some(stats) = request_stats {
+            stats.emit_event(
+                &ctx.request_id,
+                &ctx.model,
+                ctx.backend_type,
                 http_status_code,
                 error_message,
-                stats: &request_stats,
-            }
-            .emit();
+            );
         }
     }
 

@@ -19,10 +19,7 @@ use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::{error, warn};
 
 use crate::{
-    observability::{
-        events::{Event, RequestStatsEvent},
-        metrics::metrics_labels,
-    },
+    observability::metrics::metrics_labels,
     routers::{
         error,
         grpc::{
@@ -279,15 +276,13 @@ impl ResponseProcessor {
         let usage = response_formatting::build_usage(&all_responses);
 
         if let Some(request_stats) = request_stats {
-            RequestStatsEvent {
-                request_id: &dispatch.request_id,
-                model: &dispatch.model,
-                router_backend: metrics_labels::BACKEND_REGULAR,
-                http_status_code: Some(200),
-                error_message: None,
-                stats: &request_stats,
-            }
-            .emit();
+            request_stats.emit_event(
+                &dispatch.request_id,
+                &dispatch.model,
+                metrics_labels::BACKEND_REGULAR,
+                Some(200),
+                None,
+            );
         }
 
         // Build final ChatCompletionResponse
@@ -375,15 +370,13 @@ impl ResponseProcessor {
         } = response_collection::collect_responses(execution_result, request_logprobs).await?;
 
         if let Some(request_stats) = request_stats {
-            RequestStatsEvent {
-                request_id: &dispatch.request_id,
-                model: &dispatch.model,
-                router_backend: metrics_labels::BACKEND_REGULAR,
-                http_status_code: Some(200),
-                error_message: None,
-                stats: &request_stats,
-            }
-            .emit();
+            request_stats.emit_event(
+                &dispatch.request_id,
+                &dispatch.model,
+                metrics_labels::BACKEND_REGULAR,
+                Some(200),
+                None,
+            );
         }
 
         // Process each completion

@@ -16,10 +16,7 @@ use tracing::error;
 
 use super::{builder::convert_harmony_logprobs, HarmonyParserAdapter};
 use crate::{
-    observability::{
-        events::{Event, RequestStatsEvent},
-        metrics::metrics_labels,
-    },
+    observability::metrics::metrics_labels,
     routers::{
         error,
         grpc::{
@@ -134,15 +131,13 @@ impl HarmonyResponseProcessor {
             .with_reasoning_tokens(total_reasoning_tokens);
 
         if let Some(request_stats) = request_stats {
-            RequestStatsEvent {
-                request_id: &dispatch.request_id,
-                model: &chat_request.model,
-                router_backend: metrics_labels::BACKEND_HARMONY,
-                http_status_code: Some(200),
-                error_message: None,
-                stats: &request_stats,
-            }
-            .emit();
+            request_stats.emit_event(
+                &dispatch.request_id,
+                &chat_request.model,
+                metrics_labels::BACKEND_HARMONY,
+                Some(200),
+                None,
+            );
         }
 
         // Final ChatCompletionResponse
@@ -272,15 +267,13 @@ impl HarmonyResponseProcessor {
             .with_reasoning_tokens(parsed.reasoning_token_count);
 
         if let Some(request_stats) = request_stats {
-            RequestStatsEvent {
-                request_id: &dispatch.request_id,
-                model: &responses_request.model,
-                router_backend: metrics_labels::BACKEND_HARMONY,
-                http_status_code: Some(200),
-                error_message: None,
-                stats: &request_stats,
-            }
-            .emit();
+            request_stats.emit_event(
+                &dispatch.request_id,
+                &responses_request.model,
+                metrics_labels::BACKEND_HARMONY,
+                Some(200),
+                None,
+            );
         }
 
         // Check for tool calls in commentary channel

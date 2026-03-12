@@ -29,10 +29,7 @@ use super::{
     types::HarmonyChannelDelta, HarmonyParserAdapter,
 };
 use crate::{
-    observability::{
-        events::{Event, RequestStatsEvent},
-        metrics::{metrics_labels, Metrics, StreamingMetricsParams},
-    },
+    observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     routers::grpc::{
         common::{
             response_formatting::CompletionTokenTracker,
@@ -302,15 +299,13 @@ impl HarmonyStreamingProcessor {
                 }
                 ProtoResponseVariant::Error(error_wrapper) => {
                     if let Some(request_stats) = decode_stream.take_request_stats() {
-                        RequestStatsEvent {
-                            request_id: &dispatch.request_id,
-                            model: &original_request.model,
-                            router_backend: metrics_labels::BACKEND_HARMONY,
-                            http_status_code: error_wrapper.http_status_code(),
-                            error_message: Some(error_wrapper.message()),
-                            stats: &request_stats,
-                        }
-                        .emit();
+                        request_stats.emit_event(
+                            &dispatch.request_id,
+                            &original_request.model,
+                            metrics_labels::BACKEND_HARMONY,
+                            error_wrapper.http_status_code(),
+                            Some(error_wrapper.message()),
+                        );
                     }
                     return Err(format!("Server error: {}", error_wrapper.message()));
                 }
@@ -351,15 +346,13 @@ impl HarmonyStreamingProcessor {
         });
 
         if let Some(request_stats) = decode_stream.take_request_stats() {
-            RequestStatsEvent {
-                request_id: &dispatch.request_id,
-                model: &original_request.model,
-                router_backend: metrics_labels::BACKEND_HARMONY,
-                http_status_code: Some(200),
-                error_message: None,
-                stats: &request_stats,
-            }
-            .emit();
+            request_stats.emit_event(
+                &dispatch.request_id,
+                &original_request.model,
+                metrics_labels::BACKEND_HARMONY,
+                Some(200),
+                None,
+            );
         }
 
         Ok(())
