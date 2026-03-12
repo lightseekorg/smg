@@ -13,19 +13,17 @@ import signal
 import threading
 import time
 from concurrent import futures
-from typing import Dict, Optional
 
 import grpc
 from grpc_health.v1 import health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
-from smg_grpc_proto import sglang_scheduler_pb2, sglang_scheduler_pb2_grpc
-
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST, DisaggregationMode
 from sglang.srt.managers.disagg_service import start_disagg_service
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
 from sglang.utils import get_exception_traceback
+from smg_grpc_proto import sglang_scheduler_pb2, sglang_scheduler_pb2_grpc
 
 from smg_grpc_servicer.sglang.health_servicer import SGLangHealthServicer
 from smg_grpc_servicer.sglang.request_manager import GrpcRequestManager
@@ -34,9 +32,10 @@ from smg_grpc_servicer.sglang.servicer import SGLangSchedulerServicer
 
 logger = logging.getLogger(__name__)
 
+
 async def serve_grpc(
     server_args: ServerArgs,
-    model_info: Optional[Dict] = None,
+    model_info: dict | None = None,
 ):
     """Start the standalone gRPC server with integrated scheduler."""
 
@@ -47,7 +46,9 @@ async def serve_grpc(
         bootstrap_server = start_disagg_service(server_args)
         if bootstrap_server:
             logger.info(
-                f"Bootstrap server started for disaggregation mode on {server_args.host}:{server_args.disaggregation_bootstrap_port}"
+                "Bootstrap server started for disaggregation mode on %s:%s",
+                server_args.host,
+                server_args.disaggregation_bootstrap_port,
             )
 
     # Launch only the scheduler process(es) (no tokenizer/detokenizer needed for gRPC)
@@ -158,19 +159,13 @@ async def serve_grpc(
                 with open(filepath, "rb") as f:
                     return f.read()
             except OSError as e:
-                raise ValueError(
-                    f"Failed to read {description} '{filepath}': {e}"
-                ) from e
+                raise ValueError(f"Failed to read {description} '{filepath}': {e}") from e
 
         private_key = _read_ssl_file(server_args.ssl_keyfile, "SSL key file")
-        certificate_chain = _read_ssl_file(
-            server_args.ssl_certfile, "SSL certificate file"
-        )
+        certificate_chain = _read_ssl_file(server_args.ssl_certfile, "SSL certificate file")
         root_certificates = None
         if server_args.ssl_ca_certs:
-            root_certificates = _read_ssl_file(
-                server_args.ssl_ca_certs, "SSL CA certificates file"
-            )
+            root_certificates = _read_ssl_file(server_args.ssl_ca_certs, "SSL CA certificates file")
 
         if server_args.enable_ssl_refresh:
             # Use dynamic credentials so gRPC re-reads certs on each
@@ -178,9 +173,7 @@ async def serve_grpc(
             _cert_mtime = os.path.getmtime(server_args.ssl_certfile)
             _key_mtime = os.path.getmtime(server_args.ssl_keyfile)
             _ca_mtime = (
-                os.path.getmtime(server_args.ssl_ca_certs)
-                if server_args.ssl_ca_certs
-                else None
+                os.path.getmtime(server_args.ssl_ca_certs) if server_args.ssl_ca_certs else None
             )
 
             def _cert_config_fetcher():
@@ -202,9 +195,7 @@ async def serve_grpc(
                         return None  # No change
 
                     new_key = _read_ssl_file(server_args.ssl_keyfile, "SSL key file")
-                    new_cert = _read_ssl_file(
-                        server_args.ssl_certfile, "SSL certificate file"
-                    )
+                    new_cert = _read_ssl_file(server_args.ssl_certfile, "SSL certificate file")
                     new_root = None
                     if server_args.ssl_ca_certs:
                         new_root = _read_ssl_file(
@@ -314,9 +305,7 @@ async def serve_grpc(
                 proc.terminate()
                 proc.join(timeout=2.0)
                 if proc.is_alive():
-                    logger.warning(
-                        f"Scheduler process {i} did not terminate, killing..."
-                    )
+                    logger.warning(f"Scheduler process {i} did not terminate, killing...")
                     proc.kill()
                     proc.join(timeout=1.0)
 
@@ -352,7 +341,10 @@ def _execute_grpc_server_warmup(server_args: ServerArgs):
                 pass
 
         if not success:
-            error_msg = f"gRPC server warmup failed: Could not connect to server after 120 seconds. Last error: {last_error}"
+            error_msg = (
+                "gRPC server warmup failed: Could not connect to server"
+                f" after 120 seconds. Last error: {last_error}"
+            )
             logger.error(error_msg)
             channel.close()
             kill_process_tree(os.getpid())
@@ -396,9 +388,7 @@ def _execute_grpc_server_warmup(server_args: ServerArgs):
                     )
                 )
 
-            warmup_request = sglang_scheduler_pb2.GenerateRequest(
-                **warmup_request_kwargs
-            )
+            warmup_request = sglang_scheduler_pb2.GenerateRequest(**warmup_request_kwargs)
 
             # Send the warmup request
             try:
@@ -408,9 +398,7 @@ def _execute_grpc_server_warmup(server_args: ServerArgs):
                     logger.info("gRPC warmup request completed successfully")
                     success = True
                 else:
-                    error_msg = (
-                        responses[-1].error.message if responses else "No response"
-                    )
+                    error_msg = responses[-1].error.message if responses else "No response"
                     logger.warning(f"gRPC warmup request returned error: {error_msg}")
                     success = False
             except Exception as e:
@@ -435,9 +423,7 @@ def _execute_grpc_server_warmup(server_args: ServerArgs):
                     logger.info("gRPC warmup request completed successfully")
                     success = True
                 else:
-                    logger.warning(
-                        f"gRPC warmup request returned error: {response.error.message}"
-                    )
+                    logger.warning(f"gRPC warmup request returned error: {response.error.message}")
                     success = False
             except Exception as e:
                 error_msg = f"gRPC warmup request failed: {e}"
@@ -450,9 +436,7 @@ def _execute_grpc_server_warmup(server_args: ServerArgs):
         return success
 
     except Exception as e:
-        error_msg = (
-            f"gRPC warmup failed with exception: {e}\n{get_exception_traceback()}"
-        )
+        error_msg = f"gRPC warmup failed with exception: {e}\n{get_exception_traceback()}"
         logger.error(error_msg)
         try:
             channel.close()
@@ -464,7 +448,7 @@ def _execute_grpc_server_warmup(server_args: ServerArgs):
 
 def _wait_and_warmup_grpc(
     server_args: ServerArgs,
-    health_servicer: Optional[SGLangHealthServicer] = None,
+    health_servicer: SGLangHealthServicer | None = None,
 ):
     """Wait for gRPC server to be ready and execute warmup."""
     if not server_args.skip_server_warmup:

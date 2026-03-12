@@ -8,7 +8,6 @@ including tensor parallelism, pipeline parallelism, and data parallelism configu
 import logging
 import multiprocessing as mp
 import signal
-from typing import Dict, List, Optional, Tuple
 
 from sglang.srt.managers.data_parallel_controller import (
     run_data_parallel_controller_process,
@@ -41,8 +40,8 @@ def run_scheduler_with_signal_handling(*args, **kwargs):
 
 def launch_scheduler_process_only(
     server_args: ServerArgs,
-    port_args: Optional[PortArgs] = None,
-) -> Tuple[Dict, PortArgs, List[mp.Process]]:
+    port_args: PortArgs | None = None,
+) -> tuple[dict, PortArgs, list[mp.Process]]:
     """
     Launch only the scheduler process(es) without tokenizer/detokenizer.
 
@@ -113,24 +112,14 @@ def launch_scheduler_process_only(
                 )
 
                 # Calculate parallelism ranks (matching engine.py logic)
-                attn_dp_size = (
-                    server_args.dp_size if server_args.enable_dp_attention else 1
-                )
-                attn_tp_size = (
-                    server_args.tp_size // attn_dp_size // server_args.attn_cp_size
-                )
+                attn_dp_size = server_args.dp_size if server_args.enable_dp_attention else 1
+                attn_tp_size = server_args.tp_size // attn_dp_size // server_args.attn_cp_size
                 attn_cp_rank = (tp_rank // attn_tp_size) % server_args.attn_cp_size
-                moe_dp_rank = tp_rank // (
-                    server_args.tp_size // server_args.moe_dp_size
-                )
+                moe_dp_rank = tp_rank // (server_args.tp_size // server_args.moe_dp_size)
                 moe_ep_rank = (
                     tp_rank
                     % (server_args.tp_size // server_args.moe_dp_size)
-                    // (
-                        server_args.tp_size
-                        // server_args.moe_dp_size
-                        // server_args.ep_size
-                    )
+                    // (server_args.tp_size // server_args.moe_dp_size // server_args.ep_size)
                 )
 
                 # Create scheduler process
@@ -150,8 +139,9 @@ def launch_scheduler_process_only(
                     ),
                 )
 
-                with memory_saver_adapter.configure_subprocess(), numa_utils.configure_subprocess(
-                    server_args, gpu_id
+                with (
+                    memory_saver_adapter.configure_subprocess(),
+                    numa_utils.configure_subprocess(server_args, gpu_id),
                 ):
                     proc.start()
 
@@ -177,9 +167,7 @@ def launch_scheduler_process_only(
         try:
             data = reader.recv()
         except EOFError:
-            logger.error(
-                f"Rank {i} scheduler is dead. Please check if there are relevant logs."
-            )
+            logger.error(f"Rank {i} scheduler is dead. Please check if there are relevant logs.")
             scheduler_procs[i].join()
             logger.error(f"Exit code: {scheduler_procs[i].exitcode}")
             raise RuntimeError(f"Failed to initialize scheduler rank {i}")
@@ -190,9 +178,7 @@ def launch_scheduler_process_only(
             )
         scheduler_infos.append(data)
 
-    logger.info(
-        f"All {len(scheduler_procs)} scheduler process(es) initialized successfully"
-    )
+    logger.info(f"All {len(scheduler_procs)} scheduler process(es) initialized successfully")
 
     # Return the first scheduler's info (they should all be the same)
     return scheduler_infos[0], port_args, scheduler_procs

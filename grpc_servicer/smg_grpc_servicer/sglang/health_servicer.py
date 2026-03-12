@@ -7,7 +7,7 @@ native Kubernetes gRPC health probes for liveness and readiness checks.
 
 import logging
 import time
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
@@ -46,33 +46,21 @@ class SGLangHealthServicer(health_pb2_grpc.HealthServicer):
         self._serving_status = {}
 
         # Initially set to NOT_SERVING until model is loaded
-        self._serving_status[self.OVERALL_SERVER] = (
-            health_pb2.HealthCheckResponse.NOT_SERVING
-        )
-        self._serving_status[self.SGLANG_SERVICE] = (
-            health_pb2.HealthCheckResponse.NOT_SERVING
-        )
+        self._serving_status[self.OVERALL_SERVER] = health_pb2.HealthCheckResponse.NOT_SERVING
+        self._serving_status[self.SGLANG_SERVICE] = health_pb2.HealthCheckResponse.NOT_SERVING
 
         logger.info("Standard gRPC health service initialized")
 
     def set_serving(self):
         """Mark services as SERVING - call this after model is loaded."""
-        self._serving_status[self.OVERALL_SERVER] = (
-            health_pb2.HealthCheckResponse.SERVING
-        )
-        self._serving_status[self.SGLANG_SERVICE] = (
-            health_pb2.HealthCheckResponse.SERVING
-        )
+        self._serving_status[self.OVERALL_SERVER] = health_pb2.HealthCheckResponse.SERVING
+        self._serving_status[self.SGLANG_SERVICE] = health_pb2.HealthCheckResponse.SERVING
         logger.info("Health service status set to SERVING")
 
     def set_not_serving(self):
         """Mark services as NOT_SERVING - call this during shutdown."""
-        self._serving_status[self.OVERALL_SERVER] = (
-            health_pb2.HealthCheckResponse.NOT_SERVING
-        )
-        self._serving_status[self.SGLANG_SERVICE] = (
-            health_pb2.HealthCheckResponse.NOT_SERVING
-        )
+        self._serving_status[self.OVERALL_SERVER] = health_pb2.HealthCheckResponse.NOT_SERVING
+        self._serving_status[self.SGLANG_SERVICE] = health_pb2.HealthCheckResponse.NOT_SERVING
         logger.info("Health service status set to NOT_SERVING")
 
     async def Check(
@@ -96,9 +84,7 @@ class SGLangHealthServicer(health_pb2_grpc.HealthServicer):
         # Check if shutting down
         if self.request_manager.gracefully_exit:
             logger.debug("Health check: Server is shutting down")
-            return health_pb2.HealthCheckResponse(
-                status=health_pb2.HealthCheckResponse.NOT_SERVING
-            )
+            return health_pb2.HealthCheckResponse(status=health_pb2.HealthCheckResponse.NOT_SERVING)
 
         # Overall server health - just check if process is alive
         if service_name == self.OVERALL_SERVER:
@@ -124,19 +110,14 @@ class SGLangHealthServicer(health_pb2_grpc.HealthServicer):
                 return health_pb2.HealthCheckResponse(status=base_status)
 
             # Check if scheduler is responsive (received data recently)
-            time_since_last_receive = (
-                time.time() - self.request_manager.last_receive_tstamp
-            )
+            time_since_last_receive = time.time() - self.request_manager.last_receive_tstamp
 
             # If no recent activity and we have active requests, might be stuck
             # NOTE: 30s timeout is hardcoded. This is more conservative than
             # HEALTH_CHECK_TIMEOUT (20s) used for custom HealthCheck RPC.
             # Consider making this configurable via environment variable in the future
             # if different workloads need different responsiveness thresholds.
-            if (
-                time_since_last_receive > 30
-                and len(self.request_manager.rid_to_state) > 0
-            ):
+            if time_since_last_receive > 30 and len(self.request_manager.rid_to_state) > 0:
                 logger.warning(
                     f"Service health check: Scheduler not responsive "
                     f"({time_since_last_receive:.1f}s since last receive, "
@@ -147,9 +128,7 @@ class SGLangHealthServicer(health_pb2_grpc.HealthServicer):
                 )
 
             logger.debug("Service health check: SERVING")
-            return health_pb2.HealthCheckResponse(
-                status=health_pb2.HealthCheckResponse.SERVING
-            )
+            return health_pb2.HealthCheckResponse(status=health_pb2.HealthCheckResponse.SERVING)
 
         # Unknown service
         else:

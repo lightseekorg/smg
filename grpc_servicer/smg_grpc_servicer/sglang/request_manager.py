@@ -12,12 +12,12 @@ import signal
 import sys
 import threading
 import uuid
-from typing import Any, AsyncGenerator, Dict, List, Optional, Union
+from collections.abc import AsyncGenerator
+from typing import Any
 
 import grpc
 import zmq
 import zmq.asyncio
-
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.managers.io_struct import (
     AbortReq,
@@ -54,11 +54,11 @@ class _GrpcCommunicator:
     def __init__(self, sender: zmq.Socket, fan_out: int = 1):
         self._sender = sender
         self._fan_out = fan_out
-        self._result_event: Optional[asyncio.Event] = None
-        self._result_values: Optional[List[Any]] = None
+        self._result_event: asyncio.Event | None = None
+        self._result_values: list[Any] | None = None
         self._lock = asyncio.Lock()
 
-    async def __call__(self, obj, timeout: float = DEFAULT_TIMEOUT) -> List[Any]:
+    async def __call__(self, obj, timeout: float = DEFAULT_TIMEOUT) -> list[Any]:
         """
         Send request and wait for response(s).
 
@@ -111,9 +111,7 @@ class GrpcSignalHandler:
 
     def sigterm_handler(self, signum=None, frame=None):
         """Handle SIGTERM by gracefully shutting down gRPC server."""
-        logger.warning(
-            f"SIGTERM received. {signum=} {frame=}. Shutting down gRPC server..."
-        )
+        logger.warning(f"SIGTERM received. {signum=} {frame=}. Shutting down gRPC server...")
         self.grpc_manager.gracefully_exit = True
 
     def running_phase_sigquit_handler(self, signum=None, frame=None):
@@ -121,9 +119,7 @@ class GrpcSignalHandler:
         logger.error(
             "Received SIGQUIT from scheduler process. Scheduler failed, shutting down gRPC server."
         )
-        logger.info(
-            "Note: Crash dumps are handled by the scheduler process, not the gRPC server."
-        )
+        logger.info("Note: Crash dumps are handled by the scheduler process, not the gRPC server.")
         # Just exit cleanly - the scheduler handles crash dumps
         kill_process_tree(os.getpid(), include_parent=True)
 
@@ -134,13 +130,13 @@ class GrpcReqState:
 
     # Request identification
     request_id: str
-    grpc_context: Optional[grpc.aio.ServicerContext]
+    grpc_context: grpc.aio.ServicerContext | None
 
     # Communication
     out_queue: asyncio.Queue
     finished: bool
     event: asyncio.Event
-    obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput]
+    obj: TokenizedGenerateReqInput | TokenizedEmbeddingReqInput
 
     # Metrics (same as TokenizerManager's ReqState)
     time_stats: APIServerReqTimeStats
@@ -151,18 +147,18 @@ class GrpcReqState:
     input_logprobs_sent: bool = False  # Track if input logprobs were sent in streaming
 
     # Token accumulation (for non-streaming)
-    output_ids: List[int] = dataclasses.field(default_factory=list)
-    input_token_logprobs_val: List[float] = dataclasses.field(default_factory=list)
-    input_token_logprobs_idx: List[int] = dataclasses.field(default_factory=list)
-    output_token_logprobs_val: List[float] = dataclasses.field(default_factory=list)
-    output_token_logprobs_idx: List[int] = dataclasses.field(default_factory=list)
-    input_top_logprobs_val: List[List[float]] = dataclasses.field(default_factory=list)
-    input_top_logprobs_idx: List[List[int]] = dataclasses.field(default_factory=list)
-    output_top_logprobs_val: List[List[float]] = dataclasses.field(default_factory=list)
-    output_top_logprobs_idx: List[List[int]] = dataclasses.field(default_factory=list)
+    output_ids: list[int] = dataclasses.field(default_factory=list)
+    input_token_logprobs_val: list[float] = dataclasses.field(default_factory=list)
+    input_token_logprobs_idx: list[int] = dataclasses.field(default_factory=list)
+    output_token_logprobs_val: list[float] = dataclasses.field(default_factory=list)
+    output_token_logprobs_idx: list[int] = dataclasses.field(default_factory=list)
+    input_top_logprobs_val: list[list[float]] = dataclasses.field(default_factory=list)
+    input_top_logprobs_idx: list[list[int]] = dataclasses.field(default_factory=list)
+    output_top_logprobs_val: list[list[float]] = dataclasses.field(default_factory=list)
+    output_top_logprobs_idx: list[list[int]] = dataclasses.field(default_factory=list)
 
     # Session state
-    session_id: Optional[str] = None
+    session_id: str | None = None
     is_session_request: bool = False
 
 
@@ -196,7 +192,7 @@ class GrpcRequestManager:
         )
 
         # State Management (from TokenizerManager)
-        self.rid_to_state: Dict[str, GrpcReqState] = {}
+        self.rid_to_state: dict[str, GrpcReqState] = {}
         self.asyncio_tasks: set = set()
         self.gracefully_exit = False
         self.no_create_loop = False
@@ -239,9 +235,9 @@ class GrpcRequestManager:
     async def generate_request(
         self,
         obj: TokenizedGenerateReqInput,
-        request_id: Optional[str] = None,
-        grpc_context: Optional[grpc.aio.ServicerContext] = None,
-    ) -> AsyncGenerator[Union[Dict, List[Dict]], None]:
+        request_id: str | None = None,
+        grpc_context: grpc.aio.ServicerContext | None = None,
+    ) -> AsyncGenerator[dict | list[dict], None]:
         """
         Submit a generation request to the scheduler with n>1 parallel sampling support.
 
@@ -254,9 +250,7 @@ class GrpcRequestManager:
         n = getattr(obj.sampling_params, "n", 1)
 
         if n <= 1:
-            async for response in self._handle_single_request(
-                obj, request_id, grpc_context
-            ):
+            async for response in self._handle_single_request(obj, request_id, grpc_context):
                 yield response
             return
 
@@ -300,9 +294,7 @@ class GrpcRequestManager:
             request_ids.append(gen_request_id)
 
             # Start generation request
-            generators.append(
-                self._handle_single_request(gen_obj, gen_request_id, grpc_context)
-            )
+            generators.append(self._handle_single_request(gen_obj, gen_request_id, grpc_context))
 
         # Handle response aggregation
         is_stream = getattr(obj, "stream", False)
@@ -328,9 +320,7 @@ class GrpcRequestManager:
 
             # Process responses as they arrive
             while task_map:
-                done, _ = await asyncio.wait(
-                    task_map.keys(), return_when=asyncio.FIRST_COMPLETED
-                )
+                done, _ = await asyncio.wait(task_map.keys(), return_when=asyncio.FIRST_COMPLETED)
 
                 for task in done:
                     generator = task_map.pop(task)
@@ -356,8 +346,8 @@ class GrpcRequestManager:
     async def _handle_single_request(
         self,
         obj: TokenizedGenerateReqInput,
-        request_id: Optional[str] = None,
-        grpc_context: Optional[grpc.aio.ServicerContext] = None,
+        request_id: str | None = None,
+        grpc_context: grpc.aio.ServicerContext | None = None,
     ):
         """Handle a single request - core implementation without n>1 logic."""
         # Generate request ID if not provided
@@ -411,7 +401,7 @@ class GrpcRequestManager:
     async def embedding_request(
         self,
         obj: TokenizedEmbeddingReqInput,
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
     ) -> asyncio.Future:
         """
         Submit an embedding request to the scheduler.
@@ -526,9 +516,7 @@ class GrpcRequestManager:
                 if self.gracefully_exit:
                     logger.debug(f"ZMQ recv interrupted during shutdown: {e}")
                     break
-                logger.error(
-                    f"ZMQ error in handle loop: {e}\n{get_exception_traceback()}"
-                )
+                logger.error(f"ZMQ error in handle loop: {e}\n{get_exception_traceback()}")
                 break
             except Exception as e:
                 logger.error(f"Handle loop error: {e}\n{get_exception_traceback()}")
@@ -551,39 +539,23 @@ class GrpcRequestManager:
 
         # Accumulate input token logprobs (only if list is non-empty)
         if len(batch_out.input_token_logprobs_val) > 0:
-            state.input_token_logprobs_val.extend(
-                batch_out.input_token_logprobs_val[batch_index]
-            )
-            state.input_token_logprobs_idx.extend(
-                batch_out.input_token_logprobs_idx[batch_index]
-            )
+            state.input_token_logprobs_val.extend(batch_out.input_token_logprobs_val[batch_index])
+            state.input_token_logprobs_idx.extend(batch_out.input_token_logprobs_idx[batch_index])
 
         # Always accumulate output token logprobs
-        state.output_token_logprobs_val.extend(
-            batch_out.output_token_logprobs_val[batch_index]
-        )
-        state.output_token_logprobs_idx.extend(
-            batch_out.output_token_logprobs_idx[batch_index]
-        )
+        state.output_token_logprobs_val.extend(batch_out.output_token_logprobs_val[batch_index])
+        state.output_token_logprobs_idx.extend(batch_out.output_token_logprobs_idx[batch_index])
 
         # Handle top logprobs if requested
         if state.obj.top_logprobs_num > 0:
             # Accumulate input top logprobs (only if list is non-empty)
             if len(batch_out.input_top_logprobs_val) > 0:
-                state.input_top_logprobs_val.extend(
-                    batch_out.input_top_logprobs_val[batch_index]
-                )
-                state.input_top_logprobs_idx.extend(
-                    batch_out.input_top_logprobs_idx[batch_index]
-                )
+                state.input_top_logprobs_val.extend(batch_out.input_top_logprobs_val[batch_index])
+                state.input_top_logprobs_idx.extend(batch_out.input_top_logprobs_idx[batch_index])
 
             # Always accumulate output top logprobs
-            state.output_top_logprobs_val.extend(
-                batch_out.output_top_logprobs_val[batch_index]
-            )
-            state.output_top_logprobs_idx.extend(
-                batch_out.output_top_logprobs_idx[batch_index]
-            )
+            state.output_top_logprobs_val.extend(batch_out.output_top_logprobs_val[batch_index])
+            state.output_top_logprobs_idx.extend(batch_out.output_top_logprobs_idx[batch_index])
 
     async def _handle_batch_output(self, batch_out: BatchTokenIDOutput):
         """Handle batch generation output from scheduler."""
@@ -615,21 +587,13 @@ class GrpcRequestManager:
                 "token_ids": batch_out.output_ids[i] if batch_out.output_ids else [],
                 "finished": batch_out.finished_reasons[i] is not None,
                 "meta_info": {
-                    "prompt_tokens": (
-                        batch_out.prompt_tokens[i] if batch_out.prompt_tokens else 0
-                    ),
+                    "prompt_tokens": (batch_out.prompt_tokens[i] if batch_out.prompt_tokens else 0),
                     "completion_tokens": (
-                        batch_out.completion_tokens[i]
-                        if batch_out.completion_tokens
-                        else 0
+                        batch_out.completion_tokens[i] if batch_out.completion_tokens else 0
                     ),
-                    "cached_tokens": (
-                        batch_out.cached_tokens[i] if batch_out.cached_tokens else 0
-                    ),
+                    "cached_tokens": (batch_out.cached_tokens[i] if batch_out.cached_tokens else 0),
                     "finish_reason": (
-                        batch_out.finished_reasons[i]
-                        if batch_out.finished_reasons[i]
-                        else None
+                        batch_out.finished_reasons[i] if batch_out.finished_reasons[i] else None
                     ),
                 },
             }
@@ -675,11 +639,7 @@ class GrpcRequestManager:
                     # NOTE: this is different than TokenizerManager, which always accumulates
                     def get_part(attr_name):
                         source_list = getattr(batch_out, attr_name, None)
-                        return (
-                            source_list[i]
-                            if source_list and i < len(source_list)
-                            else []
-                        )
+                        return source_list[i] if source_list and i < len(source_list) else []
 
                     output_data["output_logprobs"] = {
                         "token_logprobs_val": batch_out.output_token_logprobs_val[i],
@@ -734,13 +694,9 @@ class GrpcRequestManager:
             result = {
                 "request_id": rid,
                 "embedding": batch_out.embeddings[i],
-                "prompt_tokens": (
-                    batch_out.prompt_tokens[i] if batch_out.prompt_tokens else 0
-                ),
+                "prompt_tokens": (batch_out.prompt_tokens[i] if batch_out.prompt_tokens else 0),
                 "finish_reason": (
-                    batch_out.finished_reasons[i]
-                    if batch_out.finished_reasons
-                    else None
+                    batch_out.finished_reasons[i] if batch_out.finished_reasons else None
                 ),
             }
 
@@ -766,13 +722,9 @@ class GrpcRequestManager:
         result = {
             "request_id": rid,
             "healthy": True,  # If we got a response, scheduler is healthy
-            "output_text": (
-                health_out.output_str if hasattr(health_out, "output_str") else ""
-            ),
+            "output_text": (health_out.output_str if hasattr(health_out, "output_str") else ""),
             "finish_reason": (
-                health_out.finish_reason
-                if hasattr(health_out, "finish_reason")
-                else "stop"
+                health_out.finish_reason if hasattr(health_out, "finish_reason") else "stop"
             ),
         }
 
@@ -881,9 +833,7 @@ class GrpcRequestManager:
         # Cancel all pending requests
         for rid, state in list(self.rid_to_state.items()):
             if not state.finished:
-                await state.out_queue.put(
-                    {"error": "Server shutting down", "shutdown": True}
-                )
+                await state.out_queue.put({"error": "Server shutting down", "shutdown": True})
                 state.finished = True
                 state.event.set()
 
@@ -912,7 +862,7 @@ class GrpcRequestManager:
 
         logger.info("GrpcRequestManager shutdown complete")
 
-    def get_server_info(self) -> Dict[str, Any]:
+    def get_server_info(self) -> dict[str, Any]:
         """Get server information for health checks."""
         return {
             "active_requests": len(self.rid_to_state),
@@ -921,8 +871,8 @@ class GrpcRequestManager:
         }
 
     async def get_loads(
-        self, include: List[str], dp_rank: Optional[int] = None
-    ) -> List[GetLoadsReqOutput]:
+        self, include: list[str], dp_rank: int | None = None
+    ) -> list[GetLoadsReqOutput]:
         """
         Get comprehensive load metrics from the scheduler.
 
@@ -952,9 +902,7 @@ class GrpcRequestManager:
 
         self.no_create_loop = True
         loop = get_or_create_event_loop()
-        self.asyncio_tasks.add(
-            loop.create_task(print_exception_wrapper(self.handle_loop))
-        )
+        self.asyncio_tasks.add(loop.create_task(print_exception_wrapper(self.handle_loop)))
 
         self.event_loop = loop
 
@@ -964,13 +912,9 @@ class GrpcRequestManager:
             signal_handler = GrpcSignalHandler(self)
             loop.add_signal_handler(signal.SIGTERM, signal_handler.sigterm_handler)
             # Update the signal handler for the process. It overrides the sigquit handler in the launch phase.
-            loop.add_signal_handler(
-                signal.SIGQUIT, signal_handler.running_phase_sigquit_handler
-            )
+            loop.add_signal_handler(signal.SIGQUIT, signal_handler.running_phase_sigquit_handler)
 
-        self.asyncio_tasks.add(
-            loop.create_task(print_exception_wrapper(self.sigterm_watchdog))
-        )
+        self.asyncio_tasks.add(loop.create_task(print_exception_wrapper(self.sigterm_watchdog)))
 
     async def sigterm_watchdog(self):
         """Watchdog to handle SIGTERM gracefully, matching TokenizerManager pattern."""
@@ -979,8 +923,8 @@ class GrpcRequestManager:
 
     def _req_stats_init(
         self,
-        obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput],
-        grpc_context: Optional[grpc.ServicerContext] = None,
+        obj: TokenizedGenerateReqInput | TokenizedEmbeddingReqInput,
+        grpc_context: grpc.ServicerContext | None = None,
     ):
         calibrate_time_diff()
         # Create and register request state
