@@ -60,6 +60,14 @@ In HTTP mode, SMG is a smart proxy — routing and failover only. In gRPC mode, 
     monitoring. This works with upstream vLLM as-is; no vLLM source patch is
     required.
 
+    Current limitation: restart recovery is based on observed sequence numbers.
+    SMG can detect a backend restart when the first fresh batch on reconnect has
+    a lower sequence number than the last batch it had already applied. If the
+    restarted backend catches up before SMG reconnects, the current protocol
+    does not expose a producer epoch, so that restart is indistinguishable from
+    normal continuation. Unsupported null-block `BlockStored` layouts also fail
+    closed today because the stream does not carry per-block token ranges.
+
 === "TensorRT-LLM"
 
     ```bash

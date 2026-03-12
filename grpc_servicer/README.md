@@ -51,6 +51,16 @@ If you carry a local vLLM patch that auto-enables KV events for gRPC mode, that
 patch is only a convenience feature. It is not required for compatibility with
 SMG.
 
+Current limitation: restart recovery is sequence-based. If the backend restarts
+and SMG reconnects while the new producer is still behind the previously seen
+sequence number, SMG detects the regression, clears that worker's KV state, and
+rebuilds from sequence 0. If the backend restarts and catches back up before
+SMG reconnects, the protocol has no producer epoch/generation marker, so SMG
+cannot prove that a restart happened. A future protocol update should add a
+producer instance identifier to `SubscribeKvEvents`, and vLLM null-block
+`BlockStored` layouts would need per-block token ranges to support lossless
+translation instead of the current fail-closed behavior.
+
 ## Architecture
 
 ```

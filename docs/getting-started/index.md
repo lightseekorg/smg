@@ -236,6 +236,13 @@ Use these when workers are not started via `smg serve`.
     events over `SubscribeKvEvents` for SMG features like cache-aware routing.
     Basic gRPC inference does not require it.
 
+    Current limitation: SMG's restart recovery for KV events is sequence-based.
+    That catches detectable producer resets, but a producer that restarts and
+    catches back up before reconnect remains ambiguous until the protocol grows
+    a producer epoch/generation identifier. Null-block `BlockStored` payloads
+    also remain unsupported because they cannot be translated losslessly
+    without per-block token range metadata.
+
 === "TensorRT-LLM (gRPC)"
 
     ```bash
