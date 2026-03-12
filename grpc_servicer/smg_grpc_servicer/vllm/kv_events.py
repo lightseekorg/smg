@@ -192,7 +192,7 @@ class VllmKvEventBridge:
                         self._buffer
                         and (
                             self._buffer[-1].sequence_number >= next_seq
-                            or next_seq >= self._next_sequence_number
+                            or next_seq > self._next_sequence_number
                         )
                     )
                 )
@@ -256,11 +256,7 @@ class VllmKvEventBridge:
                         continue
                     _, seq_bytes, payload = frames
                     rank_seq = int.from_bytes(seq_bytes, "big")
-                    if rank_seq <= self._last_rank_sequence.get(rank, -1):
-                        continue
-                    batch = self._decoder.decode(payload)
-                    self._last_rank_sequence[rank] = rank_seq
-                    await self._append_batch(batch)
+                    await self._ingest_rank_batch(rank, rank_seq, payload)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -280,6 +276,7 @@ class VllmKvEventBridge:
 
         oldest = self._buffer[0].sequence_number
         latest = self._buffer[-1].sequence_number
+        producer_next = self._next_sequence_number
 
         if next_seq and next_seq < oldest:
             logger.warning(
@@ -289,12 +286,12 @@ class VllmKvEventBridge:
             )
             return oldest
 
-        if next_seq and next_seq > latest:
+        if next_seq and next_seq > producer_next:
             logger.warning(
-                "Requested KV event replay from future sequence %s; latest=%s. "
+                "Requested KV event replay from future sequence %s; producer_next=%s. "
                 "Assuming producer restart and replaying from oldest=%s",
                 next_seq,
-                latest,
+                producer_next,
                 oldest,
             )
             return oldest
@@ -314,11 +311,26 @@ class VllmKvEventBridge:
                 continue
             seq_bytes, payload = frames
             rank_seq = int.from_bytes(seq_bytes, "big", signed=True)
-            if rank_seq < 0 or rank_seq <= self._last_rank_sequence.get(rank, -1):
+            if rank_seq < 0:
                 continue
-            batch = self._decoder.decode(payload)
-            self._last_rank_sequence[rank] = rank_seq
-            await self._append_batch(batch)
+            await self._ingest_rank_batch(rank, rank_seq, payload)
+
+    async def _ingest_rank_batch(self, rank: int, rank_seq: int, payload: bytes) -> None:
+        last_rank_seq = self._last_rank_sequence.get(rank, -1)
+        if rank_seq == last_rank_seq:
+            return
+        if rank_seq < last_rank_seq:
+            logger.warning(
+                "KV event publisher sequence regressed for rank %s: previous=%s received=%s. "
+                "Assuming publisher restart and accepting new batches from this rank",
+                rank,
+                last_rank_seq,
+                rank_seq,
+            )
+
+        batch = self._decoder.decode(payload)
+        await self._append_batch(batch)
+        self._last_rank_sequence[rank] = rank_seq
 
     async def _append_batch(self, batch: VllmKvEventBatch) -> None:
         translated = common_pb2.KvEventBatch(

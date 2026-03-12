@@ -233,3 +233,99 @@ def test_kv_event_bridge_fails_closed_on_unsupported_blockstored_layout():
             publisher.shutdown()
 
     asyncio.run(run())
+
+
+def test_kv_event_bridge_accepts_batches_after_rank_sequence_regression():
+    async def run() -> None:
+        import msgspec.msgpack
+
+        config = _make_config()
+        bridge = VllmKvEventBridge(config, data_parallel_size=1)
+
+        first_payload = msgspec.msgpack.encode(
+            KVEventBatch(
+                ts=time.time(),
+                events=[
+                    BlockStored(
+                        block_hashes=[601],
+                        parent_block_hash=None,
+                        token_ids=[1, 2, 3, 4],
+                        block_size=4,
+                        lora_id=None,
+                        medium="GPU",
+                        lora_name=None,
+                    )
+                ],
+                data_parallel_rank=0,
+            )
+        )
+        second_payload = msgspec.msgpack.encode(
+            KVEventBatch(
+                ts=time.time(),
+                events=[BlockRemoved(block_hashes=[601], medium="GPU")],
+                data_parallel_rank=0,
+            )
+        )
+
+        await bridge._ingest_rank_batch(0, 5, first_payload)
+        await bridge._ingest_rank_batch(0, 1, second_payload)
+
+        buffered = list(bridge._buffer)
+        assert [batch.sequence_number for batch in buffered] == [1, 2]
+        assert bridge._last_rank_sequence[0] == 1
+        assert buffered[1].events[0].HasField("removed")
+
+    asyncio.run(run())
+
+
+def test_kv_event_bridge_caught_up_subscriber_waits_for_new_batch():
+    async def run() -> None:
+        import msgspec.msgpack
+
+        config = _make_config()
+        bridge = VllmKvEventBridge(config, data_parallel_size=1)
+        bridge._task = asyncio.create_task(asyncio.sleep(60))
+
+        try:
+            first_payload = msgspec.msgpack.encode(
+                KVEventBatch(
+                    ts=time.time(),
+                    events=[
+                        BlockStored(
+                            block_hashes=[701],
+                            parent_block_hash=None,
+                            token_ids=[1, 2, 3, 4],
+                            block_size=4,
+                            lora_id=None,
+                            medium="GPU",
+                            lora_name=None,
+                        )
+                    ],
+                    data_parallel_rank=0,
+                )
+            )
+            second_payload = msgspec.msgpack.encode(
+                KVEventBatch(
+                    ts=time.time(),
+                    events=[BlockRemoved(block_hashes=[701], medium="GPU")],
+                    data_parallel_rank=0,
+                )
+            )
+
+            await bridge._ingest_rank_batch(0, 1, first_payload)
+
+            stream = bridge.subscribe(2)
+            next_batch_task = asyncio.create_task(anext(stream))
+            await asyncio.sleep(0.1)
+            assert not next_batch_task.done()
+
+            await bridge._ingest_rank_batch(0, 2, second_payload)
+            second = await asyncio.wait_for(next_batch_task, timeout=2)
+            assert second.sequence_number == 2
+            assert second.events[0].HasField("removed")
+
+            await stream.aclose()
+        finally:
+            await bridge.shutdown()
+
+    asyncio.run(run())
