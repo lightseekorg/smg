@@ -950,42 +950,46 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     // Submit startup tokenizer job if tokenizer path is configured
     // This runs before worker initialization to ensure tokenizer is available
-    if let Some(tokenizer_source) = config
-        .router_config
-        .tokenizer_path
-        .as_ref()
-        .or(config.router_config.model_path.as_ref())
-    {
-        info!("Loading startup tokenizer from: {}", tokenizer_source);
+    if !config.router_config.disable_tokenizer_autoload {
+        if let Some(tokenizer_source) = config
+            .router_config
+            .tokenizer_path
+            .as_ref()
+            .or(config.router_config.model_path.as_ref())
+        {
+            info!("Loading startup tokenizer from: {}", tokenizer_source);
 
-        #[expect(
-            clippy::expect_used,
-            reason = "JobQueue was just initialized above; absence is unreachable"
-        )]
-        let job_queue = app_context
-            .worker_job_queue
-            .get()
-            .expect("JobQueue should be initialized");
+            #[expect(
+                clippy::expect_used,
+                reason = "JobQueue was just initialized above; absence is unreachable"
+            )]
+            let job_queue = app_context
+                .worker_job_queue
+                .get()
+                .expect("JobQueue should be initialized");
 
-        let tokenizer_config = TokenizerConfigRequest {
-            id: TokenizerRegistry::generate_id(),
-            name: tokenizer_source.clone(),
-            source: tokenizer_source.clone(),
-            chat_template_path: config.router_config.chat_template.clone(),
-            cache_config: config.router_config.tokenizer_cache.to_option(),
-            fail_on_duplicate: false,
-        };
+            let tokenizer_config = TokenizerConfigRequest {
+                id: TokenizerRegistry::generate_id(),
+                name: tokenizer_source.clone(),
+                source: tokenizer_source.clone(),
+                chat_template_path: config.router_config.chat_template.clone(),
+                cache_config: config.router_config.tokenizer_cache.to_option(),
+                fail_on_duplicate: false,
+            };
 
-        let job = Job::AddTokenizer {
-            config: Box::new(tokenizer_config),
-        };
+            let job = Job::AddTokenizer {
+                config: Box::new(tokenizer_config),
+            };
 
-        job_queue
-            .submit(job)
-            .await
-            .map_err(|e| format!("Failed to submit startup tokenizer job: {e}"))?;
+            job_queue
+                .submit(job)
+                .await
+                .map_err(|e| format!("Failed to submit startup tokenizer job: {e}"))?;
 
-        info!("Startup tokenizer job submitted (will complete in background)");
+            info!("Startup tokenizer job submitted (will complete in background)");
+        }
+    } else {
+        info!("Tokenizer autoload disabled via config; skipping startup tokenizer load");
     }
 
     info!(

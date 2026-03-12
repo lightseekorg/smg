@@ -102,11 +102,14 @@ class RouterArgs:
     model_path: str | None = None
     tokenizer_path: str | None = None
     chat_template: str | None = None
+    # Disable automatic tokenizer loading at startup and worker registration
+    disable_tokenizer_autoload: bool = False
     # Tokenizer cache configuration
     tokenizer_cache_enable_l0: bool = False
     tokenizer_cache_l0_max_entries: int = 10000
     tokenizer_cache_enable_l1: bool = False
     tokenizer_cache_l1_max_memory: int = 50 * 1024 * 1024  # 50MB
+    # Parser configuration
     reasoning_parser: str | None = None
     tool_call_parser: str | None = None
     # MCP server configuration
@@ -729,6 +732,11 @@ class RouterArgs:
             type=str,
             default=None,
             help="Chat template path (optional)",
+        )
+        tokenizer_group.add_argument(
+            f"--{prefix}disable-tokenizer-autoload",
+            action="store_true",
+            help="Disable automatic tokenizer loading at startup. Use this to avoid loading tokenizers when not needed (e.g., pure load balancing scenarios).",
         )
         tokenizer_group.add_argument(
             f"--{prefix}tokenizer-cache-enable-l0",

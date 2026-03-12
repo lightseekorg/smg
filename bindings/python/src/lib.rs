@@ -433,6 +433,7 @@ struct Router {
     model_path: Option<String>,
     tokenizer_path: Option<String>,
     chat_template: Option<String>,
+    disable_tokenizer_autoload: bool,
     tokenizer_cache_enable_l0: bool,
     tokenizer_cache_l0_max_entries: usize,
     tokenizer_cache_enable_l1: bool,
@@ -680,6 +681,7 @@ impl Router {
                 enable_l1: self.tokenizer_cache_enable_l1,
                 l1_max_memory: self.tokenizer_cache_l1_max_memory,
             })
+            .disable_tokenizer_autoload(self.disable_tokenizer_autoload)
             .history_backend(history_backend)
             .maybe_api_key(self.api_key.as_ref())
             .maybe_discovery(discovery)
@@ -789,6 +791,7 @@ impl Router {
         model_path = None,
         tokenizer_path = None,
         chat_template = None,
+        disable_tokenizer_autoload = false,
         tokenizer_cache_enable_l0 = false,
         tokenizer_cache_l0_max_entries = 10000,
         tokenizer_cache_enable_l1 = false,
@@ -887,6 +890,7 @@ impl Router {
         model_path: Option<String>,
         tokenizer_path: Option<String>,
         chat_template: Option<String>,
+        disable_tokenizer_autoload: bool,
         tokenizer_cache_enable_l0: bool,
         tokenizer_cache_l0_max_entries: usize,
         tokenizer_cache_enable_l1: bool,
@@ -995,6 +999,7 @@ impl Router {
             model_path,
             tokenizer_path,
             chat_template,
+            disable_tokenizer_autoload,
             tokenizer_cache_enable_l0,
             tokenizer_cache_l0_max_entries,
             tokenizer_cache_enable_l1,

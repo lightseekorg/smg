@@ -423,6 +423,10 @@ struct CliArgs {
     #[arg(long, help_heading = "Tokenizer")]
     chat_template: Option<String>,
 
+    /// Disable automatic tokenizer loading at startup and worker registration
+    #[arg(long, default_value_t = false, help_heading = "Tokenizer")]
+    disable_tokenizer_autoload: bool,
+
     /// Enable L0 (exact match) tokenizer cache
     #[arg(long, default_value_t = false, help_heading = "Tokenizer")]
     tokenizer_cache_enable_l0: bool,
@@ -1114,6 +1118,7 @@ impl CliArgs {
                 enable_l1: self.tokenizer_cache_enable_l1,
                 l1_max_memory: self.tokenizer_cache_l1_max_memory,
             })
+            .disable_tokenizer_autoload(self.disable_tokenizer_autoload)
             .history_backend(history_backend)
             .log_level(&self.log_level)
             .maybe_api_key(self.api_key.as_ref())
