@@ -890,7 +890,6 @@ impl Router {
         model_path: Option<String>,
         tokenizer_path: Option<String>,
         chat_template: Option<String>,
-        disable_tokenizer_autoload: bool,
         tokenizer_cache_enable_l0: bool,
         tokenizer_cache_l0_max_entries: usize,
         tokenizer_cache_enable_l1: bool,
@@ -913,6 +912,7 @@ impl Router {
         otlp_traces_endpoint: String,
         control_plane_auth: Option<PyControlPlaneAuthConfig>,
         schema_config: Option<String>,
+        disable_tokenizer_autoload: bool,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
