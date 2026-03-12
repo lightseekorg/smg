@@ -138,14 +138,17 @@ impl PipelineStage for HarmonyResponseProcessingStage {
                 ctx.state.response.responses_iteration_result = Some(iteration_result);
                 Ok(None)
             }
-            RequestType::Generate(_) | RequestType::Embedding(_) | RequestType::Classify(_) => {
+            RequestType::Generate(_)
+            | RequestType::Embedding(_)
+            | RequestType::Classify(_)
+            | RequestType::Messages(_) => {
                 error!(
                     function = "HarmonyResponseProcessingStage::execute",
-                    "Generate/Embedding/Classify request type not supported in Harmony pipeline"
+                    "Generate/Embedding/Classify/Messages request type not supported in Harmony pipeline"
                 );
                 Err(error::internal_error(
                     "requests_not_supported_in_harmony",
-                    "Generate/Embedding/Classify requests not supported in Harmony pipeline",
+                    "Generate/Embedding/Classify/Messages requests not supported in Harmony pipeline",
                 ))
             }
         }

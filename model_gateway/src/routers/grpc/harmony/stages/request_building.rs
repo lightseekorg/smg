@@ -92,6 +92,16 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                     "Classify requests are not supported with Harmony models".to_string(),
                 ));
             }
+            RequestType::Messages(_) => {
+                error!(
+                    function = "HarmonyRequestBuildingStage::execute",
+                    "Messages requests not supported for Harmony models"
+                );
+                return Err(error::bad_request(
+                    "harmony_messages_not_supported",
+                    "Messages requests are not supported with Harmony models".to_string(),
+                ));
+            }
         };
 
         // Build gRPC request using token_ids directly (Harmony encoding already handled message rendering)

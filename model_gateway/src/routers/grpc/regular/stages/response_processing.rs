@@ -53,14 +53,14 @@ impl PipelineStage for ResponseProcessingStage {
             RequestType::Generate(_) => self.generate_stage.execute(ctx).await,
             RequestType::Embedding(_) => self.embedding_stage.execute(ctx).await,
             RequestType::Classify(_) => self.classify_stage.execute(ctx).await,
-            RequestType::Responses(_) => {
+            RequestType::Responses(_) | RequestType::Messages(_) => {
                 error!(
                     function = "ResponseProcessingStage::execute",
-                    "RequestType::Responses reached regular response processing stage"
+                    "Responses/Messages request type reached regular response processing stage"
                 );
                 Err(error::internal_error(
-                    "responses_in_wrong_pipeline",
-                    "RequestType::Responses reached regular response processing stage",
+                    "wrong_pipeline",
+                    "Responses/Messages should use their dedicated pipeline",
                 ))
             }
         }

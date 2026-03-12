@@ -13,6 +13,7 @@ use openai_protocol::{
     classify::{ClassifyRequest, ClassifyResponse},
     embedding::{EmbeddingRequest, EmbeddingResponse},
     generate::{GenerateRequest, GenerateResponse},
+    messages::{CreateMessageRequest, Message},
     responses::ResponsesRequest,
 };
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
@@ -52,6 +53,7 @@ pub(crate) enum RequestType {
     Responses(Arc<ResponsesRequest>),
     Embedding(Arc<EmbeddingRequest>),
     Classify(Arc<ClassifyRequest>),
+    Messages(Arc<CreateMessageRequest>),
 }
 
 /// Shared components (injected once at creation)
@@ -293,6 +295,28 @@ impl RequestContext {
         }
     }
 
+    /// Create context for messages request
+    #[expect(
+        dead_code,
+        reason = "scaffolding for Messages API pipeline, wired in follow-up PR"
+    )]
+    pub fn for_messages(
+        request: Arc<CreateMessageRequest>,
+        headers: Option<HeaderMap>,
+        model_id: Option<String>,
+        components: Arc<SharedComponents>,
+    ) -> Self {
+        Self {
+            input: RequestInput {
+                request_type: RequestType::Messages(request),
+                headers,
+                model_id,
+            },
+            components,
+            state: ProcessingState::default(),
+        }
+    }
+
     /// Get chat request (panics if not chat)
     #[expect(
         clippy::panic,
@@ -353,12 +377,45 @@ impl RequestContext {
         }
     }
 
+    /// Get messages request (panics if not messages)
+    #[expect(
+        dead_code,
+        reason = "scaffolding for Messages API pipeline, wired in follow-up PR"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via RequestType construction"
+    )]
+    pub fn messages_request(&self) -> &CreateMessageRequest {
+        match &self.input.request_type {
+            RequestType::Messages(req) => req.as_ref(),
+            _ => panic!("Expected messages request"),
+        }
+    }
+
+    /// Get Arc clone of messages request (panics if not messages)
+    #[expect(
+        dead_code,
+        reason = "scaffolding for Messages API pipeline, wired in follow-up PR"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via RequestType construction"
+    )]
+    pub fn messages_request_arc(&self) -> Arc<CreateMessageRequest> {
+        match &self.input.request_type {
+            RequestType::Messages(req) => Arc::clone(req),
+            _ => panic!("Expected messages request"),
+        }
+    }
+
     /// Check if request is streaming
     pub fn is_streaming(&self) -> bool {
         match &self.input.request_type {
             RequestType::Chat(req) => req.stream,
             RequestType::Generate(req) => req.stream,
             RequestType::Responses(req) => req.stream.unwrap_or(false),
+            RequestType::Messages(req) => req.stream.unwrap_or(false),
             RequestType::Embedding(_) => false, // Embeddings are never streaming
             RequestType::Classify(_) => false,  // Classification is never streaming
         }
@@ -543,4 +600,10 @@ pub(crate) enum FinalResponse {
     Embedding(EmbeddingResponse),
     /// Classification response
     Classify(ClassifyResponse),
+    /// Messages API response
+    #[expect(
+        dead_code,
+        reason = "scaffolding for Messages API pipeline, wired in follow-up PR"
+    )]
+    Messages(Message),
 }
