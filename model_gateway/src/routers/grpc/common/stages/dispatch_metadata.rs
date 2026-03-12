@@ -32,14 +32,11 @@ impl PipelineStage for DispatchMetadataStage {
         let request_id = proto_request.request_id().to_string();
         let model = match &ctx.input.request_type {
             RequestType::Chat(req) => req.model.clone(),
-            RequestType::Generate(_req) => {
-                // Generate requests don't have a model field
-                // Use model_id from input or UNKNOWN_MODEL_ID
-                ctx.input
-                    .model_id
-                    .clone()
-                    .unwrap_or_else(|| UNKNOWN_MODEL_ID.to_string())
-            }
+            RequestType::Generate(_) | RequestType::Completion(_) => ctx
+                .input
+                .model_id
+                .clone()
+                .unwrap_or_else(|| UNKNOWN_MODEL_ID.to_string()),
             RequestType::Responses(req) => req.model.clone(),
             RequestType::Embedding(req) => req.model.clone(),
             RequestType::Classify(req) => req.model.clone(),

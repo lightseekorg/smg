@@ -8,6 +8,7 @@ use axum::{
 use openai_protocol::{
     chat::ChatCompletionRequest,
     classify::ClassifyRequest,
+    completion::CompletionRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
     responses::{ResponsesGetParams, ResponsesRequest},
@@ -368,6 +369,56 @@ impl GrpcRouter {
             )
             .await
     }
+
+    /// Main route_completion implementation
+    async fn route_completion_impl(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &CompletionRequest,
+        model_id: Option<&str>,
+    ) -> Response {
+        debug!(
+            "Processing completion request for model: {}, stream={}",
+            model_id.unwrap_or(UNKNOWN_MODEL_ID),
+            body.stream
+        );
+
+        let request = Arc::new(body.clone());
+        let headers_cloned = headers.cloned();
+        let model_id_cloned = model_id.map(|s| s.to_string());
+        let components = self.shared_components.clone();
+        let pipeline = &self.pipeline;
+
+        RetryExecutor::execute_response_with_retry(
+            &self.retry_config,
+            |_attempt| {
+                let request = Arc::clone(&request);
+                let headers = headers_cloned.clone();
+                let model_id = model_id_cloned.clone();
+                let components = Arc::clone(&components);
+                async move {
+                    pipeline
+                        .execute_completion(request, headers, model_id, components)
+                        .await
+                }
+            },
+            |res, _attempt| is_retryable_status(res.status()),
+            |delay, attempt| {
+                Metrics::record_worker_retry(
+                    metrics_labels::WORKER_REGULAR,
+                    metrics_labels::ENDPOINT_COMPLETIONS,
+                );
+                Metrics::record_worker_retry_backoff(attempt, delay);
+            },
+            || {
+                Metrics::record_worker_retries_exhausted(
+                    metrics_labels::WORKER_REGULAR,
+                    metrics_labels::ENDPOINT_COMPLETIONS,
+                );
+            },
+        )
+        .await
+    }
 }
 
 impl std::fmt::Debug for GrpcRouter {
@@ -401,6 +452,15 @@ impl RouterTrait for GrpcRouter {
         model_id: Option<&str>,
     ) -> Response {
         self.route_chat_impl(headers, body, model_id).await
+    }
+
+    async fn route_completion(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &CompletionRequest,
+        model_id: Option<&str>,
+    ) -> Response {
+        self.route_completion_impl(headers, body, model_id).await
     }
 
     async fn route_responses(
