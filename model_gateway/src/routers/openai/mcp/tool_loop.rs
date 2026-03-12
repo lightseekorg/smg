@@ -480,18 +480,12 @@ pub(crate) fn inject_mcp_metadata_streaming(
             item.get("type").and_then(|t| t.as_str()) != Some(ItemType::MCP_LIST_TOOLS)
         });
 
-        for binding in mcp_servers.iter().rev() {
-            let list_tools_item =
-                session.build_mcp_list_tools_json(&binding.label, &binding.server_key);
-            output_array.insert(0, list_tools_item);
+        let mut prefix = Vec::with_capacity(mcp_servers.len() + state.mcp_call_items.len());
+        for binding in mcp_servers {
+            prefix.push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
         }
-
-        // Use stored transformed items (no reconstruction needed)
-        let mut insert_pos = mcp_servers.len();
-        for item in &state.mcp_call_items {
-            output_array.insert(insert_pos, item.clone());
-            insert_pos += 1;
-        }
+        prefix.extend(state.mcp_call_items.iter().cloned());
+        output_array.splice(0..0, prefix);
     } else if let Some(obj) = response.as_object_mut() {
         let mut output_items = Vec::new();
         for binding in mcp_servers {
@@ -728,24 +722,15 @@ fn build_incomplete_response(
 
         // Add mcp_list_tools and executed mcp_call items at the beginning
         if state.total_calls > 0 || !incomplete_items.is_empty() {
-            for binding in mcp_servers.iter().rev() {
-                let list_tools_item =
-                    session.build_mcp_list_tools_json(&binding.label, &binding.server_key);
-                output_array.insert(0, list_tools_item);
+            let mut prefix = Vec::with_capacity(
+                mcp_servers.len() + state.mcp_call_items.len() + incomplete_items.len(),
+            );
+            for binding in mcp_servers {
+                prefix.push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
             }
-
-            // Insert stored transformed items for executed calls (no reconstruction needed)
-            let mut insert_pos = mcp_servers.len();
-            for item in &state.mcp_call_items {
-                output_array.insert(insert_pos, item.clone());
-                insert_pos += 1;
-            }
-
-            // Add incomplete mcp_call items (never executed, so no stored item)
-            for item in incomplete_items {
-                output_array.insert(insert_pos, item);
-                insert_pos += 1;
-            }
+            prefix.extend(state.mcp_call_items.iter().cloned());
+            prefix.extend(incomplete_items);
+            output_array.splice(0..0, prefix);
         }
     }
 

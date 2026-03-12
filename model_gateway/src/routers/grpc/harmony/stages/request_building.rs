@@ -62,34 +62,18 @@ impl PipelineStage for HarmonyRequestBuildingStage {
         let request_id = match &ctx.input.request_type {
             RequestType::Chat(_) => format!("chatcmpl-{}", Uuid::now_v7()),
             RequestType::Responses(_) => format!("responses-{}", Uuid::now_v7()),
-            RequestType::Generate(_) => {
+            request_type @ (RequestType::Generate(_)
+            | RequestType::Embedding(_)
+            | RequestType::Classify(_)
+            | RequestType::Messages(_)) => {
                 error!(
                     function = "HarmonyRequestBuildingStage::execute",
-                    "Generate request type not supported for Harmony models"
+                    request_type = %request_type,
+                    "{request_type} request type not supported for Harmony models"
                 );
                 return Err(error::bad_request(
-                    "harmony_generate_not_supported",
-                    "Generate requests are not supported with Harmony models".to_string(),
-                ));
-            }
-            RequestType::Embedding(_) => {
-                error!(
-                    function = "HarmonyRequestBuildingStage::execute",
-                    "Embedding requests not supported for Harmony models"
-                );
-                return Err(error::bad_request(
-                    "harmony_embedding_not_supported",
-                    "Embedding requests are not supported with Harmony models".to_string(),
-                ));
-            }
-            RequestType::Classify(_) => {
-                error!(
-                    function = "HarmonyRequestBuildingStage::execute",
-                    "Classify requests not supported for Harmony models"
-                );
-                return Err(error::bad_request(
-                    "harmony_classify_not_supported",
-                    "Classify requests are not supported with Harmony models".to_string(),
+                    "not_supported_in_harmony",
+                    format!("{request_type} requests are not supported with Harmony models"),
                 ));
             }
         };

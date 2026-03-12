@@ -34,7 +34,6 @@ pub(in crate::routers::openai) struct ResponsesRouterContext<'a> {
     pub worker_registry: &'a WorkerRegistry,
     pub provider_registry: &'a ProviderRegistry,
     pub responses_components: &'a Arc<ResponsesComponents>,
-    pub client: &'a reqwest::Client,
 }
 
 /// Route a responses API request to the appropriate upstream worker.
@@ -57,14 +56,17 @@ pub(in crate::routers::openai) async fn route_responses(
         bool_to_static_str(streaming),
     );
 
-    let worker = match WorkerSelector::new(deps.worker_registry, deps.client)
-        .select_worker(&SelectWorkerRequest {
-            model_id: model,
-            headers,
-            provider: Some(ProviderType::OpenAI),
-            ..Default::default()
-        })
-        .await
+    let worker = match WorkerSelector::new(
+        deps.worker_registry,
+        &deps.responses_components.shared.client,
+    )
+    .select_worker(&SelectWorkerRequest {
+        model_id: model,
+        headers,
+        provider: Some(ProviderType::OpenAI),
+        ..Default::default()
+    })
+    .await
     {
         Ok(w) => w,
         Err(response) => {
@@ -82,12 +84,12 @@ pub(in crate::routers::openai) async fn route_responses(
 
     // Validate mutual exclusivity of conversation and previous_response_id
     // Treat empty strings as unset to match other metadata paths
-    let has_conversation = body.conversation.as_ref().is_some_and(|s| !s.is_empty());
+    let conversation = body.conversation.as_ref().filter(|s| !s.is_empty());
     let has_previous_response = body
         .previous_response_id
         .as_ref()
         .is_some_and(|s| !s.is_empty());
-    if has_conversation && has_previous_response {
+    if conversation.is_some() && has_previous_response {
         Metrics::record_router_error(
             metrics_labels::ROUTER_OPENAI,
             metrics_labels::BACKEND_EXTERNAL,
@@ -110,7 +112,7 @@ pub(in crate::routers::openai) async fn route_responses(
 
     let original_previous_response_id = match super::history::load_input_history(
         deps.responses_components,
-        body,
+        conversation.map(String::as_str),
         &mut request_body,
         model,
     )

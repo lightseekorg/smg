@@ -328,10 +328,11 @@ impl RequestPipeline {
             }
             Some(FinalResponse::Generate(_))
             | Some(FinalResponse::Embedding(_))
-            | Some(FinalResponse::Classify(_)) => {
+            | Some(FinalResponse::Classify(_))
+            | Some(FinalResponse::Messages(_)) => {
                 error!(
                     function = "execute_chat",
-                    "Wrong response type: expected Chat, got Generate/Embedding/Classify"
+                    "Wrong response type: expected Chat, got Generate/Embedding/Classify/Messages"
                 );
                 Metrics::record_router_error(
                     metrics_labels::ROUTER_GRPC,
@@ -431,10 +432,11 @@ impl RequestPipeline {
             }
             Some(FinalResponse::Chat(_))
             | Some(FinalResponse::Embedding(_))
-            | Some(FinalResponse::Classify(_)) => {
+            | Some(FinalResponse::Classify(_))
+            | Some(FinalResponse::Messages(_)) => {
                 error!(
                     function = "execute_generate",
-                    "Wrong response type: expected Generate, got Chat/Embedding/Classify"
+                    "Wrong response type: expected Generate, got Chat/Embedding/Classify/Messages"
                 );
                 Metrics::record_router_error(
                     metrics_labels::ROUTER_GRPC,
@@ -712,10 +714,11 @@ impl RequestPipeline {
             Some(FinalResponse::Chat(response)) => Ok(response),
             Some(FinalResponse::Generate(_))
             | Some(FinalResponse::Embedding(_))
-            | Some(FinalResponse::Classify(_)) => {
+            | Some(FinalResponse::Classify(_))
+            | Some(FinalResponse::Messages(_)) => {
                 error!(
                     function = "execute_chat_for_responses",
-                    "Wrong response type: expected Chat, got Generate/Embedding/Classify"
+                    "Wrong response type: expected Chat, got Generate/Embedding/Classify/Messages"
                 );
                 Err(error::internal_error(
                     "wrong_response_type",

@@ -4,8 +4,9 @@
 //! input before forwarding to the upstream provider.
 
 use axum::response::Response;
-use openai_protocol::responses::{
-    ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponsesRequest,
+use openai_protocol::{
+    event_types::ItemType,
+    responses::{ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponsesRequest},
 };
 use serde_json::Value;
 use smg_data_connector::{ConversationId, ListParams, ResponseId, SortOrder};
@@ -25,22 +26,18 @@ const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
 /// Returns `Ok(original_previous_response_id)` on success, or `Err(response)` on validation failure.
 pub(crate) async fn load_input_history(
     components: &ResponsesComponents,
-    body: &ResponsesRequest,
+    conversation: Option<&str>,
     request_body: &mut ResponsesRequest,
     model: &str,
 ) -> Result<Option<String>, Response> {
-    let original_previous_response_id = request_body
+    let previous_response_id = request_body
         .previous_response_id
-        .clone()
+        .take()
         .filter(|id| !id.is_empty());
 
     // Load items from previous response chain if specified
     let mut chain_items: Option<Vec<ResponseInputOutputItem>> = None;
-    if let Some(prev_id_str) = request_body
-        .previous_response_id
-        .take()
-        .filter(|id| !id.is_empty())
-    {
+    if let Some(prev_id_str) = &previous_response_id {
         let prev_id = ResponseId::from(prev_id_str.as_str());
         match components
             .response_storage
@@ -74,8 +71,8 @@ pub(crate) async fn load_input_history(
     }
 
     // Load conversation history if specified
-    if let Some(conv_id_str) = body.conversation.clone().filter(|id| !id.is_empty()) {
-        let conv_id = ConversationId::from(conv_id_str.as_str());
+    if let Some(conv_id_str) = conversation {
+        let conv_id = ConversationId::from(conv_id_str);
 
         if let Ok(None) = components
             .conversation_storage
@@ -129,7 +126,7 @@ pub(crate) async fn load_input_history(
                                 }
                             }
                         }
-                        "function_call" => {
+                        ItemType::FUNCTION_CALL => {
                             match serde_json::from_value::<ResponseInputOutputItem>(item.content) {
                                 Ok(func_call) => items.push(func_call),
                                 Err(e) => {
@@ -164,7 +161,7 @@ pub(crate) async fn load_input_history(
                     }
                 }
 
-                append_current_input(&mut items, &request_body.input, &conv_id.0);
+                append_current_input(&mut items, &request_body.input, conv_id_str);
                 request_body.input = ResponseInput::Items(items);
             }
             Err(e) => {
@@ -178,12 +175,12 @@ pub(crate) async fn load_input_history(
     // (enforced by the caller in route_responses), so this branch and the
     // conversation branch above never both modify request_body.input.
     if let Some(mut items) = chain_items {
-        let id_suffix = original_previous_response_id.as_deref().unwrap_or("new");
+        let id_suffix = previous_response_id.as_deref().unwrap_or("new");
         append_current_input(&mut items, &request_body.input, id_suffix);
         request_body.input = ResponseInput::Items(items);
     }
 
-    Ok(original_previous_response_id)
+    Ok(previous_response_id)
 }
 
 /// Deserialize ResponseInputOutputItems from a JSON array value

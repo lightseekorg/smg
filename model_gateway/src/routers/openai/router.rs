@@ -90,9 +90,7 @@ impl OpenAIRouter {
         });
 
         let responses_components = Arc::new(ResponsesComponents {
-            shared: SharedComponents {
-                client: ctx.client.clone(),
-            },
+            shared: Arc::clone(&shared_components),
             mcp_orchestrator: mcp_orchestrator.clone(),
             response_storage: ctx.response_storage.clone(),
             conversation_storage: ctx.conversation_storage.clone(),
@@ -166,7 +164,6 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             worker_registry: &self.worker_registry,
             provider_registry: &self.provider_registry,
             responses_components: &self.responses_components,
-            client: &self.responses_components.shared.client,
         };
         responses_route::route_responses(&deps, headers, body, model_id).await
     }
