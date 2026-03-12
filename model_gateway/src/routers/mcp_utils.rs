@@ -12,6 +12,18 @@ use tracing::{debug, warn};
 /// Default maximum tool loop iterations (safety limit).
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
 
+/// Compute the effective tool call limit from an optional user-specified max.
+///
+/// Clamps the user value to [`DEFAULT_MAX_ITERATIONS`] and falls back to
+/// the default when no user limit is given.
+#[inline]
+pub fn effective_tool_call_limit(max_tool_calls: Option<usize>) -> usize {
+    match max_tool_calls {
+        Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
+        None => DEFAULT_MAX_ITERATIONS,
+    }
+}
+
 /// Protocol-agnostic MCP server descriptor for connection setup.
 ///
 /// Contains only the fields needed by [`connect_mcp_servers`]. Each router
