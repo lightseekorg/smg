@@ -19,7 +19,7 @@ use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::{error, warn};
 
 use crate::{
-    observability::metrics::metrics_labels,
+    observability::{events::UnifiedRequestStats, metrics::metrics_labels},
     routers::{
         error,
         grpc::{
@@ -275,15 +275,14 @@ impl ResponseProcessor {
         // Build usage
         let usage = response_formatting::build_usage(&all_responses);
 
-        if let Some(request_stats) = request_stats {
-            request_stats.emit_event(
-                &dispatch.request_id,
-                &dispatch.model,
-                metrics_labels::BACKEND_REGULAR,
-                Some(200),
-                None,
-            );
-        }
+        UnifiedRequestStats::maybe_emit_event(
+            request_stats,
+            &dispatch.request_id,
+            &dispatch.model,
+            metrics_labels::BACKEND_REGULAR,
+            Some(200),
+            None,
+        );
 
         // Build final ChatCompletionResponse
         Ok(
@@ -369,15 +368,14 @@ impl ResponseProcessor {
             request_stats,
         } = response_collection::collect_responses(execution_result, request_logprobs).await?;
 
-        if let Some(request_stats) = request_stats {
-            request_stats.emit_event(
-                &dispatch.request_id,
-                &dispatch.model,
-                metrics_labels::BACKEND_REGULAR,
-                Some(200),
-                None,
-            );
-        }
+        UnifiedRequestStats::maybe_emit_event(
+            request_stats,
+            &dispatch.request_id,
+            &dispatch.model,
+            metrics_labels::BACKEND_REGULAR,
+            Some(200),
+            None,
+        );
 
         // Process each completion
         let mut result_array = Vec::new();

@@ -29,7 +29,10 @@ use super::{
     types::HarmonyChannelDelta, HarmonyParserAdapter,
 };
 use crate::{
-    observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
+    observability::{
+        events::UnifiedRequestStats,
+        metrics::{metrics_labels, Metrics, StreamingMetricsParams},
+    },
     routers::grpc::{
         common::{
             response_formatting::CompletionTokenTracker,
@@ -298,15 +301,14 @@ impl HarmonyStreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Error(error_wrapper) => {
-                    if let Some(request_stats) = decode_stream.take_request_stats() {
-                        request_stats.emit_event(
-                            &dispatch.request_id,
-                            &original_request.model,
-                            metrics_labels::BACKEND_HARMONY,
-                            error_wrapper.http_status_code(),
-                            Some(error_wrapper.message()),
-                        );
-                    }
+                    UnifiedRequestStats::maybe_emit_event(
+                        decode_stream.take_request_stats(),
+                        &dispatch.request_id,
+                        &original_request.model,
+                        metrics_labels::BACKEND_HARMONY,
+                        error_wrapper.http_status_code(),
+                        Some(error_wrapper.message()),
+                    );
                     return Err(format!("Server error: {}", error_wrapper.message()));
                 }
                 ProtoResponseVariant::None => {}
@@ -345,15 +347,14 @@ impl HarmonyStreamingProcessor {
             output_tokens: total_completion as u64,
         });
 
-        if let Some(request_stats) = decode_stream.take_request_stats() {
-            request_stats.emit_event(
-                &dispatch.request_id,
-                &original_request.model,
-                metrics_labels::BACKEND_HARMONY,
-                Some(200),
-                None,
-            );
-        }
+        UnifiedRequestStats::maybe_emit_event(
+            decode_stream.take_request_stats(),
+            &dispatch.request_id,
+            &original_request.model,
+            metrics_labels::BACKEND_HARMONY,
+            Some(200),
+            None,
+        );
 
         Ok(())
     }

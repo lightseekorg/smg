@@ -479,20 +479,6 @@ impl ProtoGenerateResponse {
             },
         }
     }
-
-    #[inline]
-    /// Returns true if this response should trigger backend request level stats lookup.
-    fn should_fetch_backend_request_stats(&self) -> bool {
-        match self {
-            Self::Sglang(resp) => matches!(
-                resp.response.as_ref(),
-                Some(sglang::generate_response::Response::Complete(_))
-                    | Some(sglang::generate_response::Response::Error(_))
-            ),
-            _ => false,
-        }
-    }
-
 }
 
 /// Response variant extracted from GenerateResponse
@@ -894,24 +880,6 @@ fn unified_stats_from_sglang(stats: sglang::RequestStats) -> UnifiedRequestStats
     }
 }
 
-#[inline]
-fn min_timestamp(current: Option<f64>, candidate: Option<f64>) -> Option<f64> {
-    match (current, candidate) {
-        (Some(curr), Some(next)) => Some(curr.min(next)),
-        (None, Some(next)) => Some(next),
-        (some_curr, None) => some_curr,
-    }
-}
-
-#[inline]
-fn max_timestamp(current: Option<f64>, candidate: Option<f64>) -> Option<f64> {
-    match (current, candidate) {
-        (Some(curr), Some(next)) => Some(curr.max(next)),
-        (None, Some(next)) => Some(next),
-        (some_curr, None) => some_curr,
-    }
-}
-
 /// Unified GenerateError
 /// Note: vLLM proto no longer has GenerateError - errors are returned via gRPC status
 #[derive(Clone)]
@@ -938,108 +906,30 @@ impl ProtoGenerateError {
     }
 }
 
-#[derive(Default)]
 struct RequestStatsCollector {
     enabled: bool,
-    engine: Option<&'static str>,
-    request_received_timestamp_s: Option<f64>,
-    first_token_generated_timestamp_s: Option<f64>,
-    request_finished_timestamp_s: Option<f64>,
-    response_sent_timestamp_s: Option<f64>,
-    cache_hit_rate: Option<f64>,
-    spec_decoding_acceptance_rate: Option<f64>,
-    prompt_tokens: Option<u64>,
-    completion_tokens: Option<u64>,
-    cached_tokens: Option<u64>,
+    stats: Option<UnifiedRequestStats>,
 }
 
 impl RequestStatsCollector {
-    #[inline]
-    fn reset(&mut self) {
-        self.engine = None;
-        self.request_received_timestamp_s = None;
-        self.first_token_generated_timestamp_s = None;
-        self.request_finished_timestamp_s = None;
-        self.response_sent_timestamp_s = None;
-        self.cache_hit_rate = None;
-        self.spec_decoding_acceptance_rate = None;
-        self.prompt_tokens = None;
-        self.completion_tokens = None;
-        self.cached_tokens = None;
-    }
-
     #[inline]
     fn record(&mut self, sample: &UnifiedRequestStats) {
         if !self.enabled {
             return;
         }
-
-        if let Some(current_engine) = self.engine {
-            if current_engine != sample.engine {
-                return;
-            }
-        } else {
-            self.engine = Some(sample.engine);
-        }
-
-        if let Some(pt) = sample.prompt_tokens {
-            self.prompt_tokens.get_or_insert(pt);
-        }
-        if let Some(ct) = sample.completion_tokens {
-            self.completion_tokens = Some(self.completion_tokens.unwrap_or(0) + ct);
-        }
-        if let Some(ct) = sample.cached_tokens {
-            self.cached_tokens.get_or_insert(ct);
-        }
-
-        self.request_received_timestamp_s = min_timestamp(
-            self.request_received_timestamp_s,
-            sample.request_received_timestamp_s,
-        );
-        self.first_token_generated_timestamp_s = min_timestamp(
-            self.first_token_generated_timestamp_s,
-            sample.first_token_generated_timestamp_s,
-        );
-        self.request_finished_timestamp_s = max_timestamp(
-            self.request_finished_timestamp_s,
-            sample.request_finished_timestamp_s,
-        );
-        self.response_sent_timestamp_s = max_timestamp(
-            self.response_sent_timestamp_s,
-            sample.response_sent_timestamp_s,
-        );
-
-        if let Some(rate) = sample.cache_hit_rate {
-            self.cache_hit_rate.get_or_insert(rate);
-        }
-        // Take the first reported spec decoding acceptance rate.
-        if let Some(rate) = sample.spec_decoding_acceptance_rate {
-            self.spec_decoding_acceptance_rate.get_or_insert(rate);
+        match &mut self.stats {
+            Some(existing) => existing.merge(sample),
+            None => self.stats = Some(sample.clone()),
         }
     }
 
     #[inline]
     fn take_stats(&mut self) -> Option<UnifiedRequestStats> {
-        if !self.enabled {
-            return None;
+        if self.enabled {
+            self.stats.take()
+        } else {
+            None
         }
-        let engine = self.engine?;
-
-        let stats = Some(UnifiedRequestStats {
-            engine,
-            error_message: None,
-            request_received_timestamp_s: self.request_received_timestamp_s,
-            first_token_generated_timestamp_s: self.first_token_generated_timestamp_s,
-            request_finished_timestamp_s: self.request_finished_timestamp_s,
-            response_sent_timestamp_s: self.response_sent_timestamp_s,
-            cache_hit_rate: self.cache_hit_rate,
-            spec_decoding_acceptance_rate: self.spec_decoding_acceptance_rate,
-            prompt_tokens: self.prompt_tokens,
-            completion_tokens: self.completion_tokens,
-            cached_tokens: self.cached_tokens,
-        });
-        self.reset();
-        stats
     }
 }
 
@@ -1091,7 +981,13 @@ impl ProtoStream {
                     })
                     .ok()?;
 
-                Some(response.stats.into_iter().map(unified_stats_from_sglang).collect())
+                Some(
+                    response
+                        .stats
+                        .into_iter()
+                        .map(unified_stats_from_sglang)
+                        .collect(),
+                )
             }
             Self::Vllm(_) | Self::Trtllm(_) => None,
         }
@@ -1102,8 +998,6 @@ impl ProtoStream {
 pub struct StatsProtoStream {
     stream: ProtoStream,
     request_stats: RequestStatsCollector,
-    backend_request_stats_ready: bool,
-    backend_request_stats_fetched: bool,
 }
 
 impl StatsProtoStream {
@@ -1112,46 +1006,21 @@ impl StatsProtoStream {
             stream,
             request_stats: RequestStatsCollector {
                 enabled: enable_request_statistics,
-                ..RequestStatsCollector::default()
+                stats: None,
             },
-            backend_request_stats_ready: false,
-            backend_request_stats_fetched: false,
         }
     }
 
-    /// Fetch and aggregate backend request stats once per request.
-    async fn fetch_backend_request_stats_once(&mut self) {
-        if self.backend_request_stats_fetched || !self.request_stats.enabled {
-            return;
-        }
-        self.backend_request_stats_fetched = true;
-
-        if !self.backend_request_stats_ready {
-            return;
-        }
-
-        if let Some(samples) = self.stream.fetch_backend_request_stats().await {
-            for sample in &samples {
-                self.request_stats.record(sample);
-            }
-        }
-    }
-
-    /// Advance the stream and record request stats.
+    /// Advance the stream and, when exhausted, fetch request stats from engine.
     pub async fn next(&mut self) -> Option<Result<ProtoGenerateResponse, tonic::Status>> {
         let response = self.stream.next().await;
 
-        if !self.request_stats.enabled {
-            return response;
-        }
-
-        if let Some(Ok(gen_response)) = response.as_ref() {
-            if gen_response.should_fetch_backend_request_stats() {
-                self.backend_request_stats_ready = true;
+        if response.is_none() && self.request_stats.enabled {
+            if let Some(samples) = self.stream.fetch_backend_request_stats().await {
+                for sample in &samples {
+                    self.request_stats.record(sample);
+                }
             }
-        } else if response.is_none() {
-            // Once request finishes, fetch stats.
-            self.fetch_backend_request_stats_once().await;
         }
 
         response

@@ -111,6 +111,83 @@ impl UnifiedRequestStats {
         }
         .emit();
     }
+
+    /// Emit a [`RequestStatsEvent`] if valid stats are provided, otherwise no-op.
+    pub fn maybe_emit_event(
+        stats: Option<Self>,
+        request_id: &str,
+        model: &str,
+        router_backend: &str,
+        http_status_code: Option<u16>,
+        error_message: Option<&str>,
+    ) {
+        if let Some(s) = stats {
+            s.emit_event(
+                request_id,
+                model,
+                router_backend,
+                http_status_code,
+                error_message,
+            );
+        }
+    }
+
+    /// Merge another stats sample into this one (for multi-sample aggregation).
+    /// Uses min for start timestamps, max for end timestamps, sum for
+    /// completion_tokens, and first seen value for the remaining fields.
+    /// Skip merging if engines differ.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        if self.engine != other.engine {
+            return;
+        }
+        self.request_received_timestamp_s = opt_min(
+            self.request_received_timestamp_s,
+            other.request_received_timestamp_s,
+        );
+        self.first_token_generated_timestamp_s = opt_min(
+            self.first_token_generated_timestamp_s,
+            other.first_token_generated_timestamp_s,
+        );
+
+        self.request_finished_timestamp_s = opt_max(
+            self.request_finished_timestamp_s,
+            other.request_finished_timestamp_s,
+        );
+        self.response_sent_timestamp_s = opt_max(
+            self.response_sent_timestamp_s,
+            other.response_sent_timestamp_s,
+        );
+
+        if let Some(pt) = other.prompt_tokens {
+            self.prompt_tokens.get_or_insert(pt);
+        }
+        if let Some(ct) = other.completion_tokens {
+            self.completion_tokens = Some(self.completion_tokens.unwrap_or(0) + ct);
+        }
+        if let Some(ct) = other.cached_tokens {
+            self.cached_tokens.get_or_insert(ct);
+        }
+        if let Some(rate) = other.cache_hit_rate {
+            self.cache_hit_rate.get_or_insert(rate);
+        }
+        if let Some(rate) = other.spec_decoding_acceptance_rate {
+            self.spec_decoding_acceptance_rate.get_or_insert(rate);
+        }
+    }
+}
+
+fn opt_min(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+fn opt_max(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Unified request-stats event emitted once per backend request.
