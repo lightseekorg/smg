@@ -65,4 +65,9 @@ sudo apt-get install -y --no-install-recommends libnuma-dev libibverbs-dev libib
 echo "Installing mooncake..."
 uv pip install mooncake-transfer-engine==0.3.8.post1
 
+# Install gRPC packages from source (not PyPI) so PR changes are always tested
+echo "Installing smg-grpc-proto and smg-grpc-servicer from source..."
+uv pip install -e crates/grpc_client/python/
+uv pip install -e grpc_servicer/
+
 echo "SGLang installation complete"
