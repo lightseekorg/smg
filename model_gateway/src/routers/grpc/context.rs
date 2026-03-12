@@ -56,6 +56,19 @@ pub(crate) enum RequestType {
     Messages(Arc<CreateMessageRequest>),
 }
 
+impl std::fmt::Display for RequestType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Chat(_) => write!(f, "Chat"),
+            Self::Generate(_) => write!(f, "Generate"),
+            Self::Responses(_) => write!(f, "Responses"),
+            Self::Embedding(_) => write!(f, "Embedding"),
+            Self::Classify(_) => write!(f, "Classify"),
+            Self::Messages(_) => write!(f, "Messages"),
+        }
+    }
+}
+
 /// Shared components (injected once at creation)
 pub(crate) struct SharedComponents {
     pub tokenizer_registry: Arc<TokenizerRegistry>,

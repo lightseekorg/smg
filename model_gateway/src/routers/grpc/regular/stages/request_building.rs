@@ -41,14 +41,15 @@ impl PipelineStage for RequestBuildingStage {
             RequestType::Generate(_) => self.generate_stage.execute(ctx).await,
             RequestType::Embedding(_) => self.embedding_stage.execute(ctx).await,
             RequestType::Classify(_) => self.embedding_stage.execute(ctx).await,
-            RequestType::Responses(_) | RequestType::Messages(_) => {
+            request_type @ (RequestType::Responses(_) | RequestType::Messages(_)) => {
                 error!(
                     function = "RequestBuildingStage::execute",
-                    "Responses/Messages request type reached regular request building stage"
+                    request_type = %request_type,
+                    "{request_type} request type reached regular request building stage"
                 );
                 Err(grpc_error::internal_error(
                     "wrong_pipeline",
-                    "Responses/Messages should use their dedicated pipeline",
+                    format!("{request_type} should use its dedicated pipeline"),
                 ))
             }
         }
