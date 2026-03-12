@@ -1,4 +1,3 @@
-# mypy: ignore-errors
 """
 Bridge vLLM's internal KV cache event publisher onto the SMG gRPC proto.
 """
@@ -79,7 +78,7 @@ def _translate_event(event) -> common_pb2.KvCacheEvent:
             event.block_size,
             len(event.block_hashes),
         )
-        for block_hash, token_ids in zip(event.block_hashes, token_chunks, strict=False):
+        for block_hash, token_ids in zip(event.block_hashes, token_chunks, strict=True):
             kwargs = {
                 "block_hash": int(block_hash),
                 "token_ids": token_ids,
@@ -89,7 +88,7 @@ def _translate_event(event) -> common_pb2.KvCacheEvent:
                 kwargs["lora_id"] = event.lora_id
             blocks.append(common_pb2.KvBlock(**kwargs))
 
-        stored_kwargs = {"blocks": blocks}
+        stored_kwargs: dict[str, object] = {"blocks": blocks}
         if event.parent_block_hash is not None:
             stored_kwargs["parent_block_hash"] = int(event.parent_block_hash)
 
@@ -216,10 +215,14 @@ class VllmKvEventBridge:
         sub_sockets: list[tuple[int, zmq.asyncio.Socket]] = []
         replay_sockets: list[tuple[int, zmq.asyncio.Socket]] = []
         try:
-            topic = (self._config.topic if self._config is not None else "").encode("utf-8")
+            config = self._config
+            if config is None:
+                return
+
+            topic = config.topic.encode("utf-8")
 
             for rank in range(self._data_parallel_size):
-                endpoint = _connect_endpoint(self._config.endpoint, rank)
+                endpoint = _connect_endpoint(config.endpoint, rank)
                 if endpoint is None:
                     continue
 
@@ -228,7 +231,7 @@ class VllmKvEventBridge:
                 sub.connect(endpoint)
                 sub_sockets.append((rank, sub))
 
-                replay_endpoint = _connect_endpoint(self._config.replay_endpoint, rank)
+                replay_endpoint = _connect_endpoint(config.replay_endpoint, rank)
                 if replay_endpoint:
                     replay = self._ctx.socket(zmq.REQ)
                     replay.connect(replay_endpoint)
