@@ -43,20 +43,15 @@ impl PipelineStage for PreparationStage {
         match &ctx.input.request_type {
             RequestType::Chat(_) => self.chat_stage.execute(ctx).await,
             RequestType::Generate(_) => self.generate_stage.execute(ctx).await,
-            other => {
-                let type_name = match other {
-                    RequestType::Embedding(_) => "Embedding",
-                    RequestType::Classify(_) => "Classify",
-                    RequestType::Responses(_) => "Responses",
-                    _ => "Unknown",
-                };
+            request_type => {
                 error!(
                     function = "PreparationStage::execute",
-                    "RequestType::{type_name} reached regular preparation stage"
+                    request_type = %request_type,
+                    "{request_type} request type reached regular preparation stage"
                 );
                 Err(grpc_error::internal_error(
                     "wrong_pipeline",
-                    format!("RequestType::{type_name} should use its dedicated pipeline"),
+                    format!("{request_type} should use its dedicated pipeline"),
                 ))
             }
         }

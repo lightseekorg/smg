@@ -408,10 +408,6 @@ impl RequestContext {
 
     /// Get Arc clone of messages request (panics if not messages)
     #[expect(
-        dead_code,
-        reason = "scaffolding for Messages API pipeline, wired in follow-up PR"
-    )]
-    #[expect(
         clippy::panic,
         reason = "typed accessor: caller guarantees variant via RequestType construction"
     )]
