@@ -14,9 +14,8 @@ use crate::routers::{
     gemini::{
         context::RequestContext,
         state::{RequestState, StepResult},
-        utils::extract_gemini_auth_header,
     },
-    header_utils::apply_provider_headers,
+    header_utils::ApiProvider,
 };
 
 /// POST the payload to the upstream worker and handle the response.
@@ -49,15 +48,15 @@ pub(crate) async fn non_stream_request_execution(
         .ok_or_else(|| error::internal_error("internal_error", "Worker not selected"))?
         .clone();
 
-    // Build the upstream request
-    let auth_header = extract_gemini_auth_header(ctx.input.headers.as_ref(), worker.api_key());
-    let request_builder = apply_provider_headers(
+    // Build the upstream request — always use Gemini provider (not URL-based detection)
+    let provider = ApiProvider::Gemini;
+    let auth_header = provider.extract_auth_header(ctx.input.headers.as_ref(), worker.api_key());
+    let request_builder = provider.apply_headers(
         ctx.components
             .client
             .post(upstream_url)
             .json(&payload)
             .timeout(ctx.components.request_timeout),
-        upstream_url,
         auth_header.as_ref(),
     );
 
@@ -65,7 +64,7 @@ pub(crate) async fn non_stream_request_execution(
     let response = match request_builder.send().await {
         Ok(r) => r,
         Err(e) => {
-            worker.circuit_breaker().record_failure();
+            worker.record_outcome(false);
             tracing::warn!(url = %upstream_url, error = %e, "Request to worker failed");
 
             return if e.is_timeout() {
@@ -86,14 +85,11 @@ pub(crate) async fn non_stream_request_execution(
     if !response.status().is_success() {
         // Only trip the circuit breaker on server errors (5xx), not client errors (4xx)
         if response.status().is_server_error() {
-            worker.circuit_breaker().record_failure();
+            worker.record_outcome(false);
         }
         let status = StatusCode::from_u16(response.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .cloned();
+        let content_type = response.headers().get(http::header::CONTENT_TYPE).cloned();
         let body = response.text().await.unwrap_or_else(|e| {
             tracing::warn!("Failed to read upstream error body: {e}");
             String::new()
@@ -120,7 +116,7 @@ pub(crate) async fn non_stream_request_execution(
         }
     };
 
-    worker.circuit_breaker().record_success();
+    worker.record_outcome(true);
 
     // TODO (Phase 2): Scan outputs for function_call items that map to MCP tools.
     // If found, execute tools, build resume payload, and stay in NonStreamRequest.

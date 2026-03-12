@@ -72,6 +72,10 @@ async fn test_interactions_non_streaming_with_model() {
     assert_eq!(body["status"], "completed");
     assert_eq!(body["model"], "gemini-2.5-flash");
     assert_eq!(body["store"], false);
+    assert!(
+        body.get("id").is_none(),
+        "store=false model responses must not include id"
+    );
 }
 
 #[tokio::test]
@@ -261,9 +265,6 @@ async fn test_interactions_via_axum_app() {
 
 #[tokio::test]
 async fn test_interactions_forwards_api_key_header() {
-    // Note: In test environment, the upstream URL is localhost (not googleapis.com),
-    // so apply_provider_headers treats it as Generic and sends Authorization: Bearer.
-    // The mock server accepts both x-goog-api-key and Authorization headers.
     let mock = MockGeminiServer::new_with_auth(Some("test-key-123".to_string())).await;
     let config = gemini_config(vec![mock.base_url()]);
     let ctx = create_test_context(config.clone()).await;
