@@ -71,9 +71,32 @@ repos:
 
       - id: dco-check
         name: DCO sign-off check
-        description: Check that the commit message contains a DCO sign-off
+        description: Check that the commit message contains a DCO sign-off matching git user config
         entry: |
-          bash -c 'grep -q "^Signed-off-by: .* <.*>$" "$1"' --
+          bash -c '
+            if ! grep -q "^Signed-off-by: .* <.*>$" "$1"; then
+              echo "ERROR: Commit message must contain a Signed-off-by line."
+              echo "Tip: use \"git commit -s\" to auto-add sign-off."
+              exit 1
+            fi
+            expected_name=$(git config user.name)
+            expected_email=$(git config user.email)
+            if [ -z "$expected_name" ] || [ -z "$expected_email" ]; then
+              echo "ERROR: git user.name and user.email must be configured."
+              echo "Run: git config user.name \"Your Name\" && git config user.email \"you@example.com\""
+              exit 1
+            fi
+            expected="Signed-off-by: $expected_name <$expected_email>"
+            if ! grep -qF "$expected" "$1"; then
+              echo "ERROR: DCO sign-off does not match your git config."
+              echo "Expected: $expected"
+              echo ""
+              echo "Tip: use \"git commit -s\" to auto-add sign-off, or update your git config:"
+              echo "  git config user.name \"Your Name\""
+              echo "  git config user.email \"you@example.com\""
+              exit 1
+            fi
+          ' --
         language: system
         stages: [commit-msg]
         always_run: true
