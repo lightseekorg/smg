@@ -1,44 +1,46 @@
 # smg-grpc-servicer
 
-gRPC servicer implementations for LLM inference engines. Currently supports vLLM,
-with future support for SGLang and TensorRT-LLM.
+gRPC servicer implementations for LLM inference engines. Supports vLLM and SGLang.
 
 ## Installation
 
+For vLLM:
+
 ```bash
-pip install smg-grpc-servicer
+pip install smg-grpc-servicer[vllm]
 ```
 
-Or with vLLM's optional dependency:
+For SGLang:
 
 ```bash
-pip install vllm[grpc]
+pip install smg-grpc-servicer[sglang]
 ```
 
 ## Usage
 
-With `vllm serve`:
+### vLLM
 
 ```bash
 vllm serve meta-llama/Llama-2-7b-hf --grpc
 ```
 
-Or directly:
+### SGLang
 
 ```bash
-python -m vllm.entrypoints.grpc_server --model meta-llama/Llama-2-7b-hf --port 50051
+sglang serve --model-path meta-llama/Llama-2-7b-hf --grpc-mode
 ```
 
 ## Architecture
 
 ```
-smg-grpc-servicer  ──depends on──>  vllm            (hard dependency)
-smg-grpc-servicer  ──depends on──>  smg-grpc-proto  (hard dependency)
-vllm               ──optional──>    smg-grpc-servicer (lazy import via vllm serve --grpc)
+smg-grpc-servicer[vllm]    ──optional dep──>  vllm     (lazy import)
+smg-grpc-servicer[sglang]  ──optional dep──>  sglang   (lazy import)
+smg-grpc-servicer           ──depends on──>  smg-grpc-proto  (hard dependency)
+vllm                        ──optional──>    smg-grpc-servicer (via vllm serve --grpc)
+sglang                      ──optional──>    smg-grpc-servicer (via --grpc-mode)
 ```
 
-This avoids circular dependencies: vLLM only imports `smg-grpc-servicer` at runtime
-when `--grpc` is passed, via a lazy import.
+Backend dependencies are isolated via extras to avoid conflicts between vLLM and SGLang.
 
 ## Development
 
