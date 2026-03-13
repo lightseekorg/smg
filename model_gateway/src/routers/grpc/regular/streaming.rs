@@ -28,7 +28,7 @@ use crate::{
     routers::grpc::{
         common::{response_formatting::CompletionTokenTracker, responses::build_sse_response},
         context,
-        proto_wrapper::{ProtoResponseVariant, ProtoStream},
+        proto_wrapper::{ProtoResponseVariant, StatsProtoStream},
         utils,
     },
 };
@@ -171,7 +171,7 @@ impl StreamingProcessor {
     /// Process streaming chunks from a single stream (Regular mode)
     pub async fn process_streaming_chunks(
         &self,
-        mut grpc_stream: ProtoStream,
+        mut grpc_stream: StatsProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
@@ -555,6 +555,8 @@ impl StreamingProcessor {
             output_tokens: total_completion as u64,
         });
 
+        grpc_stream.spawn_stats_emission();
+
         Ok(())
     }
 
@@ -562,8 +564,8 @@ impl StreamingProcessor {
     #[expect(clippy::too_many_arguments)]
     pub async fn process_dual_streaming_chunks(
         &self,
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: StatsProtoStream,
+        decode_stream: StatsProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
@@ -696,7 +698,7 @@ impl StreamingProcessor {
     /// TODO: add streaming logprob support
     async fn process_generate_streaming(
         tokenizer: Arc<dyn Tokenizer>,
-        mut stream: ProtoStream,
+        mut stream: StatsProtoStream,
         ctx: GenerateStreamContext,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -800,6 +802,7 @@ impl StreamingProcessor {
         // Record streaming metrics
         let total_completion: u32 = completion_tokens_map.values().sum();
         Self::record_generate_metrics(start_time, first_token_time, total_completion, &ctx);
+        stream.spawn_stats_emission();
 
         Ok(())
     }
@@ -807,8 +810,8 @@ impl StreamingProcessor {
     /// Process dual streaming for generate endpoint (PD mode with logprobs support)
     async fn process_generate_streaming_dual(
         tokenizer: Arc<dyn Tokenizer>,
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: StatsProtoStream,
+        decode_stream: StatsProtoStream,
         ctx: GenerateStreamContext,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -861,7 +864,7 @@ impl StreamingProcessor {
     /// Process generate streaming with optional input_logprobs
     async fn process_generate_streaming_with_input_logprobs(
         tokenizer: Arc<dyn Tokenizer>,
-        mut stream: ProtoStream,
+        mut stream: StatsProtoStream,
         ctx: GenerateStreamContext,
         input_token_logprobs: Option<Vec<Vec<Option<f64>>>>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
@@ -1008,6 +1011,7 @@ impl StreamingProcessor {
         // Record streaming metrics
         let total_completion: u32 = completion_tokens_map.values().sum();
         Self::record_generate_metrics(start_time, first_token_time, total_completion, &ctx);
+        stream.spawn_stats_emission();
 
         Ok(())
     }

@@ -284,6 +284,11 @@ struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "Logging")]
     log_json: bool,
 
+    // ==================== Observability ====================
+    /// Enable request-level statistics collection and logging
+    #[arg(long, help_heading = "Observability")]
+    enable_request_statistics: bool,
+
     // ==================== Prometheus Metrics ====================
     /// Port to expose Prometheus metrics
     #[arg(long, default_value_t = 29000, help_heading = "Prometheus Metrics")]
@@ -1116,6 +1121,7 @@ impl CliArgs {
             .maybe_metrics(metrics)
             .maybe_trace(trace_config)
             .maybe_log_dir(self.log_dir.as_ref())
+            .enable_request_statistics(self.enable_request_statistics)
             .maybe_request_id_headers(
                 (!self.request_id_headers.is_empty()).then(|| self.request_id_headers.clone()),
             )

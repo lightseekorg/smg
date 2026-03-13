@@ -32,6 +32,9 @@ pub struct RouterConfig {
     pub trace_config: Option<TraceConfig>,
     pub log_dir: Option<String>,
     pub log_level: Option<String>,
+    /// If set to true, logs request-level statistics from engine.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enable_request_statistics: bool,
     pub request_id_headers: Option<Vec<String>>,
     /// Set to -1 to disable rate limiting
     pub max_concurrent_requests: i32,
@@ -534,6 +537,7 @@ impl Default for RouterConfig {
             trace_config: None,
             log_dir: None,
             log_level: None,
+            enable_request_statistics: false,
             request_id_headers: None,
             max_concurrent_requests: -1,
             queue_size: 100,

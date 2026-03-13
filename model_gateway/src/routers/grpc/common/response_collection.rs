@@ -10,7 +10,7 @@ use crate::routers::{
     error,
     grpc::{
         context::ExecutionResult,
-        proto_wrapper::{ProtoGenerateComplete, ProtoResponseVariant, ProtoStream},
+        proto_wrapper::{ProtoGenerateComplete, ProtoResponseVariant, StatsProtoStream},
         utils::tonic_ext::TonicStatusExt,
     },
 };
@@ -19,6 +19,9 @@ use crate::routers::{
 ///
 /// Handles both Single and Dual (prefill-decode) execution modes.
 /// For Dual mode, merges prefill input_logprobs into decode responses if requested.
+///
+/// When `enable_request_statistics` is active on the streams, a fire-and-forget
+/// task is spawned to fetch and emit per-request stats from the engine.
 ///
 /// # Arguments
 /// * `execution_result` - The execution result containing stream(s)
@@ -34,6 +37,7 @@ pub(crate) async fn collect_responses(
         ExecutionResult::Single { mut stream } => {
             let responses = collect_stream_responses(&mut stream, "Single").await?;
             stream.mark_completed();
+            stream.spawn_stats_emission();
             responses
         }
         ExecutionResult::Dual {
@@ -51,6 +55,7 @@ pub(crate) async fn collect_responses(
             // Mark both streams as completed now that both succeeded
             prefill.mark_completed();
             decode_stream.mark_completed();
+            decode_stream.spawn_stats_emission();
 
             // Merge prefill input_logprobs if requested
             if merge_logprobs {
@@ -103,7 +108,7 @@ fn merge_prefill_logprobs(
 
 /// Collect all complete responses from a gRPC stream, discarding chunks.
 async fn collect_stream_responses(
-    stream: &mut ProtoStream,
+    stream: &mut StatsProtoStream,
     worker_name: &str,
 ) -> Result<Vec<ProtoGenerateComplete>, Response> {
     let mut all_responses = Vec::new();
