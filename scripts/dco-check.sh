@@ -14,8 +14,8 @@ if ! grep -q "^Signed-off-by: .* <.*>$" "$commit_msg_file"; then
 fi
 
 # 2. Ensure git identity is configured
-expected_name=$(git config user.name)
-expected_email=$(git config user.email)
+expected_name="$(git config --get user.name 2>/dev/null || true)"
+expected_email="$(git config --get user.email 2>/dev/null || true)"
 
 if [ -z "$expected_name" ] || [ -z "$expected_email" ]; then
   echo "ERROR: git user.name and user.email must be configured."
