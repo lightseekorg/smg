@@ -55,8 +55,6 @@ pub(crate) async fn collect_responses(
             // Mark both streams as completed now that both succeeded
             prefill.mark_completed();
             decode_stream.mark_completed();
-
-            // Emit stats from the decode stream (preferred over prefill)
             decode_stream.spawn_stats_emission();
 
             // Merge prefill input_logprobs if requested

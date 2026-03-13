@@ -275,7 +275,6 @@ message RequestStats {
   optional uint32 prompt_tokens = 8;
   optional uint32 completion_tokens = 9;
   optional uint32 cached_tokens = 10;
-  optional string error_message = 11;
 }
 
 message GetRequestStatsResponse {

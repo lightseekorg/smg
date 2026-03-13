@@ -79,7 +79,6 @@ impl Event for RequestReceivedEvent {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UnifiedRequestStats {
     pub engine: &'static str,
-    pub error_message: Option<String>,
     pub request_received_timestamp_s: Option<f64>,
     pub first_token_generated_timestamp_s: Option<f64>,
     pub request_finished_timestamp_s: Option<f64>,
@@ -98,16 +97,12 @@ impl UnifiedRequestStats {
         request_id: &str,
         model: &str,
         router_backend: &str,
-        http_status_code: Option<u16>,
-        error_message: Option<&str>,
     ) {
         if let Some(ref s) = stats {
             RequestStatsEvent {
                 request_id,
                 model,
                 router_backend,
-                http_status_code,
-                error_message,
                 stats: s,
             }
             .emit();
@@ -117,11 +112,11 @@ impl UnifiedRequestStats {
     /// Merge another stats sample into this one (for multi-sample aggregation).
     /// Uses min for start timestamps, max for end timestamps, sum for
     /// completion_tokens, and first seen value for the remaining fields.
-    /// Skip merging if engines differ.
     pub(crate) fn merge(&mut self, other: &Self) {
-        if self.engine != other.engine {
-            return;
-        }
+        debug_assert_eq!(
+            self.engine, other.engine,
+            "merging stats from different engines is not supported"
+        );
         self.request_received_timestamp_s = opt_min(
             self.request_received_timestamp_s,
             other.request_received_timestamp_s,
@@ -178,21 +173,16 @@ struct RequestStatsEvent<'a> {
     request_id: &'a str,
     model: &'a str,
     router_backend: &'a str,
-    http_status_code: Option<u16>,
-    error_message: Option<&'a str>,
     stats: &'a UnifiedRequestStats,
 }
 
 macro_rules! emit_request_stats {
     ($log_macro:ident, $event:expr, $($prefix:tt)*) => {{
-        let error_message = $event.error_message.or($event.stats.error_message.as_deref());
         $log_macro!(
             $($prefix)*
             request_id = %($event.request_id),
             model = %($event.model),
             router_backend = %($event.router_backend),
-            http_status_code = $event.http_status_code,
-            error_message = error_message,
             engine = %($event.stats.engine),
             request_received_timestamp_s = $event.stats.request_received_timestamp_s,
             first_token_generated_timestamp_s = $event.stats.first_token_generated_timestamp_s,
@@ -256,7 +246,6 @@ mod tests {
             cached_tokens: Some(cached),
             cache_hit_rate: Some(hit_rate),
             spec_decoding_acceptance_rate: Some(spec_rate),
-            ..Default::default()
         }
     }
 
@@ -264,29 +253,17 @@ mod tests {
         use super::*;
 
         #[test]
-        fn different_engines_is_noop() {
+        #[should_panic(expected = "merging stats from different engines is not supported")]
+        fn different_engines_panics_in_debug() {
             let mut a = UnifiedRequestStats {
                 engine: "sglang",
-                request_received_timestamp_s: Some(1.0),
-                prompt_tokens: Some(10),
-                completion_tokens: Some(20),
                 ..Default::default()
             };
-            let original = a.clone();
             let b = UnifiedRequestStats {
                 engine: "vllm",
-                request_received_timestamp_s: Some(0.5),
-                prompt_tokens: Some(5),
-                completion_tokens: Some(30),
                 ..Default::default()
             };
             a.merge(&b);
-            assert_eq!(
-                a.request_received_timestamp_s,
-                original.request_received_timestamp_s
-            );
-            assert_eq!(a.prompt_tokens, original.prompt_tokens);
-            assert_eq!(a.completion_tokens, original.completion_tokens);
         }
 
         #[test]
@@ -344,6 +321,8 @@ mod tests {
         use super::*;
         use crate::observability::metrics::metrics_labels;
 
+        // Test utility to count the number of emitted events.
+
         struct EventCounter(Arc<AtomicUsize>);
 
         impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCounter {
@@ -371,8 +350,6 @@ mod tests {
                     "req-id",
                     "test-model",
                     metrics_labels::BACKEND_REGULAR,
-                    Some(200),
-                    None,
                 );
             });
             assert_eq!(n, 0);
@@ -384,7 +361,6 @@ mod tests {
                 engine: "sglang",
                 prompt_tokens: Some(10),
                 completion_tokens: Some(20),
-                error_message: Some("engine error".into()),
                 ..Default::default()
             };
             let n = count_events(|| {
@@ -393,8 +369,6 @@ mod tests {
                     "req-id",
                     "test-model",
                     metrics_labels::BACKEND_REGULAR,
-                    Some(500),
-                    Some("caller error"),
                 );
             });
             assert_eq!(n, 1);
@@ -414,8 +388,6 @@ mod tests {
                         &format!("req-id-{i}"),
                         "test-model",
                         metrics_labels::BACKEND_REGULAR,
-                        Some(200),
-                        None,
                     );
                 }
             });

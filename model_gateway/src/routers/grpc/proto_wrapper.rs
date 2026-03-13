@@ -866,7 +866,6 @@ impl ProtoGenerateComplete {
 fn unified_stats_from_sglang(stats: sglang::RequestStats) -> UnifiedRequestStats {
     UnifiedRequestStats {
         engine: "sglang",
-        error_message: stats.error_message,
         request_received_timestamp_s: stats.request_received_timestamp_s,
         first_token_generated_timestamp_s: stats.first_token_generated_timestamp_s,
         request_finished_timestamp_s: stats.request_finished_timestamp_s,
@@ -893,14 +892,6 @@ impl ProtoGenerateError {
         match self {
             Self::Sglang(e) => &e.message,
             Self::Trtllm(e) => &e.message,
-        }
-    }
-
-    /// Get HTTP status code when provided by backend.
-    pub fn http_status_code(&self) -> Option<u16> {
-        match self {
-            Self::Sglang(e) => e.http_status_code.parse::<u16>().ok(),
-            Self::Trtllm(_) => None,
         }
     }
 }
@@ -977,8 +968,6 @@ impl ProtoStream {
                         &request_id,
                         &model,
                         router_backend,
-                        Some(200),
-                        None,
                     );
                 });
             }
@@ -1179,13 +1168,11 @@ mod tests {
             prompt_tokens: Some(100),
             completion_tokens: Some(200),
             cached_tokens: Some(50),
-            error_message: Some("some error".to_string()),
             ..Default::default()
         };
         let unified = unified_stats_from_sglang(stats);
 
         assert_eq!(unified.engine, "sglang");
-        assert_eq!(unified.error_message.as_deref(), Some("some error"));
         assert_eq!(unified.request_received_timestamp_s, Some(1.0));
         assert_eq!(unified.first_token_generated_timestamp_s, Some(2.0));
         assert_eq!(unified.request_finished_timestamp_s, Some(3.0));
@@ -1205,6 +1192,5 @@ mod tests {
         assert_eq!(partial.prompt_tokens, Some(42u64));
         assert_eq!(partial.completion_tokens, None);
         assert_eq!(partial.first_token_generated_timestamp_s, None);
-        assert_eq!(partial.error_message, None);
     }
 }
