@@ -458,14 +458,33 @@ impl ResponseProcessor {
         // Collect all responses (no logprobs for Messages API)
         let all_responses = response_collection::collect_responses(execution_result, false).await?;
 
-        // Messages always has n=1 — take the first (and only) response
-        let complete = all_responses.into_iter().next().ok_or_else(|| {
+        // Messages always has n=1 — enforce the invariant
+        if all_responses.is_empty() {
             error!(
                 function = "process_non_streaming_messages_response",
                 "No responses received"
             );
-            error::internal_error("no_responses", "No responses received from backend")
-        })?;
+            return Err(error::internal_error(
+                "no_responses",
+                "No responses received from backend",
+            ));
+        }
+        if all_responses.len() > 1 {
+            error!(
+                function = "process_non_streaming_messages_response",
+                response_count = all_responses.len(),
+                "Messages API expected exactly one response"
+            );
+            return Err(error::internal_error(
+                "unexpected_response_count",
+                format!(
+                    "Messages API received {} responses, expected exactly one",
+                    all_responses.len()
+                ),
+            ));
+        }
+        #[expect(clippy::unwrap_used, reason = "safe: checked len == 1 above")]
+        let complete = all_responses.into_iter().next().unwrap();
 
         // Check parser availability
         let reasoning_enabled = matches!(
@@ -617,12 +636,19 @@ impl ResponseProcessor {
         // Tool use blocks (convert from OpenAI ToolCall format)
         if let Some(calls) = &tool_calls {
             for tc in calls {
-                let input = tc
-                    .function
-                    .arguments
-                    .as_deref()
-                    .and_then(|args| serde_json::from_str(args).ok())
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                let input = if let Some(args) = tc.function.arguments.as_deref() {
+                    serde_json::from_str(args).unwrap_or_else(|e| {
+                        warn!(
+                            function = "process_non_streaming_messages_response",
+                            tool_call_id = %tc.id,
+                            error = %e,
+                            "Failed to parse tool call arguments, defaulting to empty object"
+                        );
+                        serde_json::Value::Object(serde_json::Map::new())
+                    })
+                } else {
+                    serde_json::Value::Object(serde_json::Map::new())
+                };
 
                 content_blocks.push(messages::ContentBlock::ToolUse {
                     id: tc.id.clone(),
@@ -632,13 +658,14 @@ impl ResponseProcessor {
             }
         }
 
-        // Step 4: Determine stop_reason
+        // Step 4: Determine stop_reason and stop_sequence (derived from same conditions)
         let finish_reason_str = complete.finish_reason();
         let matched_stop = complete.matched_stop_json();
+        let stop_sequence = matched_stop.and_then(|v| v.as_str().map(String::from));
 
-        let stop_reason = if tool_calls.is_some() {
+        let stop_reason = if tool_calls.is_some() || finish_reason_str == "tool_calls" {
             Some(messages::StopReason::ToolUse)
-        } else if matched_stop.is_some() {
+        } else if stop_sequence.is_some() {
             Some(messages::StopReason::StopSequence)
         } else if finish_reason_str == "length" {
             Some(messages::StopReason::MaxTokens)
@@ -646,7 +673,12 @@ impl ResponseProcessor {
             Some(messages::StopReason::EndTurn)
         };
 
-        let stop_sequence = matched_stop.and_then(|v| v.as_str().map(String::from));
+        // Clear stop_sequence when stop_reason is not StopSequence
+        let stop_sequence = if matches!(stop_reason, Some(messages::StopReason::StopSequence)) {
+            stop_sequence
+        } else {
+            None
+        };
 
         // Step 5: Build usage
         let usage = messages::Usage {

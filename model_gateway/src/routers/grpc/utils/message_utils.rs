@@ -390,16 +390,12 @@ pub(crate) fn get_history_tool_calls_count_messages(request: &CreateMessageReque
         .messages
         .iter()
         .filter(|msg| msg.role == messages::Role::Assistant)
-        .filter_map(|msg| match &msg.content {
-            InputContent::Blocks(blocks) => Some(
-                blocks
-                    .iter()
-                    .filter(|b| matches!(b, InputContentBlock::ToolUse(_)))
-                    .count(),
-            ),
-            InputContent::String(_) => None,
+        .flat_map(|msg| match &msg.content {
+            InputContent::Blocks(blocks) => blocks.as_slice(),
+            InputContent::String(_) => &[],
         })
-        .sum()
+        .filter(|b| matches!(b, InputContentBlock::ToolUse(_)))
+        .count()
 }
 
 #[cfg(test)]
