@@ -11,10 +11,13 @@
 //! The ring is rebuilt only when workers are added/removed, not per-request.
 //! Uses virtual nodes (150 per worker) for even distribution and blake3 for stable hashing.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use dashmap::DashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use smg_mesh::OptionalMeshSyncManager;
 use uuid::Uuid;
 
@@ -111,8 +114,7 @@ impl HashRing {
 
         // Walk clockwise from start, wrapping around
         // Track visited URLs to avoid checking same worker multiple times (virtual nodes)
-        let mut checked_urls =
-            std::collections::HashSet::with_capacity(self.worker_count().min(16));
+        let mut checked_urls = HashSet::with_capacity(self.worker_count().min(16));
 
         for i in 0..self.entries.len() {
             let (_, url) = &self.entries[(start + i) % self.entries.len()];
@@ -201,6 +203,10 @@ pub struct WorkerRegistry {
 
     /// URL to worker ID mapping
     url_to_id: Arc<DashMap<String, WorkerId>>,
+
+    /// Per-URL replacement locks to serialize same-URL registrations.
+    url_registration_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+
     /// Optional mesh sync manager for state synchronization
     /// When None, the registry works independently without mesh synchronization
     /// Uses RwLock for thread-safe access when setting mesh_sync after initialization
@@ -217,6 +223,7 @@ impl WorkerRegistry {
             type_workers: Arc::new(DashMap::new()),
             connection_workers: Arc::new(DashMap::new()),
             url_to_id: Arc::new(DashMap::new()),
+            url_registration_locks: Arc::new(DashMap::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
         }
     }
@@ -231,6 +238,7 @@ impl WorkerRegistry {
             type_workers: self.type_workers.clone(),
             connection_workers: self.connection_workers.clone(),
             url_to_id: self.url_to_id.clone(),
+            url_registration_locks: self.url_registration_locks.clone(),
             mesh_sync: self.mesh_sync.clone(),
         }
     }
@@ -257,37 +265,100 @@ impl WorkerRegistry {
         *guard = mesh_sync;
     }
 
+    fn worker_model_ids(worker: &Arc<dyn Worker>) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut model_ids: Vec<String> = worker
+            .models()
+            .into_iter()
+            .map(|model| model.id)
+            .filter(|model_id| seen.insert(model_id.clone()))
+            .collect();
+
+        if model_ids.is_empty() {
+            model_ids.push(worker.model_id().to_string());
+        }
+
+        model_ids
+    }
+
+    fn add_worker_to_model_index(&self, model_id: &str, worker: Arc<dyn Worker>) {
+        self.model_index
+            .entry(model_id.to_string())
+            .and_modify(|existing| {
+                let mut new_workers: Vec<Arc<dyn Worker>> = existing
+                    .iter()
+                    .filter(|w| w.url() != worker.url())
+                    .cloned()
+                    .collect();
+                new_workers.push(worker.clone());
+                *existing = Arc::from(new_workers.into_boxed_slice());
+            })
+            .or_insert_with(|| Arc::from(vec![worker].into_boxed_slice()));
+    }
+
+    fn remove_worker_from_model_index(&self, model_id: &str, worker_url: &str) {
+        let mut should_remove_entry = false;
+
+        if let Some(mut entry) = self.model_index.get_mut(model_id) {
+            let new_workers: Vec<Arc<dyn Worker>> = entry
+                .iter()
+                .filter(|w| w.url() != worker_url)
+                .cloned()
+                .collect();
+
+            if new_workers.is_empty() {
+                *entry = Arc::from(Vec::<Arc<dyn Worker>>::new().into_boxed_slice());
+                should_remove_entry = true;
+            } else {
+                *entry = Arc::from(new_workers.into_boxed_slice());
+            }
+        }
+
+        if should_remove_entry {
+            self.model_index
+                .remove_if(model_id, |_, workers| workers.is_empty());
+        }
+
+        self.rebuild_hash_ring(model_id);
+    }
+
     /// Register a new worker
     pub fn register(&self, worker: Arc<dyn Worker>) -> WorkerId {
-        let worker_id = if let Some(existing_id) = self.url_to_id.get(worker.url()) {
-            // Worker with this URL already exists, update it
-            existing_id.clone()
-        } else {
-            WorkerId::new()
-        };
+        let registration_lock = self
+            .url_registration_locks
+            .entry(worker.url().to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _registration_guard = registration_lock.lock();
+
+        let worker_id = self.reserve_id_for_url(worker.url());
+        let old_worker = self.workers.get(&worker_id).map(|entry| entry.clone());
+
+        if let Some(old_worker) = old_worker {
+            for model_id in Self::worker_model_ids(&old_worker) {
+                self.remove_worker_from_model_index(&model_id, old_worker.url());
+            }
+
+            if let Some(mut type_workers) = self.type_workers.get_mut(old_worker.worker_type()) {
+                type_workers.retain(|id| id != &worker_id);
+            }
+
+            if let Some(mut conn_workers) = self
+                .connection_workers
+                .get_mut(old_worker.connection_mode())
+            {
+                conn_workers.retain(|id| id != &worker_id);
+            }
+        }
 
         // Store worker
         self.workers.insert(worker_id.clone(), worker.clone());
 
-        // Update URL mapping
-        self.url_to_id
-            .insert(worker.url().to_string(), worker_id.clone());
-
-        // Update model index for O(1) lookups using copy-on-write
-        // This creates a new immutable snapshot with the added worker
-        let model_id = worker.model_id().to_string();
-        self.model_index
-            .entry(model_id.clone())
-            .and_modify(|existing| {
-                // Create new snapshot with the additional worker
-                let mut new_workers: Vec<Arc<dyn Worker>> = existing.iter().cloned().collect();
-                new_workers.push(worker.clone());
-                *existing = Arc::from(new_workers.into_boxed_slice());
-            })
-            .or_insert_with(|| Arc::from(vec![worker.clone()].into_boxed_slice()));
-
-        // Rebuild hash ring for this model
-        self.rebuild_hash_ring(&model_id);
+        // Update model index for O(1) lookups using copy-on-write.
+        for model_id in Self::worker_model_ids(&worker) {
+            self.add_worker_to_model_index(&model_id, worker.clone());
+            self.rebuild_hash_ring(&model_id);
+        }
 
         // Update type index (clone needed for DashMap key ownership)
         self.type_workers
@@ -340,21 +411,9 @@ impl WorkerRegistry {
             // Remove from URL mapping
             self.url_to_id.remove(worker.url());
 
-            // Remove from model index using copy-on-write
-            // Create new snapshot without the removed worker
-            let worker_url = worker.url();
-            let model_id = worker.model_id().to_string();
-            if let Some(mut entry) = self.model_index.get_mut(&model_id) {
-                let new_workers: Vec<Arc<dyn Worker>> = entry
-                    .iter()
-                    .filter(|w| w.url() != worker_url)
-                    .cloned()
-                    .collect();
-                *entry = Arc::from(new_workers.into_boxed_slice());
+            for model_id in Self::worker_model_ids(&worker) {
+                self.remove_worker_from_model_index(&model_id, worker.url());
             }
-
-            // Rebuild hash ring for this model
-            self.rebuild_hash_ring(&model_id);
 
             // Remove from type index
             if let Some(mut type_workers) = self.type_workers.get_mut(worker.worker_type()) {
@@ -707,7 +766,7 @@ impl WorkerRegistry {
 
                 // Sync schedule with registry: add new workers, prune removed
                 // and disabled ones so stale deadlines don't cause wakeups.
-                let checkable_urls: std::collections::HashSet<String> = workers
+                let checkable_urls: HashSet<String> = workers
                     .iter()
                     .filter(|w| !w.metadata().health_config.disable_health_check)
                     .map(|w| w.url().to_string())
@@ -827,6 +886,8 @@ pub struct WorkerRegistryStats {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    use openai_protocol::model_card::ModelCard;
 
     use super::*;
     use crate::core::{circuit_breaker::CircuitBreakerConfig, BasicWorkerBuilder};
@@ -1007,5 +1068,81 @@ mod tests {
             1,
             "Worker should remain in the registry when remove_unhealthy is false"
         );
+    }
+
+    #[test]
+    fn test_multi_model_worker_is_indexed_for_each_model() {
+        let registry = WorkerRegistry::new();
+
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("https://api.openai.com")
+                .worker_type(WorkerType::Regular)
+                .models(vec![
+                    ModelCard::new("gpt-4o"),
+                    ModelCard::new("text-embedding-3-large"),
+                ])
+                .circuit_breaker_config(CircuitBreakerConfig::default())
+                .build(),
+        );
+
+        let worker_id = registry.register(worker);
+
+        assert!(registry.get(&worker_id).is_some());
+        assert_eq!(registry.get_by_model("gpt-4o").len(), 1);
+        assert_eq!(registry.get_by_model("text-embedding-3-large").len(), 1);
+        assert_eq!(
+            registry.get_by_model("gpt-4o")[0].url(),
+            "https://api.openai.com"
+        );
+        assert_eq!(
+            registry.get_by_model("text-embedding-3-large")[0].url(),
+            "https://api.openai.com"
+        );
+
+        let mut models = registry.get_models();
+        models.sort();
+        assert_eq!(
+            models,
+            vec!["gpt-4o".to_string(), "text-embedding-3-large".to_string()]
+        );
+
+        let stats = registry.stats();
+        assert_eq!(stats.total_workers, 1);
+        assert_eq!(stats.total_models, 2);
+    }
+
+    #[test]
+    fn test_re_register_same_url_refreshes_all_model_indexes() {
+        let registry = WorkerRegistry::new();
+
+        let first: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("https://api.openai.com")
+                .worker_type(WorkerType::Regular)
+                .models(vec![ModelCard::new("gpt-4o")])
+                .circuit_breaker_config(CircuitBreakerConfig::default())
+                .build(),
+        );
+        let second: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("https://api.openai.com")
+                .worker_type(WorkerType::Regular)
+                .models(vec![ModelCard::new("o3"), ModelCard::new("o4-mini")])
+                .circuit_breaker_config(CircuitBreakerConfig::default())
+                .build(),
+        );
+
+        let first_id = registry.register(first);
+        let second_id = registry.register(second);
+
+        assert_eq!(first_id, second_id);
+        assert_eq!(registry.len(), 1);
+        assert!(registry.get_by_model("gpt-4o").is_empty());
+        assert_eq!(registry.get_by_model("o3").len(), 1);
+        assert_eq!(registry.get_by_model("o4-mini").len(), 1);
+        assert_eq!(registry.get_by_type(WorkerType::Regular).len(), 1);
+        assert_eq!(registry.get_by_connection(ConnectionMode::Http).len(), 1);
+
+        let mut models = registry.get_models();
+        models.sort();
+        assert_eq!(models, vec!["o3".to_string(), "o4-mini".to_string()]);
     }
 }
