@@ -13,6 +13,7 @@ use openai_protocol::{
     chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
     common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue},
     generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
+    messages::{self, CreateMessageRequest, Message},
 };
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use tool_parser::ParserFactory as ToolParserFactory;
@@ -440,5 +441,266 @@ impl ResponseProcessor {
         }
 
         Ok(result_array)
+    }
+
+    /// Process non-streaming Messages API response
+    ///
+    /// Collects the single response (Messages always has n=1), decodes tokens,
+    /// parses reasoning/tool calls, and builds an Anthropic `Message` response.
+    pub async fn process_non_streaming_messages_response(
+        &self,
+        execution_result: ExecutionResult,
+        messages_request: Arc<CreateMessageRequest>,
+        dispatch: DispatchMetadata,
+        _tokenizer: Arc<dyn Tokenizer>,
+        stop_decoder: &mut StopSequenceDecoder,
+    ) -> Result<Message, axum::response::Response> {
+        // Collect all responses (no logprobs for Messages API)
+        let all_responses = response_collection::collect_responses(execution_result, false).await?;
+
+        // Messages always has n=1 — enforce the invariant
+        if all_responses.is_empty() {
+            error!(
+                function = "process_non_streaming_messages_response",
+                "No responses received"
+            );
+            return Err(error::internal_error(
+                "no_responses",
+                "No responses received from backend",
+            ));
+        }
+        if all_responses.len() > 1 {
+            error!(
+                function = "process_non_streaming_messages_response",
+                response_count = all_responses.len(),
+                "Messages API expected exactly one response"
+            );
+            return Err(error::internal_error(
+                "unexpected_response_count",
+                format!(
+                    "Messages API received {} responses, expected exactly one",
+                    all_responses.len()
+                ),
+            ));
+        }
+        #[expect(clippy::unwrap_used, reason = "safe: checked len == 1 above")]
+        let complete = all_responses.into_iter().next().unwrap();
+
+        // Check parser availability
+        let reasoning_enabled = matches!(
+            messages_request.thinking,
+            Some(messages::ThinkingConfig::Enabled { .. })
+        );
+        let reasoning_parser_available = reasoning_enabled
+            && utils::check_reasoning_parser_availability(
+                &self.reasoning_parser_factory,
+                self.configured_reasoning_parser.as_deref(),
+                &messages_request.model,
+            );
+
+        let tool_choice_enabled = !matches!(
+            &messages_request.tool_choice,
+            Some(messages::ToolChoice::None)
+        );
+
+        let tool_parser_available = tool_choice_enabled
+            && messages_request.tools.is_some()
+            && utils::check_tool_parser_availability(
+                &self.tool_parser_factory,
+                self.configured_tool_parser.as_deref(),
+                &messages_request.model,
+            );
+
+        // Log once per request (not per choice)
+        if reasoning_enabled && !reasoning_parser_available {
+            tracing::debug!(
+                "No reasoning parser found for model '{}', skipping reasoning parsing",
+                messages_request.model
+            );
+        }
+
+        if messages_request.tools.is_some() && tool_choice_enabled && !tool_parser_available {
+            tracing::debug!(
+                "No tool parser found for model '{}', skipping tool call parsing",
+                messages_request.model
+            );
+        }
+
+        // Decode tokens through stop decoder
+        stop_decoder.reset();
+        let outputs = stop_decoder
+            .process_tokens(complete.output_ids())
+            .map_err(|e| {
+                error!(function = "process_non_streaming_messages_response", error = %e, "Failed to process tokens");
+                error::internal_error(
+                    "process_tokens_failed",
+                    format!("Failed to process tokens: {e}"),
+                )
+            })?;
+
+        let mut final_text = String::new();
+        for output in outputs {
+            match output {
+                SequenceDecoderOutput::Text(t) => final_text.push_str(&t),
+                SequenceDecoderOutput::StoppedWithText(t) => {
+                    final_text.push_str(&t);
+                    break;
+                }
+                SequenceDecoderOutput::Stopped => break,
+                SequenceDecoderOutput::Held => {}
+            }
+        }
+        if let SequenceDecoderOutput::Text(t) = stop_decoder.flush() {
+            final_text.push_str(&t);
+        }
+
+        // Step 1: Parse reasoning content
+        let mut reasoning_text: Option<String> = None;
+        let mut processed_text = final_text;
+
+        if reasoning_parser_available {
+            let pooled_parser = utils::get_reasoning_parser(
+                &self.reasoning_parser_factory,
+                self.configured_reasoning_parser.as_deref(),
+                &messages_request.model,
+            );
+            let mut parser = pooled_parser.lock().await;
+            match parser.detect_and_parse_reasoning(&processed_text) {
+                Ok(result) => {
+                    if !result.reasoning_text.is_empty() {
+                        reasoning_text = Some(result.reasoning_text);
+                    }
+                    processed_text = result.normal_text;
+                }
+                Err(e) => {
+                    warn!("Reasoning parsing error, skipping parsing: {e}");
+                }
+            }
+        }
+
+        // Step 2: Parse tool calls
+        let mut tool_calls: Option<Vec<ToolCall>> = None;
+
+        if tool_choice_enabled && messages_request.tools.is_some() {
+            // Check if JSON schema constraint was used (specific tool or any/required mode)
+            let used_json_schema = matches!(
+                &messages_request.tool_choice,
+                Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
+            );
+
+            if used_json_schema {
+                // Bridge Messages ToolChoice to Chat ToolChoice for reuse
+                let chat_tool_choice = messages_request
+                    .tool_choice
+                    .as_ref()
+                    .map(utils::message_utils::convert_message_tool_choice);
+
+                (tool_calls, processed_text) = utils::parse_json_schema_response(
+                    &processed_text,
+                    chat_tool_choice.as_ref(),
+                    &messages_request.model,
+                    utils::message_utils::get_history_tool_calls_count_messages(&messages_request),
+                );
+            } else if tool_parser_available {
+                (tool_calls, processed_text) = self
+                    .parse_tool_calls(
+                        &processed_text,
+                        &messages_request.model,
+                        utils::message_utils::get_history_tool_calls_count_messages(
+                            &messages_request,
+                        ),
+                    )
+                    .await;
+            }
+        }
+
+        // Step 3: Build content blocks
+        let mut content_blocks: Vec<messages::ContentBlock> = Vec::new();
+
+        // Thinking block first (if present)
+        if let Some(thinking) = reasoning_text {
+            content_blocks.push(messages::ContentBlock::Thinking {
+                thinking,
+                signature: String::new(),
+            });
+        }
+
+        // Text block (if non-empty)
+        if !processed_text.is_empty() {
+            content_blocks.push(messages::ContentBlock::Text {
+                text: processed_text,
+                citations: None,
+            });
+        }
+
+        // Tool use blocks (convert from OpenAI ToolCall format)
+        if let Some(calls) = &tool_calls {
+            for tc in calls {
+                let input = if let Some(args) = tc.function.arguments.as_deref() {
+                    serde_json::from_str(args).unwrap_or_else(|e| {
+                        warn!(
+                            function = "process_non_streaming_messages_response",
+                            tool_call_id = %tc.id,
+                            error = %e,
+                            "Failed to parse tool call arguments, defaulting to empty object"
+                        );
+                        serde_json::Value::Object(serde_json::Map::new())
+                    })
+                } else {
+                    serde_json::Value::Object(serde_json::Map::new())
+                };
+
+                content_blocks.push(messages::ContentBlock::ToolUse {
+                    id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    input,
+                });
+            }
+        }
+
+        // Step 4: Determine stop_reason and stop_sequence (derived from same conditions)
+        let finish_reason_str = complete.finish_reason();
+        let matched_stop = complete.matched_stop_json();
+        let stop_sequence = matched_stop.and_then(|v| v.as_str().map(String::from));
+
+        let stop_reason = if tool_calls.is_some() || finish_reason_str == "tool_calls" {
+            Some(messages::StopReason::ToolUse)
+        } else if stop_sequence.is_some() {
+            Some(messages::StopReason::StopSequence)
+        } else if finish_reason_str == "length" {
+            Some(messages::StopReason::MaxTokens)
+        } else {
+            Some(messages::StopReason::EndTurn)
+        };
+
+        // Clear stop_sequence when stop_reason is not StopSequence
+        let stop_sequence = if matches!(stop_reason, Some(messages::StopReason::StopSequence)) {
+            stop_sequence
+        } else {
+            None
+        };
+
+        // Step 5: Build usage
+        let usage = messages::Usage {
+            input_tokens: complete.prompt_tokens(),
+            output_tokens: complete.completion_tokens(),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation: None,
+            server_tool_use: None,
+            service_tier: None,
+        };
+
+        // Step 6: Build Message
+        Ok(Message {
+            id: dispatch.request_id,
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: content_blocks,
+            model: dispatch.model,
+            stop_reason,
+            stop_sequence,
+            usage,
+        })
     }
 }
