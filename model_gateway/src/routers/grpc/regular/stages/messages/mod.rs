@@ -1,15 +1,13 @@
 //! Messages API endpoint pipeline stages
 //!
-//! These stages handle Messages API-specific preprocessing and request building.
-//! Response processing will be added in a follow-up PR.
+//! These stages handle Messages API-specific preprocessing, request building,
+//! and response processing. Each stage is wired into a dedicated Messages
+//! pipeline via `RequestPipeline::new_messages()`.
 
 mod preparation;
 mod request_building;
 mod response_processing;
 
-#[expect(unused_imports, reason = "wired in follow-up PR (pipeline factory)")]
 pub(crate) use preparation::MessagePreparationStage;
-#[expect(unused_imports, reason = "wired in follow-up PR (pipeline factory)")]
 pub(crate) use request_building::MessageRequestBuildingStage;
-#[expect(unused_imports, reason = "wired in follow-up PR (pipeline factory)")]
 pub(crate) use response_processing::MessageResponseProcessingStage;

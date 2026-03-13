@@ -1,5 +1,4 @@
 //! Message request building stage: Build proto GenerateRequest for message requests
-#![allow(dead_code)] // wired in follow-up PR (pipeline factory)
 
 use async_trait::async_trait;
 use axum::response::Response;
