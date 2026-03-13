@@ -380,6 +380,24 @@ pub(crate) fn extract_chat_tools(tools: &[messages::Tool]) -> Vec<ChatTool> {
         .collect()
 }
 
+/// Count the number of tool use blocks in assistant messages of the request history.
+///
+/// Parallel to `get_history_tool_calls_count` in chat_utils, but works with
+/// Messages API `InputMessage` types. Used for generating globally unique
+/// tool call IDs (e.g. KimiK2 format).
+pub(crate) fn get_history_tool_calls_count_messages(request: &CreateMessageRequest) -> usize {
+    request
+        .messages
+        .iter()
+        .filter(|msg| msg.role == messages::Role::Assistant)
+        .flat_map(|msg| match &msg.content {
+            InputContent::Blocks(blocks) => blocks.as_slice(),
+            InputContent::String(_) => &[],
+        })
+        .filter(|b| matches!(b, InputContentBlock::ToolUse(_)))
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use messages::{InputMessage, Role, TextBlock};
@@ -577,5 +595,80 @@ mod tests {
         );
         assert_eq!(chat_tool.function.parameters["type"], "object");
         assert!(chat_tool.function.parameters["properties"]["city"].is_object());
+    }
+
+    #[test]
+    fn test_get_history_tool_calls_count_messages() {
+        // No tool calls
+        let request = CreateMessageRequest {
+            model: "test".to_string(),
+            messages: vec![InputMessage {
+                role: Role::User,
+                content: InputContent::String("Hello".to_string()),
+            }],
+            max_tokens: 100,
+            metadata: None,
+            service_tier: None,
+            stop_sequences: None,
+            stream: None,
+            system: None,
+            temperature: None,
+            thinking: None,
+            tool_choice: None,
+            tools: None,
+            top_k: None,
+            top_p: None,
+            container: None,
+            mcp_servers: None,
+        };
+        assert_eq!(get_history_tool_calls_count_messages(&request), 0);
+
+        // With tool calls in assistant message
+        let request = CreateMessageRequest {
+            model: "test".to_string(),
+            messages: vec![
+                InputMessage {
+                    role: Role::User,
+                    content: InputContent::String("Hello".to_string()),
+                },
+                InputMessage {
+                    role: Role::Assistant,
+                    content: InputContent::Blocks(vec![
+                        InputContentBlock::Text(TextBlock {
+                            text: "Let me check.".to_string(),
+                            cache_control: None,
+                            citations: None,
+                        }),
+                        InputContentBlock::ToolUse(messages::ToolUseBlock {
+                            id: "tu_1".to_string(),
+                            name: "calc".to_string(),
+                            input: json!({"x": 1}),
+                            cache_control: None,
+                        }),
+                        InputContentBlock::ToolUse(messages::ToolUseBlock {
+                            id: "tu_2".to_string(),
+                            name: "search".to_string(),
+                            input: json!({"q": "test"}),
+                            cache_control: None,
+                        }),
+                    ]),
+                },
+            ],
+            max_tokens: 100,
+            metadata: None,
+            service_tier: None,
+            stop_sequences: None,
+            stream: None,
+            system: None,
+            temperature: None,
+            thinking: None,
+            tool_choice: None,
+            tools: None,
+            top_k: None,
+            top_p: None,
+            container: None,
+            mcp_servers: None,
+        };
+        assert_eq!(get_history_tool_calls_count_messages(&request), 2);
     }
 }
