@@ -1,9 +1,15 @@
 use std::{
     any::Any,
+    error::Error as _,
     sync::{atomic::AtomicBool, Arc},
 };
 
-use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
+use axum::{
+    body::Body,
+    extract::Request,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
 use openai_protocol::{
     chat::ChatCompletionRequest,
     realtime_session::{
@@ -30,10 +36,15 @@ use crate::{
             header_utils::extract_auth_header,
             worker_selection::{SelectWorkerRequest, WorkerSelector},
         },
-        openai::realtime::{rest::forward_realtime_rest, ws::handle_realtime_ws, RealtimeRegistry},
+        openai::realtime::{
+            rest::forward_realtime_rest, webrtc, webrtc::handle_realtime_webrtc,
+            ws::handle_realtime_ws, RealtimeRegistry,
+        },
     },
     worker::{ProviderType, Worker, WorkerRegistry},
 };
+
+const WEBRTC_REQUEST_BODY_LIMIT: usize = 10 * 1024 * 1024;
 
 /// Resolve the provider implementation for a given worker and model.
 ///
@@ -61,6 +72,7 @@ pub struct OpenAIRouter {
     responses_components: Arc<ResponsesComponents>,
     retry_config: RetryConfig,
     realtime_registry: Arc<RealtimeRegistry>,
+    context: Arc<AppContext>,
 }
 
 impl std::fmt::Debug for OpenAIRouter {
@@ -111,6 +123,7 @@ impl OpenAIRouter {
             responses_components,
             retry_config: ctx.router_config.effective_retry_config(),
             realtime_registry: ctx.realtime_registry.clone(),
+            context: Arc::clone(ctx),
         })
     }
 
@@ -260,6 +273,64 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             model.to_owned(),
             worker,
             auth_header,
+            Arc::clone(&self.realtime_registry),
+        )
+        .await
+    }
+
+    async fn route_realtime_webrtc(&self, req: Request<Body>, model: &str) -> Response {
+        let (parts, body) = req.into_parts();
+        let body = match axum::body::to_bytes(body, WEBRTC_REQUEST_BODY_LIMIT).await {
+            Ok(b) => b,
+            Err(e) => {
+                if e.source()
+                    .and_then(|s| s.downcast_ref::<http_body_util::LengthLimitError>())
+                    .is_some()
+                {
+                    return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+                }
+                return super::super::error::bad_request(
+                    "invalid_body",
+                    format!("Failed to read body: {e}"),
+                );
+            }
+        };
+
+        // Parse body once to extract model, SDP, and session config.
+        // For multipart, the model comes from the session JSON body.
+        // For application/sdp, the model comes from the query parameter.
+        let parsed = match webrtc::parse_webrtc_request(&parts, &body, model).await {
+            Ok(p) => p,
+            Err(resp) => return resp,
+        };
+
+        Metrics::record_router_request(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_WEBRTC,
+            &parsed.model,
+            metrics_labels::ENDPOINT_REALTIME,
+            "false",
+        );
+
+        let auth_header = extract_auth_header(Some(&parts.headers), None);
+        let worker = self
+            .select_worker(&parsed.model, Some(&parts.headers))
+            .await;
+
+        let bind_addr = self
+            .context
+            .webrtc_bind_addr
+            .unwrap_or_else(|| std::net::Ipv4Addr::UNSPECIFIED.into());
+
+        handle_realtime_webrtc(
+            parts.headers,
+            parsed,
+            worker,
+            auth_header,
+            self.shared_components.client.clone(),
+            bind_addr,
+            self.context.webrtc_stun_server.clone(),
             Arc::clone(&self.realtime_registry),
         )
         .await
