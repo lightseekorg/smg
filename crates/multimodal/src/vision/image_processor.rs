@@ -441,6 +441,10 @@ impl ImageProcessorRegistry {
             "phi3-vision",
             Box::new(super::processors::Phi3VisionProcessor::new()),
         );
+        registry.register(
+            "phi3_v",
+            Box::new(super::processors::Phi3VisionProcessor::new()),
+        );
 
         // Register LLaMA 4 Vision
         registry.register(
@@ -592,5 +596,15 @@ mod tests {
             .find("Qwen3-VL-30B-A3B-Instruct", Some("qwen2_vl"))
             .expect("qwen3 processor by model_id");
         assert_eq!(processor.model_name(), "qwen3-vl");
+    }
+
+    #[test]
+    fn test_registry_find_phi3_model_type_fallback() {
+        let registry = ImageProcessorRegistry::with_defaults();
+
+        let processor = registry
+            .find("custom-model", Some("phi3_v"))
+            .expect("phi3 processor by model_type");
+        assert_eq!(processor.model_name(), "phi3-vision");
     }
 }
