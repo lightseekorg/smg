@@ -8,6 +8,7 @@
 pub mod proxy;
 pub mod registry;
 pub mod rest;
+pub mod webrtc;
 pub mod webrtc_bridge;
 pub mod ws;
 

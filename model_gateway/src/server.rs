@@ -821,7 +821,7 @@ pub struct ServerConfig {
     /// `None` means use the default (0.0.0.0, auto-detect candidate IP).
     pub webrtc_bind_addr: Option<std::net::IpAddr>,
     /// STUN server for ICE candidate gathering (host:port).
-    /// `None` means use the default (stun.l.google.com:19302).
+    /// Defaults to `stun.l.google.com:19302`; `"none"` to disable.
     pub webrtc_stun_server: Option<String>,
 }
 
