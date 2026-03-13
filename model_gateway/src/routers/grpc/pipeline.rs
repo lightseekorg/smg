@@ -11,12 +11,13 @@ use openai_protocol::{
     classify::ClassifyRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
+    messages::CreateMessageRequest,
 };
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::{debug, error};
 
-// Import embedding-specific and classify-specific stages
+// Import embedding-specific, classify-specific, and messages-specific stages
 use super::regular::stages::classify::ClassifyResponseProcessingStage;
 use super::{
     common::{responses::ResponsesContext, stages::*},
@@ -29,6 +30,10 @@ use super::{
                 preparation::EmbeddingPreparationStage,
                 request_building::EmbeddingRequestBuildingStage,
                 response_processing::EmbeddingResponseProcessingStage,
+            },
+            messages::{
+                MessagePreparationStage, MessageRequestBuildingStage,
+                MessageResponseProcessingStage,
             },
             *,
         },
@@ -252,6 +257,82 @@ impl RequestPipeline {
         Self {
             stages: Arc::new(stages),
             backend_type: metrics_labels::BACKEND_REGULAR,
+        }
+    }
+
+    /// Create a Messages API pipeline (single-worker)
+    ///
+    /// Uses Messages-specific stages for preparation, request building, and response
+    /// processing. Shares worker selection, client acquisition, dispatch metadata,
+    /// and request execution stages with other pipelines.
+    pub fn new_messages(
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+        tool_parser_factory: ToolParserFactory,
+        reasoning_parser_factory: ReasoningParserFactory,
+        configured_tool_parser: Option<String>,
+        configured_reasoning_parser: Option<String>,
+    ) -> Self {
+        let processor = processor::ResponseProcessor::new(
+            tool_parser_factory,
+            reasoning_parser_factory,
+            configured_tool_parser,
+            configured_reasoning_parser,
+        );
+
+        let stages: Vec<Box<dyn PipelineStage>> = vec![
+            Box::new(MessagePreparationStage),
+            Box::new(WorkerSelectionStage::new(
+                worker_registry,
+                policy_registry,
+                WorkerSelectionMode::Regular,
+            )),
+            Box::new(ClientAcquisitionStage),
+            Box::new(MessageRequestBuildingStage::new(false)), // No PD metadata
+            Box::new(DispatchMetadataStage),
+            Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
+            Box::new(MessageResponseProcessingStage::new(processor)),
+        ];
+
+        Self {
+            stages: Arc::new(stages),
+            backend_type: metrics_labels::BACKEND_REGULAR,
+        }
+    }
+
+    /// Create a Messages API PD (prefill-decode) pipeline
+    pub fn new_messages_pd(
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+        tool_parser_factory: ToolParserFactory,
+        reasoning_parser_factory: ReasoningParserFactory,
+        configured_tool_parser: Option<String>,
+        configured_reasoning_parser: Option<String>,
+    ) -> Self {
+        let processor = processor::ResponseProcessor::new(
+            tool_parser_factory,
+            reasoning_parser_factory,
+            configured_tool_parser,
+            configured_reasoning_parser,
+        );
+
+        let stages: Vec<Box<dyn PipelineStage>> = vec![
+            Box::new(MessagePreparationStage),
+            Box::new(WorkerSelectionStage::new(
+                worker_registry,
+                policy_registry,
+                WorkerSelectionMode::PrefillDecode,
+            )),
+            Box::new(ClientAcquisitionStage),
+            Box::new(MessageRequestBuildingStage::new(true)), // Inject PD metadata
+            Box::new(DispatchMetadataStage),
+            Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
+            Box::new(MessageResponseProcessingStage::new(processor)),
+        ];
+
+        Self {
+            stages: Arc::new(stages),
+            backend_type: metrics_labels::BACKEND_PD,
         }
     }
 
@@ -660,6 +741,111 @@ impl RequestPipeline {
                 error!(
                     function = "execute_classify",
                     "No final response produced by pipeline."
+                );
+                error::internal_error("no_response_produced", "No response produced")
+            }
+        }
+    }
+
+    /// Execute the complete pipeline for a Messages API request
+    pub async fn execute_messages(
+        &self,
+        request: Arc<CreateMessageRequest>,
+        headers: Option<http::HeaderMap>,
+        model_id: Option<String>,
+        components: Arc<SharedComponents>,
+    ) -> Response {
+        let start = Instant::now();
+        let streaming = request.stream.unwrap_or(false);
+
+        // Record request start
+        Metrics::record_router_request(
+            metrics_labels::ROUTER_GRPC,
+            self.backend_type,
+            metrics_labels::CONNECTION_GRPC,
+            &request.model,
+            metrics_labels::ENDPOINT_MESSAGES,
+            bool_to_static_str(streaming),
+        );
+
+        let mut ctx = RequestContext::for_messages(request.clone(), headers, model_id, components);
+
+        for stage in self.stages.iter() {
+            match stage.execute(&mut ctx).await {
+                Ok(Some(response)) => {
+                    // Stage completed with streaming response
+                    Metrics::record_router_duration(
+                        metrics_labels::ROUTER_GRPC,
+                        self.backend_type,
+                        metrics_labels::CONNECTION_GRPC,
+                        &request.model,
+                        metrics_labels::ENDPOINT_MESSAGES,
+                        start.elapsed(),
+                    );
+                    return response;
+                }
+                Ok(None) => continue,
+                Err(response) => {
+                    Metrics::record_router_error(
+                        metrics_labels::ROUTER_GRPC,
+                        self.backend_type,
+                        metrics_labels::CONNECTION_GRPC,
+                        &request.model,
+                        metrics_labels::ENDPOINT_MESSAGES,
+                        error_type_from_status(response.status()),
+                    );
+                    error!(
+                        "Stage {} failed with status {}",
+                        stage.name(),
+                        response.status()
+                    );
+                    return response;
+                }
+            }
+        }
+
+        match ctx.state.response.final_response {
+            Some(FinalResponse::Messages(response)) => {
+                Metrics::record_router_duration(
+                    metrics_labels::ROUTER_GRPC,
+                    self.backend_type,
+                    metrics_labels::CONNECTION_GRPC,
+                    &request.model,
+                    metrics_labels::ENDPOINT_MESSAGES,
+                    start.elapsed(),
+                );
+                axum::Json(response).into_response()
+            }
+            Some(FinalResponse::Chat(_))
+            | Some(FinalResponse::Generate(_))
+            | Some(FinalResponse::Embedding(_))
+            | Some(FinalResponse::Classify(_)) => {
+                error!(
+                    function = "execute_messages",
+                    "Wrong response type: expected Messages"
+                );
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_GRPC,
+                    self.backend_type,
+                    metrics_labels::CONNECTION_GRPC,
+                    &request.model,
+                    metrics_labels::ENDPOINT_MESSAGES,
+                    metrics_labels::ERROR_INTERNAL,
+                );
+                error::internal_error("wrong_response_type", "Internal error: wrong response type")
+            }
+            None => {
+                error!(
+                    function = "execute_messages",
+                    "No response produced by pipeline"
+                );
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_GRPC,
+                    self.backend_type,
+                    metrics_labels::CONNECTION_GRPC,
+                    &request.model,
+                    metrics_labels::ENDPOINT_MESSAGES,
+                    metrics_labels::ERROR_INTERNAL,
                 );
                 error::internal_error("no_response_produced", "No response produced")
             }

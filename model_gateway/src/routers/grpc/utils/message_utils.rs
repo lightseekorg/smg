@@ -73,12 +73,18 @@ pub fn process_messages(
     // Step 5: Build template kwargs from ThinkingConfig
     let mut combined_template_kwargs = HashMap::new();
 
-    if let Some(ThinkingConfig::Enabled { budget_tokens }) = &request.thinking {
-        // Pass thinking config as template kwargs
-        combined_template_kwargs.insert(
-            "thinking".to_string(),
-            json!({"type": "enabled", "budget_tokens": budget_tokens}),
-        );
+    // Pass both `enable_thinking` (Qwen3) and `thinking` (Kimi-K2.5) since
+    // different model templates use different kwarg names for the same concept.
+    match &request.thinking {
+        Some(ThinkingConfig::Enabled { .. }) => {
+            combined_template_kwargs.insert("enable_thinking".to_string(), json!(true));
+            combined_template_kwargs.insert("thinking".to_string(), json!(true));
+        }
+        Some(ThinkingConfig::Disabled) => {
+            combined_template_kwargs.insert("enable_thinking".to_string(), json!(false));
+            combined_template_kwargs.insert("thinking".to_string(), json!(false));
+        }
+        None => {} // Let template use its default behavior
     }
 
     let final_template_kwargs = if combined_template_kwargs.is_empty() {

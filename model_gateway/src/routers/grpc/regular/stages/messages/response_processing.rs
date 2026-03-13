@@ -3,7 +3,6 @@
 //! Collects the backend response, converts it to an Anthropic `Message`,
 //! and stores it as FinalResponse::Messages.
 //! Streaming support will be added in a follow-up PR.
-#![allow(dead_code)] // wired in follow-up PR (pipeline factory)
 
 use async_trait::async_trait;
 use axum::response::Response;
