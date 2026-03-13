@@ -131,7 +131,7 @@ impl MessagePreparationStage {
             &tokenizer,
             stop_for_decoder.as_ref(),
             None,  // no stop_token_ids in Messages API
-            false, // skip_special_tokens default
+            true,  // always skip special tokens — Messages API never exposes raw tokens
             false, // no_stop_trim default
         );
 
