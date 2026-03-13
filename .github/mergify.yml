@@ -117,6 +117,14 @@ pull_request_rules:
           If this work is still relevant, feel free to reopen the PR or create a new one.
       close:
         message: Closed due to inactivity (30+ days).
+
+  - name: Remove stale label when PR becomes active
+    description: Remove stale label when PR is updated
+    conditions:
+      - -updated-at < 14 days ago
+      - -closed
+      - label = stale
+    actions:
       label:
-        add:
+        remove:
           - stale
