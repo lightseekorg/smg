@@ -121,7 +121,7 @@ pull_request_rules:
   - name: Remove stale label when PR becomes active
     description: Remove stale label when PR is updated
     conditions:
-      - -updated-at < 14 days ago
+      - updated-at > 14 days ago
       - -closed
       - label = stale
     actions:
