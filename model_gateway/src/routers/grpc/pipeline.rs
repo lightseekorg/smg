@@ -19,9 +19,6 @@ use tracing::{debug, error};
 
 // Import embedding-specific, classify-specific, and messages-specific stages
 use super::regular::stages::classify::ClassifyResponseProcessingStage;
-use super::regular::stages::messages::{
-    MessagePreparationStage, MessageRequestBuildingStage, MessageResponseProcessingStage,
-};
 use super::{
     common::{responses::ResponsesContext, stages::*},
     context::*,
@@ -33,6 +30,10 @@ use super::{
                 preparation::EmbeddingPreparationStage,
                 request_building::EmbeddingRequestBuildingStage,
                 response_processing::EmbeddingResponseProcessingStage,
+            },
+            messages::{
+                MessagePreparationStage, MessageRequestBuildingStage,
+                MessageResponseProcessingStage,
             },
             *,
         },

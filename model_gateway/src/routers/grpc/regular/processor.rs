@@ -487,16 +487,13 @@ impl ResponseProcessor {
         let complete = all_responses.into_iter().next().unwrap();
 
         // Check parser availability
-        let reasoning_enabled = matches!(
-            messages_request.thinking,
-            Some(messages::ThinkingConfig::Enabled { .. })
+        // Always attempt reasoning parsing when a parser is available — some models'
+        // chat templates emit thinking tokens regardless of the request's `thinking` config.
+        let reasoning_parser_available = utils::check_reasoning_parser_availability(
+            &self.reasoning_parser_factory,
+            self.configured_reasoning_parser.as_deref(),
+            &messages_request.model,
         );
-        let reasoning_parser_available = reasoning_enabled
-            && utils::check_reasoning_parser_availability(
-                &self.reasoning_parser_factory,
-                self.configured_reasoning_parser.as_deref(),
-                &messages_request.model,
-            );
 
         let tool_choice_enabled = !matches!(
             &messages_request.tool_choice,
@@ -511,10 +508,9 @@ impl ResponseProcessor {
                 &messages_request.model,
             );
 
-        // Log once per request (not per choice)
-        if reasoning_enabled && !reasoning_parser_available {
+        if !reasoning_parser_available {
             tracing::debug!(
-                "No reasoning parser found for model '{}', skipping reasoning parsing",
+                "No reasoning parser found for model '{}', reasoning content will not be separated",
                 messages_request.model
             );
         }
