@@ -185,7 +185,7 @@ main() {
             run_pytest "$E2E_DIR/embeddings"
             ;;
         benchmarks)
-            run_pytest "$E2E_DIR/benchmarks" "--workers 0"  # No parallel for benchmarks
+            run_pytest "$E2E_DIR/benchmarks"
             ;;
         go|golang|go-bindings)
             run_go_e2e

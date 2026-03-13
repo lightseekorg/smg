@@ -30,11 +30,13 @@ class RouterArgs:
     decode_policy: str | None = None  # Specific policy for decode nodes in PD mode
     worker_startup_timeout_secs: int = 1800
     worker_startup_check_interval: int = 30
+    load_monitor_interval: int = 10
     cache_threshold: float = 0.3
     balance_abs_threshold: int = 64
     balance_rel_threshold: float = 1.5
     eviction_interval_secs: int = 60
     max_tree_size: int = 2**26
+    block_size: int = 16
     max_idle_secs: int = 4 * 3600
     assignment_mode: str = "random"  # Mode for manual policy new routing key assignment
     max_payload_size: int = 512 * 1024 * 1024  # 512MB default for large batches
@@ -54,6 +56,7 @@ class RouterArgs:
     prefill_selector: dict[str, str] = dataclasses.field(default_factory=dict)
     decode_selector: dict[str, str] = dataclasses.field(default_factory=dict)
     bootstrap_port_annotation: str = "sglang.ai/bootstrap-port"
+    model_id_from: str | None = None
     # Prometheus configuration
     prometheus_port: int | None = None
     prometheus_host: str | None = None
@@ -108,6 +111,8 @@ class RouterArgs:
     mcp_config_path: str | None = None
     # Backend selection
     backend: str = "sglang"
+    # Storage hooks (WASM)
+    storage_hook_wasm_path: str | None = None
     # History backend configuration
     history_backend: str = "memory"
     oracle_wallet_path: str | None = None
@@ -124,6 +129,7 @@ class RouterArgs:
     redis_url: str | None = None
     redis_pool_max: int = 16
     redis_retention_days: int = 30
+    schema_config: str | None = None
     # mTLS configuration for worker communication
     client_cert_path: str | None = None
     client_key_path: str | None = None
@@ -330,6 +336,12 @@ class RouterArgs:
             help="Maximum size of the approximation tree for cache-aware routing",
         )
         routing_group.add_argument(
+            f"--{prefix}block-size",
+            type=int,
+            default=RouterArgs.block_size,
+            help="KV cache block size for event-driven cache-aware routing (default: 16)",
+        )
+        routing_group.add_argument(
             f"--{prefix}max-idle-secs",
             type=int,
             default=RouterArgs.max_idle_secs,
@@ -399,6 +411,14 @@ class RouterArgs:
             help="Interval in seconds between checks for worker startup",
         )
 
+        # Load monitoring
+        parser.add_argument(
+            f"--{prefix}load-monitor-interval",
+            type=int,
+            default=RouterArgs.load_monitor_interval,
+            help="Interval in seconds between load monitor checks for PowerOfTwo routing (default: 10)",
+        )
+
         # Logging configuration
         logging_group.add_argument(
             f"--{prefix}log-dir",
@@ -466,6 +486,16 @@ class RouterArgs:
             default={},
             help=(
                 "Label selector for decode server pods in PD mode (format: key1=value1 key2=value2)"
+            ),
+        )
+        k8s_group.add_argument(
+            f"--{prefix}model-id-from",
+            type=str,
+            default=None,
+            help=(
+                "Override each worker's model ID from pod metadata."
+                " Accepted values: 'namespace', 'label:<key>', 'annotation:<key>'."
+                " The backend-discovered model name becomes an alias."
             ),
         )
         # Prometheus configuration
@@ -666,6 +696,7 @@ class RouterArgs:
         # Tokenizer configuration
         tokenizer_group.add_argument(
             f"--{prefix}model-path",
+            f"--{prefix}model",
             type=str,
             default=None,
             help="Model path for loading tokenizer (HuggingFace model ID or local path)",
@@ -736,6 +767,12 @@ class RouterArgs:
             default=RouterArgs.backend,
             choices=["sglang", "openai", "anthropic"],
             help="Backend runtime to use (default: sglang)",
+        )
+        backend_group.add_argument(
+            f"--{prefix}storage-hook-wasm-path",
+            type=str,
+            default=None,
+            help="Path to a WASM component implementing storage hooks",
         )
         backend_group.add_argument(
             f"--{prefix}history-backend",
@@ -833,6 +870,14 @@ class RouterArgs:
             type=int,
             default=int(os.getenv("REDIS_RETENTION_DAYS", RouterArgs.redis_retention_days)),
             help="Redis data retention in days (-1 for persistent, default: 30, env: REDIS_RETENTION_DAYS)",
+        )
+
+        # Schema configuration
+        backend_group.add_argument(
+            f"--{prefix}schema-config",
+            type=str,
+            default=None,
+            help="Path to a YAML schema config file for storage table/column remapping",
         )
 
         # TLS/mTLS configuration
@@ -967,9 +1012,14 @@ class RouterArgs:
         args_dict = {}
 
         for attr in dataclasses.fields(cls):
-            # Auto strip prefix from args
-            if f"{prefix}{attr.name}" in cli_args_dict:
-                args_dict[attr.name] = cli_args_dict[f"{prefix}{attr.name}"]
+            # Auto strip prefix from args.
+            # Prefer the prefixed version (e.g. --router-model-path) when
+            # explicitly set, but fall back to the unprefixed version
+            # (e.g. --model-path from the backend) when the prefixed key
+            # exists but is None (argparse default).
+            prefixed_key = f"{prefix}{attr.name}"
+            if prefixed_key in cli_args_dict and cli_args_dict[prefixed_key] is not None:
+                args_dict[attr.name] = cli_args_dict[prefixed_key]
             elif attr.name in cli_args_dict:
                 args_dict[attr.name] = cli_args_dict[attr.name]
 

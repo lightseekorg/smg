@@ -281,18 +281,29 @@ enum BlockAccumulator {
         thinking: String,
         signature: String,
     },
+    /// Passthrough for block types that don't need delta accumulation
+    /// (e.g. server_tool_use, tool_search_tool_result, tool_reference).
+    /// Stores the raw `content_block` JSON from content_block_start.
+    Passthrough {
+        content_block: Value,
+    },
 }
 
 impl BlockAccumulator {
-    /// Create a new accumulator for the given content block type.
-    fn for_type(block_type: &str) -> Self {
+    /// Create a new accumulator for the given content block type and
+    /// optional raw `content_block` JSON from `content_block_start`.
+    fn for_type(block_type: &str, content_block: Option<Value>) -> Self {
         match block_type {
             "thinking" => Self::Thinking {
                 thinking: String::new(),
                 signature: String::new(),
             },
-            _ => Self::Text {
+            "text" => Self::Text {
                 text: String::new(),
+            },
+            // Block types that are forwarded as-is without delta accumulation
+            _ => Self::Passthrough {
+                content_block: content_block.unwrap_or(Value::Null),
             },
         }
     }
@@ -385,6 +396,26 @@ impl BlockAccumulator {
                 },
                 None,
             ),
+            Self::Passthrough { content_block } => {
+                // Deserialize the raw content_block JSON into a ContentBlock.
+                // Falls back to empty text if deserialization fails.
+                match serde_json::from_value::<ContentBlock>(content_block.clone()) {
+                    Ok(block) => (block, None),
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "Failed to deserialize passthrough content block, using empty text"
+                        );
+                        (
+                            ContentBlock::Text {
+                                text: String::new(),
+                                citations: None,
+                            },
+                            None,
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -514,7 +545,9 @@ where
                 .await?;
         } else {
             // Initialize accumulator before mutating parsed (block_type borrows parsed)
-            self.upstream_blocks[upstream_index as usize] = BlockAccumulator::for_type(block_type);
+            let raw_block = parsed.get("content_block").cloned();
+            self.upstream_blocks[upstream_index as usize] =
+                BlockAccumulator::for_type(block_type, raw_block);
             parsed["index"] = Value::from(client_index);
             self.send("content_block_start", parsed).await?;
         }

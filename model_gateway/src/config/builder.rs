@@ -86,6 +86,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn gemini_mode(mut self, worker_urls: Vec<String>) -> Self {
+        self.config.mode = RoutingMode::Gemini { worker_urls };
+        self
+    }
+
     pub fn mode(mut self, mode: RoutingMode) -> Self {
         self.config.mode = mode;
         self
@@ -122,6 +127,7 @@ impl RouterConfigBuilder {
             balance_rel_threshold,
             eviction_interval_secs,
             max_tree_size,
+            block_size: 16,
         };
         self
     }
@@ -179,6 +185,11 @@ impl RouterConfigBuilder {
 
     pub fn worker_startup_check_interval_secs(mut self, interval: u64) -> Self {
         self.config.worker_startup_check_interval_secs = interval;
+        self
+    }
+
+    pub fn load_monitor_interval_secs(mut self, interval: u64) -> Self {
+        self.config.load_monitor_interval_secs = interval;
         self
     }
 
@@ -350,6 +361,11 @@ impl RouterConfigBuilder {
 
     pub fn enable_wasm(mut self, enable: bool) -> Self {
         self.config.enable_wasm = enable;
+        self
+    }
+
+    pub fn maybe_storage_hook_wasm_path(mut self, path: Option<&str>) -> Self {
+        self.config.storage_hook_wasm_path = path.map(|p| p.to_string());
         self
     }
 

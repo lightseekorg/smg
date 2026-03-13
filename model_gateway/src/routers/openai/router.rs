@@ -1,6 +1,5 @@
 use std::{
     any::Any,
-    collections::HashSet,
     sync::{atomic::AtomicBool, Arc},
     time::Instant,
 };
@@ -12,9 +11,13 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use futures_util::{future::join_all, StreamExt};
+use futures_util::StreamExt;
 use openai_protocol::{
     chat::ChatCompletionRequest,
+    realtime_session::{
+        RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
+        RealtimeTranscriptionSessionCreateRequest,
+    },
     responses::{
         generate_id, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
         ResponsesGetParams, ResponsesRequest,
@@ -38,11 +41,15 @@ use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
     core::{
-        is_retryable_status, Endpoint, ModelCard, ProviderType, RetryExecutor, RuntimeType, Worker,
+        is_retryable_status, Endpoint, ProviderType, RetryExecutor, RuntimeType, Worker,
         WorkerRegistry,
     },
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
-    routers::header_utils::{apply_provider_headers, extract_auth_header},
+    routers::{
+        header_utils::{apply_provider_headers, extract_auth_header},
+        openai::realtime::{rest::forward_realtime_rest, ws::handle_realtime_ws, RealtimeRegistry},
+        worker_selection::{SelectWorkerRequest, WorkerSelector},
+    },
 };
 
 pub struct OpenAIRouter {
@@ -52,6 +59,7 @@ pub struct OpenAIRouter {
     shared_components: Arc<SharedComponents>,
     responses_components: Arc<ResponsesComponents>,
     retry_config: RetryConfig,
+    realtime_registry: Arc<RealtimeRegistry>,
 }
 
 impl std::fmt::Debug for OpenAIRouter {
@@ -121,7 +129,23 @@ impl OpenAIRouter {
             shared_components,
             responses_components,
             retry_config: ctx.router_config.effective_retry_config(),
+            realtime_registry: ctx.realtime_registry.clone(),
         })
+    }
+
+    async fn select_worker(
+        &self,
+        model_id: &str,
+        headers: Option<&HeaderMap>,
+    ) -> Result<Arc<dyn Worker>, Response> {
+        WorkerSelector::new(&self.worker_registry, &self.shared_components.client)
+            .select_worker(&SelectWorkerRequest {
+                model_id,
+                headers,
+                provider: Some(ProviderType::OpenAI),
+                ..Default::default()
+            })
+            .await
     }
 
     fn get_provider_arc_for_worker(
@@ -138,134 +162,6 @@ impl OpenAIRouter {
             }
         }
         self.provider_registry.default_provider_arc()
-    }
-
-    async fn refresh_worker_models(
-        &self,
-        worker: &Arc<dyn Worker>,
-        auth_header: Option<&HeaderValue>,
-    ) -> bool {
-        let url = format!("{}/v1/models", worker.url());
-        let mut backend_req = self.shared_components.client.get(&url);
-        if let Some(auth) = auth_header {
-            backend_req = apply_provider_headers(backend_req, &url, Some(auth));
-        }
-
-        match backend_req.send().await {
-            Ok(response) if response.status().is_success() => {
-                match response.json::<Value>().await {
-                    Ok(json_response) => {
-                        if let Some(data) = json_response.get("data").and_then(|d| d.as_array()) {
-                            let model_cards: Vec<ModelCard> = data
-                                .iter()
-                                .filter_map(|m| m.get("id").and_then(|id| id.as_str()))
-                                .map(ModelCard::new)
-                                .collect();
-
-                            if !model_cards.is_empty() {
-                                tracing::info!(
-                                    "Model refresh: found {} models from {}",
-                                    model_cards.len(),
-                                    url
-                                );
-                                worker.set_models(model_cards);
-                                return true;
-                            }
-                        }
-                        false
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to parse models response: {}", e);
-                        false
-                    }
-                }
-            }
-            Ok(response) => {
-                tracing::debug!(
-                    "Model refresh returned non-success status {} from {}",
-                    response.status(),
-                    url
-                );
-                false
-            }
-            Err(e) => {
-                tracing::warn!("Failed to fetch models from backend: {}", e);
-                false
-            }
-        }
-    }
-
-    async fn refresh_external_models(&self, auth_header: Option<&HeaderValue>) {
-        let external_workers = self.worker_registry.get_workers_filtered(
-            None,
-            None,
-            None,
-            Some(RuntimeType::External),
-            true, // healthy_only
-        );
-
-        if external_workers.is_empty() {
-            return;
-        }
-
-        tracing::debug!(
-            "Refreshing models for {} external workers",
-            external_workers.len()
-        );
-
-        let futures: Vec<_> = external_workers
-            .iter()
-            .map(|w| self.refresh_worker_models(w, auth_header))
-            .collect();
-
-        join_all(futures).await;
-    }
-
-    /// Find workers that can handle the given model and select the least loaded one
-    fn find_best_worker_for_model(&self, model_id: &str) -> Option<Arc<dyn Worker>> {
-        self.worker_registry
-            .get_workers_filtered(None, None, None, Some(RuntimeType::External), true)
-            .into_iter()
-            .filter(|w| w.supports_model(model_id) && w.circuit_breaker().can_execute())
-            .min_by_key(|w| w.load())
-    }
-
-    /// Check if any worker supports the model (regardless of circuit breaker state)
-    fn any_worker_supports_model(&self, model_id: &str) -> bool {
-        self.worker_registry
-            .get_workers_filtered(None, None, None, Some(RuntimeType::External), true)
-            .into_iter()
-            .any(|w| w.supports_model(model_id))
-    }
-
-    async fn select_worker_for_model(
-        &self,
-        model_id: &str,
-        auth_header: Option<&HeaderValue>,
-    ) -> Result<Arc<dyn Worker>, Response> {
-        // Try to find a worker immediately
-        if let Some(worker) = self.find_best_worker_for_model(model_id) {
-            return Ok(worker);
-        }
-
-        // Refresh external models and try again
-        tracing::debug!(
-            "No worker found for model '{}', refreshing external worker models",
-            model_id
-        );
-        self.refresh_external_models(auth_header).await;
-
-        self.find_best_worker_for_model(model_id).ok_or_else(|| {
-            // Check if the model exists but all workers are circuit-broken
-            if self.any_worker_supports_model(model_id) {
-                error::service_unavailable(
-                    "service_unavailable",
-                    format!("All workers for model '{model_id}' are temporarily unavailable"),
-                )
-            } else {
-                error::model_not_found(model_id)
-            }
-        })
     }
 
     /// Deserialize ResponseInputOutputItems from a JSON array value
@@ -336,7 +232,12 @@ impl OpenAIRouter {
                         .flat_map(|stored| {
                             Self::deserialize_items_from_array(&stored.input)
                                 .into_iter()
-                                .chain(Self::deserialize_items_from_array(&stored.output))
+                                .chain(Self::deserialize_items_from_array(
+                                    stored
+                                        .raw_response
+                                        .get("output")
+                                        .unwrap_or(&Value::Array(vec![])),
+                                ))
                         })
                         .collect();
                     chain_items = Some(items);
@@ -536,62 +437,6 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         (StatusCode::OK, info.to_string()).into_response()
     }
 
-    async fn get_models(&self, req: Request<Body>) -> Response {
-        let external_workers = self.external_workers();
-        if external_workers.is_empty() {
-            return error::service_unavailable(
-                "service_unavailable",
-                "No external workers registered",
-            );
-        }
-
-        let auth_header = extract_auth_header(Some(req.headers()), None);
-        self.refresh_external_models(auth_header.as_ref()).await;
-
-        let mut all_models = Vec::new();
-        let mut seen_models = HashSet::new();
-
-        for worker in &external_workers {
-            for model_card in worker.models() {
-                let owned_by = model_card
-                    .provider
-                    .as_ref()
-                    .map(|p| format!("{p:?}").to_lowercase())
-                    .unwrap_or_else(|| "unknown".to_string());
-
-                if seen_models.insert(model_card.id.clone()) {
-                    all_models.push(json!({
-                        "id": &model_card.id,
-                        "object": "model",
-                        "created": 0,
-                        "owned_by": &owned_by,
-                        "aliases": model_card.aliases,
-                        "model_type": format!("{:?}", model_card.model_type),
-                    }));
-                }
-
-                for alias in &model_card.aliases {
-                    if seen_models.insert(alias.clone()) {
-                        all_models.push(json!({
-                            "id": alias,
-                            "object": "model",
-                            "created": 0,
-                            "owned_by": &owned_by,
-                            "primary_model": &model_card.id,
-                        }));
-                    }
-                }
-            }
-        }
-
-        let response_json = json!({
-            "object": "list",
-            "data": all_models
-        });
-
-        (StatusCode::OK, Json(response_json)).into_response()
-    }
-
     async fn route_chat(
         &self,
         headers: Option<&HeaderMap>,
@@ -612,12 +457,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             bool_to_static_str(streaming),
         );
 
-        let auth_header = extract_auth_header(headers, None);
-
-        let worker = match self
-            .select_worker_for_model(body.model.as_str(), auth_header.as_ref())
-            .await
-        {
+        let worker = match self.select_worker(body.model.as_str(), headers).await {
             Ok(w) => w,
             Err(response) => {
                 Metrics::record_router_error(
@@ -850,12 +690,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             bool_to_static_str(streaming),
         );
 
-        let auth_header = extract_auth_header(headers, None);
-
-        let worker = match self
-            .select_worker_for_model(model, auth_header.as_ref())
-            .await
-        {
+        let worker = match self.select_worker(model, headers).await {
             Ok(w) => w,
             Err(response) => {
                 Metrics::record_router_error(
@@ -1061,6 +896,90 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 )
             }
         }
+    }
+
+    async fn route_realtime_session(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeSessionCreateRequest,
+    ) -> Response {
+        // TODO(Phase 3): Inject MCP tool definitions into body.tools
+        let model = body.model.as_deref().unwrap_or_default();
+        let worker = self.select_worker(model, headers).await;
+        forward_realtime_rest(
+            &self.shared_components.client,
+            worker,
+            headers,
+            body,
+            model,
+            "/v1/realtime/sessions",
+            metrics_labels::ENDPOINT_REALTIME_SESSIONS,
+        )
+        .await
+    }
+
+    async fn route_realtime_client_secret(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeClientSecretCreateRequest,
+    ) -> Response {
+        // TODO(Phase 3): Inject MCP tool definitions into body.session.tools
+        let model = body.session.model.as_deref().unwrap_or_default();
+        let worker = self.select_worker(model, headers).await;
+        forward_realtime_rest(
+            &self.shared_components.client,
+            worker,
+            headers,
+            body,
+            model,
+            "/v1/realtime/client_secrets",
+            metrics_labels::ENDPOINT_REALTIME_CLIENT_SECRETS,
+        )
+        .await
+    }
+
+    async fn route_realtime_transcription_session(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &RealtimeTranscriptionSessionCreateRequest,
+    ) -> Response {
+        let model = body.model.as_deref().unwrap_or_default();
+        let worker = self.select_worker(model, headers).await;
+        forward_realtime_rest(
+            &self.shared_components.client,
+            worker,
+            headers,
+            body,
+            model,
+            "/v1/realtime/transcription_sessions",
+            metrics_labels::ENDPOINT_REALTIME_TRANSCRIPTION,
+        )
+        .await
+    }
+
+    async fn route_realtime_ws(&self, req: Request<Body>, model: &str) -> Response {
+        let (parts, _body) = req.into_parts();
+
+        Metrics::record_router_request(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_WEBSOCKET,
+            model,
+            metrics_labels::ENDPOINT_REALTIME,
+            "false",
+        );
+
+        let auth_header = extract_auth_header(Some(&parts.headers), None);
+        let worker = self.select_worker(model, Some(&parts.headers)).await;
+
+        handle_realtime_ws(
+            parts,
+            model.to_owned(),
+            worker,
+            auth_header,
+            Arc::clone(&self.realtime_registry),
+        )
+        .await
     }
 
     fn router_type(&self) -> &'static str {

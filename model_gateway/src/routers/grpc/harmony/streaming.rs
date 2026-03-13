@@ -1,7 +1,7 @@
 //! Harmony streaming response processor
 
 use std::{
-    collections::{hash_map::Entry::Vacant, HashMap, HashSet},
+    collections::{hash_map::Entry::Vacant, HashMap},
     io,
     sync::Arc,
     time::Instant,
@@ -15,11 +15,12 @@ use openai_protocol::{
     },
     common::{ChatLogProbs, FunctionCallDelta, ToolCall, ToolCallDelta, Usage},
     responses::{
-        OutputTokensDetails, ResponseStatus, ResponseUsage, ResponsesResponse, ResponsesUsage,
+        InputTokensDetails, OutputTokensDetails, ResponseStatus, ResponseUsage, ResponsesResponse,
+        ResponsesUsage,
     },
 };
 use serde_json::json;
-use smg_mcp::{McpToolSession, ResponseFormat};
+use smg_mcp::{McpToolSession, ResponseFormat, DEFAULT_SERVER_LABEL};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
@@ -124,10 +125,75 @@ impl HarmonyStreamingProcessor {
 
     /// Process streaming chunks from a single stream
     async fn process_single_stream(
-        mut grpc_stream: ProtoStream,
+        grpc_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    ) -> Result<(), String> {
+        let mut prompt_tokens = HashMap::new();
+        let mut cached_tokens = HashMap::new();
+        Self::process_chat_decode_stream(
+            grpc_stream,
+            &dispatch,
+            &original_request,
+            tx,
+            &mut prompt_tokens,
+            &mut cached_tokens,
+        )
+        .await
+    }
+
+    /// Process streaming chunks from dual streams (prefill + decode)
+    async fn process_dual_stream(
+        mut prefill_stream: ProtoStream,
+        decode_stream: ProtoStream,
+        dispatch: context::DispatchMetadata,
+        original_request: Arc<ChatCompletionRequest>,
+        tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    ) -> Result<(), String> {
+        // Phase 1: Process prefill stream (collect metadata)
+        let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
+        let mut cached_tokens: HashMap<u32, u32> = HashMap::new();
+
+        while let Some(result) = prefill_stream.next().await {
+            let response = result.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
+
+            if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
+                prompt_tokens.insert(complete_wrapper.index(), complete_wrapper.prompt_tokens());
+                cached_tokens.insert(complete_wrapper.index(), complete_wrapper.cached_tokens());
+            }
+        }
+
+        // Phase 2: Decode (shared helper)
+        Self::process_chat_decode_stream(
+            decode_stream,
+            &dispatch,
+            &original_request,
+            tx,
+            &mut prompt_tokens,
+            &mut cached_tokens,
+        )
+        .await?;
+
+        // Mark prefill stream completed AFTER decode succeeds
+        // This ensures that if client disconnects during decode, BOTH streams send abort
+        prefill_stream.mark_completed();
+        Ok(())
+    }
+
+    /// Process the decode phase of a Chat Completion stream.
+    ///
+    /// Shared between single-stream and dual-stream modes. The `prompt_tokens`
+    /// and `cached_tokens` maps may be pre-populated from a prefill phase
+    /// (dual stream) or empty (single stream). Values from `Complete` messages
+    /// are inserted only if not already present.
+    async fn process_chat_decode_stream(
+        mut decode_stream: ProtoStream,
+        dispatch: &context::DispatchMetadata,
+        original_request: &ChatCompletionRequest,
+        tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        prompt_tokens: &mut HashMap<u32, u32>,
+        cached_tokens: &mut HashMap<u32, u32>,
     ) -> Result<(), String> {
         // Timing for metrics
         let start_time = Instant::now();
@@ -136,16 +202,14 @@ impl HarmonyStreamingProcessor {
         // Per-index state management (for n>1 support)
         let mut parsers: HashMap<u32, HarmonyParserAdapter> = HashMap::new();
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
-        let mut finish_reasons: HashMap<u32, Option<String>> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
-        let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
         let mut completion_tokens = CompletionTokenTracker::new();
 
         let stream_options = &original_request.stream_options;
 
         // Process stream
-        while let Some(result) = grpc_stream.next().await {
-            let response = result.map_err(|e| format!("Stream error: {e}"))?;
+        while let Some(result) = decode_stream.next().await {
+            let response = result.map_err(|e| format!("Stream error: {}", e.message()))?;
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
@@ -192,8 +256,8 @@ impl HarmonyStreamingProcessor {
                             &delta,
                             index,
                             is_first,
-                            &dispatch,
-                            &original_request,
+                            dispatch,
+                            original_request,
                             tx,
                             chunk_logprobs,
                         )?;
@@ -207,26 +271,28 @@ impl HarmonyStreamingProcessor {
                     let index = complete_wrapper.index();
 
                     // Store final metadata
-                    finish_reasons
-                        .insert(index, Some(complete_wrapper.finish_reason().to_string()));
                     matched_stops.insert(index, complete_wrapper.matched_stop_json());
-                    prompt_tokens.insert(index, complete_wrapper.prompt_tokens());
+                    prompt_tokens
+                        .entry(index)
+                        .or_insert_with(|| complete_wrapper.prompt_tokens());
                     completion_tokens.record_complete(&complete_wrapper);
+                    cached_tokens
+                        .entry(index)
+                        .or_insert_with(|| complete_wrapper.cached_tokens());
 
                     // Finalize parser and emit final chunk
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
-                        let final_output = parser.finalize(
-                            complete_wrapper.finish_reason().to_string(),
-                            matched_stop.clone(),
-                        );
+
+                        let final_output =
+                            parser.finalize(complete_wrapper.finish_reason().to_string());
 
                         Self::emit_final_chunk(
                             index,
                             &final_output.finish_reason,
-                            final_output.matched_stop.as_ref(),
-                            &dispatch,
-                            &original_request,
+                            matched_stop.as_ref(),
+                            dispatch,
+                            original_request,
                             tx,
                         )?;
                     }
@@ -236,179 +302,24 @@ impl HarmonyStreamingProcessor {
                 }
                 ProtoResponseVariant::None => {}
             }
-        }
-
-        // Compute totals once for both usage chunk and metrics
-        let total_prompt: u32 = prompt_tokens.values().sum();
-        let total_completion: u32 = completion_tokens.total();
-
-        // Emit final usage if requested
-        if let Some(true) = stream_options.as_ref().and_then(|so| so.include_usage) {
-            Self::emit_usage_chunk(
-                total_prompt,
-                total_completion,
-                &dispatch,
-                &original_request,
-                tx,
-            )?;
         }
 
         // Mark stream as completed successfully to prevent abort on drop
-        grpc_stream.mark_completed();
-
-        // Record streaming metrics
-        Metrics::record_streaming_metrics(StreamingMetricsParams {
-            router_type: metrics_labels::ROUTER_GRPC,
-            backend_type: metrics_labels::BACKEND_HARMONY,
-            model_id: &original_request.model,
-            endpoint: metrics_labels::ENDPOINT_CHAT,
-            ttft: first_token_time.map(|t| t.duration_since(start_time)),
-            generation_duration: start_time.elapsed(),
-            input_tokens: Some(total_prompt as u64),
-            output_tokens: total_completion as u64,
-        });
-
-        Ok(())
-    }
-
-    /// Process streaming chunks from dual streams (prefill + decode)
-    async fn process_dual_stream(
-        mut prefill_stream: ProtoStream,
-        mut decode_stream: ProtoStream,
-        dispatch: context::DispatchMetadata,
-        original_request: Arc<ChatCompletionRequest>,
-        tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-    ) -> Result<(), String> {
-        // Timing for metrics
-        let start_time = Instant::now();
-        let mut first_token_time: Option<Instant> = None;
-
-        // Phase 1: Process prefill stream (collect metadata)
-        let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
-
-        while let Some(result) = prefill_stream.next().await {
-            let response = result.map_err(|e| format!("Prefill stream error: {e}"))?;
-
-            if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
-                prompt_tokens.insert(complete_wrapper.index(), complete_wrapper.prompt_tokens());
-            }
-        }
-
-        // Phase 2: Process decode stream (same as single stream)
-        let mut parsers: HashMap<u32, HarmonyParserAdapter> = HashMap::new();
-        let mut is_firsts: HashMap<u32, bool> = HashMap::new();
-        let mut finish_reasons: HashMap<u32, Option<String>> = HashMap::new();
-        let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
-        let mut completion_tokens = CompletionTokenTracker::new();
-
-        let stream_options = &original_request.stream_options;
-
-        while let Some(result) = decode_stream.next().await {
-            let response = result.map_err(|e| format!("Decode stream error: {e}"))?;
-
-            match response.into_response() {
-                ProtoResponseVariant::Chunk(chunk_wrapper) => {
-                    let index = chunk_wrapper.index();
-
-                    // Track first token time for TTFT metric
-                    if first_token_time.is_none() {
-                        first_token_time = Some(Instant::now());
-                    }
-
-                    // Initialize parser for this index if needed
-                    if let Vacant(e) = parsers.entry(index) {
-                        e.insert(
-                            HarmonyParserAdapter::new()
-                                .map_err(|e| format!("Failed to create parser: {e}"))?,
-                        );
-                        is_firsts.insert(index, true);
-                    }
-
-                    completion_tokens.record_chunk(&chunk_wrapper);
-
-                    // Convert logprobs if present and requested
-                    let chunk_logprobs = if original_request.logprobs {
-                        chunk_wrapper
-                            .output_logprobs()
-                            .map(|lp| convert_harmony_logprobs(&lp))
-                    } else {
-                        None
-                    };
-
-                    let parser = parsers
-                        .get_mut(&index)
-                        .ok_or("Parser not found for index")?;
-
-                    let delta_result = parser
-                        .parse_chunk(chunk_wrapper.token_ids())
-                        .map_err(|e| format!("Parse error: {e}"))?;
-
-                    if let Some(delta) = delta_result {
-                        let is_first = is_firsts.get(&index).copied().unwrap_or(false);
-                        Self::emit_chunk_delta(
-                            &delta,
-                            index,
-                            is_first,
-                            &dispatch,
-                            &original_request,
-                            tx,
-                            chunk_logprobs,
-                        )?;
-
-                        if is_first {
-                            is_firsts.insert(index, false);
-                        }
-                    }
-                }
-                ProtoResponseVariant::Complete(complete_wrapper) => {
-                    let index = complete_wrapper.index();
-
-                    finish_reasons
-                        .insert(index, Some(complete_wrapper.finish_reason().to_string()));
-                    matched_stops.insert(index, complete_wrapper.matched_stop_json());
-                    completion_tokens.record_complete(&complete_wrapper);
-
-                    if let Some(parser) = parsers.get_mut(&index) {
-                        let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
-                        let final_output = parser.finalize(
-                            complete_wrapper.finish_reason().to_string(),
-                            matched_stop.clone(),
-                        );
-
-                        Self::emit_final_chunk(
-                            index,
-                            &final_output.finish_reason,
-                            final_output.matched_stop.as_ref(),
-                            &dispatch,
-                            &original_request,
-                            tx,
-                        )?;
-                    }
-                }
-                ProtoResponseVariant::Error(error_wrapper) => {
-                    return Err(format!("Server error: {}", error_wrapper.message()));
-                }
-                ProtoResponseVariant::None => {}
-            }
-        }
-
         decode_stream.mark_completed();
-
-        // Mark prefill stream as completed AFTER decode completes successfully
-        // This ensures that if client disconnects during decode, BOTH streams send abort
-        prefill_stream.mark_completed();
 
         // Compute totals once for both usage chunk and metrics
         let total_prompt: u32 = prompt_tokens.values().sum();
         let total_completion: u32 = completion_tokens.total();
+        let total_cached: u32 = cached_tokens.values().sum();
 
         // Emit final usage if requested
         if let Some(true) = stream_options.as_ref().and_then(|so| so.include_usage) {
             Self::emit_usage_chunk(
                 total_prompt,
                 total_completion,
-                &dispatch,
-                &original_request,
+                total_cached,
+                dispatch,
+                original_request,
                 tx,
             )?;
         }
@@ -529,6 +440,7 @@ impl HarmonyStreamingProcessor {
     fn emit_usage_chunk(
         prompt_tokens: u32,
         completion_tokens: u32,
+        cached_tokens: u32,
         dispatch: &context::DispatchMetadata,
         original_request: &ChatCompletionRequest,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
@@ -536,7 +448,10 @@ impl HarmonyStreamingProcessor {
         let usage_chunk =
             ChatCompletionStreamResponse::builder(&dispatch.request_id, &original_request.model)
                 .created(dispatch.created)
-                .usage(Usage::from_counts(prompt_tokens, completion_tokens))
+                .usage(
+                    Usage::from_counts(prompt_tokens, completion_tokens)
+                        .with_cached_tokens(cached_tokens),
+                )
                 .maybe_system_fingerprint(dispatch.weight_version.as_deref())
                 .build();
 
@@ -552,10 +467,10 @@ impl HarmonyStreamingProcessor {
 
     /// Process streaming chunks for Responses API iteration.
     ///
-    /// When MCP context is provided (session, mcp_tool_names):
+    /// When MCP context is provided (session):
     /// - MCP tools with `ResponseFormat::WebSearchCall` → `web_search_call.*` events
     /// - Other MCP tools → `mcp_call.*` events
-    /// - Function tools (not in mcp_tool_names) → `function_call.*` events
+    /// - Other tools → `function_call.*` events
     ///
     /// When no MCP context is provided, all tool calls are treated as function calls.
     pub async fn process_responses_iteration_stream(
@@ -563,24 +478,15 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
-        mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 debug!("Processing Responses API single stream mode");
-                Self::process_decode_stream(stream, emitter, tx, session, mcp_tool_names).await
+                Self::process_decode_stream(stream, emitter, tx, session, 0).await
             }
             context::ExecutionResult::Dual { prefill, decode } => {
                 debug!("Processing Responses API dual stream mode");
-                Self::process_responses_dual_stream(
-                    prefill,
-                    *decode,
-                    emitter,
-                    tx,
-                    session,
-                    mcp_tool_names,
-                )
-                .await
+                Self::process_responses_dual_stream(prefill, *decode, emitter, tx, session).await
             }
             context::ExecutionResult::Embedding { .. } => {
                 Err("Embeddings not supported in Responses API streaming".to_string())
@@ -594,16 +500,22 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
-        mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
-        // Phase 1: Drain prefill stream
+        // Phase 1: Drain prefill stream, collecting cached_tokens from Complete messages
+        let mut prefill_cached_tokens_by_index: HashMap<u32, u32> = HashMap::new();
         while let Some(result) = prefill_stream.next().await {
-            let _response = result.map_err(|e| format!("Prefill stream error: {e}"))?;
+            let response = result.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
+            if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
+                prefill_cached_tokens_by_index
+                    .insert(complete_wrapper.index(), complete_wrapper.cached_tokens());
+            }
         }
+        let prefill_cached_tokens: u32 = prefill_cached_tokens_by_index.values().sum();
 
         // Phase 2: Process decode stream
         let result =
-            Self::process_decode_stream(decode_stream, emitter, tx, session, mcp_tool_names).await;
+            Self::process_decode_stream(decode_stream, emitter, tx, session, prefill_cached_tokens)
+                .await;
 
         prefill_stream.mark_completed();
         result
@@ -615,7 +527,7 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
-        mcp_tool_names: Option<&HashSet<String>>,
+        prefill_cached_tokens: u32,
     ) -> Result<ResponsesIterationResult, String> {
         let mut parser =
             HarmonyParserAdapter::new().map_err(|e| format!("Failed to create parser: {e}"))?;
@@ -633,18 +545,19 @@ impl HarmonyStreamingProcessor {
         let mut tool_call_tracking: HashMap<usize, (usize, String, Option<ResponseFormat>)> =
             HashMap::new();
 
-        // Metadata from Complete message
-        let mut finish_reason = String::from("stop");
-        let mut matched_stop: Option<serde_json::Value> = None;
+        // Metadata from Complete message; seed cached_tokens from prefill phase (dual-stream)
+        let mut finish_reason: String;
+        let mut finalized_analysis: Option<String> = None;
         let mut prompt_tokens: u32 = 0;
         let mut completion_tokens: u32 = 0;
+        let mut cached_tokens: u32 = prefill_cached_tokens;
         let mut reasoning_token_count: u32 = 0;
 
         // Process stream
         let mut chunk_count = 0;
         while let Some(result) = decode_stream.next().await {
             chunk_count += 1;
-            let response = result.map_err(|e| format!("Decode stream error: {e}"))?;
+            let response = result.map_err(|e| format!("Decode stream error: {}", e.message()))?;
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
@@ -743,20 +656,14 @@ impl HarmonyStreamingProcessor {
                                     .map(|n| n.as_str())
                                     .unwrap_or("");
 
-                                // Determine response_format based on MCP context
-                                let response_format = if let Some(names) = mcp_tool_names {
-                                    if names.contains(tool_name) {
-                                        Some(
-                                            session
-                                                .map(|s| s.tool_response_format(tool_name))
-                                                .unwrap_or(ResponseFormat::Passthrough),
-                                        )
+                                // Determine response_format based on MCP context.
+                                let response_format = session.and_then(|s| {
+                                    if s.has_exposed_tool(tool_name) {
+                                        Some(s.tool_response_format(tool_name))
                                     } else {
-                                        None // Function tool
+                                        None
                                     }
-                                } else {
-                                    None // No MCP context, treat as function tool
-                                };
+                                });
 
                                 // Determine output item type and JSON type string
                                 let output_item_type =
@@ -787,7 +694,7 @@ impl HarmonyStreamingProcessor {
 
                                 let label = session
                                     .map(|s| s.resolve_tool_server_label(tool_name))
-                                    .unwrap_or_else(|| "mcp".to_string());
+                                    .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
                                 attach_mcp_server_label(
                                     &mut item,
                                     Some(label.as_str()),
@@ -876,8 +783,9 @@ impl HarmonyStreamingProcessor {
                 ProtoResponseVariant::Complete(complete_wrapper) => {
                     // Store final metadata
                     finish_reason = complete_wrapper.finish_reason().to_string();
-                    matched_stop = complete_wrapper.matched_stop_json();
                     prompt_tokens = complete_wrapper.prompt_tokens();
+                    // Combine decode-stream cached_tokens with any prefill cached_tokens
+                    cached_tokens = cached_tokens.saturating_add(complete_wrapper.cached_tokens());
                     // For vLLM, use accumulated count (we tracked deltas above)
                     // For SGLang, use complete value (already cumulative)
                     if !complete_wrapper.is_vllm() {
@@ -885,10 +793,12 @@ impl HarmonyStreamingProcessor {
                     }
 
                     // Finalize parser and get complete output
-                    let final_output = parser.finalize(finish_reason.clone(), matched_stop.clone());
+                    // Responses API: no user-specified stop sequences
+                    let final_output = parser.finalize(finish_reason.clone());
 
-                    // Store finalized tool calls and reasoning token count
-                    accumulated_tool_calls.clone_from(&final_output.commentary);
+                    // Store finalized output for later use
+                    finalized_analysis = final_output.analysis;
+                    accumulated_tool_calls = final_output.commentary;
                     reasoning_token_count = final_output.reasoning_token_count;
 
                     // Complete all tool calls if we have commentary
@@ -947,7 +857,7 @@ impl HarmonyStreamingProcessor {
 
                                 let label = session
                                     .map(|s| s.resolve_tool_server_label(tool_name))
-                                    .unwrap_or_else(|| "mcp".to_string());
+                                    .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
                                 attach_mcp_server_label(
                                     &mut item,
                                     Some(label.as_str()),
@@ -1079,7 +989,7 @@ impl HarmonyStreamingProcessor {
 
                         let label = session
                             .map(|s| s.resolve_tool_server_label(tool_name))
-                            .unwrap_or_else(|| "mcp".to_string());
+                            .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
                         attach_mcp_server_label(
                             &mut item,
                             Some(label.as_str()),
@@ -1101,10 +1011,7 @@ impl HarmonyStreamingProcessor {
         if let Some(tool_calls) = accumulated_tool_calls {
             if !tool_calls.is_empty() {
                 let analysis_content = if has_analysis {
-                    // Get analysis from finalized parser output by calling finalize again
-                    // This is safe because finalize can be called multiple times
-                    let output = parser.finalize(finish_reason.clone(), matched_stop.clone());
-                    output.analysis
+                    finalized_analysis
                 } else {
                     None
                 };
@@ -1114,6 +1021,7 @@ impl HarmonyStreamingProcessor {
                     analysis: analysis_content,
                     partial_text: accumulated_final_text,
                     usage: Usage::from_counts(prompt_tokens, completion_tokens)
+                        .with_cached_tokens(cached_tokens)
                         .with_reasoning_tokens(reasoning_token_count),
                     request_id: emitter.response_id.clone(),
                 });
@@ -1131,7 +1039,11 @@ impl HarmonyStreamingProcessor {
                         input_tokens: prompt_tokens,
                         output_tokens: completion_tokens,
                         total_tokens: prompt_tokens + completion_tokens,
-                        input_tokens_details: None,
+                        input_tokens_details: if cached_tokens > 0 {
+                            Some(InputTokensDetails { cached_tokens })
+                        } else {
+                            None
+                        },
                         output_tokens_details: if reasoning_token_count > 0 {
                             Some(OutputTokensDetails {
                                 reasoning_tokens: reasoning_token_count,
@@ -1143,6 +1055,7 @@ impl HarmonyStreamingProcessor {
                     .build(),
             ),
             usage: Usage::from_counts(prompt_tokens, completion_tokens)
+                .with_cached_tokens(cached_tokens)
                 .with_reasoning_tokens(reasoning_token_count),
         })
     }

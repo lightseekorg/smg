@@ -420,10 +420,11 @@ mod model_info_tests {
         let models = data.unwrap();
         assert!(!models.is_empty());
 
+        // Model ID comes from worker registry (discovered from /get_model_info model_path)
         let first_model = &models[0];
         assert_eq!(
             first_model.get("id").and_then(|v| v.as_str()),
-            Some("mock-model")
+            Some("mock-model-path")
         );
         assert_eq!(
             first_model.get("object").and_then(|v| v.as_str()),
@@ -432,7 +433,7 @@ mod model_info_tests {
         assert!(first_model.get("created").is_some());
         assert_eq!(
             first_model.get("owned_by").and_then(|v| v.as_str()),
-            Some("organization-owner")
+            Some("self_hosted")
         );
 
         ctx.shutdown().await;
@@ -887,9 +888,11 @@ mod responses_endpoint_tests {
             {"id": "item_1", "content": "hello", "role": "user"},
             {"id": "item_2", "content": "hi there", "role": "assistant"}
         ]);
-        stored_response.output = json!([
-            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "test response"}]}
-        ]);
+        stored_response.raw_response = json!({
+            "output": [
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "test response"}]}
+            ]
+        });
 
         ctx.app_context
             .response_storage

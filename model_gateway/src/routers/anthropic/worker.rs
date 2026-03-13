@@ -1,13 +1,10 @@
-//! Worker selection and HTTP transport layer for Anthropic router
+//! HTTP transport layer for Anthropic router
 //!
-//! Contains the core primitives for selecting workers, building requests,
-//! sending them, and processing responses. These functions are composed
-//! by the streaming and non-streaming processors.
+//! Contains the core primitives for building requests, sending them,
+//! and processing responses. These functions are composed by the
+//! streaming and non-streaming processors.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use axum::{
     http::HeaderMap,
@@ -18,41 +15,13 @@ use tracing::{debug, error, info, warn};
 
 use super::utils::{read_response_body_limited, should_propagate_header, ReadBodyResult};
 use crate::{
-    core::{ProviderType, Worker, WorkerRegistry},
+    core::Worker,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::error,
 };
 
 /// Maximum error response body size to prevent DoS (1 MB)
 const MAX_ERROR_RESPONSE_SIZE: usize = 1024 * 1024;
-
-/// Select the best worker for the given model.
-#[expect(clippy::result_large_err)]
-pub(crate) fn select_worker(
-    worker_registry: &WorkerRegistry,
-    model_id: &str,
-) -> Result<Arc<dyn Worker>, Response> {
-    debug!(model = %model_id, "Selecting worker for request");
-
-    match find_best_worker_for_model(worker_registry, model_id) {
-        Some(w) => {
-            debug!(
-                model = %model_id,
-                worker_url = %w.url(),
-                worker_load = %w.load(),
-                "Selected worker for request"
-            );
-            Ok(w)
-        }
-        None => {
-            warn!(model = %model_id, "No healthy workers available for model");
-            Err(error::service_unavailable(
-                "no_workers",
-                format!("No healthy workers available for model '{model_id}'"),
-            ))
-        }
-    }
-}
 
 /// Build the target URL and propagated headers for a worker request.
 pub(crate) fn build_request(
@@ -229,77 +198,6 @@ pub(crate) fn record_router_request(model_id: &str, streaming: bool) {
         "messages",
         bool_to_static_str(streaming),
     );
-}
-
-// ============================================================================
-// Worker Filtering
-// ============================================================================
-
-/// Get healthy Anthropic workers from the registry.
-///
-/// SECURITY: In multi-provider setups, this filters by Anthropic provider to prevent
-/// credential leakage. Anthropic credentials (X-API-Key, Authorization) are never sent
-/// to non-Anthropic workers (e.g., OpenAI, xAI).
-///
-/// In single-provider setups (all workers have the same or no provider), returns all healthy workers.
-/// In multi-provider setups, returns only healthy workers with `ProviderType::Anthropic`.
-pub(crate) fn get_healthy_anthropic_workers(
-    worker_registry: &WorkerRegistry,
-) -> Vec<Arc<dyn Worker>> {
-    let workers = worker_registry.get_workers_filtered(
-        None, // model_id
-        None, // worker_type
-        None, // connection_mode
-        None, // runtime_type
-        true, // healthy_only
-    );
-
-    filter_by_anthropic_provider(workers)
-}
-
-/// Find the best worker for a given model.
-///
-/// Returns the least-loaded healthy Anthropic worker that supports the given model.
-fn find_best_worker_for_model(
-    worker_registry: &WorkerRegistry,
-    model_id: &str,
-) -> Option<Arc<dyn Worker>> {
-    get_healthy_anthropic_workers(worker_registry)
-        .into_iter()
-        .filter(|w| w.supports_model(model_id))
-        .min_by_key(|w| w.load())
-}
-
-/// Filter workers to only include Anthropic workers in multi-provider setups.
-///
-/// Treats `None` (no provider configured) as a distinct provider value so that
-/// a mix of `Some(...)` and `None` workers is recognized as multi-provider,
-/// preventing Anthropic credentials from leaking to untagged workers.
-fn filter_by_anthropic_provider(workers: Vec<Arc<dyn Worker>>) -> Vec<Arc<dyn Worker>> {
-    // Early-exit pattern to detect multiple providers without HashSet allocation.
-    // Track Option<ProviderType> so None vs Some(...) counts as different.
-    let mut first_provider: Option<Option<ProviderType>> = None;
-    let has_multiple_providers = workers.iter().any(|w| {
-        let provider = w.default_provider().cloned();
-        match first_provider {
-            None => {
-                first_provider = Some(provider);
-                false
-            }
-            Some(ref first) => *first != provider,
-        }
-    });
-
-    if has_multiple_providers {
-        // Multi-provider setup: only use explicitly Anthropic workers
-        workers
-            .into_iter()
-            .filter(|w| matches!(w.default_provider(), Some(ProviderType::Anthropic)))
-            .collect()
-    } else {
-        // Single-provider or no-provider setup: use all workers
-        workers
-    }
 }
 
 fn record_success_metrics(model_id: &str, message: &Message, start_time: Instant) {

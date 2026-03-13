@@ -260,7 +260,7 @@ impl StreamingProcessor {
 
         // Phase 2: Main streaming loop
         while let Some(response) = grpc_stream.next().await {
-            let gen_response = response.map_err(|e| format!("Stream error: {e}"))?;
+            let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
 
             match gen_response.into_response() {
                 ProtoResponseVariant::Chunk(chunk) => {
@@ -520,10 +520,14 @@ impl StreamingProcessor {
             if stream_opts.include_usage.unwrap_or(false) {
                 let total_prompt: u32 = prompt_tokens.values().sum();
                 let total_completion: u32 = completion_tokens.total();
+                let total_cached: u32 = cached_tokens.values().sum();
 
                 let usage_chunk = ChatCompletionStreamResponse::builder(request_id, model)
                     .created(created)
-                    .usage(Usage::from_counts(total_prompt, total_completion))
+                    .usage(
+                        Usage::from_counts(total_prompt, total_completion)
+                            .with_cached_tokens(total_cached),
+                    )
                     .maybe_system_fingerprint(system_fingerprint)
                     .build();
 
@@ -569,7 +573,8 @@ impl StreamingProcessor {
         // Phase 1.5: Collect input_logprobs from prefill stream if requested
         if original_request.logprobs {
             while let Some(response) = prefill_stream.next().await {
-                let gen_response = response.map_err(|e| format!("Prefill stream error: {e}"))?;
+                let gen_response =
+                    response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
                 match gen_response.into_response() {
                     ProtoResponseVariant::Complete(_complete) => {
                         // Input logprobs collected but not yet used in streaming
@@ -703,7 +708,7 @@ impl StreamingProcessor {
         let mut completion_tokens_map: HashMap<u32, u32> = HashMap::new();
 
         while let Some(response) = stream.next().await {
-            let gen_response = response.map_err(|e| format!("Stream error: {e}"))?;
+            let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
 
             match gen_response.into_response() {
                 ProtoResponseVariant::Chunk(chunk) => {
@@ -811,7 +816,8 @@ impl StreamingProcessor {
         let input_token_logprobs = if ctx.return_logprob {
             let mut input_logprobs = None;
             while let Some(response) = prefill_stream.next().await {
-                let gen_response = response.map_err(|e| format!("Prefill stream error: {e}"))?;
+                let gen_response =
+                    response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
                 match gen_response.into_response() {
                     ProtoResponseVariant::Complete(complete) => {
                         // Extract input_logprobs from prefill Complete message (convert proto to SGLang format)
@@ -870,7 +876,7 @@ impl StreamingProcessor {
         let mut completion_tokens_map: HashMap<u32, u32> = HashMap::new();
 
         while let Some(response) = stream.next().await {
-            let gen_response = response.map_err(|e| format!("Stream error: {e}"))?;
+            let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
 
             match gen_response.into_response() {
                 ProtoResponseVariant::Chunk(chunk) => {

@@ -38,6 +38,11 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromPolicyRegistryStep {
             let model_id = worker.model_id().to_string();
             let worker_url = worker.url();
 
+            // Remove from KV event monitor (stops subscription, removes from indexer)
+            if let Some(ref monitor) = app_context.kv_event_monitor {
+                monitor.on_worker_removed(worker_url).await;
+            }
+
             // Remove from cache-aware policy
             app_context
                 .policy_registry

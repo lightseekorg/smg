@@ -4,10 +4,15 @@
 //! Both regular and harmony processors use these functions to avoid duplication.
 
 use axum::response::Response;
+use tracing::{error as trace_error, warn};
 
 use crate::routers::{
     error,
-    grpc::{context::ExecutionResult, proto_wrapper::ProtoGenerateComplete, utils},
+    grpc::{
+        context::ExecutionResult,
+        proto_wrapper::{ProtoGenerateComplete, ProtoResponseVariant, ProtoStream},
+        utils::tonic_ext::TonicStatusExt,
+    },
 };
 
 /// Collect and merge responses from execution result
@@ -27,7 +32,7 @@ pub(crate) async fn collect_responses(
 ) -> Result<Vec<ProtoGenerateComplete>, Response> {
     let all_responses = match execution_result {
         ExecutionResult::Single { mut stream } => {
-            let responses = utils::collect_stream_responses(&mut stream, "Single").await?;
+            let responses = collect_stream_responses(&mut stream, "Single").await?;
             stream.mark_completed();
             responses
         }
@@ -36,13 +41,12 @@ pub(crate) async fn collect_responses(
             decode,
         } => {
             // Collect prefill for input_logprobs (don't mark completed yet)
-            let prefill_responses =
-                utils::collect_stream_responses(&mut prefill, "Prefill").await?;
+            let prefill_responses = collect_stream_responses(&mut prefill, "Prefill").await?;
 
             // Collect decode for actual output (don't mark completed yet)
             let mut decode_stream = *decode;
             let mut decode_responses =
-                utils::collect_stream_responses(&mut decode_stream, "Decode").await?;
+                collect_stream_responses(&mut decode_stream, "Decode").await?;
 
             // Mark both streams as completed now that both succeeded
             prefill.mark_completed();
@@ -95,4 +99,50 @@ fn merge_prefill_logprobs(
             }
         }
     }
+}
+
+/// Collect all complete responses from a gRPC stream, discarding chunks.
+async fn collect_stream_responses(
+    stream: &mut ProtoStream,
+    worker_name: &str,
+) -> Result<Vec<ProtoGenerateComplete>, Response> {
+    let mut all_responses = Vec::new();
+
+    while let Some(response) = stream.next().await {
+        match response {
+            Ok(gen_response) => {
+                match gen_response.into_response() {
+                    ProtoResponseVariant::Complete(complete) => {
+                        all_responses.push(complete);
+                    }
+                    ProtoResponseVariant::Error(err) => {
+                        // In-band error (legacy): backends should use context.abort() instead.
+                        // Kept for backward compatibility during the transition.
+                        warn!(function = "collect_stream_responses", worker = %worker_name, error = %err.message(), "Worker sent in-band error (legacy path, backend should use context.abort)");
+                        // Don't mark as completed - let Drop send abort for error cases
+                        return Err(error::internal_error(
+                            "worker_generation_failed",
+                            format!("{} generation failed: {}", worker_name, err.message()),
+                        ));
+                    }
+                    ProtoResponseVariant::Chunk(_chunk) => {
+                        // Streaming chunk - no action needed
+                    }
+                    ProtoResponseVariant::None => {
+                        // Empty response - no action needed
+                    }
+                }
+            }
+            Err(e) => {
+                trace_error!(function = "collect_stream_responses", worker = %worker_name, grpc_code = ?e.code(), error = ?e, "Worker stream error");
+                // Don't mark as completed - let Drop send abort for error cases
+                return Err(e.to_http_error(
+                    "worker_stream_failed",
+                    format!("{worker_name} stream failed: {}", e.message()),
+                ));
+            }
+        }
+    }
+
+    Ok(all_responses)
 }

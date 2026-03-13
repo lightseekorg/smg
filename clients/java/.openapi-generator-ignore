@@ -1,0 +1,18 @@
+# Only generate model classes — skip everything else
+src/main/java/**/api/**
+src/test/**
+docs/**
+gradle/**
+build.gradle
+build.sbt
+settings.gradle
+gradle.properties
+gradlew
+gradlew.bat
+pom.xml
+README.md
+.travis.yml
+.github/**
+git_push.sh
+.gitignore
+api/**

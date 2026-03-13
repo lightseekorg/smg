@@ -1238,15 +1238,6 @@ impl RouterTrait for PDRouter {
             .await
     }
 
-    async fn get_models(&self, req: Request<Body>) -> Response {
-        // Extract headers first to avoid Send issues
-        let headers = header_utils::copy_request_headers(&req);
-
-        // Proxy to first prefill worker
-        self.proxy_to_first_prefill_worker("v1/models", Some(headers))
-            .await
-    }
-
     async fn get_model_info(&self, req: Request<Body>) -> Response {
         // Extract headers first to avoid Send issues
         let headers = header_utils::copy_request_headers(&req);

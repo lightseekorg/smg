@@ -10,7 +10,11 @@ if [ -f ".venv/bin/activate" ]; then
 fi
 
 echo "Installing e2e test dependencies..."
-python3 -m pip install pytest pytest-rerunfailures httpx openai anthropic grpcio grpcio-health-checking numpy pandas
+python3 -m pip install pytest pytest-rerunfailures httpx openai anthropic grpcio grpcio-health-checking numpy pandas requests jinja2 tqdm websockets
+
+# Install SmgClient (pure Python client for cross-SDK parity testing)
+echo "Installing smg-client..."
+python3 -m pip install clients/python/
 
 # Install any extra dependencies passed as arguments
 if [ $# -gt 0 ]; then

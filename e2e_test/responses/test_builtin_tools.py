@@ -4,7 +4,7 @@ Tests for built-in tool routing (web_search_preview, code_interpreter, file_sear
 that are routed through MCP servers with response format transformation.
 
 Prerequisites:
-- Brave MCP Server running on port 8001 (set up in CI via pr-test-rust.yml)
+- Brave MCP Server running on port 8080 (set up in CI via pr-test-rust.yml)
 - OPENAI_API_KEY environment variable set for cloud backend tests
 """
 
@@ -19,11 +19,10 @@ import time
 import openai
 import pytest
 import yaml
+from conftest import smg_compare
+from infra import BRAVE_MCP_HOST, BRAVE_MCP_PORT, BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
-
-BRAVE_MCP_PORT = 8001
-BRAVE_MCP_URL = f"http://localhost:{BRAVE_MCP_PORT}/sse"
 
 WEB_SEARCH_PREVIEW_TOOL = {"type": "web_search_preview"}
 
@@ -32,18 +31,19 @@ BRAVE_MCP_TOOL = {
     "server_label": "brave",
     "server_url": BRAVE_MCP_URL,
     "require_approval": "never",
+    "allowed_tools": ["brave_web_search"],
 }
 
 WEB_SEARCH_PROMPT = (
-    "Search the web for information about the Rust programming language. "
-    "Use your web search tool and provide a brief summary."
+    "Search the web for the Rust programming language. "
+    "Set count to 1 to get only one result, and give a one sentence summary."
 )
 
 
 def is_brave_server_available() -> bool:
     """Check if Brave MCP server is running on expected port."""
     try:
-        with socket.create_connection(("localhost", BRAVE_MCP_PORT), timeout=1):
+        with socket.create_connection((BRAVE_MCP_HOST, BRAVE_MCP_PORT), timeout=1):
             return True
     except (TimeoutError, OSError):
         return False
@@ -55,7 +55,7 @@ def create_mcp_config() -> dict:
         "servers": [
             {
                 "name": "brave-builtin",
-                "protocol": "sse",
+                "protocol": "streamable",
                 "url": BRAVE_MCP_URL,
                 "builtin_type": "web_search_preview",
                 "builtin_tool_name": "brave_web_search",
@@ -86,12 +86,11 @@ def mcp_config_file():
 
 @pytest.fixture(scope="module")
 def require_brave_server():
-    """Skip tests if Brave MCP server is not available."""
+    """Fail if Brave MCP server is not available."""
     if not is_brave_server_available():
-        pytest.skip(
+        pytest.fail(
             f"Brave MCP server not available on port {BRAVE_MCP_PORT}. "
-            "Run: docker run -d -p 8001:8080 -e BRAVE_API_KEY=<key> "
-            "shoofio/brave-search-mcp-sse:1.0.10"
+            "Ensure the brave-search service is running."
         )
 
 
@@ -122,22 +121,28 @@ def gateway_with_mcp_config(require_brave_server, mcp_config_file):
 
 
 @pytest.fixture(scope="class")
-def gateway_with_mcp_config_grpc(require_brave_server, mcp_config_file, model_pool):
+def gateway_with_mcp_config_grpc(require_brave_server, mcp_config_file):
     """Launch gRPC gateway with MCP config that routes web_search_preview to Brave."""
     from infra import ConnectionMode, Gateway
+    from infra.model_specs import get_model_spec
+    from infra.worker import start_workers, stop_workers
 
+    engine = os.environ.get("E2E_ENGINE", "sglang")
     logger.info("Launching gRPC gateway with MCP config: %s", mcp_config_file)
 
-    # Get a gRPC worker from the pool
+    # Start a gRPC worker
     try:
-        instance = model_pool.get("openai/gpt-oss-20b", ConnectionMode.GRPC)
-    except (KeyError, RuntimeError) as e:
+        workers = start_workers("openai/gpt-oss-20b", engine, mode=ConnectionMode.GRPC, count=1)
+    except Exception as e:
         pytest.skip(f"gRPC worker not available: {e}")
+
+    worker = workers[0]
+    model_path = get_model_spec("openai/gpt-oss-20b")["model"]
 
     gateway = Gateway()
     gateway.start(
-        worker_urls=[instance.worker_url],
-        model_path=instance.model_path,
+        worker_urls=[worker.base_url],
+        model_path=model_path,
         extra_args=[
             "--mcp-config-path",
             mcp_config_file,
@@ -152,10 +157,10 @@ def gateway_with_mcp_config_grpc(require_brave_server, mcp_config_file, model_po
         api_key="not-used",
     )
 
-    yield gateway, client, instance.model_path
+    yield gateway, client, model_path
 
     gateway.shutdown()
-    instance.release()
+    stop_workers(workers)
 
 
 # Note: These tests require manual gateway configuration with MCP config.
@@ -166,6 +171,8 @@ def gateway_with_mcp_config_grpc(require_brave_server, mcp_config_file, model_po
 # tests serve as documentation and can be run manually with proper setup.
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestBuiltinVsMcpComparison:
     """Compare built-in tool behavior vs direct MCP tool behavior.
@@ -173,7 +180,7 @@ class TestBuiltinVsMcpComparison:
     These tests verify baseline MCP behavior without requiring builtin routing config.
     """
 
-    def test_mcp_tool_produces_mcp_call(self, setup_backend):
+    def test_mcp_tool_produces_mcp_call(self, setup_backend, smg):
         """Verify that direct MCP tool produces mcp_call output."""
         _, model, client, gateway = setup_backend
 
@@ -181,7 +188,10 @@ class TestBuiltinVsMcpComparison:
 
         resp = client.responses.create(
             model=model,
-            input="Search the web for Python programming language.",
+            input=(
+                "Search the web for Python programming language. "
+                "Set count to 1 to get only one result and give a one sentence summary."
+            ),
             tools=[BRAVE_MCP_TOOL],
             stream=False,
         )
@@ -197,7 +207,20 @@ class TestBuiltinVsMcpComparison:
             f"Direct MCP tool should produce mcp_call, got: {output_types}"
         )
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="Search the web for Python programming language.",
+                tools=[BRAVE_MCP_TOOL],
+            )
+            assert smg_resp.error is None, f"SmgClient error: {smg_resp.error}"
+            assert smg_resp.id is not None
+            assert smg_resp.status in ("completed", "incomplete")
 
+
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestBuiltinToolsCloudBackend:
     """Built-in tool tests against cloud backend (OpenAI).
@@ -206,7 +229,7 @@ class TestBuiltinToolsCloudBackend:
     Full routing tests require MCP config with builtin_type configured.
     """
 
-    def test_web_search_preview_accepted(self, setup_backend):
+    def test_web_search_preview_accepted(self, setup_backend, smg):
         """Test that web_search_preview tool type is accepted."""
         _, model, client, gateway = setup_backend
 
@@ -222,7 +245,18 @@ class TestBuiltinToolsCloudBackend:
         assert resp.id is not None
         assert resp.status in ("completed", "incomplete")
 
-    def test_mixed_builtin_and_function_tools(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=WEB_SEARCH_PROMPT,
+                tools=[WEB_SEARCH_PREVIEW_TOOL],
+            )
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status in ("completed", "incomplete")
+
+    def test_mixed_builtin_and_function_tools(self, setup_backend, smg):
         """Test mixing web_search_preview with function tools."""
         _, model, client, gateway = setup_backend
 
@@ -249,7 +283,19 @@ class TestBuiltinToolsCloudBackend:
         assert resp.error is None
         assert resp.id is not None
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What's the weather in Seattle?",
+                tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
+            )
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
 
+
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
@@ -260,7 +306,7 @@ class TestBuiltinToolsLocalBackend:
     These tests verify built-in tool handling with local models.
     """
 
-    def test_web_search_preview_accepted(self, setup_backend):
+    def test_web_search_preview_accepted(self, setup_backend, smg):
         """Test that web_search_preview tool type is accepted by local backend."""
         _, model, client, gateway = setup_backend
 
@@ -275,7 +321,18 @@ class TestBuiltinToolsLocalBackend:
 
         assert resp.id is not None
 
-    def test_mixed_builtin_and_function_tools(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=WEB_SEARCH_PROMPT,
+                tools=[WEB_SEARCH_PREVIEW_TOOL],
+            )
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status in ("completed", "incomplete")
+
+    def test_mixed_builtin_and_function_tools(self, setup_backend, smg):
         """Test mixing web_search_preview with function tools on local backend."""
         _, model, client, gateway = setup_backend
 
@@ -301,20 +358,32 @@ class TestBuiltinToolsLocalBackend:
 
         assert resp.id is not None
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What's the weather in Seattle?",
+                tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
+            )
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+
 
 # =============================================================================
 # Full Integration Tests (require Brave MCP server + proper gateway config)
 # =============================================================================
 # These tests run in CI where:
-# 1. Brave MCP server runs on port 8001
+# 1. Brave MCP server runs on port 8080
 # 2. Gateway is configured with builtin_type: web_search_preview via fixture
 #
 # To run locally:
-# 1. Start Brave MCP: docker run -d -p 8001:8080 -e BRAVE_API_KEY=<key> shoofio/brave-search-mcp-sse:1.0.10
+# 1. Start Brave MCP: docker run -d -p 8080:8080 -e BRAVE_API_KEY=<key> shoofio/brave-search-mcp-sse:1.0.10
 # 2. Set OPENAI_API_KEY environment variable
 # 3. Run: pytest e2e_test/responses/test_builtin_tools.py::TestBuiltinToolRouting -v
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 class TestBuiltinToolRouting:
     """Full integration tests for built-in tool routing.
 
@@ -324,7 +393,7 @@ class TestBuiltinToolRouting:
     3. Response contains web_search_call (not mcp_call)
 
     Requires:
-    - Brave MCP server on port 8001
+    - Brave MCP server on port 8080
     - OPENAI_API_KEY environment variable
     """
 
@@ -392,6 +461,8 @@ class TestBuiltinToolRouting:
             )
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestMcpWebSearchStreamingEvents:
     """Test MCP tool SSE streaming events (baseline behavior).
@@ -417,7 +488,10 @@ class TestMcpWebSearchStreamingEvents:
 
         resp = client.responses.create(
             model=model,
-            input="Search the web for Python programming language.",
+            input=(
+                "Search the web for Python programming language. "
+                "Set count to 1 to get only one result and give a one sentence summary."
+            ),
             tools=[BRAVE_MCP_TOOL],
             stream=True,
         )
@@ -466,7 +540,12 @@ class TestMcpWebSearchStreamingEvents:
             assert mcp_call.name is not None
             assert mcp_call.output is not None
 
+        # SmgClient streaming comparison — no smg fixture in this test,
+        # covered by test_tools_call.py MCP streaming tests
 
+
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 class TestWebSearchStreamingEvents:
     """Test web_search_call SSE streaming events with builtin routing.
 
@@ -617,7 +696,10 @@ class TestWebSearchStreamingEvents:
 # to verify the harmony router produces the same events as the regular router.
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
+@pytest.mark.model("openai/gpt-oss-20b")
 class TestBuiltinToolRoutingGrpc:
     """Full integration tests for built-in tool routing on gRPC backend.
 
@@ -627,8 +709,8 @@ class TestBuiltinToolRoutingGrpc:
     3. Response contains web_search_call (not mcp_call)
 
     Requires:
-    - Brave MCP server on port 8001
-    - gRPC worker available in model_pool
+    - Brave MCP server on port 8080
+    - gRPC worker available via start_workers
     """
 
     def test_web_search_preview_produces_web_search_call(self, gateway_with_mcp_config_grpc):
@@ -687,7 +769,10 @@ class TestBuiltinToolRoutingGrpc:
             )
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
+@pytest.mark.model("openai/gpt-oss-20b")
 class TestWebSearchStreamingEventsGrpc:
     """Test web_search_call SSE streaming events with builtin routing on gRPC.
 

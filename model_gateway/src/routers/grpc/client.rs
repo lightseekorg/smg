@@ -2,8 +2,13 @@
 
 use std::collections::HashMap;
 
-use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
-use smg_grpc_client::{SglangSchedulerClient, TrtllmServiceClient, VllmEngineClient};
+use openai_protocol::{
+    chat::ChatCompletionRequest, generate::GenerateRequest, worker::WorkerLoadResponse,
+};
+use smg_grpc_client::{
+    tokenizer_bundle, tokenizer_bundle::StreamBundle, SglangSchedulerClient, TrtllmServiceClient,
+    VllmEngineClient,
+};
 
 use crate::routers::grpc::{
     proto_wrapper::{ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream},
@@ -116,9 +121,7 @@ impl GrpcClient {
         }
     }
 
-    pub async fn health_check(
-        &self,
-    ) -> Result<HealthCheckResponse, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn health_check(&self) -> Result<HealthCheckResponse, tonic::Status> {
         match self {
             Self::Sglang(client) => {
                 let resp = client.health_check().await?;
@@ -146,9 +149,7 @@ impl GrpcClient {
         }
     }
 
-    pub async fn get_model_info(
-        &self,
-    ) -> Result<ModelInfo, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_model_info(&self) -> Result<ModelInfo, tonic::Status> {
         match self {
             Self::Sglang(client) => Ok(ModelInfo::Sglang(Box::new(client.get_model_info().await?))),
             Self::Vllm(client) => Ok(ModelInfo::Vllm(client.get_model_info().await?)),
@@ -156,9 +157,33 @@ impl GrpcClient {
         }
     }
 
-    pub async fn get_server_info(
+    /// Get the full load response from the backend.
+    /// Only supported for SGLang backends. Returns per-DP-rank load metrics.
+    pub async fn get_loads(&self) -> Result<WorkerLoadResponse, tonic::Status> {
+        match self {
+            Self::Sglang(client) => {
+                let resp = client.get_loads(vec!["core".to_string()]).await?;
+                Ok(WorkerLoadResponse::from(resp))
+            }
+            _ => Err(tonic::Status::unimplemented(
+                "GetLoads RPC not supported for this backend",
+            )),
+        }
+    }
+
+    /// Subscribe to KV cache events (all backends).
+    pub async fn subscribe_kv_events(
         &self,
-    ) -> Result<ServerInfo, Box<dyn std::error::Error + Send + Sync>> {
+        start_seq: u64,
+    ) -> Result<tonic::Streaming<smg_grpc_client::common_proto::KvEventBatch>, tonic::Status> {
+        match self {
+            Self::Sglang(client) => client.subscribe_kv_events(start_seq).await,
+            Self::Vllm(client) => client.subscribe_kv_events(start_seq).await,
+            Self::Trtllm(client) => client.subscribe_kv_events(start_seq).await,
+        }
+    }
+
+    pub async fn get_server_info(&self) -> Result<ServerInfo, tonic::Status> {
         match self {
             Self::Sglang(client) => Ok(ServerInfo::Sglang(Box::new(
                 client.get_server_info().await?,
@@ -168,10 +193,34 @@ impl GrpcClient {
         }
     }
 
+    /// Fetch tokenizer bundle from backend runtime and validate integrity/safety.
+    pub async fn get_tokenizer(
+        &self,
+    ) -> Result<StreamBundle, Box<dyn std::error::Error + Send + Sync>> {
+        let bundle = match self {
+            Self::Sglang(client) => client.get_tokenizer().await,
+            Self::Vllm(client) => client.get_tokenizer().await,
+            Self::Trtllm(client) => client.get_tokenizer().await,
+        }?;
+
+        tokenizer_bundle::validate_bundle_sha256(&bundle).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Tokenizer bundle SHA256 validation failed: {e}"),
+            )
+        })?;
+
+        Ok(bundle)
+    }
+
+    /// Generate streaming response from request
+    ///
+    /// Dispatches to the appropriate backend client and wraps the result in ProtoStream.
+    /// Returns `tonic::Status` on error so callers can inspect the gRPC status code directly.
     pub async fn generate(
         &mut self,
         req: ProtoGenerateRequest,
-    ) -> Result<ProtoStream, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<ProtoStream, tonic::Status> {
         match (self, req) {
             (Self::Sglang(client), ProtoGenerateRequest::Sglang(boxed_req)) => {
                 let stream = client.generate(*boxed_req).await?;
@@ -196,7 +245,7 @@ impl GrpcClient {
     pub async fn embed(
         &mut self,
         req: ProtoEmbedRequest,
-    ) -> Result<ProtoEmbedResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<ProtoEmbedResponse, tonic::Status> {
         match (self, req) {
             (Self::Sglang(client), ProtoEmbedRequest::Sglang(boxed_req)) => {
                 let resp = client.embed(*boxed_req).await?;
@@ -210,6 +259,10 @@ impl GrpcClient {
         }
     }
 
+    #[expect(
+        clippy::unreachable,
+        reason = "assembly stage guarantees matching MultimodalData variant for each backend"
+    )]
     pub fn build_chat_request(
         &self,
         request_id: String,
@@ -221,7 +274,10 @@ impl GrpcClient {
     ) -> Result<ProtoGenerateRequest, String> {
         match self {
             Self::Sglang(client) => {
-                let sglang_mm = multimodal_inputs.map(|mm| mm.into_sglang_proto());
+                let sglang_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Sglang(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
@@ -233,7 +289,10 @@ impl GrpcClient {
                 Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
             }
             Self::Vllm(client) => {
-                let vllm_mm = multimodal_inputs.map(|mm| mm.into_vllm_proto());
+                let vllm_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Vllm(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
@@ -245,7 +304,10 @@ impl GrpcClient {
                 Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
             }
             Self::Trtllm(client) => {
-                let trtllm_mm = multimodal_inputs.map(|mm| mm.into_trtllm_proto());
+                let trtllm_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Trtllm(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,

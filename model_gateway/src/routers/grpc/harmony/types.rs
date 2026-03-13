@@ -3,7 +3,6 @@
 use openai_harmony::chat::Content;
 use openai_protocol::common::ToolCall;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// Harmony message format
 ///
@@ -98,9 +97,6 @@ pub(crate) struct HarmonyChannelOutput {
 
     /// Finish reason
     pub finish_reason: String,
-
-    /// Matched stop token (if any)
-    pub matched_stop: Option<Value>,
 
     /// Number of reasoning tokens (from analysis and commentary channels)
     pub reasoning_token_count: u32,

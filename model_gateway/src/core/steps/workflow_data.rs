@@ -20,6 +20,19 @@ use openai_protocol::{
 use serde::{Deserialize, Serialize};
 use wfaas::{WorkflowData, WorkflowError};
 
+// ============================================================================
+// Worker kind classification
+// ============================================================================
+
+/// Classification of worker type: local inference backend or external cloud API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkerKind {
+    /// Self-hosted inference backend (sglang, vllm, trtllm).
+    Local,
+    /// Cloud API endpoint (OpenAI, Anthropic, etc.).
+    External,
+}
+
 use super::{
     mcp_registration::McpServerConfigRequest, tokenizer_registration::TokenizerConfigRequest,
     wasm_module_registration::WasmModuleConfigRequest,
@@ -33,9 +46,8 @@ use crate::{app_context::AppContext, core::Worker};
 
 /// Trait for workflow data that supports worker registration operations.
 ///
-/// This trait is implemented by both `LocalWorkerWorkflowData` and
-/// `ExternalWorkerWorkflowData`, allowing shared steps to work with either
-/// workflow type while maintaining full type safety.
+/// Implemented by `WorkerWorkflowData`, allowing shared steps
+/// (register, activate, update policies) to work generically.
 pub trait WorkerRegistrationData: WorkflowData {
     /// Get the application context (transient, not serialized).
     fn get_app_context(&self) -> Option<&Arc<AppContext>>;
@@ -65,6 +77,70 @@ impl WorkerList {
         Self {
             worker_urls: workers.iter().map(|w| w.url().to_string()).collect(),
         }
+    }
+}
+
+// ============================================================================
+// Unified worker registration workflow data
+// ============================================================================
+
+/// Unified data for worker registration workflows (both local and external).
+///
+/// A `ClassifyWorkerTypeStep` runs first to populate `worker_kind`, then
+/// branch-specific steps check `worker_kind` and return `StepResult::Skip`
+/// when they don't apply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerWorkflowData {
+    pub config: WorkerSpec,
+    /// Determined by ClassifyWorkerTypeStep (Local or External).
+    pub worker_kind: Option<WorkerKind>,
+    // -- Local-only fields --
+    pub connection_mode: Option<crate::core::ConnectionMode>,
+    pub detected_runtime_type: Option<String>,
+    pub discovered_labels: HashMap<String, String>,
+    pub dp_info: Option<super::worker::local::DpInfo>,
+    // -- External-only fields --
+    pub model_cards: Vec<ModelCard>,
+    // -- Shared fields --
+    pub workers: Option<WorkerList>,
+    pub final_labels: HashMap<String, String>,
+    /// Application context (transient, must be re-initialized after deserialization)
+    #[serde(skip, default)]
+    pub app_context: Option<Arc<AppContext>>,
+    /// Actual worker objects (transient, not serialized)
+    #[serde(skip, default)]
+    pub actual_workers: Option<Vec<Arc<dyn Worker>>>,
+}
+
+impl WorkflowData for WorkerWorkflowData {
+    fn workflow_type() -> &'static str {
+        "worker_registration"
+    }
+}
+
+impl WorkerWorkflowData {
+    /// Validate that all transient fields are properly initialized.
+    pub fn validate_initialized(&self) -> Result<(), WorkflowError> {
+        if self.app_context.is_none() {
+            return Err(WorkflowError::ContextValueNotFound(
+                "app_context not initialized after deserialization".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl WorkerRegistrationData for WorkerWorkflowData {
+    fn get_app_context(&self) -> Option<&Arc<AppContext>> {
+        self.app_context.as_ref()
+    }
+
+    fn get_actual_workers(&self) -> Option<&Vec<Arc<dyn Worker>>> {
+        self.actual_workers.as_ref()
+    }
+
+    fn get_labels(&self) -> Option<&HashMap<String, String>> {
+        Some(&self.final_labels)
     }
 }
 
@@ -100,106 +176,6 @@ impl TokenizerWorkflowData {
             ));
         }
         Ok(())
-    }
-}
-
-/// Data for local worker registration workflow
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocalWorkerWorkflowData {
-    pub config: WorkerSpec,
-    pub connection_mode: Option<crate::core::ConnectionMode>,
-    pub discovered_labels: HashMap<String, String>,
-    pub dp_info: Option<super::worker::local::DpInfo>,
-    pub workers: Option<WorkerList>,
-    pub final_labels: HashMap<String, String>,
-    /// Detected runtime type (for gRPC workers)
-    pub detected_runtime_type: Option<String>,
-    /// Application context (transient, must be re-initialized after deserialization)
-    #[serde(skip, default)]
-    pub app_context: Option<Arc<AppContext>>,
-    /// Actual worker objects (transient, not serialized)
-    #[serde(skip, default)]
-    pub actual_workers: Option<Vec<Arc<dyn Worker>>>,
-}
-
-impl WorkflowData for LocalWorkerWorkflowData {
-    fn workflow_type() -> &'static str {
-        "local_worker_registration"
-    }
-}
-
-impl LocalWorkerWorkflowData {
-    /// Validate that all transient fields are properly initialized.
-    pub fn validate_initialized(&self) -> Result<(), WorkflowError> {
-        if self.app_context.is_none() {
-            return Err(WorkflowError::ContextValueNotFound(
-                "app_context not initialized after deserialization".into(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl WorkerRegistrationData for LocalWorkerWorkflowData {
-    fn get_app_context(&self) -> Option<&Arc<AppContext>> {
-        self.app_context.as_ref()
-    }
-
-    fn get_actual_workers(&self) -> Option<&Vec<Arc<dyn Worker>>> {
-        self.actual_workers.as_ref()
-    }
-
-    fn get_labels(&self) -> Option<&HashMap<String, String>> {
-        Some(&self.final_labels)
-    }
-}
-
-/// Data for external worker registration workflow
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExternalWorkerWorkflowData {
-    pub config: WorkerSpec,
-    /// Discovered model cards from /v1/models endpoint
-    pub model_cards: Vec<ModelCard>,
-    pub workers: Option<WorkerList>,
-    /// Labels for policies (derived from config)
-    pub labels: HashMap<String, String>,
-    /// Application context (transient, must be re-initialized after deserialization)
-    #[serde(skip, default)]
-    pub app_context: Option<Arc<AppContext>>,
-    /// Actual worker objects (transient, not serialized)
-    #[serde(skip, default)]
-    pub actual_workers: Option<Vec<Arc<dyn Worker>>>,
-}
-
-impl WorkflowData for ExternalWorkerWorkflowData {
-    fn workflow_type() -> &'static str {
-        "external_worker_registration"
-    }
-}
-
-impl ExternalWorkerWorkflowData {
-    /// Validate that all transient fields are properly initialized.
-    pub fn validate_initialized(&self) -> Result<(), WorkflowError> {
-        if self.app_context.is_none() {
-            return Err(WorkflowError::ContextValueNotFound(
-                "app_context not initialized after deserialization".into(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl WorkerRegistrationData for ExternalWorkerWorkflowData {
-    fn get_app_context(&self) -> Option<&Arc<AppContext>> {
-        self.app_context.as_ref()
-    }
-
-    fn get_actual_workers(&self) -> Option<&Vec<Arc<dyn Worker>>> {
-        self.actual_workers.as_ref()
-    }
-
-    fn get_labels(&self) -> Option<&HashMap<String, String>> {
-        Some(&self.labels)
     }
 }
 

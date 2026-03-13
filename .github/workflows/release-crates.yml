@@ -22,21 +22,21 @@ jobs:
       matrix:
         include:
           - crate: openai-protocol
-            path: protocols
+            path: crates/protocols
           - crate: reasoning-parser
-            path: reasoning_parser
+            path: crates/reasoning_parser
           - crate: kv-index
-            path: kv_index
+            path: crates/kv_index
           - crate: data-connector
-            path: data_connector
+            path: crates/data_connector
           - crate: wfaas
-            path: workflow
+            path: crates/workflow
           - crate: smg-wasm
-            path: wasm
+            path: crates/wasm
           - crate: smg-auth
-            path: auth
+            path: crates/auth
           - crate: llm-tokenizer
-            path: tokenizer
+            path: crates/tokenizer
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/publish-crate
@@ -54,15 +54,15 @@ jobs:
       matrix:
         include:
           - crate: tool-parser
-            path: tool_parser
+            path: crates/tool_parser
           - crate: smg-mcp
-            path: mcp
+            path: crates/mcp
           - crate: smg-grpc-client
-            path: grpc_client
+            path: crates/grpc_client
           - crate: llm-multimodal
-            path: multimodal
+            path: crates/multimodal
           - crate: smg-mesh
-            path: mesh
+            path: crates/mesh
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/publish-crate

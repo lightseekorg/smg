@@ -104,7 +104,7 @@ class SglangWorkerLauncher(WorkerLauncher):
     """Launcher for sglang inference workers."""
 
     def _get_tp_size(self, args: argparse.Namespace) -> int:
-        return getattr(args, "tp_size", 1)
+        return getattr(args, "tensor_parallel_size", 1)
 
     def build_command(
         self, args: argparse.Namespace, backend_args: list[str], host: str, port: int
@@ -123,6 +123,11 @@ class SglangWorkerLauncher(WorkerLauncher):
         if getattr(args, "connection_mode", "grpc") == "grpc":
             cmd.append("--grpc-mode")
 
+        if getattr(args, "connection_mode", "grpc") == "http" and getattr(
+            args, "enable_token_usage_details", False
+        ):
+            cmd.append("--enable-cache-report")
+
         cmd.extend(self._filter_backend_args(backend_args, ["--model-path", "--host", "--port"]))
         return cmd
 
@@ -138,7 +143,7 @@ class VllmWorkerLauncher(WorkerLauncher):
     ) -> list[str]:
         vllm_entry_points = (
             "vllm.entrypoints.grpc_server"
-            if getattr(args, "connection_mode", "grpc") == "grpc"
+            if args.connection_mode == "grpc"
             else "vllm.entrypoints.openai.api_server"
         )
 
@@ -153,6 +158,11 @@ class VllmWorkerLauncher(WorkerLauncher):
             "--port",
             str(port),
         ]
+        if getattr(args, "connection_mode", "grpc") == "http" and getattr(
+            args, "enable_token_usage_details", False
+        ):
+            cmd.append("--enable-prompt-tokens-details")
+
         cmd.extend(self._filter_backend_args(backend_args, ["--model", "--host", "--port"]))
 
         return cmd
@@ -213,7 +223,7 @@ class TrtllmWorkerLauncher(WorkerLauncher):
             sys.executable,
             "-m",
             "tensorrt_llm.commands.serve",
-            getattr(args, "model", ""),
+            getattr(args, "model_path", ""),
             "--grpc",
             "--host",
             host,
@@ -222,7 +232,14 @@ class TrtllmWorkerLauncher(WorkerLauncher):
         ]
 
         # Add optional config file
-        cmd.extend(self._filter_backend_args(backend_args, ["--model", "--host", "--port"]))
+        # TRT-LLM Click options use underscores (e.g. --tensor_parallel_size)
+        # while SGLang/vLLM use hyphens. Normalize so users can pass either form.
+        normalized = [
+            "--" + a[2:].replace("-", "_") if a.startswith("--") else a for a in backend_args
+        ]
+        cmd.extend(
+            self._filter_backend_args(normalized, ["--model", "--model_path", "--host", "--port"])
+        )
 
         return cmd
 
@@ -362,7 +379,13 @@ def _add_trtllm_stub_args(parser: argparse.ArgumentParser) -> None:
     TP size is read from the config file, not passed as CLI argument.
     """
     group = parser.add_argument_group("TensorRT-LLM Options")
-    group.add_argument("--model", type=str, help="Model path (HuggingFace ID or local path)")
+    group.add_argument(
+        "--model",
+        "--model-path",
+        dest="model_path",
+        type=str,
+        help="Model path (HuggingFace ID or local path)",
+    )
     group.add_argument("--tp_size", type=int, help="Tensor parallel size (overrides config file)")
 
 
@@ -433,6 +456,11 @@ def add_serve_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=300,
         help="Seconds to wait for workers to become healthy (default: 300)",
+    )
+    group.add_argument(
+        "--enable-token-usage-details",
+        action="store_true",
+        help="Enable detailed token usage reporting (if supported by backend and router)",
     )
 
 

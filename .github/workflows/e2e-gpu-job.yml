@@ -1,0 +1,133 @@
+name: E2E GPU Job
+
+on:
+  workflow_call:
+    inputs:
+      engine:
+        required: true
+        type: string
+        description: "Engine to test: sglang, vllm, or trtllm"
+      gpu_tier:
+        required: true
+        type: string
+        description: "GPU tier: 1, 2, or 4"
+      runner:
+        required: true
+        type: string
+        description: "Runner label: 1-gpu-h100, 2-gpu-h100, or 4-gpu-h100"
+      timeout:
+        required: true
+        type: number
+        description: "Job timeout in minutes"
+      extra_deps:
+        required: false
+        type: string
+        default: ""
+        description: "Extra pip dependencies"
+      test_dirs:
+        required: false
+        type: string
+        default: "e2e_test/"
+        description: "pytest test path (e.g., e2e_test/chat_completions)"
+      test_filter:
+        required: false
+        type: string
+        default: ""
+        description: "pytest -k filter expression"
+      setup_agentic_deps:
+        required: false
+        type: boolean
+        default: false
+        description: "Set up Oracle DB and Brave MCP for agentic tests"
+
+jobs:
+  run:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout }}
+    permissions:
+      contents: read
+    env:
+      E2E_ENGINE: ${{ inputs.engine }}
+      E2E_RUNTIME: ${{ inputs.engine }}
+      E2E_GPU_TIER: ${{ inputs.gpu_tier }}
+      ROUTER_LOCAL_MODEL_PATH: /home/ubuntu/models
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      # Engine-specific setup
+      - name: Setup SGLang backend
+        if: inputs.engine == 'sglang'
+        uses: ./.github/actions/setup-sglang
+
+      - name: Setup vLLM backend
+        if: inputs.engine == 'vllm'
+        uses: ./.github/actions/setup-vllm
+
+      - name: Setup TRT-LLM backend
+        if: inputs.engine == 'trtllm'
+        uses: ./.github/actions/setup-trtllm
+
+      # Artifact downloads
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: smg-wheel
+          path: wheel/
+
+      - name: Download WASM test fixtures
+        uses: actions/download-artifact@v8
+        with:
+          name: wasm-test-fixtures
+          path: crates/wasm/tests/fixtures/
+        continue-on-error: true
+
+      - name: Download Python client types
+        uses: actions/download-artifact@v8
+        with:
+          name: python-client-types
+          path: clients/python/smg_client/types/
+
+      # Agentic service dependencies (Oracle DB, Brave MCP)
+      - name: Check shared services
+        if: inputs.setup_agentic_deps
+        run: bash scripts/ci_agentic_svc_deps.sh check --oracle oracle-db --brave brave-search-mcp
+
+      # Install
+      - name: Install wheel and test dependencies
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+          bash scripts/ci_install_e2e_deps.sh ${{ inputs.extra_deps }}
+
+      - name: Setup Oracle
+        if: inputs.setup_agentic_deps
+        run: |
+          bash scripts/ci_agentic_svc_deps.sh setup-oracle-client
+          bash scripts/ci_agentic_svc_deps.sh create-oracle-user oracle-db
+          bash scripts/ci_agentic_svc_deps.sh create-oracle-flyway-user oracle-db
+
+      # Run tests
+      - name: Run E2E tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          SHOW_WORKER_LOGS: "0"
+          SHOW_ROUTER_LOGS: "1"
+          BRAVE_MCP_HOST: ${{ inputs.setup_agentic_deps && 'brave-search-mcp' || '' }}
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          pytest ${{ inputs.test_dirs }} \
+            --ignore=e2e_test/benchmarks \
+            --ignore=e2e_test/bindings_go \
+            ${{ inputs.test_filter }} \
+            --reruns 2 --reruns-delay 5 \
+            -s -vv
+
+      - name: Cleanup Oracle test users
+        if: always() && inputs.setup_agentic_deps
+        run: |
+          bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-flyway-user oracle-db
+          bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-user oracle-db

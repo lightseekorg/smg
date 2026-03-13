@@ -21,12 +21,11 @@ use crate::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
     core::steps::{
-        create_external_worker_workflow_data, create_local_worker_workflow_data,
         create_mcp_workflow_data, create_tokenizer_workflow_data,
         create_wasm_registration_workflow_data, create_wasm_removal_workflow_data,
         create_worker_removal_workflow_data, create_worker_update_workflow_data,
-        McpServerConfigRequest, TokenizerConfigRequest, TokenizerRemovalRequest,
-        WasmModuleConfigRequest, WasmModuleRemovalRequest,
+        create_worker_workflow_data, McpServerConfigRequest, TokenizerConfigRequest,
+        TokenizerRemovalRequest, WasmModuleConfigRequest, WasmModuleRemovalRequest,
     },
 };
 
@@ -113,7 +112,7 @@ impl Default for JobQueueConfig {
     fn default() -> Self {
         Self {
             queue_capacity: 1000,
-            max_concurrent_jobs: 10,
+            max_concurrent_jobs: 200,
         }
     }
 }
@@ -266,7 +265,7 @@ impl JobQueue {
         job: Job,
         context: Weak<AppContext>,
         status_map: Arc<DashMap<String, JobStatus>>,
-        _permit: tokio::sync::OwnedSemaphorePermit,
+        permit: tokio::sync::OwnedSemaphorePermit,
     ) {
         let job_type = job.job_type();
         let worker_url = job.worker_url().to_string();
@@ -279,6 +278,12 @@ impl JobQueue {
         );
 
         debug!("Processing job: type={}, worker={}", job_type, worker_url);
+
+        // Release concurrency slot immediately. The semaphore bounds how many
+        // jobs can be dequeued concurrently (preventing thundering herd), but
+        // long-running waits (e.g. 30-min worker health checks) must not hold
+        // a slot or they starve the queue for all other job types.
+        drop(permit);
 
         // Execute job
         match context.upgrade() {
@@ -299,8 +304,6 @@ impl JobQueue {
                 );
             }
         }
-
-        // Permit automatically released when dropped
     }
 
     /// Execute a specific job
@@ -315,63 +318,23 @@ impl JobQueue {
                 let timeout_duration =
                     Duration::from_secs(context.router_config.worker_startup_timeout_secs + 30);
 
-                // Select workflow based on runtime type
-                match config.runtime_type {
-                    RuntimeType::External => {
-                        let workflow_data = create_external_worker_workflow_data(
-                            (**config).clone(),
-                            Arc::clone(context),
-                        );
-                        let instance_id = engines
-                            .external_worker
-                            .start_workflow(
-                                WorkflowId::new("external_worker_registration"),
-                                workflow_data,
-                            )
-                            .await
-                            .map_err(|e| {
-                                format!(
-                                    "Failed to start external worker registration workflow: {e:?}"
-                                )
-                            })?;
+                let workflow_data =
+                    create_worker_workflow_data((**config).clone(), Arc::clone(context));
+                let instance_id = engines
+                    .worker_registration
+                    .start_workflow(WorkflowId::new("worker_registration"), workflow_data)
+                    .await
+                    .map_err(|e| format!("Failed to start worker registration workflow: {e:?}"))?;
 
-                        debug!(
-                            "Started external worker registration workflow for {} (instance: {})",
-                            config.url, instance_id
-                        );
+                debug!(
+                    "Started worker registration workflow for {} (instance: {})",
+                    config.url, instance_id
+                );
 
-                        engines
-                            .external_worker
-                            .wait_for_completion(instance_id, &config.url, timeout_duration)
-                            .await
-                    }
-                    _ => {
-                        let workflow_data = create_local_worker_workflow_data(
-                            (**config).clone(),
-                            Arc::clone(context),
-                        );
-                        let instance_id = engines
-                            .local_worker
-                            .start_workflow(
-                                WorkflowId::new("local_worker_registration"),
-                                workflow_data,
-                            )
-                            .await
-                            .map_err(|e| {
-                                format!("Failed to start local worker registration workflow: {e:?}")
-                            })?;
-
-                        debug!(
-                            "Started local worker registration workflow for {} (instance: {})",
-                            config.url, instance_id
-                        );
-
-                        engines
-                            .local_worker
-                            .wait_for_completion(instance_id, &config.url, timeout_duration)
-                            .await
-                    }
-                }
+                engines
+                    .worker_registration
+                    .wait_for_completion(instance_id, &config.url, timeout_duration)
+                    .await
             }
             Job::UpdateWorker { url, update } => {
                 let engines = context
@@ -524,76 +487,17 @@ impl JobQueue {
 
                         prefill_workers.chain(decode_workers).collect()
                     }
-                    RoutingMode::OpenAI { worker_urls } => {
-                        // OpenAI mode: submit AddWorker jobs with runtime: "external"
-                        // The external_worker_registration workflow handles model discovery
-                        let api_key = router_config.api_key.clone();
-                        let mut submitted_count = 0;
-
-                        for url in worker_urls {
-                            let url_for_error = url.clone();
-                            let config =
-                                build_external_worker_config(url, api_key.clone(), router_config);
-
-                            let job = Job::AddWorker {
-                                config: Box::new(config),
-                            };
-
-                            if let Some(queue) = context.worker_job_queue.get() {
-                                queue.submit(job).await.map_err(|e| {
-                                    format!(
-                                        "Failed to submit AddWorker job for external endpoint {url_for_error}: {e}"
-                                    )
-                                })?;
-                                submitted_count += 1;
-                            } else {
-                                return Err("JobQueue not available".to_string());
-                            }
-                        }
-
-                        if submitted_count == 0 {
-                            info!("OpenAI mode: no worker URLs provided");
-                            return Ok("OpenAI mode: no worker URLs to initialize".to_string());
-                        }
-
-                        return Ok(format!(
-                            "Submitted {submitted_count} AddWorker jobs for external endpoints"
-                        ));
-                    }
-                    RoutingMode::Anthropic { worker_urls } => {
-                        // Anthropic mode: similar to OpenAI, submit AddWorker jobs with runtime: "external"
-                        let api_key = router_config.api_key.clone();
-                        let mut submitted_count = 0;
-
-                        for url in worker_urls {
-                            let url_for_error = url.clone();
-                            let config =
-                                build_external_worker_config(url, api_key.clone(), router_config);
-
-                            let job = Job::AddWorker {
-                                config: Box::new(config),
-                            };
-
-                            if let Some(queue) = context.worker_job_queue.get() {
-                                queue.submit(job).await.map_err(|e| {
-                                    format!(
-                                        "Failed to submit AddWorker job for Anthropic endpoint {url_for_error}: {e}"
-                                    )
-                                })?;
-                                submitted_count += 1;
-                            } else {
-                                return Err("JobQueue not available".to_string());
-                            }
-                        }
-
-                        if submitted_count == 0 {
-                            info!("Anthropic mode: no worker URLs provided");
-                            return Ok("Anthropic mode: no worker URLs to initialize".to_string());
-                        }
-
-                        return Ok(format!(
-                            "Submitted {submitted_count} AddWorker jobs for Anthropic endpoints"
-                        ));
+                    RoutingMode::OpenAI { worker_urls }
+                    | RoutingMode::Anthropic { worker_urls }
+                    | RoutingMode::Gemini { worker_urls } => {
+                        let provider_name = router_config.mode_type();
+                        return submit_external_worker_jobs(
+                            worker_urls,
+                            provider_name,
+                            router_config,
+                            context,
+                        )
+                        .await;
                     }
                 };
 
@@ -796,6 +700,46 @@ impl JobQueue {
             );
         }
     }
+}
+
+/// Submit AddWorker jobs for external provider endpoints (OpenAI/Anthropic/Gemini).
+async fn submit_external_worker_jobs(
+    worker_urls: &[String],
+    provider_name: &str,
+    router_config: &RouterConfig,
+    context: &Arc<AppContext>,
+) -> Result<String, String> {
+    let api_key = router_config.api_key.clone();
+    let mut submitted_count = 0;
+
+    for url in worker_urls {
+        let url_for_error = url.clone();
+        let config = build_external_worker_config(url, api_key.clone(), router_config);
+
+        let job = Job::AddWorker {
+            config: Box::new(config),
+        };
+
+        if let Some(queue) = context.worker_job_queue.get() {
+            queue.submit(job).await.map_err(|e| {
+                format!("Failed to submit AddWorker job for {provider_name} endpoint {url_for_error}: {e}")
+            })?;
+            submitted_count += 1;
+        } else {
+            return Err("JobQueue not available".to_string());
+        }
+    }
+
+    if submitted_count == 0 {
+        info!("{provider_name} mode: no worker URLs provided");
+        return Ok(format!(
+            "{provider_name} mode: no worker URLs to initialize"
+        ));
+    }
+
+    Ok(format!(
+        "Submitted {submitted_count} AddWorker jobs for {provider_name} endpoints"
+    ))
 }
 
 /// Build a `WorkerSpec` for an external API endpoint (OpenAI/Anthropic mode).

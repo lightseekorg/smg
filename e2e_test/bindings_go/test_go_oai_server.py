@@ -19,6 +19,8 @@ import pytest
 logger = logging.getLogger(__name__)
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 class TestGoOAIServerBasic:
     """Basic tests for Go OAI server functionality."""
@@ -98,6 +100,8 @@ class TestGoOAIServerBasic:
         logger.info(f"Response to follow-up: {full_content}")
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.xfail(
     reason="Llama-3.2-1B-Instruct doesn't reliably support tool calling with tool_choice=required",
@@ -240,6 +244,8 @@ class TestGoOAIServerFunctionCalling:
         assert tool_calls is None or len(tool_calls) == 0
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 class TestGoOAIServerParameters:
     """Tests for various generation parameters through Go OAI server."""
@@ -304,6 +310,8 @@ class TestGoOAIServerParameters:
         assert response.choices[0].message.content is not None
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 class TestGoOAIServerResponseValidation:
     """Tests for response field validation."""
@@ -465,6 +473,8 @@ class TestGoOAIServerResponseValidation:
         logger.info(f"Finish reason: {response.choices[0].finish_reason}")
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 class TestGoOAIServerConcurrency:
     """Tests for concurrent request handling."""
@@ -536,6 +546,8 @@ class TestGoOAIServerConcurrency:
             logger.info(f"Stream {i}: {content[:30]}...")
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 class TestGoOAIServerEdgeCases:
     """Tests for edge cases and error handling."""
@@ -614,6 +626,8 @@ class TestGoOAIServerEdgeCases:
         logger.info(f"Pirate response: {response.choices[0].message.content}")
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.xfail(
     reason="Go OAI server does not currently support n > 1 (multiple choices)",

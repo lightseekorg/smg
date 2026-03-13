@@ -1,0 +1,90 @@
+## GitHub config URL for the runner scale set
+githubConfigUrl: "https://github.com/lightseekorg/smg"
+
+## Name of the Kubernetes secret containing GitHub credentials
+## The secret should contain either a PAT (github_token) or GitHub App credentials
+githubConfigSecret: github-arc-secret
+
+## Runner scaling configuration
+minRunners: 4
+maxRunners: 8
+
+## name of the runner scale set to create.  Defaults to the helm release name
+runnerScaleSetName: "k8s-runner-cpu"
+
+resourceMeta: {}
+keyVault: {}
+
+## Runner pod template
+template:
+  spec:
+    volumes:
+      - name: work
+        emptyDir: {}
+      - name: dind-sock
+        emptyDir: {}
+      - name: dind-externals
+        emptyDir: {}
+
+    containers:
+      - name: runner
+        image: fra.ocir.io/idqj093njucb/action-runner:v0.0.2
+        command:
+          - /home/runner/run.sh
+        env:
+          - name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: '120'
+        resources:
+          requests:
+            cpu: "8"
+            memory: "16Gi"
+          limits:
+            cpu: "8"
+            memory: "16Gi"
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+
+    initContainers:
+      - name: init-dind-externals
+        args:
+          - '-r'
+          - /home/runner/externals/.
+          - /home/runner/tmpDir/
+        command:
+          - cp
+        image: fra.ocir.io/idqj093njucb/action-runner:v0.0.2
+        volumeMounts:
+          - mountPath: /home/runner/tmpDir
+            name: dind-externals
+      - name: dind
+        args:
+          - dockerd
+          - '--host=unix:///var/run/docker.sock'
+          - '--group=$(DOCKER_GROUP_GID)'
+        env:
+          - name: DOCKER_GROUP_GID
+            value: '123'
+        image: fra.ocir.io/idqj093njucb/docker:dind
+        restartPolicy: Always
+        securityContext:
+          privileged: true
+        startupProbe:
+          exec:
+            command:
+              - docker
+              - info
+          failureThreshold: 24
+          initialDelaySeconds: 0
+          periodSeconds: 5
+        volumeMounts:
+          - mountPath: /home/runner/_work
+            name: work
+          - mountPath: /var/run
+            name: dind-sock
+          - mountPath: /home/runner/externals
+            name: dind-externals

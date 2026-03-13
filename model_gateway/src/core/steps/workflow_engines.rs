@@ -8,22 +8,18 @@ use std::sync::Arc;
 use wfaas::{EventSubscriber, InMemoryStore, WorkflowEngine};
 
 use super::{
-    create_external_worker_workflow, create_local_worker_workflow,
     create_mcp_registration_workflow, create_tokenizer_registration_workflow,
     create_wasm_module_registration_workflow, create_wasm_module_removal_workflow,
-    create_worker_removal_workflow, create_worker_update_workflow, ExternalWorkerWorkflowData,
-    LocalWorkerWorkflowData, McpWorkflowData, TokenizerWorkflowData, WasmRegistrationWorkflowData,
-    WasmRemovalWorkflowData, WorkerRemovalWorkflowData, WorkerUpdateWorkflowData,
+    create_worker_registration_workflow, create_worker_removal_workflow,
+    create_worker_update_workflow, McpWorkflowData, TokenizerWorkflowData,
+    WasmRegistrationWorkflowData, WasmRemovalWorkflowData, WorkerRemovalWorkflowData,
+    WorkerUpdateWorkflowData,
 };
-use crate::config::RouterConfig;
+use crate::{config::RouterConfig, core::steps::workflow_data::WorkerWorkflowData};
 
-/// Type alias for local worker workflow engine
-pub type LocalWorkerEngine =
-    WorkflowEngine<LocalWorkerWorkflowData, InMemoryStore<LocalWorkerWorkflowData>>;
-
-/// Type alias for external worker workflow engine
-pub type ExternalWorkerEngine =
-    WorkflowEngine<ExternalWorkerWorkflowData, InMemoryStore<ExternalWorkerWorkflowData>>;
+/// Type alias for the unified worker registration workflow engine
+pub type WorkerRegistrationEngine =
+    WorkflowEngine<WorkerWorkflowData, InMemoryStore<WorkerWorkflowData>>;
 
 /// Type alias for worker removal workflow engine
 pub type WorkerRemovalEngine =
@@ -54,10 +50,8 @@ pub type WasmRemovalEngine =
 /// This replaces the old `WorkflowEngine<AnyWorkflowData, ...>` approach.
 #[derive(Clone, Debug)]
 pub struct WorkflowEngines {
-    /// Engine for local worker registration workflows
-    pub local_worker: Arc<LocalWorkerEngine>,
-    /// Engine for external worker registration workflows
-    pub external_worker: Arc<ExternalWorkerEngine>,
+    /// Engine for unified worker registration workflows (local + external)
+    pub worker_registration: Arc<WorkerRegistrationEngine>,
     /// Engine for worker removal workflows
     pub worker_removal: Arc<WorkerRemovalEngine>,
     /// Engine for worker update workflows
@@ -79,17 +73,11 @@ impl WorkflowEngines {
         reason = "Workflow registration uses compile-time-known step/transition definitions that cannot fail at runtime — a failure here indicates a programming error in workflow construction"
     )]
     pub fn new(router_config: &RouterConfig) -> Self {
-        // Create local worker engine
-        let local_worker = WorkflowEngine::new();
-        local_worker
-            .register_workflow(create_local_worker_workflow(router_config))
-            .expect("local_worker_registration workflow should be valid");
-
-        // Create external worker engine
-        let external_worker = WorkflowEngine::new();
-        external_worker
-            .register_workflow(create_external_worker_workflow())
-            .expect("external_worker_registration workflow should be valid");
+        // Create unified worker registration engine
+        let worker_registration = WorkflowEngine::new();
+        worker_registration
+            .register_workflow(create_worker_registration_workflow(router_config))
+            .expect("worker_registration workflow should be valid");
 
         // Create worker removal engine
         let worker_removal = WorkflowEngine::new();
@@ -127,8 +115,7 @@ impl WorkflowEngines {
             .expect("wasm_module_removal workflow should be valid");
 
         Self {
-            local_worker: Arc::new(local_worker),
-            external_worker: Arc::new(external_worker),
+            worker_registration: Arc::new(worker_registration),
             worker_removal: Arc::new(worker_removal),
             worker_update: Arc::new(worker_update),
             mcp: Arc::new(mcp),
@@ -140,11 +127,7 @@ impl WorkflowEngines {
 
     /// Subscribe an event subscriber to all workflow engines
     pub async fn subscribe_all<S: EventSubscriber + 'static>(&self, subscriber: Arc<S>) {
-        self.local_worker
-            .event_bus()
-            .subscribe(subscriber.clone())
-            .await;
-        self.external_worker
+        self.worker_registration
             .event_bus()
             .subscribe(subscriber.clone())
             .await;

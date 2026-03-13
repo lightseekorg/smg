@@ -4,6 +4,9 @@
 # Python bindings directory
 PYTHON_DIR := bindings/python
 
+# OpenAPI Generator CLI wrapper version (pinned for reproducibility)
+OPENAPI_GENERATOR_CLI_VERSION := 2.30.0
+
 # Auto-detect CPU cores and cap at reasonable limit to avoid thread exhaustion
 # Can be overridden: make python-dev JOBS=4
 NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)
@@ -20,6 +23,7 @@ endif
 
 .PHONY: help build test clean docs check fmt lint dev-setup pre-commit setup-rust setup-sccache sccache-stats sccache-clean sccache-stop \
         python-dev python-build python-build-release python-install python-clean python-test python-check \
+        generate-openapi generate-python-types generate-java-types generate-clients \
         show-version bump-version check-versions
 
 help: ## Show this help message
@@ -134,6 +138,46 @@ python-check: ## Check Python package with twine
 	@pip install twine 2>/dev/null || true
 	@twine check $(PYTHON_DIR)/dist/*
 	@echo "Python package check passed!"
+
+# Client SDK code generation
+generate-openapi: ## Generate OpenAPI spec from Rust protocol types
+	@echo "Generating OpenAPI spec..."
+	@mkdir -p clients/openapi
+	@cargo run -p openapi-gen -- clients/openapi/smg-openapi.yaml
+
+generate-python-types: generate-openapi ## Generate Python types from OpenAPI spec
+	@echo "Generating Python types..."
+	@uvx --from 'datamodel-code-generator==0.54.0' datamodel-codegen \
+		--input clients/openapi/smg-openapi.yaml \
+		--input-file-type openapi \
+		--output clients/python/smg_client/types/_generated.py \
+		--output-model-type pydantic_v2.BaseModel \
+		--use-annotated \
+		--field-constraints \
+		--target-python-version 3.10 \
+		--collapse-root-models \
+		--use-standard-collections \
+		--use-union-operator
+	@echo "Post-processing: converting enums to str enums..."
+	@sed -i.bak 's/class \(.*\)(Enum):/class \1(str, Enum):/' clients/python/smg_client/types/_generated.py
+	@rm -f clients/python/smg_client/types/_generated.py.bak
+
+generate-java-types: generate-openapi ## Generate Java types from OpenAPI spec
+	@echo "Generating Java types..."
+	@rm -rf clients/java/src
+	@npx --yes @openapitools/openapi-generator-cli@$(OPENAPI_GENERATOR_CLI_VERSION) generate \
+		-i clients/openapi/smg-openapi.yaml \
+		-g java \
+		-o clients/java \
+		--model-package com.lightseek.smg.types \
+		--api-package com.lightseek.smg.api \
+		--global-property models,supportingFiles,modelDocs=false,modelTests=false \
+		--additional-properties serializationLibrary=jackson,dateLibrary=java8,openApiNullable=false,useJakartaEe=true,hideGenerationTimestamp=true,library=native
+	@echo "Post-processing generated Java files..."
+	@./scripts/fix_java_codegen.sh clients/java/src
+
+generate-clients: generate-python-types generate-java-types ## Generate all client SDK types
+	@echo "All client types generated!"
 
 # Combined shortcuts
 dev: python-dev ## Quick development setup (build Python bindings in dev mode)

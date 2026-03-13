@@ -9,8 +9,9 @@ use axum::response::Response;
 use openai_protocol::{
     common::{ToolCall, Usage},
     responses::{
-        OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
-        ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+        InputTokensDetails, OutputTokensDetails, ResponseContentPart, ResponseOutputItem,
+        ResponseReasoningContent, ResponseStatus, ResponseUsage, ResponsesRequest,
+        ResponsesResponse, ResponsesUsage,
     },
 };
 use serde_json::{json, to_string};
@@ -19,8 +20,7 @@ use tracing::{debug, error, warn};
 
 use super::{
     common::{
-        build_mcp_tool_names_set, build_next_request_with_tools, inject_mcp_metadata,
-        load_previous_messages, McpCallTracking,
+        build_next_request_with_tools, inject_mcp_metadata, load_previous_messages, McpCallTracking,
     },
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools, ToolResult},
 };
@@ -99,7 +99,7 @@ async fn execute_with_mcp_loop(
 
     // Preserve original tools for response (before merging MCP tools)
     // The response should show the user's original request tools, not internal MCP tools
-    let original_tools = current_request.tools.clone();
+    let mut original_tools = current_request.tools.clone();
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
     let session_request_id = format!("resp_{}", uuid::Uuid::now_v7());
@@ -111,7 +111,7 @@ async fn execute_with_mcp_loop(
     if !mcp_tools.is_empty() {
         let mcp_response_tools = convert_mcp_tools_to_response_tools(&session);
 
-        let mut all_tools = current_request.tools.clone().unwrap_or_default();
+        let mut all_tools = current_request.tools.take().unwrap_or_default();
         all_tools.extend(mcp_response_tools);
         current_request.tools = Some(all_tools);
 
@@ -168,12 +168,12 @@ async fn execute_with_mcp_loop(
                     "Tool calls found - separating MCP and function tools"
                 );
 
-                // Separate MCP and function tool calls based on tool type
-                let request_tools = current_request.tools.as_deref().unwrap_or(&[]);
-                let mcp_tool_names = build_mcp_tool_names_set(request_tools);
+                // Separate MCP and function tool calls based on session exposure.
+                // MCP tools are exposed to the model as function tools, so the only reliable
+                // discriminator is whether the name belongs to the MCP session.
                 let (mcp_tool_calls, function_tool_calls): (Vec<_>, Vec<_>) = tool_calls
                     .into_iter()
-                    .partition(|tc| mcp_tool_names.contains(tc.function.name.as_str()));
+                    .partition(|tc| session.has_exposed_tool(&tc.function.name));
 
                 debug!(
                     mcp_calls = mcp_tool_calls.len(),
@@ -306,7 +306,7 @@ async fn execute_with_mcp_loop(
                 inject_mcp_metadata(&mut response, &mcp_tracking, &session);
 
                 // Restore original tools (hide internal MCP tools from response)
-                response.tools = original_tools.clone().unwrap_or_default();
+                response.tools = original_tools.take().unwrap_or_default();
 
                 debug!(
                     mcp_calls = mcp_tracking.total_calls(),
@@ -431,11 +431,13 @@ fn build_tool_response(
 
     // Add function tool calls WITHOUT output (need caller execution)
     for tool_call in function_tool_calls {
+        let call_id = tool_call.id.clone();
+        let arguments = tool_call.function.arguments.unwrap_or_default();
         output.push(ResponseOutputItem::FunctionToolCall {
-            id: tool_call.id.clone(),
-            call_id: tool_call.id.clone(),
-            name: tool_call.function.name.clone(),
-            arguments: tool_call.function.arguments.clone().unwrap_or_default(),
+            id: tool_call.id,
+            call_id,
+            name: tool_call.function.name,
+            arguments,
             output: None, // No output = needs execution
             status: "completed".to_string(),
         });
@@ -456,7 +458,10 @@ fn build_tool_response(
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
-            input_tokens_details: None,
+            input_tokens_details: usage
+                .prompt_tokens_details
+                .as_ref()
+                .map(InputTokensDetails::from),
             output_tokens_details: usage.completion_tokens_details.as_ref().and_then(|d| {
                 d.reasoning_tokens.map(|tokens| OutputTokensDetails {
                     reasoning_tokens: tokens,
