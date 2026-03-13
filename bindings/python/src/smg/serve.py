@@ -68,7 +68,7 @@ class WorkerLauncher(ABC):
         base_idx = dp_rank * tp_size
 
         visible = env.get("CUDA_VISIBLE_DEVICES", "")
-        available_gpus = [g.strip() for g in visible.split(",") if g.strip()] if visible else []
+        available_gpus = [g.strip() for g in visible.split(",") if g.strip()]
 
         if available_gpus:
             if base_idx + tp_size > len(available_gpus):
