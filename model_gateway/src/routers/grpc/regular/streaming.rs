@@ -1559,11 +1559,19 @@ impl StreamingProcessor {
         let mut matched_stop: Option<Value> = None;
 
         // Check parser availability once upfront
-        let reasoning_parser_available = utils::check_reasoning_parser_availability(
-            &self.reasoning_parser_factory,
-            self.configured_reasoning_parser.as_deref(),
-            model,
+        // Only run reasoning parser when the user explicitly enabled thinking in the request.
+        // Without this gate, the reasoning parser misclassifies normal text and tool call JSON
+        // as thinking content, breaking tool use and producing incorrect content blocks.
+        let separate_reasoning = matches!(
+            &original_request.thinking,
+            Some(messages::ThinkingConfig::Enabled { .. })
         );
+        let reasoning_parser_available = separate_reasoning
+            && utils::check_reasoning_parser_availability(
+                &self.reasoning_parser_factory,
+                self.configured_reasoning_parser.as_deref(),
+                model,
+            );
 
         let tool_choice_enabled = !matches!(
             &original_request.tool_choice,
