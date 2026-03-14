@@ -16,8 +16,9 @@ pub mod session;
 
 pub use config::{
     ArgMappingConfig, BuiltinToolType, ConfigValidationError, McpConfig, McpServerConfig,
-    McpTransport, PolicyConfig, PolicyDecisionConfig, ResponseFormatConfig, ServerPolicyConfig,
-    Tool, ToolConfig, TrustLevelConfig,
+    McpTransport, PolicyConfig, PolicyDecisionConfig, ResolutionConflictPolicy,
+    ResponseFormatConfig, SemanticFallbackPolicy, SemanticSearchConfig, ServerPolicyConfig, Tool,
+    ToolConfig, ToolNamespaceStyle, ToolResolutionConfig, TrustLevelConfig,
 };
 pub use handler::{HandlerRequestContext, RefreshRequest, SmgClientHandler};
 pub use metrics::{LatencySnapshot, McpMetrics, MetricsSnapshot};

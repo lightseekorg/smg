@@ -180,6 +180,8 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
         proxy: None,
         warmup: vec![],
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
     let mcp_orchestrator = McpOrchestrator::new(empty_config)

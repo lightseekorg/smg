@@ -120,6 +120,8 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
         proxy: None,
         warmup: vec![],
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
     let mcp_orchestrator = McpOrchestrator::new(empty_config)

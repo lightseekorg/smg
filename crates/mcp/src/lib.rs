@@ -31,9 +31,10 @@ pub use core::{
     ArgMappingConfig, BuiltinToolType, ConfigValidationError, HandlerRequestContext,
     LatencySnapshot, McpConfig, McpMetrics, McpOrchestrator, McpRequestContext, McpServerBinding,
     McpServerConfig, McpToolSession, McpTransport, MetricsSnapshot, PolicyConfig,
-    PolicyDecisionConfig, PoolKey, RefreshRequest, ResponseFormatConfig, ServerPolicyConfig,
-    SmgClientHandler, Tool, ToolCallResult, ToolConfig, ToolExecutionInput, ToolExecutionOutput,
-    TrustLevelConfig, DEFAULT_SERVER_LABEL,
+    PolicyDecisionConfig, PoolKey, RefreshRequest, ResolutionConflictPolicy, ResponseFormatConfig,
+    SemanticFallbackPolicy, SemanticSearchConfig, ServerPolicyConfig, SmgClientHandler, Tool,
+    ToolCallResult, ToolConfig, ToolExecutionInput, ToolExecutionOutput, ToolNamespaceStyle,
+    ToolResolutionConfig, TrustLevelConfig, DEFAULT_SERVER_LABEL,
 };
 
 // Re-export shared types
