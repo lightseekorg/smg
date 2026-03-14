@@ -208,10 +208,18 @@ impl ApiProvider {
             ApiProvider::Anthropic => {
                 if let Some(auth) = auth_header {
                     if let Ok(auth_str) = auth.to_str() {
-                        let api_key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
-                        req = req
-                            .header("x-api-key", api_key)
-                            .header("anthropic-version", "2023-06-01");
+                        // Strip Bearer scheme case-insensitively (RFC 7235)
+                        let api_key = auth_str
+                            .split_once(' ')
+                            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+                            .map(|(_, token)| token)
+                            .unwrap_or(auth_str)
+                            .trim();
+                        if !api_key.is_empty() {
+                            req = req
+                                .header("x-api-key", api_key)
+                                .header("anthropic-version", "2023-06-01");
+                        }
                     }
                 }
             }
