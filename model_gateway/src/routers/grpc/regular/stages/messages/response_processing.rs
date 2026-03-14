@@ -1,36 +1,50 @@
-//! Message response processing stage: non-streaming response processing
+//! Message response processing stage: streaming and non-streaming response processing
 //!
-//! Collects the backend response, converts it to an Anthropic `Message`,
-//! and stores it as FinalResponse::Messages.
-//! Streaming support will be added in a follow-up PR.
+//! - For streaming: Spawns background task and returns SSE response (early exit)
+//! - For non-streaming: Collects the backend response, converts it to an Anthropic `Message`,
+//!   and stores it as FinalResponse::Messages.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::response::Response;
 use tracing::error;
 
-use crate::routers::{
-    error,
-    grpc::{
-        common::stages::PipelineStage,
-        context::{FinalResponse, RequestContext},
-        regular::processor,
+use crate::{
+    core::AttachedBody,
+    routers::{
+        error,
+        grpc::{
+            common::stages::PipelineStage,
+            context::{FinalResponse, RequestContext},
+            regular::{processor, streaming},
+        },
     },
 };
 
-/// Message response processing stage (non-streaming only)
+/// Message response processing stage
 pub(crate) struct MessageResponseProcessingStage {
     processor: processor::ResponseProcessor,
+    streaming_processor: Arc<streaming::StreamingProcessor>,
 }
 
 impl MessageResponseProcessingStage {
-    pub fn new(processor: processor::ResponseProcessor) -> Self {
-        Self { processor }
+    pub fn new(
+        processor: processor::ResponseProcessor,
+        streaming_processor: Arc<streaming::StreamingProcessor>,
+    ) -> Self {
+        Self {
+            processor,
+            streaming_processor,
+        }
     }
 }
 
 #[async_trait]
 impl PipelineStage for MessageResponseProcessingStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
+        let is_streaming = ctx.is_streaming();
+
         // Extract execution result
         let execution_result = ctx.state.response.execution_result.take().ok_or_else(|| {
             error!(
@@ -66,6 +80,28 @@ impl PipelineStage for MessageResponseProcessingStage {
             )
         })?;
 
+        if is_streaming {
+            // Streaming: use StreamingProcessor and return SSE response
+            let response = self
+                .streaming_processor
+                .clone()
+                .process_messages_streaming_response(
+                    execution_result,
+                    ctx.messages_request_arc(),
+                    dispatch,
+                    tokenizer,
+                );
+
+            // Attach load guards for RAII lifecycle
+            let response = match ctx.state.load_guards.take() {
+                Some(guards) => AttachedBody::wrap_response(response, guards),
+                None => response,
+            };
+
+            return Ok(Some(response));
+        }
+
+        // Non-streaming: delegate to ResponseProcessor
         let messages_request = ctx.messages_request_arc();
 
         let stop_decoder = ctx.state.response.stop_decoder.as_mut().ok_or_else(|| {
@@ -79,7 +115,6 @@ impl PipelineStage for MessageResponseProcessingStage {
             )
         })?;
 
-        // Non-streaming: delegate to ResponseProcessor
         let response = self
             .processor
             .process_non_streaming_messages_response(
