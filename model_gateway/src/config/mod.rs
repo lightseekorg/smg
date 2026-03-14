@@ -1,8 +1,10 @@
 pub mod builder;
+pub mod loader;
 pub mod types;
 pub(crate) mod validation;
 
 pub use builder::*;
+pub use loader::{dump_config_yaml, is_env_file, load_config_file, load_env_file};
 pub use types::*;
 
 #[derive(Debug, thiserror::Error)]

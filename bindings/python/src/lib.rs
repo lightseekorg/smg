@@ -454,6 +454,7 @@ struct Router {
     otlp_traces_endpoint: String,
     control_plane_auth: Option<PyControlPlaneAuthConfig>,
     schema_config: Option<String>,
+    config_path: Option<String>,
 }
 
 impl Router {
@@ -808,6 +809,7 @@ impl Router {
         otlp_traces_endpoint = String::from("localhost:4317"),
         control_plane_auth = None,
         schema_config = None,
+        config_path = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -905,6 +907,7 @@ impl Router {
         otlp_traces_endpoint: String,
         control_plane_auth: Option<PyControlPlaneAuthConfig>,
         schema_config: Option<String>,
+        config_path: Option<String>,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -1012,15 +1015,56 @@ impl Router {
             otlp_traces_endpoint,
             control_plane_auth,
             schema_config,
+            config_path,
         })
     }
 
     fn start(&self) -> PyResult<()> {
         use observability::metrics::PrometheusConfig;
 
-        let router_config = self.to_router_config().map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Configuration error: {e}"))
-        })?;
+        let router_config = if let Some(ref path) = self.config_path {
+            if config::is_env_file(path) {
+                // Load env vars into the process. Note: this won't retroactively
+                // change Router fields already set from Python — use python-dotenv
+                // before creating the Router for full .env support.
+                config::load_env_file(path).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Failed to load .env file: {e}"
+                    ))
+                })?;
+                self.to_router_config().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("Configuration error: {e}"))
+                })?
+            } else {
+                // Load YAML/JSON config and pass through builder for cert/MCP loading
+                let file_config = config::load_config_file(path).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Failed to load config file: {e}"
+                    ))
+                })?;
+                config::RouterConfigBuilder::from_config(file_config)
+                    .maybe_server_cert_and_key(
+                        self.server_cert_path.as_ref(),
+                        self.server_key_path.as_ref(),
+                    )
+                    .maybe_client_cert_and_key(
+                        self.client_cert_path.as_ref(),
+                        self.client_key_path.as_ref(),
+                    )
+                    .add_ca_certificates(self.ca_cert_paths.clone())
+                    .maybe_mcp_config_path(self.mcp_config_path.as_ref())
+                    .build()
+                    .map_err(|e| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "Configuration error: {e}"
+                        ))
+                    })?
+            }
+        } else {
+            self.to_router_config().map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("Configuration error: {e}"))
+            })?
+        };
 
         router_config.validate().map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("Configuration validation failed: {e}"))
@@ -1069,19 +1113,29 @@ impl Router {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
+        // Extract values from router_config before it's moved into ServerConfig.
+        // This ensures config file values (if loaded) are used for server settings.
+        let host = router_config.host.clone();
+        let port = router_config.port;
+        let max_payload_size = router_config.max_payload_size;
+        let log_dir = router_config.log_dir.clone();
+        let log_level = router_config.log_level.clone();
+        let request_timeout_secs = router_config.request_timeout_secs;
+        let request_id_headers = router_config.request_id_headers.clone();
+
         runtime.block_on(async move {
             server::startup(server::ServerConfig {
-                host: self.host.clone(),
-                port: self.port,
+                host,
+                port,
                 router_config,
-                max_payload_size: self.max_payload_size,
-                log_dir: self.log_dir.clone(),
-                log_level: self.log_level.clone(),
+                max_payload_size,
+                log_dir,
+                log_level,
                 log_json: self.log_json,
                 service_discovery_config,
                 prometheus_config,
-                request_timeout_secs: self.request_timeout_secs,
-                request_id_headers: self.request_id_headers.clone(),
+                request_timeout_secs,
+                request_id_headers,
                 shutdown_grace_period_secs: self.shutdown_grace_period_secs,
                 control_plane_auth: self
                     .control_plane_auth
