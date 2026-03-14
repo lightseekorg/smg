@@ -314,6 +314,9 @@ class Router:
         # Build control plane auth config
         args_dict["control_plane_auth"] = build_control_plane_auth_config(args_dict)
 
+        # Extract config path before removing from dict
+        config_path = args_dict.pop("config", None)
+
         # Remove fields that shouldn't be passed to Rust Router constructor
         fields_to_remove = [
             "oracle_wallet_path",
@@ -341,7 +344,7 @@ class Router:
         for field in fields_to_remove:
             args_dict.pop(field, None)
 
-        return Router(_Router(**args_dict))
+        return Router(_Router(**args_dict, config_path=config_path))
 
     def start(self) -> None:
         """Start the router server.

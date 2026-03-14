@@ -6,8 +6,8 @@ use smg::{
     config::{
         CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
         HistoryBackend, ManualAssignmentMode, MetricsConfig, OracleConfig, PolicyConfig,
-        PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode, SchemaConfig,
-        TokenizerCacheConfig, TraceConfig,
+        PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RouterConfigBuilder, RoutingMode,
+        SchemaConfig, TokenizerCacheConfig, TraceConfig,
     },
     core::ConnectionMode,
     observability::{
@@ -20,6 +20,22 @@ use smg::{
 };
 use smg_auth::{ApiKeyEntry, ControlPlaneAuthConfig, JwtConfig, Role};
 use smg_mesh::MeshServerConfig;
+
+/// Pre-extract `--config <path>` from raw args before clap parsing.
+/// Needed so .env files can be loaded before clap reads env vars.
+fn pre_extract_config_path(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--config" {
+            return iter.next().cloned();
+        }
+        if let Some(path) = arg.strip_prefix("--config=") {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
 fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
     let args: Vec<String> = std::env::args().collect();
     let mut prefill_entries = Vec::new();
@@ -134,6 +150,18 @@ enum Commands {
 
 #[derive(Parser, Debug)]
 struct CliArgs {
+    // ==================== Configuration File ====================
+    /// Path to a configuration file (YAML, JSON, or .env).
+    /// When provided, the file values are used as defaults that CLI
+    /// arguments and environment variables can override.
+    #[arg(long, help_heading = "Configuration")]
+    config: Option<String>,
+
+    /// Dump the effective configuration as YAML and exit.
+    /// Useful for generating a config file template.
+    #[arg(long, default_value_t = false, help_heading = "Configuration")]
+    dump_config: bool,
+
     // ==================== Worker Configuration ====================
     /// Host address to bind the router server
     #[arg(long, default_value = "0.0.0.0", help_heading = "Worker Configuration")]
@@ -962,6 +990,18 @@ impl CliArgs {
         Ok(rcf)
     }
 
+    /// Build a [`RouterConfig`] from a config file, applying explicit CLI overrides.
+    /// Load a YAML/JSON config file directly into a [`RouterConfig`],
+    /// applying only cert/MCP file loading via the builder.
+    fn build_router_config_from_file(&self, config_path: &str) -> ConfigResult<RouterConfig> {
+        let config = smg::config::load_config_file(config_path)?;
+
+        RouterConfigBuilder::from_config(config)
+            .maybe_server_cert_and_key(self.tls_cert_path.as_ref(), self.tls_key_path.as_ref())
+            .maybe_mcp_config_path(self.mcp_config_path.as_ref())
+            .build()
+    }
+
     fn to_router_config(
         &self,
         prefill_urls: Vec<(String, Option<u16>)>,
@@ -1286,6 +1326,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Auto-load .env from current directory (if present)
+    let _ = dotenvy::dotenv();
+
+    // Pre-extract --config before clap parsing so .env files can be loaded
+    // before clap reads environment variables via `env = "..."` attributes.
+    let config_path = pre_extract_config_path(&args);
+    if let Some(ref path) = config_path {
+        if smg::config::is_env_file(path) {
+            smg::config::load_env_file(path)?;
+        }
+    }
+
     let prefill_urls = parse_prefill_args();
 
     let mut filtered_args: Vec<String> = Vec::new();
@@ -1307,13 +1359,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let cli = Cli::parse_from(filtered_args);
+    let cli = Cli::parse_from(&filtered_args);
 
     // Handle subcommands or use direct args
     let mut cli_args = match cli.command {
         Some(Commands::Launch { args }) => args,
         None => cli.router_args,
     };
+
+    // Get the right ArgMatches for value_source() checks
+    // Handle --dump-config: build config and print as YAML
+    if cli_args.dump_config {
+        let router_config = if let Some(ref path) = cli_args.config {
+            if smg::config::is_env_file(path) {
+                cli_args.to_router_config(prefill_urls)?
+            } else {
+                cli_args.build_router_config_from_file(path)?
+            }
+        } else {
+            cli_args.to_router_config(prefill_urls)?
+        };
+        let yaml = smg::config::dump_config_yaml(&router_config)?;
+        println!("{yaml}");
+        return Ok(());
+    }
 
     // Automatically enable IGW mode when service discovery is turned on
     if cli_args.service_discovery && !cli_args.enable_igw {
@@ -1346,7 +1415,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let router_config = cli_args.to_router_config(prefill_urls)?;
+    // Build router config: from config file or from CLI args
+    let router_config = if let Some(ref path) = cli_args.config {
+        if smg::config::is_env_file(path) {
+            cli_args.to_router_config(prefill_urls)?
+        } else {
+            println!("Loading config from: {path}");
+            cli_args.build_router_config_from_file(path)?
+        }
+    } else {
+        cli_args.to_router_config(prefill_urls)?
+    };
     router_config.validate()?;
 
     let server_config = cli_args.to_server_config(router_config)?;

@@ -454,6 +454,7 @@ struct Router {
     otlp_traces_endpoint: String,
     control_plane_auth: Option<PyControlPlaneAuthConfig>,
     schema_config: Option<String>,
+    config_path: Option<String>,
 }
 
 impl Router {
@@ -808,6 +809,7 @@ impl Router {
         otlp_traces_endpoint = String::from("localhost:4317"),
         control_plane_auth = None,
         schema_config = None,
+        config_path = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -905,6 +907,7 @@ impl Router {
         otlp_traces_endpoint: String,
         control_plane_auth: Option<PyControlPlaneAuthConfig>,
         schema_config: Option<String>,
+        config_path: Option<String>,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -1012,15 +1015,35 @@ impl Router {
             otlp_traces_endpoint,
             control_plane_auth,
             schema_config,
+            config_path,
         })
     }
 
     fn start(&self) -> PyResult<()> {
         use observability::metrics::PrometheusConfig;
 
-        let router_config = self.to_router_config().map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Configuration error: {e}"))
-        })?;
+        let router_config = if let Some(ref path) = self.config_path {
+            if config::is_env_file(path) {
+                config::load_env_file(path).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Failed to load .env file: {e}"
+                    ))
+                })?;
+                self.to_router_config().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("Configuration error: {e}"))
+                })?
+            } else {
+                config::load_config_file(path).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Failed to load config file: {e}"
+                    ))
+                })?
+            }
+        } else {
+            self.to_router_config().map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("Configuration error: {e}"))
+            })?
+        };
 
         router_config.validate().map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("Configuration validation failed: {e}"))

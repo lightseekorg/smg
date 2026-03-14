@@ -12,9 +12,9 @@ use crate::core::ConnectionMode;
 
 /// Main router configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RouterConfig {
     pub mode: RoutingMode,
-    #[serde(default)]
     pub connection_mode: ConnectionMode,
     pub policy: PolicyConfig,
     pub host: String,

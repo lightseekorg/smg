@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass
 class RouterArgs:
+    # Configuration file (YAML, JSON, or .env)
+    config: str | None = None
+
     # Worker configuration
     worker_urls: list[str] = dataclasses.field(default_factory=list)
     host: str = "0.0.0.0"
@@ -225,6 +228,20 @@ class RouterArgs:
         )
         auth_group = parser.add_argument_group(
             "Control Plane Authentication", "API key and JWT/OIDC authentication"
+        )
+        config_group = parser.add_argument_group(
+            "Configuration", "Configuration file support"
+        )
+
+        # Configuration file
+        config_group.add_argument(
+            "--config",
+            type=str,
+            default=None,
+            help=(
+                "Path to a configuration file (YAML, JSON, or .env). "
+                "Config file values are overridden by explicit CLI arguments"
+            ),
         )
 
         # Worker configuration

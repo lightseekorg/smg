@@ -107,6 +107,7 @@ rustls-pemfile = "2.2"
 openssl = "0.10.73"
 rmcp = { version = "0.8.3", features = ["client"] }
 serde_yaml = "0.9"
+dotenvy = "0.15"
 openai-harmony = "0.0.8"
 openmetrics-parser = "0.4.4"
 arc-swap = "1.7.1"
