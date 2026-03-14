@@ -231,17 +231,28 @@ fn build_model_card(
         .map(|s| s == "true")
         .unwrap_or(false);
 
-    if !user_provided {
+    let is_diffusion = labels
+        .get("model_type")
+        .is_some_and(|s| s.to_lowercase() == "diffusion");
+
+    if user_provided {
+        if has_vision && !card.model_type.supports_vision() {
+            card.model_type |= ModelType::VISION;
+        }
+        if is_diffusion && !card.model_type.supports_diffusion() {
+            card.model_type |= ModelType::DIFFUSION;
+        }
+    } else {
         let is_embedding = labels.get("is_embedding").is_some_and(|s| s == "true");
         let is_non_generation = labels.get("is_generation").is_some_and(|s| s == "false");
 
-        if is_embedding || is_non_generation {
+        if is_diffusion {
+            card.model_type = ModelType::DIFFUSION_MODEL;
+        } else if is_embedding || is_non_generation {
             card.model_type = infer_non_generation_type(labels);
         } else if has_vision && !card.model_type.supports_vision() {
             card.model_type |= ModelType::VISION;
         }
-    } else if has_vision && !card.model_type.supports_vision() {
-        card.model_type |= ModelType::VISION;
     }
 
     card
@@ -273,5 +284,63 @@ fn normalize_url(url: &str, connection_mode: ConnectionMode) -> String {
             ConnectionMode::Http => format!("http://{url}"),
             ConnectionMode::Grpc => format!("grpc://{url}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::worker::WorkerSpec;
+
+    use super::*;
+
+    fn default_config() -> WorkerSpec {
+        serde_json::from_str(r#"{"url": "http://localhost:30000"}"#).unwrap()
+    }
+
+    #[test]
+    fn test_build_model_card_diffusion_from_model_type_label() {
+        let config = default_config();
+        let mut labels = HashMap::new();
+        labels.insert("model_type".to_string(), "diffusion".to_string());
+        labels.insert("is_generation".to_string(), "true".to_string());
+
+        let card = build_model_card("stable-diffusion-xl", &config, &labels);
+        assert!(card.model_type.supports_diffusion());
+        assert!(card.model_type.is_diffusion_model());
+    }
+
+    #[test]
+    fn test_build_model_card_diffusion_case_insensitive() {
+        let config = default_config();
+        let mut labels = HashMap::new();
+        labels.insert("model_type".to_string(), "Diffusion".to_string());
+
+        let card = build_model_card("flux-dev", &config, &labels);
+        assert!(card.model_type.supports_diffusion());
+    }
+
+    #[test]
+    fn test_build_model_card_non_diffusion_llm() {
+        let config = default_config();
+        let mut labels = HashMap::new();
+        labels.insert("model_type".to_string(), "llama".to_string());
+        labels.insert("is_generation".to_string(), "true".to_string());
+
+        let card = build_model_card("llama-3-70b", &config, &labels);
+        assert!(!card.model_type.supports_diffusion());
+        assert!(card.model_type.is_llm());
+    }
+
+    #[test]
+    fn test_build_model_card_diffusion_takes_precedence_over_embedding() {
+        let config = default_config();
+        let mut labels = HashMap::new();
+        labels.insert("model_type".to_string(), "diffusion".to_string());
+        labels.insert("is_generation".to_string(), "false".to_string());
+
+        let card = build_model_card("sd-model", &config, &labels);
+        // Diffusion check comes before is_generation check
+        assert!(card.model_type.supports_diffusion());
+        assert!(!card.model_type.supports_embeddings());
     }
 }

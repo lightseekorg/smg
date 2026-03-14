@@ -34,6 +34,8 @@ bitflags! {
         const AUDIO       = 1 << 10;
         /// Content moderation models
         const MODERATION  = 1 << 11;
+        /// Diffusion models (Stable Diffusion, Flux, etc.)
+        const DIFFUSION   = 1 << 12;
 
         /// Standard LLM: chat + completions + responses + tools
         const LLM = Self::CHAT.bits() | Self::COMPLETIONS.bits()
@@ -62,6 +64,9 @@ bitflags! {
 
         /// Content moderation model only
         const MODERATION_MODEL = Self::MODERATION.bits();
+
+        /// Diffusion model only (Stable Diffusion, Flux, etc.)
+        const DIFFUSION_MODEL = Self::DIFFUSION.bits();
     }
 }
 
@@ -79,6 +84,7 @@ const CAPABILITY_NAMES: &[(ModelType, &str)] = &[
     (ModelType::IMAGE_GEN, "image_gen"),
     (ModelType::AUDIO, "audio"),
     (ModelType::MODERATION, "moderation"),
+    (ModelType::DIFFUSION, "diffusion"),
 ];
 
 impl ModelType {
@@ -154,6 +160,12 @@ impl ModelType {
         self.contains(Self::MODERATION)
     }
 
+    /// Check if this model type supports diffusion (image generation via diffusion)
+    #[inline]
+    pub fn supports_diffusion(self) -> bool {
+        self.contains(Self::DIFFUSION)
+    }
+
     /// Check if this model type supports a given endpoint
     pub fn supports_endpoint(self, endpoint: Endpoint) -> bool {
         match endpoint {
@@ -212,6 +224,12 @@ impl ModelType {
     #[inline]
     pub fn is_moderation_model(self) -> bool {
         self.supports_moderation() && !self.supports_chat()
+    }
+
+    /// Check if this is a diffusion model
+    #[inline]
+    pub fn is_diffusion_model(self) -> bool {
+        self.supports_diffusion() && !self.supports_chat()
     }
 }
 
@@ -309,6 +327,7 @@ impl JsonSchema for ModelType {
                 "image_gen".into(),
                 "audio".into(),
                 "moderation".into(),
+                "diffusion".into(),
             ]),
             ..Default::default()
         };
@@ -404,5 +423,56 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Generate => write!(f, "generate"),
             Endpoint::Models => write!(f, "models"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_diffusion_flag_basics() {
+        let dt = ModelType::DIFFUSION;
+        assert!(dt.supports_diffusion());
+        assert!(!dt.supports_chat());
+        assert!(!dt.supports_vision());
+    }
+
+    #[test]
+    fn test_diffusion_model_composite() {
+        let dm = ModelType::DIFFUSION_MODEL;
+        assert!(dm.supports_diffusion());
+        assert!(dm.is_diffusion_model());
+        assert!(!dm.is_llm());
+        assert!(!dm.is_image_model());
+    }
+
+    #[test]
+    fn test_diffusion_with_chat_is_not_diffusion_model() {
+        let dt = ModelType::CHAT | ModelType::DIFFUSION;
+        assert!(dt.supports_diffusion());
+        assert!(!dt.is_diffusion_model()); // has chat, so not a pure diffusion model
+        assert!(dt.is_llm());
+    }
+
+    #[test]
+    fn test_diffusion_capability_name() {
+        let dm = ModelType::DIFFUSION_MODEL;
+        let names = dm.as_capability_names();
+        assert_eq!(names, vec!["diffusion"]);
+    }
+
+    #[test]
+    fn test_diffusion_serialization_roundtrip() {
+        let dm = ModelType::DIFFUSION_MODEL;
+        let json = serde_json::to_string(&dm).unwrap();
+        assert_eq!(json, r#"["diffusion"]"#);
+        let deserialized: ModelType = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, dm);
+    }
+
+    #[test]
+    fn test_diffusion_display() {
+        assert_eq!(ModelType::DIFFUSION_MODEL.to_string(), "diffusion");
     }
 }
