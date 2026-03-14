@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use openai_protocol::{
-    chat::ChatCompletionRequest, generate::GenerateRequest, messages::CreateMessageRequest,
-    worker::WorkerLoadResponse,
+    chat::ChatCompletionRequest, completion::CompletionRequest, generate::GenerateRequest,
+    messages::CreateMessageRequest, worker::WorkerLoadResponse,
 };
 use smg_grpc_client::{
     tokenizer_bundle, tokenizer_bundle::StreamBundle, SglangSchedulerClient, TrtllmServiceClient,
@@ -415,6 +415,44 @@ impl GrpcClient {
                     request_id,
                     body,
                     original_text,
+                    token_ids,
+                )?;
+                Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
+            }
+        }
+    }
+
+    pub fn build_completion_request(
+        &self,
+        request_id: String,
+        body: &CompletionRequest,
+        processed_text: String,
+        token_ids: Vec<u32>,
+    ) -> Result<ProtoGenerateRequest, String> {
+        match self {
+            Self::Sglang(client) => {
+                let req = client.build_generate_request_from_completion(
+                    request_id,
+                    body,
+                    processed_text,
+                    token_ids,
+                )?;
+                Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
+            }
+            Self::Vllm(client) => {
+                let req = client.build_generate_request_from_completion(
+                    request_id,
+                    body,
+                    processed_text,
+                    token_ids,
+                )?;
+                Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
+            }
+            Self::Trtllm(client) => {
+                let req = client.build_generate_request_from_completion(
+                    request_id,
+                    body,
+                    processed_text,
                     token_ids,
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
