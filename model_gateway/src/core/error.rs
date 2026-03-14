@@ -25,6 +25,42 @@ pub enum WorkerError {
 
     #[error("Connection failed for worker {url}: {reason}")]
     ConnectionFailed { url: String, reason: String },
+
+    /// The `lora_path` value in the request uses a URI scheme that is not yet
+    /// supported (e.g. `s3://`, `hermes://`).  This is a **client error** (4xx).
+    #[error("LoRA adapter URI not supported: {message}")]
+    LoraUnsupportedUri { message: String },
+
+    /// The engine rejected the LoRA load/unload call.
+    /// This is a **server-side error** (5xx).
+    #[error("LoRA adapter load failed: {message}")]
+    LoraLoadFailed { message: String },
+}
+
+impl WorkerError {
+    /// Returns `true` when the error is the **caller's fault** and should be
+    /// surfaced as a 4xx rather than a 5xx.
+    pub fn is_client_error(&self) -> bool {
+        matches!(self, WorkerError::LoraUnsupportedUri { .. })
+    }
+
+    /// A stable, machine-readable error code for use in API responses.
+    ///
+    /// Each variant produces a distinct code so that callers can programmatically
+    /// distinguish error types regardless of how `is_client_error()` evolves.
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            WorkerError::HealthCheckFailed { .. } => "worker_health_check_failed",
+            WorkerError::WorkerNotFound { .. } => "worker_not_found",
+            WorkerError::InvalidConfiguration { .. } => "invalid_configuration",
+            WorkerError::NetworkError { .. } => "network_error",
+            WorkerError::WorkerAtCapacity { .. } => "worker_at_capacity",
+            WorkerError::InvalidUrl { .. } => "invalid_url",
+            WorkerError::ConnectionFailed { .. } => "connection_failed",
+            WorkerError::LoraUnsupportedUri { .. } => "lora_unsupported_uri",
+            WorkerError::LoraLoadFailed { .. } => "lora_load_failed",
+        }
+    }
 }
 
 /// Result type for worker operations

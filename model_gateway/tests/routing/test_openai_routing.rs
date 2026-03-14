@@ -608,6 +608,7 @@ async fn test_router_factory_openai_mode() {
 }
 
 /// Test that unsupported endpoints return proper error codes
+#[expect(deprecated, reason = "lora_id kept until callers migrate to lora_path")]
 #[tokio::test]
 async fn test_unsupported_endpoints() {
     let ctx = create_test_app_context().await;
