@@ -56,7 +56,7 @@ jobs:
       engine_repo: ${{ inputs.trtllm_repo }}
       engine_commit: ${{ inputs.trtllm_commit || 'latest' }}
       smg_repo: ${{ inputs.smg_repo || 'https://github.com/lightseekorg/smg' }}
-      smg_commit: ${{ inputs.smg_commit || 'v1.3.0' }}
+      smg_commit: ${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.3.0' }}
       tag: ${{ inputs.tag }}
       source_build_repo: ${{ inputs.trtllm_repo }}
       source_build_ref: ${{ inputs.trtllm_commit || 'latest' }}

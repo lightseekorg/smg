@@ -63,7 +63,7 @@ jobs:
       engine_repo: ${{ inputs.sglang_repo }}
       engine_commit: ${{ inputs.sglang_commit || 'latest' }}
       smg_repo: ${{ inputs.smg_repo || 'https://github.com/lightseekorg/smg' }}
-      smg_commit: ${{ inputs.smg_commit || 'v1.3.0' }}
+      smg_commit: ${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.3.0' }}
       tag: ${{ inputs.tag }}
       dry_run: ${{ github.event_name == 'pull_request' }}
     secrets: inherit
