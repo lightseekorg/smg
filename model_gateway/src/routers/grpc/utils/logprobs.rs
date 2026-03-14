@@ -69,6 +69,78 @@ pub(crate) fn convert_proto_to_openai_logprobs(
     })
 }
 
+pub(crate) fn convert_proto_to_completion_logprobs(
+    proto_logprobs: &ProtoOutputLogProbs,
+    tokenizer: &Arc<dyn Tokenizer>,
+    initial_text_offset: u32,
+    skip_special_tokens: bool,
+    visible_text: Option<&str>,
+) -> openai_protocol::common::LogProbs {
+    let mut tokens = Vec::with_capacity(proto_logprobs.token_logprobs.len());
+    let mut token_logprobs = Vec::with_capacity(proto_logprobs.token_logprobs.len());
+    let mut top_logprobs = Vec::with_capacity(proto_logprobs.token_logprobs.len());
+    let mut text_offset = Vec::with_capacity(proto_logprobs.token_logprobs.len());
+
+    let mut current_offset = initial_text_offset;
+    let visible_limit = visible_text.map(str::len);
+    let mut emitted_visible_len = 0usize;
+
+    for (i, &logprob) in proto_logprobs.token_logprobs.iter().enumerate() {
+        if visible_limit.is_some_and(|limit| emitted_visible_len >= limit) {
+            break;
+        }
+
+        let token_id = proto_logprobs.token_ids.get(i).copied().unwrap_or(0);
+        let token_text = tokenizer
+            .decode(&[token_id], skip_special_tokens)
+            .unwrap_or_else(|_| format!("<token_{token_id}>"));
+
+        if token_text.is_empty() {
+            continue;
+        }
+
+        if let Some(limit) = visible_limit {
+            let next_visible_len = emitted_visible_len + token_text.len();
+            if next_visible_len > limit {
+                break;
+            }
+            emitted_visible_len = next_visible_len;
+        }
+
+        tokens.push(token_text.clone());
+        token_logprobs.push(Some(logprob));
+        text_offset.push(current_offset);
+        current_offset += token_text.len() as u32;
+
+        let top_logprobs_map = if let Some(top_logprobs_entry) = proto_logprobs.top_logprobs.get(i)
+        {
+            let mut map = std::collections::HashMap::new();
+            for (j, &top_logprob) in top_logprobs_entry.values.iter().enumerate() {
+                if let Some(&tid) = top_logprobs_entry.token_ids.get(j) {
+                    let text = tokenizer
+                        .decode(&[tid], skip_special_tokens)
+                        .unwrap_or_else(|_| format!("<token_{tid}>"));
+                    if text.is_empty() {
+                        continue;
+                    }
+                    map.insert(text, top_logprob);
+                }
+            }
+            Some(map)
+        } else {
+            None
+        };
+        top_logprobs.push(top_logprobs_map);
+    }
+
+    openai_protocol::common::LogProbs {
+        tokens,
+        token_logprobs,
+        top_logprobs,
+        text_offset,
+    }
+}
+
 /// Convert OutputLogProbs to Generate format Vec<Vec<Option<f64>>>
 ///
 /// Generate format: [[logprob, token_id, ...], [logprob, token_id, ...], ...]

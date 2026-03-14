@@ -16,7 +16,7 @@ pub(crate) use chat_utils::{
 };
 pub(crate) use logprobs::{
     convert_generate_input_logprobs, convert_generate_output_logprobs, convert_proto_logprobs,
-    convert_proto_to_openai_logprobs,
+    convert_proto_to_completion_logprobs, convert_proto_to_openai_logprobs,
 };
 pub(crate) use metrics::{error_type_from_status, route_to_endpoint};
 pub(crate) use parsers::{
