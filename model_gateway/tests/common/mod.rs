@@ -1,7 +1,6 @@
 // These modules are used by tests and benchmarks
 #![allow(dead_code, clippy::allow_attributes, clippy::large_futures)]
 
-pub mod mock_gemini_server;
 pub mod mock_mcp_server;
 pub mod mock_openai_server;
 pub mod mock_worker;
@@ -405,25 +404,6 @@ pub fn create_test_context(
                     ModelCard::new("mock-model"),
                     ModelCard::new("gpt-4"),
                     ModelCard::new("gpt-3.5-turbo"),
-                ];
-                let worker: Arc<dyn Worker> = Arc::new(
-                    BasicWorkerBuilder::new(url)
-                        .worker_type(WorkerType::Regular)
-                        .runtime_type(RuntimeType::External)
-                        .models(models)
-                        .build(),
-                );
-                app_context.worker_registry.register(worker);
-            }
-        }
-
-        // Register external workers for Gemini mode
-        if let RoutingMode::Gemini { worker_urls, .. } = &config.mode {
-            for url in worker_urls {
-                let models = vec![
-                    ModelCard::new("gemini-2.5-flash"),
-                    ModelCard::new("gemini-2.5-pro"),
-                    ModelCard::new("deep-research-pro-preview-12-2025"),
                 ];
                 let worker: Arc<dyn Worker> = Arc::new(
                     BasicWorkerBuilder::new(url)
