@@ -38,6 +38,17 @@ impl StreamingResponseAccumulator {
         self.process_block(block);
     }
 
+    /// Feed the accumulator with a pre-split event name and data payload.
+    ///
+    /// Avoids the format+reparse overhead of [`ingest_block`] when the caller
+    /// already has the event name and data separated (e.g. from SSE parsing).
+    pub fn ingest_event(&mut self, event_name: Option<&str>, data: &str) {
+        if data.is_empty() {
+            return;
+        }
+        self.handle_event(event_name, data);
+    }
+
     /// Consume the accumulator and produce the best-effort final response value.
     pub fn into_final_response(mut self) -> Option<Value> {
         if self.completed_response.is_some() {
@@ -62,16 +73,15 @@ impl StreamingResponseAccumulator {
         if let Some(resp) = &self.completed_response {
             return Some(resp.clone());
         }
-        self.build_fallback_response_snapshot()
+        self.assemble_fallback(self.output_items.clone())
     }
 
-    fn build_fallback_response_snapshot(&self) -> Option<Value> {
+    fn assemble_fallback(&self, mut output_items: Vec<(usize, Value)>) -> Option<Value> {
         let mut response = self.initial_response.clone()?;
 
         if let Some(obj) = response.as_object_mut() {
             obj.insert("status".to_string(), Value::String("completed".to_string()));
 
-            let mut output_items = self.output_items.clone();
             output_items.sort_by_key(|(index, _)| *index);
             let outputs: Vec<Value> = output_items.into_iter().map(|(_, item)| item).collect();
             obj.insert("output".to_string(), Value::Array(outputs));
@@ -131,19 +141,7 @@ impl StreamingResponseAccumulator {
     }
 
     fn build_fallback_response(&mut self) -> Option<Value> {
-        let mut response = self.initial_response.clone()?;
-
-        if let Some(obj) = response.as_object_mut() {
-            obj.insert("status".to_string(), Value::String("completed".to_string()));
-
-            self.output_items.sort_by_key(|(index, _)| *index);
-            let outputs: Vec<Value> = std::mem::take(&mut self.output_items)
-                .into_iter()
-                .map(|(_, item)| item)
-                .collect();
-            obj.insert("output".to_string(), Value::Array(outputs));
-        }
-
-        Some(response)
+        let output_items = std::mem::take(&mut self.output_items);
+        self.assemble_fallback(output_items)
     }
 }

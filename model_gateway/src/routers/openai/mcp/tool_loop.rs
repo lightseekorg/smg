@@ -27,8 +27,24 @@ use tracing::{debug, info, warn};
 use super::tool_handler::FunctionCallInProgress;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::{error, header_utils::apply_request_headers, mcp_utils::DEFAULT_MAX_ITERATIONS},
+    routers::{
+        error,
+        header_utils::apply_request_headers,
+        mcp_utils::{effective_tool_call_limit, DEFAULT_MAX_ITERATIONS},
+    },
 };
+
+/// Send an SSE event to the client channel.
+/// Returns false if client disconnected.
+#[inline]
+fn send_sse_event(
+    tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    event_name: &str,
+    payload: &Value,
+) -> bool {
+    let block = format!("event: {event_name}\ndata: {payload}\n\n");
+    tx.send(Ok(Bytes::from(block))).is_ok()
+}
 
 /// State for tracking multi-turn tool calling loop
 pub(crate) struct ToolLoopState {
@@ -311,13 +327,8 @@ pub(crate) fn send_mcp_list_tools_events(
         "item": tools_item_empty
     });
     *sequence_number += 1;
-    let event1 = format!(
-        "event: {}\ndata: {}\n\n",
-        OutputItemEvent::ADDED,
-        event1_payload
-    );
-    if tx.send(Ok(Bytes::from(event1))).is_err() {
-        return false; // Client disconnected
+    if !send_sse_event(tx, OutputItemEvent::ADDED, &event1_payload) {
+        return false;
     }
 
     // Event 2: response.mcp_list_tools.in_progress
@@ -328,12 +339,7 @@ pub(crate) fn send_mcp_list_tools_events(
         "item_id": item_id
     });
     *sequence_number += 1;
-    let event2 = format!(
-        "event: {}\ndata: {}\n\n",
-        McpEvent::LIST_TOOLS_IN_PROGRESS,
-        event2_payload
-    );
-    if tx.send(Ok(Bytes::from(event2))).is_err() {
+    if !send_sse_event(tx, McpEvent::LIST_TOOLS_IN_PROGRESS, &event2_payload) {
         return false;
     }
 
@@ -345,12 +351,7 @@ pub(crate) fn send_mcp_list_tools_events(
         "item_id": item_id
     });
     *sequence_number += 1;
-    let event3 = format!(
-        "event: {}\ndata: {}\n\n",
-        McpEvent::LIST_TOOLS_COMPLETED,
-        event3_payload
-    );
-    if tx.send(Ok(Bytes::from(event3))).is_err() {
+    if !send_sse_event(tx, McpEvent::LIST_TOOLS_COMPLETED, &event3_payload) {
         return false;
     }
 
@@ -362,12 +363,7 @@ pub(crate) fn send_mcp_list_tools_events(
         "item": tools_item_full
     });
     *sequence_number += 1;
-    let event4 = format!(
-        "event: {}\ndata: {}\n\n",
-        OutputItemEvent::DONE,
-        event4_payload
-    );
-    tx.send(Ok(Bytes::from(event4))).is_ok()
+    send_sse_event(tx, OutputItemEvent::DONE, &event4_payload)
 }
 
 /// Send intermediate event during tool execution (searching/interpreting).
@@ -403,8 +399,7 @@ fn send_tool_call_intermediate_event(
     });
     *sequence_number += 1;
 
-    let event = format!("event: {event_type}\ndata: {event_payload}\n\n");
-    tx.send(Ok(Bytes::from(event))).is_ok()
+    send_sse_event(tx, event_type, &event_payload)
 }
 
 /// Send tool call completion events after tool execution.
@@ -444,9 +439,7 @@ fn send_tool_call_completion_events(
         "item_id": item_id
     });
     *sequence_number += 1;
-
-    let completed_event = format!("event: {completed_event_type}\ndata: {completed_payload}\n\n");
-    if tx.send(Ok(Bytes::from(completed_event))).is_err() {
+    if !send_sse_event(tx, completed_event_type, &completed_payload) {
         return false;
     }
 
@@ -458,13 +451,7 @@ fn send_tool_call_completion_events(
         "item": tool_call_item
     });
     *sequence_number += 1;
-
-    let done_event = format!(
-        "event: {}\ndata: {}\n\n",
-        OutputItemEvent::DONE,
-        done_payload
-    );
-    tx.send(Ok(Bytes::from(done_event))).is_ok()
+    send_sse_event(tx, OutputItemEvent::DONE, &done_payload)
 }
 
 /// Inject MCP metadata into a streaming response
@@ -564,10 +551,7 @@ pub(crate) async fn execute_tool_loop(
             function_calls.len()
         );
 
-        let effective_limit = match max_tool_calls {
-            Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
-            None => DEFAULT_MAX_ITERATIONS,
-        };
+        let effective_limit = effective_tool_call_limit(max_tool_calls);
 
         for call in function_calls {
             state.total_calls += 1;
