@@ -44,6 +44,10 @@ impl DecodeStream {
 
     /// Step appends a token_id to the internal state and tries to produce a text chunk.
     /// Returning `None` means the given id is not enough to produce a chunk.
+    ///
+    /// Uses content-based comparison (not byte-length) to correctly handle
+    /// byte-fallback tokenizers where `\u{FFFD}` resolves to a character of
+    /// the same byte length.
     #[inline]
     pub fn step(&mut self, id: TokenIdType) -> Result<Option<String>> {
         self.all_token_ids.push(id);
@@ -58,23 +62,36 @@ impl DecodeStream {
             self.skip_special_tokens,
         )?;
 
-        if new_text.len() > prefix_text.len() && !new_text.ends_with("�") {
-            // Find the nearest char boundary at or before prefix_text.len()
-            // to avoid panicking on multi-byte UTF-8 sequences
-            let mut split_at = prefix_text.len();
-            while !new_text.is_char_boundary(split_at) && split_at > 0 {
-                split_at -= 1;
-            }
+        // Trailing \u{FFFD} means an incomplete UTF-8 byte sequence — wait
+        if new_text.ends_with('\u{FFFD}') {
+            return Ok(None);
+        }
 
-            let new_text = new_text[split_at..].to_string();
+        // Find where new_text diverges from prefix_text by comparing bytes.
+        // This correctly handles the case where \u{FFFD} (3 bytes) resolves
+        // to a real character of the same byte length (e.g., CJK), which the
+        // previous byte-length comparison missed entirely.
+        let common_len = prefix_text
+            .as_bytes()
+            .iter()
+            .zip(new_text.as_bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
 
+        // Back up to the nearest UTF-8 char boundary
+        let mut split_at = common_len;
+        while split_at > 0 && !new_text.is_char_boundary(split_at) {
+            split_at -= 1;
+        }
+
+        let incremental = &new_text[split_at..];
+        if !incremental.is_empty() {
             self.prefix_offset = self.read_offset;
             self.read_offset = self.all_token_ids.len();
-
-            Ok(Some(new_text))
-        } else {
-            Ok(None)
+            return Ok(Some(incremental.to_string()));
         }
+
+        Ok(None)
     }
 
     /// Process multiple tokens at once
