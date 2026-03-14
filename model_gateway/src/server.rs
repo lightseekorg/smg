@@ -201,7 +201,7 @@ async fn v1_chat_completions(
 async fn v1_completions(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
-    Json(body): Json<CompletionRequest>,
+    ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Response {
     state
         .router
