@@ -500,6 +500,13 @@ impl ResponseProcessor {
             Some(messages::ToolChoice::None)
         );
 
+        // When tool_choice forces tool output (Any/Tool), the model's entire output is
+        // tool call JSON — the reasoning parser would misclassify it as thinking content.
+        let used_json_schema = matches!(
+            &messages_request.tool_choice,
+            Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
+        );
+
         let tool_parser_available = tool_choice_enabled
             && messages_request.tools.is_some()
             && utils::check_tool_parser_availability(
@@ -551,10 +558,12 @@ impl ResponseProcessor {
         }
 
         // Step 1: Parse reasoning content
+        // Skip when used_json_schema — the model output is constrained to tool call JSON,
+        // and the reasoning parser would misclassify it as thinking content.
         let mut reasoning_text: Option<String> = None;
         let mut processed_text = final_text;
 
-        if reasoning_parser_available {
+        if reasoning_parser_available && !used_json_schema {
             let pooled_parser = utils::get_reasoning_parser(
                 &self.reasoning_parser_factory,
                 self.configured_reasoning_parser.as_deref(),
@@ -578,12 +587,6 @@ impl ResponseProcessor {
         let mut tool_calls: Option<Vec<ToolCall>> = None;
 
         if tool_choice_enabled && messages_request.tools.is_some() {
-            // Check if JSON schema constraint was used (specific tool or any/required mode)
-            let used_json_schema = matches!(
-                &messages_request.tool_choice,
-                Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
-            );
-
             if used_json_schema {
                 // Bridge Messages ToolChoice to Chat ToolChoice for reuse
                 let chat_tool_choice = messages_request
