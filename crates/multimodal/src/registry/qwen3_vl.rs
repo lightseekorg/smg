@@ -45,8 +45,7 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
     }
 
     fn matches(&self, metadata: &ModelMetadata) -> bool {
-        let id = metadata.model_id.to_ascii_lowercase();
-        id.contains("qwen3") && id.contains("vl")
+        metadata.matches_model_type_hints(&["qwen3", "vl"])
     }
 
     fn placeholder_token(&self, metadata: &ModelMetadata) -> RegistryResult<String> {
@@ -174,6 +173,27 @@ mod tests {
         let registry = ModelRegistry::new();
         let spec = registry.lookup(&metadata).expect("should match qwen3");
         // Must match qwen3_vl spec, not qwen_vl
+        assert_eq!(spec.name(), "qwen3_vl");
+    }
+
+    #[test]
+    fn qwen3_vl_matches_alias_via_model_type() {
+        let tokenizer = TestTokenizer::new(&[("<|image_pad|>", 151655)]);
+        let config = json!({
+            "model_type": "qwen3_vl",
+            "vision_start_token_id": 151652,
+            "image_token_id": 151655,
+            "vision_end_token_id": 151653
+        });
+        let metadata = ModelMetadata {
+            model_id: "custom-model",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry
+            .lookup(&metadata)
+            .expect("should match qwen3 alias");
         assert_eq!(spec.name(), "qwen3_vl");
     }
 }

@@ -337,27 +337,32 @@ impl ImageProcessorRegistry {
         self.processors.insert(pattern.into(), processor);
     }
 
-    /// Find a processor for the given model ID.
+    /// Find a processor for the given model ID, falling back to model_type.
     ///
     /// Matches by substring containment (case-insensitive).
-    pub fn find(&self, model_id: &str) -> Option<&dyn ImagePreProcessor> {
-        let model_lower = model_id.to_lowercase();
-        for (pattern, processor) in &self.processors {
-            if model_lower.contains(&pattern.to_lowercase()) {
-                return Some(processor.as_ref());
-            }
-        }
-        None
+    pub fn find(&self, model_id: &str, model_type: Option<&str>) -> Option<&dyn ImagePreProcessor> {
+        self.find_in_candidate(model_id)
+            .or_else(|| model_type.and_then(|model_type| self.find_in_candidate(model_type)))
     }
 
     /// Check if a model has a registered processor.
     pub fn has_processor(&self, model_id: &str) -> bool {
-        self.find(model_id).is_some()
+        self.find(model_id, None).is_some()
     }
 
     /// Get list of supported model patterns.
     pub fn supported_patterns(&self) -> Vec<&str> {
         self.processors.keys().map(|s| s.as_str()).collect()
+    }
+
+    fn find_in_candidate(&self, candidate: &str) -> Option<&dyn ImagePreProcessor> {
+        let candidate = candidate.to_ascii_lowercase();
+        for (pattern, processor) in &self.processors {
+            if candidate.contains(&pattern.to_ascii_lowercase()) {
+                return Some(processor.as_ref());
+            }
+        }
+        None
     }
 }
 
@@ -434,6 +439,10 @@ impl ImageProcessorRegistry {
         );
         registry.register(
             "phi3-vision",
+            Box::new(super::processors::Phi3VisionProcessor::new()),
+        );
+        registry.register(
+            "phi3_v",
             Box::new(super::processors::Phi3VisionProcessor::new()),
         );
 
@@ -551,7 +560,7 @@ mod tests {
         assert!(registry.has_processor("lmms-lab/llava-next-interleave-qwen-7b"));
 
         // Get the processor and check model name
-        let processor = registry.find("llava-hf/llava-1.5-7b-hf").unwrap();
+        let processor = registry.find("llava-hf/llava-1.5-7b-hf", None).unwrap();
         assert_eq!(processor.model_name(), "llava");
     }
 
@@ -565,5 +574,37 @@ mod tests {
         assert!(registry.has_processor("test-model-7b"));
         assert!(registry.has_processor("TEST-MODEL"));
         assert!(!registry.has_processor("other-model"));
+    }
+
+    #[test]
+    fn test_registry_find_falls_back_to_model_type() {
+        let registry = ImageProcessorRegistry::with_defaults();
+
+        assert!(registry.find("custom-model", None).is_none());
+
+        let processor = registry
+            .find("custom-model", Some("qwen3_vl"))
+            .expect("qwen3 processor by model_type");
+        assert_eq!(processor.model_name(), "qwen3-vl");
+    }
+
+    #[test]
+    fn test_registry_find_preserves_fast_path() {
+        let registry = ImageProcessorRegistry::with_defaults();
+
+        let processor = registry
+            .find("Qwen3-VL-30B-A3B-Instruct", Some("qwen2_vl"))
+            .expect("qwen3 processor by model_id");
+        assert_eq!(processor.model_name(), "qwen3-vl");
+    }
+
+    #[test]
+    fn test_registry_find_phi3_model_type_fallback() {
+        let registry = ImageProcessorRegistry::with_defaults();
+
+        let processor = registry
+            .find("custom-model", Some("phi3_v"))
+            .expect("phi3 processor by model_type");
+        assert_eq!(processor.model_name(), "phi3-vision");
     }
 }
