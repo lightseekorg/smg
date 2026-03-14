@@ -1,0 +1,12 @@
+{{- if or .Values.rbac.create .Values.router.serviceDiscovery.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "smg.fullname" . }}
+  labels:
+    {{- include "smg.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "watch"]
+{{- end }}
