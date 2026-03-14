@@ -6,7 +6,54 @@ use anyhow::Result;
 
 use crate::traits::{self, TokenIdType};
 
-const INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET: usize = 5;
+const INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET: usize = 32;
+
+#[inline]
+fn incremental_text(
+    prefix_text: &str,
+    new_text: &str,
+    allow_incomplete_suffix: bool,
+) -> Option<String> {
+    if !allow_incomplete_suffix && new_text.ends_with('\u{FFFD}') {
+        return None;
+    }
+
+    let mut split_at = prefix_text.len();
+    while split_at > 0
+        && (split_at > new_text.len()
+            || !new_text.is_char_boundary(split_at)
+            || !prefix_text.is_char_boundary(split_at))
+    {
+        split_at -= 1;
+    }
+
+    if new_text.len() > split_at && new_text.starts_with(&prefix_text[..split_at]) {
+        let incremental = new_text[split_at..].to_string();
+        if !incremental.is_empty() {
+            return Some(incremental);
+        }
+    }
+
+    let stable_prefix = prefix_text.trim_end_matches('\u{FFFD}');
+    let mut matched_len = 0;
+    let mut right_chars = new_text.char_indices();
+
+    for left_ch in stable_prefix.chars() {
+        match right_chars.next() {
+            Some((idx, right_ch)) if left_ch == right_ch => {
+                matched_len = idx + right_ch.len_utf8();
+            }
+            _ => break,
+        }
+    }
+
+    let incremental = new_text[matched_len..].to_string();
+    if incremental.is_empty() {
+        None
+    } else {
+        Some(incremental)
+    }
+}
 
 /// DecodeStream will keep the state necessary to produce individual chunks of
 /// strings given an input stream of token_ids
@@ -48,6 +95,7 @@ impl DecodeStream {
     pub fn step(&mut self, id: TokenIdType) -> Result<Option<String>> {
         self.all_token_ids.push(id);
 
+        let len = self.all_token_ids.len();
         let prefix_text = self.tokenizer.decode(
             &self.all_token_ids[self.prefix_offset..self.read_offset],
             self.skip_special_tokens,
@@ -58,23 +106,22 @@ impl DecodeStream {
             self.skip_special_tokens,
         )?;
 
-        if new_text.len() > prefix_text.len() && !new_text.ends_with("�") {
-            // Find the nearest char boundary at or before prefix_text.len()
-            // to avoid panicking on multi-byte UTF-8 sequences
-            let mut split_at = prefix_text.len();
-            while !new_text.is_char_boundary(split_at) && split_at > 0 {
-                split_at -= 1;
-            }
-
-            let new_text = new_text[split_at..].to_string();
-
+        if let Some(new_text) = incremental_text(&prefix_text, &new_text, false) {
             self.prefix_offset = self.read_offset;
-            self.read_offset = self.all_token_ids.len();
-
-            Ok(Some(new_text))
-        } else {
-            Ok(None)
+            self.read_offset = len;
+            return Ok(Some(new_text));
         }
+
+        let decode_window_len = len.saturating_sub(self.prefix_offset);
+        if !new_text.ends_with('\u{FFFD}') {
+            self.prefix_offset = len.saturating_sub(INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET);
+            self.read_offset = len;
+        } else if decode_window_len > INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET + 2 {
+            self.prefix_offset = len.saturating_sub(INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET);
+            self.read_offset = self.prefix_offset;
+        }
+
+        Ok(None)
     }
 
     /// Process multiple tokens at once
@@ -94,14 +141,22 @@ impl DecodeStream {
     /// Force flush any remaining text
     pub fn flush(&mut self) -> Result<Option<String>> {
         if self.read_offset < self.all_token_ids.len() {
+            let prefix_start = self
+                .read_offset
+                .saturating_sub(INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET);
+            let prefix_text = self.tokenizer.decode(
+                &self.all_token_ids[prefix_start..self.read_offset],
+                self.skip_special_tokens,
+            )?;
             let remaining = self.tokenizer.decode(
-                &self.all_token_ids[self.read_offset..],
+                &self.all_token_ids[prefix_start..],
                 self.skip_special_tokens,
             )?;
 
+            self.prefix_offset = self.read_offset;
             self.read_offset = self.all_token_ids.len();
 
-            if !remaining.is_empty() {
+            if let Some(remaining) = incremental_text(&prefix_text, &remaining, true) {
                 return Ok(Some(remaining));
             }
         }
