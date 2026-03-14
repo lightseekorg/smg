@@ -96,7 +96,7 @@ impl GenerateResponseProcessingStage {
             // Streaming: Use StreamingProcessor and return SSE response
             let response = self.streaming_processor.clone().process_streaming_generate(
                 execution_result,
-                ctx.generate_request_arc(), // Cheap Arc clone (8 bytes)
+                ctx.generate_request().return_logprob.unwrap_or(false),
                 dispatch,
                 tokenizer,
             );
@@ -112,7 +112,6 @@ impl GenerateResponseProcessingStage {
 
         // Non-streaming: Delegate to ResponseProcessor
         let request_logprobs = ctx.generate_request().return_logprob.unwrap_or(false);
-        let generate_request = ctx.generate_request_arc();
 
         let stop_decoder = ctx.state.response.stop_decoder.as_mut().ok_or_else(|| {
             error!(
@@ -129,7 +128,6 @@ impl GenerateResponseProcessingStage {
             .processor
             .process_non_streaming_generate_response(
                 execution_result,
-                generate_request,
                 dispatch,
                 stop_decoder,
                 request_logprobs,

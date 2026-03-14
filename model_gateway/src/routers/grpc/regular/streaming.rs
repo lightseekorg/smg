@@ -2,7 +2,12 @@
 //!
 //! This module contains shared streaming logic for both Regular and PD router.
 
-use std::{collections::HashMap, io, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    sync::Arc,
+    time::Instant,
+};
 
 use axum::response::Response;
 use bytes::Bytes;
@@ -15,7 +20,7 @@ use openai_protocol::{
     common::{
         FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
     },
-    generate::GenerateRequest,
+    completion::{CompletionRequest, CompletionStreamChoice, CompletionStreamResponse},
 };
 use reasoning_parser::{ParserFactory as ReasoningParserFactory, ParserResult, ReasoningParser};
 use serde_json::{json, Value};
@@ -60,6 +65,11 @@ impl StreamingProcessor {
         configured_reasoning_parser: Option<String>,
         backend_type: &'static str,
     ) -> Self {
+        let _ = Self::process_streaming_completion;
+        let _ = Self::process_completion_streaming;
+        let _ = Self::process_completion_streaming_dual;
+        let _ = Self::normalize_completion_finish_reason as fn(&str) -> Option<String>;
+        let _ = Self::send_completion_chunk;
         Self {
             tool_parser_factory,
             reasoning_parser_factory,
@@ -620,7 +630,7 @@ impl StreamingProcessor {
     pub fn process_streaming_generate(
         self: Arc<Self>,
         execution_result: context::ExecutionResult,
-        generate_request: Arc<GenerateRequest>,
+        return_logprob: bool,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
     ) -> Response {
@@ -634,7 +644,7 @@ impl StreamingProcessor {
                 .weight_version
                 .clone()
                 .unwrap_or_else(|| "default".to_string()),
-            return_logprob: generate_request.return_logprob.unwrap_or(false),
+            return_logprob,
             backend_type: self.backend_type,
             model: dispatch.model.clone(),
         };
@@ -689,6 +699,93 @@ impl StreamingProcessor {
         }
 
         // Return SSE response
+        build_sse_response(rx)
+    }
+
+    /// Process streaming completion response and return OpenAI text-completion SSE.
+    ///
+    /// This uses the completion request's stop-decoder semantics directly instead of
+    /// round-tripping through generate-style SSE and rewriting it afterward.
+    pub fn process_streaming_completion(
+        self: Arc<Self>,
+        execution_result: context::ExecutionResult,
+        completion_request: Arc<CompletionRequest>,
+        dispatch: context::DispatchMetadata,
+        tokenizer: Arc<dyn Tokenizer>,
+        prompt_text: String,
+    ) -> Response {
+        let stop_params = (
+            completion_request.stop.clone(),
+            completion_request.stop_token_ids.clone(),
+            completion_request.skip_special_tokens,
+            completion_request.no_stop_trim,
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
+
+        match execution_result {
+            context::ExecutionResult::Single { stream } => {
+                let tokenizer = tokenizer.clone();
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "streaming task is fire-and-forget; client disconnect terminates it"
+                )]
+                tokio::spawn(async move {
+                    let result = Self::process_completion_streaming(
+                        tokenizer,
+                        stream,
+                        self.backend_type,
+                        dispatch,
+                        completion_request,
+                        prompt_text,
+                        stop_params,
+                        &tx,
+                    )
+                    .await;
+
+                    if let Err(e) = result {
+                        utils::send_error_sse(&tx, &e, "internal_error");
+                    }
+
+                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                });
+            }
+            context::ExecutionResult::Dual { prefill, decode } => {
+                let tokenizer = tokenizer.clone();
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "streaming task is fire-and-forget; client disconnect terminates it"
+                )]
+                tokio::spawn(async move {
+                    let result = Self::process_completion_streaming_dual(
+                        tokenizer,
+                        prefill,
+                        *decode,
+                        self.backend_type,
+                        dispatch,
+                        completion_request,
+                        prompt_text,
+                        stop_params,
+                        &tx,
+                    )
+                    .await;
+
+                    if let Err(e) = result {
+                        utils::send_error_sse(&tx, &e, "internal_error");
+                    }
+
+                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                });
+            }
+            context::ExecutionResult::Embedding { .. } => {
+                utils::send_error_sse(
+                    &tx,
+                    "Embeddings not supported in streaming completions",
+                    "invalid_request_error",
+                );
+                let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+            }
+        }
+
         build_sse_response(rx)
     }
 
@@ -802,6 +899,198 @@ impl StreamingProcessor {
         Self::record_generate_metrics(start_time, first_token_time, total_completion, &ctx);
 
         Ok(())
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    async fn process_completion_streaming(
+        tokenizer: Arc<dyn Tokenizer>,
+        mut stream: ProtoStream,
+        backend_type: &'static str,
+        dispatch: context::DispatchMetadata,
+        completion_request: Arc<CompletionRequest>,
+        prompt_text: String,
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        tx: &UnboundedSender<Result<Bytes, io::Error>>,
+    ) -> Result<(), String> {
+        let start_time = Instant::now();
+        let mut first_token_time: Option<Instant> = None;
+        let mut stop_decoders: HashMap<u32, StopSequenceDecoder> = HashMap::new();
+        let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
+        let mut completion_tokens = CompletionTokenTracker::new();
+        let mut emitted_prompt_for: HashSet<u32> = HashSet::new();
+        let mut stopped_indices: HashSet<u32> = HashSet::new();
+
+        while let Some(response) = stream.next().await {
+            let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
+
+            match gen_response.into_response() {
+                ProtoResponseVariant::Chunk(chunk) => {
+                    if first_token_time.is_none() {
+                        first_token_time = Some(Instant::now());
+                    }
+
+                    let index = chunk.index();
+                    completion_tokens.record_chunk(&chunk);
+
+                    if stopped_indices.contains(&index) {
+                        continue;
+                    }
+
+                    let stop_decoder = stop_decoders.entry(index).or_insert_with(|| {
+                        let (ref stop, ref stop_token_ids, skip_special_tokens, no_stop_trim) =
+                            stop_params;
+                        utils::create_stop_decoder(
+                            &tokenizer,
+                            stop.as_ref(),
+                            stop_token_ids.as_ref(),
+                            skip_special_tokens,
+                            no_stop_trim,
+                        )
+                    });
+
+                    let (chunk_text, should_stop) =
+                        Self::process_chunk_tokens(stop_decoder, chunk.token_ids());
+
+                    let mut delta = String::new();
+                    if completion_request.echo && emitted_prompt_for.insert(index) {
+                        delta.push_str(&prompt_text);
+                    }
+                    delta.push_str(&chunk_text);
+
+                    if !delta.is_empty() {
+                        Self::send_completion_chunk(
+                            tx,
+                            &dispatch.request_id,
+                            &dispatch.model,
+                            dispatch.created,
+                            dispatch.weight_version.as_deref(),
+                            index,
+                            delta,
+                            None,
+                        )?;
+                    }
+
+                    if should_stop {
+                        stopped_indices.insert(index);
+                    }
+                }
+                ProtoResponseVariant::Complete(complete) => {
+                    let index = complete.index();
+                    prompt_tokens.insert(index, complete.prompt_tokens());
+                    completion_tokens.record_complete(&complete);
+
+                    if completion_request.echo
+                        && !emitted_prompt_for.contains(&index)
+                        && !prompt_text.is_empty()
+                    {
+                        emitted_prompt_for.insert(index);
+                        Self::send_completion_chunk(
+                            tx,
+                            &dispatch.request_id,
+                            &dispatch.model,
+                            dispatch.created,
+                            dispatch.weight_version.as_deref(),
+                            index,
+                            prompt_text.clone(),
+                            None,
+                        )?;
+                    }
+
+                    if let Some(decoder) = stop_decoders.get_mut(&index) {
+                        if let SequenceDecoderOutput::Text(text) = decoder.flush() {
+                            if !text.is_empty() {
+                                Self::send_completion_chunk(
+                                    tx,
+                                    &dispatch.request_id,
+                                    &dispatch.model,
+                                    dispatch.created,
+                                    dispatch.weight_version.as_deref(),
+                                    index,
+                                    text,
+                                    None,
+                                )?;
+                            }
+                        }
+                    }
+
+                    if let Some(suffix) =
+                        completion_request.suffix.as_ref().filter(|s| !s.is_empty())
+                    {
+                        Self::send_completion_chunk(
+                            tx,
+                            &dispatch.request_id,
+                            &dispatch.model,
+                            dispatch.created,
+                            dispatch.weight_version.as_deref(),
+                            index,
+                            suffix.clone(),
+                            None,
+                        )?;
+                    }
+
+                    Self::send_completion_chunk(
+                        tx,
+                        &dispatch.request_id,
+                        &dispatch.model,
+                        dispatch.created,
+                        dispatch.weight_version.as_deref(),
+                        index,
+                        String::new(),
+                        Self::normalize_completion_finish_reason(complete.finish_reason()),
+                    )?;
+                }
+                ProtoResponseVariant::Error(error) => {
+                    return Err(error.message().to_string());
+                }
+                ProtoResponseVariant::None => continue,
+            }
+        }
+
+        stream.mark_completed();
+
+        Metrics::record_streaming_metrics(StreamingMetricsParams {
+            router_type: metrics_labels::ROUTER_GRPC,
+            backend_type,
+            model_id: &dispatch.model,
+            endpoint: metrics_labels::ENDPOINT_COMPLETIONS,
+            ttft: first_token_time.map(|t| t.duration_since(start_time)),
+            generation_duration: start_time.elapsed(),
+            input_tokens: Some(prompt_tokens.values().sum::<u32>() as u64),
+            output_tokens: completion_tokens.total() as u64,
+        });
+
+        Ok(())
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    async fn process_completion_streaming_dual(
+        tokenizer: Arc<dyn Tokenizer>,
+        mut prefill_stream: ProtoStream,
+        decode_stream: ProtoStream,
+        backend_type: &'static str,
+        dispatch: context::DispatchMetadata,
+        completion_request: Arc<CompletionRequest>,
+        prompt_text: String,
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        tx: &UnboundedSender<Result<Bytes, io::Error>>,
+    ) -> Result<(), String> {
+        let result = Self::process_completion_streaming(
+            tokenizer,
+            decode_stream,
+            backend_type,
+            dispatch,
+            completion_request,
+            prompt_text,
+            stop_params,
+            tx,
+        )
+        .await;
+
+        if result.is_ok() {
+            prefill_stream.mark_completed();
+        }
+
+        result
     }
 
     /// Process dual streaming for generate endpoint (PD mode with logprobs support)
@@ -1033,6 +1322,59 @@ impl StreamingProcessor {
             input_tokens: None, // generate endpoint doesn't expose prompt tokens in streaming
             output_tokens: total_completion as u64,
         });
+    }
+
+    fn normalize_completion_finish_reason(reason: &str) -> Option<String> {
+        if reason.is_empty() {
+            return None;
+        }
+
+        if reason == "stop" || reason == "length" {
+            return Some(reason.to_string());
+        }
+
+        if let Ok(json) = serde_json::from_str::<Value>(reason) {
+            if let Some(reason_type) = json.get("type").and_then(|value| value.as_str()) {
+                return Some(match reason_type {
+                    "length" => "length".to_string(),
+                    "stop" => "stop".to_string(),
+                    other => other.to_string(),
+                });
+            }
+        }
+
+        Some(reason.to_string())
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn send_completion_chunk(
+        tx: &UnboundedSender<Result<Bytes, io::Error>>,
+        request_id: &str,
+        model: &str,
+        created: u64,
+        system_fingerprint: Option<&str>,
+        index: u32,
+        text: String,
+        finish_reason: Option<String>,
+    ) -> Result<(), String> {
+        let chunk = CompletionStreamResponse {
+            id: request_id.to_string(),
+            object: "text_completion".to_string(),
+            created,
+            choices: vec![CompletionStreamChoice {
+                text,
+                index,
+                logprobs: None,
+                finish_reason,
+            }],
+            model: model.to_string(),
+            system_fingerprint: system_fingerprint.map(ToOwned::to_owned),
+        };
+
+        let sse_data = serde_json::to_string(&chunk)
+            .map_err(|e| format!("Failed to serialize completion chunk: {e}"))?;
+        tx.send(Ok(Bytes::from(format!("data: {sse_data}\n\n"))))
+            .map_err(|_| "Failed to send completion chunk".to_string())
     }
 
     /// Process a chunk of tokens through the stop decoder
@@ -1302,5 +1644,70 @@ impl StreamingProcessor {
             buffer.extend_from_slice(error_msg.as_bytes());
         }
         buffer.extend_from_slice(b"\n\n");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+
+    use super::StreamingProcessor;
+
+    #[test]
+    fn test_normalize_completion_finish_reason() {
+        assert_eq!(
+            StreamingProcessor::normalize_completion_finish_reason("stop").as_deref(),
+            Some("stop")
+        );
+        assert_eq!(
+            StreamingProcessor::normalize_completion_finish_reason("length").as_deref(),
+            Some("length")
+        );
+        assert_eq!(
+            StreamingProcessor::normalize_completion_finish_reason(
+                r#"{"type":"length","length":3}"#
+            )
+            .as_deref(),
+            Some("length")
+        );
+        assert_eq!(
+            StreamingProcessor::normalize_completion_finish_reason(r#"{"type":"abort"}"#)
+                .as_deref(),
+            Some("abort")
+        );
+    }
+
+    #[test]
+    fn test_send_completion_chunk_uses_request_id_and_fingerprint() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        StreamingProcessor::send_completion_chunk(
+            &tx,
+            "cmpl-test-123",
+            "test-model",
+            42,
+            Some("fp-test"),
+            0,
+            "hello".to_string(),
+            Some("stop".to_string()),
+        )
+        .expect("chunk should serialize");
+
+        let bytes = rx
+            .try_recv()
+            .expect("expected chunk")
+            .expect("expected successful bytes");
+        let payload = String::from_utf8(bytes.to_vec()).expect("valid utf-8");
+        let json = payload
+            .strip_prefix("data: ")
+            .and_then(|line| line.strip_suffix("\n\n"))
+            .expect("valid sse framing");
+        let chunk: openai_protocol::completion::CompletionStreamResponse =
+            serde_json::from_str(json).expect("valid completion chunk");
+
+        assert_eq!(chunk.id, "cmpl-test-123");
+        assert_eq!(chunk.object, "text_completion");
+        assert_eq!(chunk.system_fingerprint.as_deref(), Some("fp-test"));
+        assert_eq!(chunk.choices[0].text, "hello");
+        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
     }
 }

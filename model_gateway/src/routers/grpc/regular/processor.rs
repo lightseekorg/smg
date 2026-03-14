@@ -12,7 +12,7 @@ use llm_tokenizer::{
 use openai_protocol::{
     chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
     common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue},
-    generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
+    generate::{GenerateMetaInfo, GenerateResponse},
     messages::{self, CreateMessageRequest, Message},
 };
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
@@ -28,6 +28,28 @@ use crate::routers::{
         utils,
     },
 };
+
+fn completion_finish_reason(reason: &str) -> Option<String> {
+    if reason.is_empty() {
+        return None;
+    }
+
+    if reason == "stop" || reason == "length" {
+        return Some(reason.to_string());
+    }
+
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(reason) {
+        if let Some(reason_type) = json.get("type").and_then(|value| value.as_str()) {
+            return Some(match reason_type {
+                "length" => "length".to_string(),
+                "stop" => "stop".to_string(),
+                other => other.to_string(),
+            });
+        }
+    }
+
+    Some(reason.to_string())
+}
 
 /// Unified response processor for both routers
 #[derive(Clone)]
@@ -45,6 +67,7 @@ impl ResponseProcessor {
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
     ) -> Self {
+        let _ = Self::process_non_streaming_completion_response;
         Self {
             tool_parser_factory,
             reasoning_parser_factory,
@@ -343,7 +366,6 @@ impl ResponseProcessor {
     pub async fn process_non_streaming_generate_response(
         &self,
         execution_result: ExecutionResult,
-        _generate_request: Arc<GenerateRequest>,
         dispatch: DispatchMetadata,
         stop_decoder: &mut StopSequenceDecoder,
         request_logprobs: bool,
@@ -441,6 +463,115 @@ impl ResponseProcessor {
         }
 
         Ok(result_array)
+    }
+
+    /// Process non-streaming completion response (collects all responses and builds final CompletionResponse)
+    pub async fn process_non_streaming_completion_response(
+        &self,
+        execution_result: ExecutionResult,
+        completion_req: Arc<openai_protocol::completion::CompletionRequest>,
+        dispatch: DispatchMetadata,
+        tokenizer: Arc<dyn Tokenizer>,
+        stop_decoder: &mut StopSequenceDecoder,
+        prompt_text: &str,
+    ) -> Result<openai_protocol::completion::CompletionResponse, axum::response::Response> {
+        let request_logprobs = completion_req.logprobs.is_some();
+        let all_responses =
+            response_collection::collect_responses(execution_result, request_logprobs).await?;
+
+        let mut total_prompt = 0u32;
+        let mut total_completion = 0u32;
+        let mut choices = Vec::new();
+
+        for (i, complete) in all_responses.into_iter().enumerate() {
+            stop_decoder.reset();
+
+            // Process tokens through stop decoder
+            let outputs = match stop_decoder.process_tokens(complete.output_ids()) {
+                Ok(outputs) => outputs,
+                Err(e) => {
+                    return Err(error::internal_error(
+                        "process_tokens_failed",
+                        format!("Failed to process tokens: {e}"),
+                    ))
+                }
+            };
+
+            // Accumulate text with early breaks
+            let mut decoded_text = String::new();
+            for output in outputs {
+                match output {
+                    SequenceDecoderOutput::Text(t) => decoded_text.push_str(&t),
+                    SequenceDecoderOutput::StoppedWithText(t) => {
+                        decoded_text.push_str(&t);
+                        break;
+                    }
+                    SequenceDecoderOutput::Stopped => break,
+                    SequenceDecoderOutput::Held => {}
+                }
+            }
+
+            // Flush remaining text
+            if let SequenceDecoderOutput::Text(t) = stop_decoder.flush() {
+                decoded_text.push_str(&t);
+            }
+
+            total_prompt = total_prompt.max(complete.prompt_tokens());
+            total_completion += complete.completion_tokens();
+
+            let finish_reason = completion_finish_reason(complete.finish_reason())
+                .unwrap_or_else(|| "stop".to_string());
+
+            let matched_stop = complete.matched_stop_json();
+
+            let mut text = String::new();
+            if completion_req.echo {
+                text.push_str(prompt_text);
+            }
+            let text_offset = text.len() as u32;
+            text.push_str(&decoded_text);
+            if let Some(ref sfx) = completion_req.suffix {
+                text.push_str(sfx);
+            }
+
+            let logprobs = if request_logprobs {
+                complete.output_logprobs().as_ref().map(|proto_logprobs| {
+                    utils::convert_proto_to_completion_logprobs(
+                        proto_logprobs,
+                        &tokenizer,
+                        text_offset,
+                        completion_req.skip_special_tokens,
+                        Some(&decoded_text),
+                    )
+                })
+            } else {
+                None
+            };
+
+            choices.push(openai_protocol::completion::CompletionChoice {
+                text,
+                index: i as u32,
+                logprobs,
+                finish_reason: Some(finish_reason),
+                matched_stop,
+            });
+        }
+
+        Ok(openai_protocol::completion::CompletionResponse {
+            id: dispatch.request_id.clone(),
+            object: "text_completion".to_string(),
+            created: dispatch.created,
+            model: dispatch.model.clone(),
+            choices,
+            usage: Some(openai_protocol::common::Usage {
+                prompt_tokens: total_prompt,
+                completion_tokens: total_completion,
+                total_tokens: total_prompt + total_completion,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            }),
+            system_fingerprint: dispatch.weight_version.clone(),
+        })
     }
 
     /// Process non-streaming Messages API response
