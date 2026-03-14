@@ -5,7 +5,8 @@ use axum::response::Response;
 use tracing::error;
 
 use super::{
-    chat::ChatRequestBuildingStage, embedding::request_building::EmbeddingRequestBuildingStage,
+    chat::ChatRequestBuildingStage, completion::CompletionRequestBuildingStage,
+    embedding::request_building::EmbeddingRequestBuildingStage,
     generate::GenerateRequestBuildingStage,
 };
 use crate::routers::{
@@ -20,6 +21,7 @@ use crate::routers::{
 pub(crate) struct RequestBuildingStage {
     chat_stage: ChatRequestBuildingStage,
     generate_stage: GenerateRequestBuildingStage,
+    completion_stage: CompletionRequestBuildingStage,
     embedding_stage: EmbeddingRequestBuildingStage,
 }
 
@@ -28,6 +30,7 @@ impl RequestBuildingStage {
         Self {
             chat_stage: ChatRequestBuildingStage::new(inject_pd_metadata),
             generate_stage: GenerateRequestBuildingStage::new(inject_pd_metadata),
+            completion_stage: CompletionRequestBuildingStage::new(inject_pd_metadata),
             embedding_stage: EmbeddingRequestBuildingStage::new(),
         }
     }
@@ -39,11 +42,10 @@ impl PipelineStage for RequestBuildingStage {
         match &ctx.input.request_type {
             RequestType::Chat(_) => self.chat_stage.execute(ctx).await,
             RequestType::Generate(_) => self.generate_stage.execute(ctx).await,
+            RequestType::Completion(_) => self.completion_stage.execute(ctx).await,
             RequestType::Embedding(_) => self.embedding_stage.execute(ctx).await,
             RequestType::Classify(_) => self.embedding_stage.execute(ctx).await,
-            request_type @ (RequestType::Completion(_)
-            | RequestType::Responses(_)
-            | RequestType::Messages(_)) => {
+            request_type @ (RequestType::Responses(_) | RequestType::Messages(_)) => {
                 error!(
                     function = "RequestBuildingStage::execute",
                     request_type = %request_type,

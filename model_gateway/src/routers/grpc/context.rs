@@ -413,10 +413,6 @@ impl RequestContext {
 
     /// Get Arc clone of completion request (panics if not completion)
     #[expect(
-        dead_code,
-        reason = "Arc accessor is introduced before later stacked PRs use it from completion stages"
-    )]
-    #[expect(
         clippy::panic,
         reason = "typed accessor: caller guarantees variant via RequestType construction"
     )]
@@ -651,10 +647,6 @@ pub(crate) enum ExecutionResult {
 
 /// Final processed response
 #[derive(Debug)]
-#[expect(
-    dead_code,
-    reason = "Completion final response is introduced in the plumbing PR before later stacked PRs produce it"
-)]
 pub(crate) enum FinalResponse {
     Chat(ChatCompletionResponse),
     /// Generate response is a Vec of GenerateResponse (n=1 returns single item, n>1 returns multiple)
