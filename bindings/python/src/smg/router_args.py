@@ -235,7 +235,7 @@ class RouterArgs:
 
         # Configuration file
         config_group.add_argument(
-            "--config",
+            f"--{prefix}config",
             type=str,
             default=None,
             help=(

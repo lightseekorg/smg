@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{parser::ValueSource, ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use rand::{distr::Alphanumeric, Rng};
 use smg::{
     config::{
@@ -21,6 +21,14 @@ use smg::{
 use smg_auth::{ApiKeyEntry, ControlPlaneAuthConfig, JwtConfig, Role};
 use smg_mesh::MeshServerConfig;
 
+/// Check if a CLI argument was explicitly provided (not from a default value).
+fn is_explicitly_set(matches: &clap::ArgMatches, id: &str) -> bool {
+    matches!(
+        matches.value_source(id),
+        Some(ValueSource::CommandLine) | Some(ValueSource::EnvVariable)
+    )
+}
+
 /// Pre-extract `--config <path>` from raw args before clap parsing.
 /// Needed so .env files can be loaded before clap reads env vars.
 fn pre_extract_config_path(args: &[String]) -> Option<String> {
@@ -34,6 +42,158 @@ fn pre_extract_config_path(args: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+/// Merge a file-loaded [`RouterConfig`] with a CLI-derived one.
+///
+/// Uses JSON deep merge: for each config field, the CLI value wins only if the
+/// corresponding CLI arg was explicitly provided (via command line or env var).
+/// Otherwise the file value is kept.
+///
+/// Adding a new flat field to both `CliArgs` and `RouterConfig` requires
+/// **zero changes** here — the merge is convention-based (`field_name` in the
+/// config JSON matches `field-name` as the clap arg ID).
+fn merge_configs(
+    file_config: RouterConfig,
+    cli_config: RouterConfig,
+    matches: &clap::ArgMatches,
+) -> ConfigResult<RouterConfig> {
+    // Collect explicitly-set CLI arg IDs, normalized to underscore format.
+    // Also expand aliases for args whose names don't match config field paths.
+    let explicit: HashSet<String> = matches
+        .ids()
+        .filter(|id| is_explicitly_set(matches, id.as_str()))
+        .flat_map(|id| {
+            let key = id.as_str().replace('-', "_");
+            let mut keys = vec![key.clone()];
+            if let Some(alias) = cli_arg_to_config_path(&key) {
+                keys.push(alias);
+            }
+            keys
+        })
+        .collect();
+
+    let mut base = serde_json::to_value(&file_config).map_err(|e| {
+        ConfigError::ValidationFailed {
+            reason: format!("Failed to serialize file config: {e}"),
+        }
+    })?;
+    let overrides = serde_json::to_value(&cli_config).map_err(|e| {
+        ConfigError::ValidationFailed {
+            reason: format!("Failed to serialize CLI config: {e}"),
+        }
+    })?;
+
+    // Skip enum/structural fields — they need whole-value replacement, not deep merge
+    let skip_keys: &[&str] = &["mode", "policy", "connection_mode"];
+    deep_merge(&mut base, &overrides, &explicit, "", skip_keys);
+
+    // Handle enum/structural fields: replace entirely when any constituent CLI arg is set
+    if let (Some(base_map), Some(override_map)) = (base.as_object_mut(), overrides.as_object()) {
+        const MODE_ARGS: &[&str] = &[
+            "worker_urls",
+            "pd_disaggregation",
+            "decode",
+            "backend",
+            "prefill_policy",
+            "decode_policy",
+        ];
+        if MODE_ARGS.iter().any(|k| explicit.contains(*k)) {
+            for key in ["mode", "connection_mode"] {
+                if let Some(val) = override_map.get(key) {
+                    base_map.insert(key.to_string(), val.clone());
+                }
+            }
+        }
+
+        const POLICY_ARGS: &[&str] = &[
+            "policy",
+            "cache_threshold",
+            "balance_abs_threshold",
+            "balance_rel_threshold",
+            "eviction_interval",
+            "max_tree_size",
+            "block_size",
+            "max_idle_secs",
+            "assignment_mode",
+            "prefix_token_count",
+            "prefix_hash_load_factor",
+        ];
+        if POLICY_ARGS.iter().any(|k| explicit.contains(*k)) {
+            if let Some(val) = override_map.get("policy") {
+                base_map.insert("policy".to_string(), val.clone());
+            }
+        }
+    }
+
+    serde_json::from_value(base).map_err(|e| ConfigError::ValidationFailed {
+        reason: format!("Failed to deserialize merged config: {e}"),
+    })
+}
+
+/// Map CLI arg names (underscore-normalized) to RouterConfig JSON paths
+/// where the naming convention (`field_name` ↔ `field-name`) doesn't hold.
+fn cli_arg_to_config_path(cli_key: &str) -> Option<String> {
+    // CLI "cb_*" → config "circuit_breaker.*"
+    if let Some(rest) = cli_key.strip_prefix("cb_") {
+        return Some(format!("circuit_breaker_{rest}"));
+    }
+    // CLI "health_{failure,success}_threshold" → config "health_check.{failure,success}_threshold"
+    if cli_key == "health_failure_threshold" || cli_key == "health_success_threshold" {
+        return Some(format!("health_check_{}", &cli_key["health_".len()..]));
+    }
+    // CLI "disable_health_check" → config "health_check.disable_health_check"
+    if cli_key == "disable_health_check" {
+        return Some("health_check_disable_health_check".to_string());
+    }
+    // CLI "health_check_interval_secs" → config "health_check.check_interval_secs"
+    if cli_key == "health_check_interval_secs" {
+        return Some("health_check_check_interval_secs".to_string());
+    }
+    // CLI args with different suffixes
+    match cli_key {
+        "worker_startup_check_interval" => Some("worker_startup_check_interval_secs".to_string()),
+        "load_monitor_interval" => Some("load_monitor_interval_secs".to_string()),
+        _ => None,
+    }
+}
+
+/// Recursively merge `overrides` into `base`.
+///
+/// A leaf value is overridden only if its full path (keys joined with `_`)
+/// appears in `explicit`. Object values are recursed into, except keys in
+/// `skip_keys` which are handled separately.
+fn deep_merge(
+    base: &mut serde_json::Value,
+    overrides: &serde_json::Value,
+    explicit: &HashSet<String>,
+    prefix: &str,
+    skip_keys: &[&str],
+) {
+    if let (Some(base_map), Some(override_map)) = (base.as_object_mut(), overrides.as_object()) {
+        for (key, override_val) in override_map {
+            if skip_keys.contains(&key.as_str()) {
+                continue;
+            }
+            let path = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}_{key}")
+            };
+            match base_map.get_mut(key) {
+                Some(base_val) if base_val.is_object() && override_val.is_object() => {
+                    deep_merge(base_val, override_val, explicit, &path, &[]);
+                }
+                Some(base_val) if explicit.contains(&path) => {
+                    *base_val = override_val.clone();
+                }
+                None if explicit.contains(&path) => {
+                    base_map.insert(key.clone(), override_val.clone());
+                }
+                _ => {} // not explicitly set → keep file value
+            }
+        }
+    }
 }
 
 fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
@@ -991,15 +1151,55 @@ impl CliArgs {
     }
 
     /// Build a [`RouterConfig`] from a config file, applying explicit CLI overrides.
-    /// Load a YAML/JSON config file directly into a [`RouterConfig`],
-    /// applying only cert/MCP file loading via the builder.
-    fn build_router_config_from_file(&self, config_path: &str) -> ConfigResult<RouterConfig> {
-        let config = smg::config::load_config_file(config_path)?;
+    ///
+    /// Precedence: file defaults < env vars < CLI args.
+    /// Uses generic JSON deep merge — adding a new flat field requires zero changes.
+    fn build_router_config_from_file(
+        &mut self,
+        config_path: &str,
+        matches: &clap::ArgMatches,
+        prefill_urls: Vec<(String, Option<u16>)>,
+    ) -> ConfigResult<RouterConfig> {
+        let file_config = smg::config::load_config_file(config_path)?;
+        let cli_config = self.to_router_config(prefill_urls)?;
+        let config = merge_configs(file_config, cli_config, matches)?;
+
+        // Sync fields that to_server_config() reads from CliArgs directly
+        self.sync_server_fields(&config, matches);
 
         RouterConfigBuilder::from_config(config)
             .maybe_server_cert_and_key(self.tls_cert_path.as_ref(), self.tls_key_path.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())
             .build()
+    }
+
+    /// Sync merged config values back to `self` for fields that
+    /// [`to_server_config`] reads directly from `CliArgs`.
+    fn sync_server_fields(&mut self, config: &RouterConfig, matches: &clap::ArgMatches) {
+        macro_rules! sync {
+            ($($field:ident),* $(,)?) => {
+                $(
+                    {
+                        let arg_id = stringify!($field).replace('_', "-");
+                        if !is_explicitly_set(matches, &arg_id) {
+                            self.$field = config.$field.clone();
+                        }
+                    }
+                )*
+            };
+        }
+        sync!(host, port, max_payload_size, request_timeout_secs);
+
+        // Type mismatches: CliArgs has String/Option<String>,
+        // RouterConfig has Option<String>
+        if !is_explicitly_set(matches, "log-level") {
+            if let Some(ref level) = config.log_level {
+                self.log_level.clone_from(level);
+            }
+        }
+        if !is_explicitly_set(matches, "log-dir") {
+            self.log_dir.clone_from(&config.log_dir);
+        }
     }
 
     fn to_router_config(
@@ -1359,22 +1559,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let cli = Cli::parse_from(&filtered_args);
+    // Parse CLI, retaining ArgMatches for value_source() checks during config merge
+    let cli_matches = Cli::command().get_matches_from(&filtered_args);
+    let cli = match Cli::from_arg_matches(&cli_matches) {
+        Ok(cli) => cli,
+        Err(e) => e.exit(),
+    };
 
-    // Handle subcommands or use direct args
+    // Get ArgMatches for CliArgs (may be top-level or inside "launch" subcommand)
+    let args_matches = cli_matches
+        .subcommand_matches("launch")
+        .unwrap_or(&cli_matches);
+
     let mut cli_args = match cli.command {
         Some(Commands::Launch { args }) => args,
         None => cli.router_args,
     };
 
-    // Get the right ArgMatches for value_source() checks
     // Handle --dump-config: build config and print as YAML
     if cli_args.dump_config {
-        let router_config = if let Some(ref path) = cli_args.config {
+        let config_path = cli_args.config.clone();
+        let router_config = if let Some(ref path) = config_path {
             if smg::config::is_env_file(path) {
                 cli_args.to_router_config(prefill_urls)?
             } else {
-                cli_args.build_router_config_from_file(path)?
+                cli_args.build_router_config_from_file(path, args_matches, prefill_urls)?
             }
         } else {
             cli_args.to_router_config(prefill_urls)?
@@ -1416,12 +1625,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Build router config: from config file or from CLI args
-    let router_config = if let Some(ref path) = cli_args.config {
+    let config_path = cli_args.config.clone();
+    let router_config = if let Some(ref path) = config_path {
         if smg::config::is_env_file(path) {
             cli_args.to_router_config(prefill_urls)?
         } else {
             println!("Loading config from: {path}");
-            cli_args.build_router_config_from_file(path)?
+            cli_args.build_router_config_from_file(path, args_matches, prefill_urls)?
         }
     } else {
         cli_args.to_router_config(prefill_urls)?
