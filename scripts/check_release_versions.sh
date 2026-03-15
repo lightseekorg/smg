@@ -122,6 +122,16 @@ if ! git rev-parse "$TAG" >/dev/null 2>&1; then
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# VERSION_OVERRIDE: skip conventional-commit detection and use this version
+# for all bumps. Set via: VERSION_OVERRIDE=1.3.1 ./check_release_versions.sh
+# ---------------------------------------------------------------------------
+VERSION_OVERRIDE="${VERSION_OVERRIDE:-}"
+if [[ -n "$VERSION_OVERRIDE" && ! "$VERSION_OVERRIDE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo -e "${RED}ERROR: VERSION_OVERRIDE must be in X.Y.Z format, got: '$VERSION_OVERRIDE'${NC}" >&2
+    exit 1
+fi
+
 echo -e "${BOLD}Checking workspace versions against tag: ${BLUE}$TAG${NC}"
 if [[ -n "$VERSION_OVERRIDE" ]]; then
     echo -e "${BOLD}Version override: ${CYAN}$VERSION_OVERRIDE${NC} (ignoring conventional commit detection)"
@@ -171,12 +181,6 @@ get_workspace_dep_version() {
         | grep -o 'version = "[^"]*"' \
         | sed 's/version = "\(.*\)"/\1/'
 }
-
-# ---------------------------------------------------------------------------
-# VERSION_OVERRIDE: skip conventional-commit detection and use this version
-# for all bumps. Set via: VERSION_OVERRIDE=1.3.1 ./check_release_versions.sh
-# ---------------------------------------------------------------------------
-VERSION_OVERRIDE="${VERSION_OVERRIDE:-}"
 
 # Detect semver bump level from conventional commits touching a directory.
 # Scans commit subjects and bodies for:

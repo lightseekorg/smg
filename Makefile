@@ -223,11 +223,4 @@ bump-version: ## Bump version across all files (usage: make bump-version VERSION
 	@echo "Verify with: make show-version"
 
 check-versions: ## Check workspace crate versions against latest tag (usage: make check-versions [TAG=v1.0.0] [VERSION_OVERRIDE=1.3.1])
-	@args=""; \
-	if [ -n "$(TAG)" ]; then args="$$args $(TAG)"; fi; \
-	if [ -n "$(VERSION_OVERRIDE)" ]; then export VERSION_OVERRIDE="$(VERSION_OVERRIDE)"; fi; \
-	if [ -n "$$args" ]; then \
-		./scripts/check_release_versions.sh $$args; \
-	else \
-		./scripts/check_release_versions.sh; \
-	fi
+	@VERSION_OVERRIDE="$(VERSION_OVERRIDE)" ./scripts/check_release_versions.sh $(TAG)
