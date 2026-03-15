@@ -503,9 +503,16 @@ impl LoadMonitor {
                 workers.len()
             );
 
-            // Update policies with this group's loads
+            // Update policies with this group's loads (convert to isize token-load estimate)
+            let isize_loads: HashMap<String, isize> = group_loads
+                .iter()
+                .map(|(url, resp)| {
+                    let load = (resp.effective_token_usage() * 10_000.0) as isize;
+                    (url.clone(), load)
+                })
+                .collect();
             for policy in &power_of_two_policies {
-                policy.update_loads(&group_loads);
+                policy.update_loads(&isize_loads);
             }
 
             // Atomically merge into the shared watch channel.

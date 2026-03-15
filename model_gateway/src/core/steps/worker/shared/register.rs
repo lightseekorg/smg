@@ -12,7 +12,6 @@ use crate::{
     core::{
         steps::workflow_data::WorkerRegistrationData,
         worker::{ConnectionModeExt, WorkerTypeExt},
-        WorkerGroupKey,
     },
     observability::metrics::Metrics,
 };
@@ -88,29 +87,6 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for RegisterWorke
                 model_id,
                 pool_size,
             );
-        }
-
-        // Notify LoadMonitor of new worker groups so it can start polling
-        if let Some(ref load_monitor) = app_context.load_monitor {
-            for (worker_type, connection_mode, model_id) in &unique_configs {
-                let key = WorkerGroupKey {
-                    model_id: model_id.clone(),
-                    worker_type: *worker_type,
-                    connection_mode: *connection_mode,
-                };
-                // Use the minimum interval across all workers in this group.
-                // If workers disagree, the fastest polling rate wins (safest default).
-                let interval = workers
-                    .iter()
-                    .filter(|w| {
-                        w.model_id() == model_id
-                            && w.worker_type() == worker_type
-                            && w.connection_mode() == connection_mode
-                    })
-                    .filter_map(|w| w.metadata().spec.load_monitor_interval_secs)
-                    .min();
-                load_monitor.on_group_added(key, interval).await;
-            }
         }
 
         // Note: worker_ids are stored for potential future use but not persisted

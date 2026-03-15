@@ -6,9 +6,7 @@ use reqwest::Client;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
-    core::{
-        BasicWorkerBuilder, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry, WorkerType,
-    },
+    core::{BasicWorkerBuilder, ModelCard, RuntimeType, Worker, WorkerRegistry, WorkerType},
     middleware::{AuthConfig, TokenBucket},
     policies::PolicyRegistry,
     routers::RouterTrait,
@@ -53,13 +51,12 @@ pub fn create_test_app(
     let conversation_storage = Arc::new(MemoryConversationStorage::new());
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
-    // Initialize load monitor
-    let load_monitor = Some(Arc::new(LoadMonitor::new(
-        worker_registry.clone(),
-        policy_registry.clone(),
-        client.clone(),
-        router_config.worker_startup_check_interval_secs,
-    )));
+    // Create a minimal MetricsStore (no scrapers needed in tests)
+    let bus = Arc::new(metrics_service::EventBus::new(64));
+    let metrics_store = Arc::new(metrics_service::MetricsStore::new(
+        bus,
+        std::time::Duration::from_secs(60),
+    ));
 
     // Create empty OnceLock for worker job queue and workflow engines
     let worker_job_queue = Arc::new(OnceLock::new());
@@ -79,7 +76,7 @@ pub fn create_test_app(
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
-            .load_monitor(load_monitor)
+            .metrics_store(metrics_store)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
             .build()
@@ -196,6 +193,13 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
     let conversation_storage = Arc::new(MemoryConversationStorage::new());
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
+    // Create a minimal MetricsStore (no scrapers needed in tests)
+    let bus = Arc::new(metrics_service::EventBus::new(64));
+    let metrics_store = Arc::new(metrics_service::MetricsStore::new(
+        bus,
+        std::time::Duration::from_secs(60),
+    ));
+
     Arc::new(
         AppContext::builder()
             .router_config(router_config)
@@ -209,7 +213,7 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
-            .load_monitor(None)
+            .metrics_store(metrics_store)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
             .mcp_orchestrator(mcp_orchestrator_lock)

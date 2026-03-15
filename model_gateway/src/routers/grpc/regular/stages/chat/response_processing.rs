@@ -139,7 +139,23 @@ impl ChatResponseProcessingStage {
             .await?;
 
         // Store the final response
-        ctx.state.response.final_response = Some(FinalResponse::Chat(response));
+        ctx.state.response.final_response = Some(FinalResponse::Chat(response.clone()));
+
+        // Piggyback: publish token-count snapshot derived from the complete response
+        if let Some(metrics_store) = ctx.components.metrics_store.as_ref() {
+            if let Some(worker_url) = ctx.primary_worker_url() {
+                if let Some(usage) = &response.usage {
+                    let mut snapshot = metrics_service::WorkerSnapshot::new(
+                        worker_url,
+                        metrics_service::MetricSource::Piggyback,
+                    );
+                    snapshot.in_flight_requests = 0;
+                    snapshot.avg_tokens_per_req =
+                        (usage.prompt_tokens + usage.completion_tokens) as isize;
+                    metrics_store.update(snapshot);
+                }
+            }
+        }
 
         Ok(None)
     }

@@ -1,0 +1,34 @@
+[package]
+name = "metrics-service"
+version = "1.0.0"
+edition = "2021"
+description = "Event-driven metrics store and collection service for SMG workers"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Praneth Paruchuri <pranethparuchuri@gmail.com>",
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+    "Keyang Ru <rukeyang@gmail.com>",
+]
+keywords = ["metrics", "smg", "llm", "prometheus"]
+categories = ["api-bindings", "network-programming"]
+
+[lib]
+name = "metrics_service"
+
+[dependencies]
+dashmap.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+futures.workspace = true
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+metrics.workspace = true
+cel-interpreter.workspace = true
+urlencoding = "2"
+
+[lints]
+workspace = true

@@ -4,6 +4,10 @@ use std::{
 };
 
 use llm_tokenizer::registry::TokenizerRegistry;
+use metrics_service::{
+    scrapers::{direct::DirectScraper, prometheus::PrometheusScraper},
+    MetricsStore,
+};
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use reqwest::Client;
 use smg_data_connector::{
@@ -16,12 +20,11 @@ use tracing::debug;
 
 use crate::{
     config::RouterConfig,
-    core::{
-        steps::WorkflowEngines, JobQueue, KvEventMonitor, LoadMonitor, WorkerRegistry,
-        WorkerService,
-    },
+    core::{steps::WorkflowEngines, JobQueue, KvEventMonitor, WorkerRegistry, WorkerService},
     middleware::TokenBucket,
-    observability::inflight_tracker::InFlightRequestTracker,
+    observability::{
+        inflight_tracker::InFlightRequestTracker, metrics::start_metrics_observability_exporter,
+    },
     policies::PolicyRegistry,
     routers::{openai::realtime::RealtimeRegistry, router_manager::RouterManager},
     wasm::{config::WasmRuntimeConfig, module_manager::WasmModuleManager},
@@ -50,10 +53,10 @@ pub struct AppContext {
     pub worker_registry: Arc<WorkerRegistry>,
     pub policy_registry: Arc<PolicyRegistry>,
     pub router_manager: Option<Arc<RouterManager>>,
+    pub metrics_store: Arc<MetricsStore>,
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    pub load_monitor: Option<Arc<LoadMonitor>>,
     pub configured_reasoning_parser: Option<String>,
     pub configured_tool_parser: Option<String>,
     pub worker_job_queue: Arc<OnceLock<Arc<JobQueue>>>,
@@ -88,10 +91,10 @@ pub struct AppContextBuilder {
     worker_registry: Option<Arc<WorkerRegistry>>,
     policy_registry: Option<Arc<PolicyRegistry>>,
     router_manager: Option<Arc<RouterManager>>,
+    metrics_store: Option<Arc<MetricsStore>>,
     response_storage: Option<Arc<dyn ResponseStorage>>,
     conversation_storage: Option<Arc<dyn ConversationStorage>>,
     conversation_item_storage: Option<Arc<dyn ConversationItemStorage>>,
-    load_monitor: Option<Arc<LoadMonitor>>,
     worker_job_queue: Option<Arc<OnceLock<Arc<JobQueue>>>>,
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
     mcp_orchestrator: Option<Arc<OnceLock<Arc<McpOrchestrator>>>>,
@@ -140,10 +143,10 @@ impl AppContextBuilder {
             worker_registry: None,
             policy_registry: None,
             router_manager: None,
+            metrics_store: None,
             response_storage: None,
             conversation_storage: None,
             conversation_item_storage: None,
-            load_monitor: None,
             worker_job_queue: None,
             workflow_engines: None,
             mcp_orchestrator: None,
@@ -202,6 +205,11 @@ impl AppContextBuilder {
         self
     }
 
+    pub fn metrics_store(mut self, metrics_store: Arc<MetricsStore>) -> Self {
+        self.metrics_store = Some(metrics_store);
+        self
+    }
+
     pub fn response_storage(mut self, response_storage: Arc<dyn ResponseStorage>) -> Self {
         self.response_storage = Some(response_storage);
         self
@@ -220,11 +228,6 @@ impl AppContextBuilder {
         conversation_item_storage: Arc<dyn ConversationItemStorage>,
     ) -> Self {
         self.conversation_item_storage = Some(conversation_item_storage);
-        self
-    }
-
-    pub fn load_monitor(mut self, load_monitor: Option<Arc<LoadMonitor>>) -> Self {
-        self.load_monitor = load_monitor;
         self
     }
 
@@ -301,6 +304,9 @@ impl AppContextBuilder {
                 .policy_registry
                 .ok_or(AppContextBuildError("policy_registry"))?,
             router_manager: self.router_manager,
+            metrics_store: self
+                .metrics_store
+                .ok_or(AppContextBuildError("metrics_store"))?,
             response_storage: self
                 .response_storage
                 .ok_or(AppContextBuildError("response_storage"))?,
@@ -310,7 +316,6 @@ impl AppContextBuilder {
             conversation_item_storage: self
                 .conversation_item_storage
                 .ok_or(AppContextBuildError("conversation_item_storage"))?,
-            load_monitor: self.load_monitor,
             configured_reasoning_parser,
             configured_tool_parser,
             worker_job_queue,
@@ -338,17 +343,78 @@ impl AppContextBuilder {
         webrtc_bind_addr: Option<std::net::IpAddr>,
         webrtc_stun_server: Option<String>,
     ) -> Result<Self, String> {
+        let scraper_cfg = &router_config.metrics_scraper;
+
+        // Create the WorkerRegistry early so the DirectScraper closure can hold
+        // a Weak reference to the same registry that the application uses.
+        let worker_registry = Arc::new(WorkerRegistry::new());
+
+        // Build MetricsStore using the configured staleness threshold
+        let bus = Arc::new(metrics_service::EventBus::new(1024));
+        let metrics_store = Arc::new(MetricsStore::new(
+            bus.clone(),
+            Duration::from_secs(scraper_cfg.staleness_threshold_secs),
+        ));
+
+        // Spawn DirectScraper — polls each worker's /get_load and /metrics endpoints
+        {
+            let direct_scraper = DirectScraper::new(
+                Arc::clone(&metrics_store),
+                Duration::from_secs(scraper_cfg.scrape_interval_secs),
+            );
+            let weak_wr = Arc::downgrade(&worker_registry);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "direct scraper runs for the lifetime of the gateway"
+            )]
+            tokio::spawn(async move {
+                direct_scraper
+                    .run(move || {
+                        let urls = weak_wr
+                            .upgrade()
+                            .map(|wr| {
+                                wr.get_all()
+                                    .iter()
+                                    .map(|w| w.url().to_string())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        std::future::ready(urls)
+                    })
+                    .await;
+            });
+        }
+
+        // Optionally spawn PrometheusScraper when prometheus_url is configured
+        if let Some(prom_url) = &scraper_cfg.prometheus_url {
+            let prom_url = prom_url.clone();
+            let prom_interval = Duration::from_secs(scraper_cfg.prometheus_scrape_interval_secs);
+            let prom_store = Arc::clone(&metrics_store);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "prometheus scraper runs for the lifetime of the gateway"
+            )]
+            tokio::spawn(async move {
+                let scraper = PrometheusScraper::new(prom_store, prom_url, prom_interval);
+                scraper.run().await;
+            });
+        }
+
+        // Start EventBus observability exporter (exports smg_worker_* Prometheus gauges)
+        start_metrics_observability_exporter(Arc::clone(&metrics_store));
+
         Ok(Self::new()
             .with_client(&router_config, request_timeout_secs)?
             .maybe_rate_limiter(&router_config)
             .with_tokenizer_registry()
             .with_reasoning_parser_factory()
             .with_tool_parser_factory()
-            .with_worker_registry()
-            .with_policy_registry(&router_config)
+            // Pass the pre-built registry so both the scraper and the builder share the same Arc
+            .worker_registry(worker_registry)
+            .metrics_store(Arc::clone(&metrics_store))
+            .with_policy_registry(&router_config, Some(Arc::clone(&metrics_store)))
             .with_storage(&router_config)
             .await?
-            .with_load_monitor(&router_config)?
             .with_worker_job_queue()
             .with_workflow_engines()
             .with_mcp_orchestrator(&router_config)
@@ -468,15 +534,16 @@ impl AppContextBuilder {
         self
     }
 
-    /// Create worker registry
-    fn with_worker_registry(mut self) -> Self {
-        self.worker_registry = Some(Arc::new(WorkerRegistry::new()));
-        self
-    }
-
-    /// Create policy registry
-    fn with_policy_registry(mut self, config: &RouterConfig) -> Self {
-        self.policy_registry = Some(Arc::new(PolicyRegistry::new(config.policy.clone())));
+    /// Create policy registry, optionally wiring a MetricsStore for the MetricsDriven policy
+    fn with_policy_registry(
+        mut self,
+        config: &RouterConfig,
+        metrics_store: Option<Arc<MetricsStore>>,
+    ) -> Self {
+        self.policy_registry = Some(Arc::new(PolicyRegistry::new_with_store(
+            config.policy.clone(),
+            metrics_store,
+        )));
         self
     }
 
@@ -515,27 +582,6 @@ impl AppContextBuilder {
         self.conversation_storage = Some(conversation_storage);
         self.conversation_item_storage = Some(conversation_item_storage);
 
-        Ok(self)
-    }
-
-    /// Create load monitor
-    fn with_load_monitor(mut self, config: &RouterConfig) -> Result<Self, String> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| "client must be set before load monitor".to_string())?;
-        self.load_monitor = Some(Arc::new(LoadMonitor::new(
-            self.worker_registry
-                .as_ref()
-                .ok_or_else(|| "worker_registry must be set before load monitor".to_string())?
-                .clone(),
-            self.policy_registry
-                .as_ref()
-                .ok_or_else(|| "policy_registry must be set before load monitor".to_string())?
-                .clone(),
-            client.clone(),
-            config.load_monitor_interval_secs,
-        )));
         Ok(self)
     }
 

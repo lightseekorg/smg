@@ -42,6 +42,6 @@ pub use worker::{
     DEFAULT_BOOTSTRAP_PORT, MOONCAKE_CONNECTOR,
 };
 pub use worker_builder::BasicWorkerBuilder;
-pub use worker_manager::{LoadMonitor, WorkerManager};
+pub use worker_manager::WorkerManager;
 pub use worker_registry::{HashRing, WorkerRegistry};
 pub use worker_service::WorkerService;
