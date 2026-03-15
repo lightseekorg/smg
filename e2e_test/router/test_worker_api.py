@@ -15,10 +15,11 @@ Note: These tests use HTTP mode which is not supported by vLLM.
 from __future__ import annotations
 
 import logging
+import os
 
 import pytest
 from conftest import smg_compare
-from infra import ConnectionMode, Gateway, ModelPool
+from infra import ConnectionMode, Gateway, start_workers, stop_workers
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ logger = logging.getLogger(__name__)
 pytestmark = pytest.mark.skip_for_runtime("vllm", reason="vLLM does not support HTTP mode")
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.parametrize("setup_backend", ["grpc", "http"], indirect=True)
 class TestWorkerAPI:
@@ -79,14 +82,16 @@ class TestWorkerAPI:
         logger.info("Gateway health check passed")
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 class TestIGWMode:
     """Tests for IGW mode - start gateway empty, add workers via API.
 
-    Workers are launched on-demand via model_pool.get().
+    Workers are launched on-demand via start_workers().
     """
 
-    def test_igw_start_empty(self, model_pool: ModelPool):
+    def test_igw_start_empty(self):
         """Test starting gateway in IGW mode with no workers."""
         gateway = Gateway()
         gateway.start(igw_mode=True)
@@ -100,132 +105,178 @@ class TestIGWMode:
         finally:
             gateway.shutdown()
 
-    def test_igw_add_worker(self, model_pool: ModelPool):
+    def test_igw_add_worker(self):
         """Test adding a worker to IGW gateway."""
-        http_instance = model_pool.get("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.HTTP)
-
-        gateway = Gateway()
-        gateway.start(igw_mode=True)
-
-        try:
-            # Add worker
-            success, result = gateway.add_worker(http_instance.worker_url)
-            assert success, f"Failed to add worker: {result}"
-            logger.info("Added worker: %s", result)
-
-            # Verify worker was added
-            workers = gateway.list_workers()
-            assert len(workers) >= 1, "Expected at least one worker"
-            logger.info("Worker count: %d", len(workers))
-
-            # Verify models are available
-            models = gateway.list_models()
-            logger.info("Models available: %d", len(models))
-        finally:
-            gateway.shutdown()
-            http_instance.release()
-
-    def test_igw_add_and_remove_worker(self, model_pool: ModelPool):
-        """Test adding and removing workers dynamically."""
-        http_instance = model_pool.get("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.HTTP)
-
-        gateway = Gateway()
-        gateway.start(igw_mode=True)
-
-        try:
-            # Add worker
-            success, _ = gateway.add_worker(http_instance.worker_url)
-            assert success, "Failed to add worker"
-
-            initial_count = len(gateway.list_workers())
-            logger.info("Worker count after add: %d", initial_count)
-
-            # Remove worker
-            success, msg = gateway.remove_worker(http_instance.worker_url)
-            if success:
-                logger.info("Removed worker: %s", msg)
-                final_count = len(gateway.list_workers())
-                logger.info("Worker count after remove: %d", final_count)
-            else:
-                logger.warning("Remove worker not supported: %s", msg)
-        finally:
-            gateway.shutdown()
-            http_instance.release()
-
-    def test_igw_multiple_workers(self, model_pool: ModelPool):
-        """Test adding multiple workers (HTTP + gRPC) to IGW gateway."""
-        http_instance = model_pool.get("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.HTTP)
-        grpc_instance = model_pool.get("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.GRPC)
-
-        gateway = Gateway()
-        gateway.start(igw_mode=True)
-
-        try:
-            # Add both workers
-            success1, _ = gateway.add_worker(http_instance.worker_url)
-            success2, _ = gateway.add_worker(grpc_instance.worker_url)
-
-            if not success1 or not success2:
-                pytest.skip("Dynamic worker management not fully supported")
-
-            workers = gateway.list_workers()
-            logger.info("Worker count: %d", len(workers))
-            assert len(workers) >= 2, "Expected at least 2 workers"
-
-            for w in workers:
-                logger.info("Worker: id=%s, url=%s", w.id, w.url)
-        finally:
-            gateway.shutdown()
-            http_instance.release()
-            grpc_instance.release()
-
-
-@pytest.mark.e2e
-class TestDisableHealthCheck:
-    """Tests for --disable-health-check CLI option."""
-
-    def test_disable_health_check_workers_immediately_healthy(self, model_pool: ModelPool):
-        """Test that workers are immediately healthy when health checks are disabled."""
-        http_instance = model_pool.get("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.HTTP)
-
-        gateway = Gateway()
-        gateway.start(
-            igw_mode=True,
-            extra_args=["--disable-health-check"],
+        engine = os.environ.get("E2E_ENGINE", "sglang")
+        http_workers = start_workers(
+            "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.HTTP, count=1
         )
 
         try:
-            # Add worker - should be immediately healthy since health checks are disabled
-            success, worker_id = gateway.add_worker(
-                http_instance.worker_url,
-                wait_ready=True,
-                ready_timeout=10,  # Short timeout since it should be immediate
-            )
-            assert success, f"Failed to add worker: {worker_id}"
-            logger.info("Added worker with health checks disabled: %s", worker_id)
+            http_worker = http_workers[0]
 
-            # Verify worker is healthy
-            workers = gateway.list_workers()
-            assert len(workers) >= 1, "Expected at least one worker"
+            gateway = Gateway()
+            gateway.start(igw_mode=True)
 
-            for worker in workers:
-                logger.info(
-                    "Worker: id=%s, status=%s, disable_health_check=%s",
-                    worker.id,
-                    worker.status,
-                    worker.metadata.get("disable_health_check"),
-                )
-                # Worker should be healthy immediately
-                assert worker.status == "healthy", (
-                    "Worker should be healthy when health checks disabled"
-                )
+            try:
+                # Add worker
+                success, result = gateway.add_worker(http_worker.base_url)
+                assert success, f"Failed to add worker: {result}"
+                logger.info("Added worker: %s", result)
+
+                # Verify worker was added
+                workers = gateway.list_workers()
+                assert len(workers) >= 1, "Expected at least one worker"
+                logger.info("Worker count: %d", len(workers))
+
+                # Verify models are available
+                models = gateway.list_models()
+                logger.info("Models available: %d", len(models))
+            finally:
+                gateway.shutdown()
         finally:
-            gateway.shutdown()
-            http_instance.release()
+            stop_workers(http_workers)
 
-    def test_disable_health_check_gateway_starts_without_health_checker(
-        self, model_pool: ModelPool
-    ):
+    def test_igw_add_and_remove_worker(self):
+        """Test adding and removing workers dynamically."""
+        engine = os.environ.get("E2E_ENGINE", "sglang")
+        http_workers = start_workers(
+            "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.HTTP, count=1
+        )
+
+        try:
+            http_worker = http_workers[0]
+
+            gateway = Gateway()
+            gateway.start(igw_mode=True)
+
+            try:
+                # Add worker
+                success, _ = gateway.add_worker(http_worker.base_url)
+                assert success, "Failed to add worker"
+
+                initial_count = len(gateway.list_workers())
+                logger.info("Worker count after add: %d", initial_count)
+
+                # Remove worker
+                success, msg = gateway.remove_worker(http_worker.base_url)
+                if success:
+                    logger.info("Removed worker: %s", msg)
+                    final_count = len(gateway.list_workers())
+                    logger.info("Worker count after remove: %d", final_count)
+                else:
+                    logger.warning("Remove worker not supported: %s", msg)
+            finally:
+                gateway.shutdown()
+        finally:
+            stop_workers(http_workers)
+
+
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
+@pytest.mark.e2e
+class TestIGWMultiWorker:
+    """Test IGW mode with multiple workers (requires 2 GPUs)."""
+
+    def test_igw_multiple_workers(self):
+        """Test adding multiple workers (HTTP + gRPC) to IGW gateway."""
+        engine = os.environ.get("E2E_ENGINE", "sglang")
+        http_workers = start_workers(
+            "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.HTTP, count=1
+        )
+        try:
+            grpc_workers = start_workers(
+                "meta-llama/Llama-3.1-8B-Instruct",
+                engine,
+                mode=ConnectionMode.GRPC,
+                count=1,
+                gpu_offset=1,
+            )
+        except Exception:
+            stop_workers(http_workers)
+            raise
+        all_workers = http_workers + grpc_workers
+
+        try:
+            http_worker = http_workers[0]
+            grpc_worker = grpc_workers[0]
+
+            gateway = Gateway()
+            gateway.start(igw_mode=True)
+
+            try:
+                # Add both workers
+                success1, _ = gateway.add_worker(http_worker.base_url)
+                success2, _ = gateway.add_worker(grpc_worker.base_url)
+
+                if not success1 or not success2:
+                    pytest.skip("Dynamic worker management not fully supported")
+
+                workers = gateway.list_workers()
+                logger.info("Worker count: %d", len(workers))
+                assert len(workers) >= 2, "Expected at least 2 workers"
+
+                for w in workers:
+                    logger.info("Worker: id=%s, url=%s", w.id, w.url)
+            finally:
+                gateway.shutdown()
+        finally:
+            stop_workers(all_workers)
+
+
+@pytest.mark.e2e
+@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.gpu(1)
+class TestDisableHealthCheck:
+    """Tests for --disable-health-check CLI option."""
+
+    def test_disable_health_check_workers_immediately_healthy(self):
+        """Test that workers are immediately healthy when health checks are disabled."""
+        engine = os.environ.get("E2E_ENGINE", "sglang")
+        http_workers = start_workers(
+            "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.HTTP, count=1
+        )
+
+        try:
+            http_worker = http_workers[0]
+
+            gateway = Gateway()
+            gateway.start(
+                igw_mode=True,
+                extra_args=["--disable-health-check"],
+            )
+
+            try:
+                # Add worker - should be immediately healthy since health checks are disabled
+                success, worker_id = gateway.add_worker(
+                    http_worker.base_url,
+                    wait_ready=True,
+                    ready_timeout=10,  # Short timeout since it should be immediate
+                )
+                assert success, f"Failed to add worker: {worker_id}"
+                logger.info("Added worker with health checks disabled: %s", worker_id)
+
+                # Verify worker is healthy
+                workers = gateway.list_workers()
+                assert len(workers) >= 1, "Expected at least one worker"
+
+                for worker in workers:
+                    logger.info(
+                        "Worker: id=%s, status=%s, disable_health_check=%s",
+                        worker.id,
+                        worker.status,
+                        worker.metadata.get("disable_health_check"),
+                    )
+                    # Worker should be healthy immediately
+                    assert worker.status == "healthy", (
+                        "Worker should be healthy when health checks disabled"
+                    )
+            finally:
+                gateway.shutdown()
+        finally:
+            stop_workers(http_workers)
+
+    def test_disable_health_check_gateway_starts_without_health_checker(self):
         """Test that gateway starts successfully with health checks disabled."""
         gateway = Gateway()
         gateway.start(

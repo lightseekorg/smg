@@ -25,6 +25,8 @@ API_KEY = "not-used"
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(4)
 @pytest.mark.model("Qwen/Qwen3-30B-A3B")
 @pytest.mark.gateway(extra_args=["--reasoning-parser", "qwen3", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)

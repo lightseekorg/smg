@@ -86,6 +86,8 @@ def make_mcp_toolset(
 # =============================================================================
 
 
+@pytest.mark.vendor("anthropic")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["anthropic"], indirect=True)
 class TestToolSearchPassthrough:
     """Tool search passthrough tests — request forwarded to Anthropic as-is."""
@@ -279,6 +281,8 @@ MCP_SERVER_URL = os.environ.get("MCP_TOOL_SEARCH_SERVER_URL", BRAVE_MCP_URL)
 MCP_SERVER_NAME = os.environ.get("MCP_TOOL_SEARCH_SERVER_NAME", "brave")
 
 
+@pytest.mark.vendor("anthropic")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["anthropic"], indirect=True)
 class TestToolSearchWithMcp:
     """Tool search with SMG-handled MCP (x-smg-mcp: enabled).

@@ -139,8 +139,11 @@ jobs:
 
   upload-servicer:
     name: Upload servicer to PyPI
-    if: github.repository == 'lightseekorg/smg'
     needs: [build-servicer]
+    if: >-
+      always()
+      && github.repository == 'lightseekorg/smg'
+      && needs.build-servicer.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8

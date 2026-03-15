@@ -15,7 +15,12 @@ use openai_protocol::{
     completion::CompletionRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
+    interactions::InteractionsRequest,
     messages::CreateMessageRequest,
+    realtime_session::{
+        RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
+        RealtimeTranscriptionSessionCreateRequest,
+    },
     rerank::RerankRequest,
     responses::{ResponsesGetParams, ResponsesRequest},
 };
@@ -35,6 +40,7 @@ pub mod parse;
 pub mod persistence_utils;
 pub mod router_manager;
 pub mod tokenize;
+pub mod worker_selection;
 
 pub use factory::RouterFactory;
 // Re-export HTTP routers for convenience
@@ -214,6 +220,77 @@ pub trait RouterTrait: Send + Sync + Debug {
         (
             StatusCode::NOT_IMPLEMENTED,
             "Messages API not yet implemented for this router",
+        )
+            .into_response()
+    }
+
+    /// Route Gemini Interactions API requests (/v1/interactions)
+    async fn route_interactions(
+        &self,
+        _headers: Option<&HeaderMap>,
+        _body: &InteractionsRequest,
+        _model_id: Option<&str>,
+    ) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Interactions API not implemented for this router",
+        )
+            .into_response()
+    }
+
+    /// Route a realtime session create request (/v1/realtime/sessions)
+    async fn route_realtime_session(
+        &self,
+        _headers: Option<&HeaderMap>,
+        _body: &RealtimeSessionCreateRequest,
+    ) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Realtime sessions not implemented",
+        )
+            .into_response()
+    }
+
+    /// Route a realtime client secret create request (/v1/realtime/client_secrets)
+    async fn route_realtime_client_secret(
+        &self,
+        _headers: Option<&HeaderMap>,
+        _body: &RealtimeClientSecretCreateRequest,
+    ) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Realtime client secrets not implemented",
+        )
+            .into_response()
+    }
+
+    /// Route a realtime transcription session create request (/v1/realtime/transcription_sessions)
+    async fn route_realtime_transcription_session(
+        &self,
+        _headers: Option<&HeaderMap>,
+        _body: &RealtimeTranscriptionSessionCreateRequest,
+    ) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Realtime transcription sessions not implemented",
+        )
+            .into_response()
+    }
+
+    /// Route a realtime WebSocket upgrade request
+    async fn route_realtime_ws(&self, _req: Request<Body>, _model_id: &str) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Realtime WebSocket not implemented",
+        )
+            .into_response()
+    }
+
+    /// Route a realtime WebRTC upgrade request
+    async fn route_realtime_webrtc(&self, _req: Request<Body>, _model_id: &str) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Realtime WebRTC not implemented",
         )
             .into_response()
     }

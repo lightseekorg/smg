@@ -4,7 +4,7 @@
 //! - `SharedComponents`: created once per router, `Arc`-cloned for each request.
 //! - `RequestContext`: created fresh per request, owned and mutated by steps.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::http::HeaderMap;
 use openai_protocol::interactions::InteractionsRequest;
@@ -24,7 +24,6 @@ use crate::core::{Worker, WorkerRegistry};
 /// into every `RequestContext`.
 ///
 /// TODO: Create InteractionsStorage and add in context
-#[expect(dead_code)]
 pub(crate) struct SharedComponents {
     /// HTTP client for upstream requests.
     pub client: reqwest::Client,
@@ -32,8 +31,12 @@ pub(crate) struct SharedComponents {
     /// Worker registry for model → worker resolution.
     pub worker_registry: Arc<WorkerRegistry>,
 
-    /// MCP orchestrator for creating tool sessions.
+    /// MCP orchestrator for creating tool sessions (used in Phase 2).
+    #[expect(dead_code, reason = "MCP tool integration is Phase 2")]
     pub mcp_orchestrator: Arc<McpOrchestrator>,
+
+    /// Per-request timeout from router config.
+    pub request_timeout: Duration,
 }
 
 // ============================================================================
@@ -49,7 +52,6 @@ pub(crate) struct SharedComponents {
 /// here — it lives inside the background task spawned by the terminal
 /// streaming step, following the same pattern as `process_streaming_response`
 /// in the gRPC router.
-#[expect(dead_code)]
 pub(crate) struct RequestContext {
     /// Immutable request data from the client.
     pub input: RequestInput,
@@ -65,7 +67,6 @@ pub(crate) struct RequestContext {
 }
 
 /// Immutable request data captured at the start of processing.
-#[expect(dead_code)]
 pub(crate) struct RequestInput {
     /// Original client request (`Arc` for cheap cloning into spawned tasks).
     pub original_request: Arc<InteractionsRequest>,
@@ -80,12 +81,11 @@ pub(crate) struct RequestInput {
 
 /// Mutable processing state populated incrementally by steps.
 #[derive(Default)]
-#[expect(dead_code)]
 pub(crate) struct ProcessingState {
     /// Selected upstream worker (set by `WorkerSelection`).
     pub worker: Option<Arc<dyn Worker>>,
 
-    /// Upstream URL: `{worker.url()}/v1/interactions` (set by `WorkerSelection`).
+    /// Upstream URL: `{worker.url()}/v1beta/interactions` (set by `WorkerSelection`).
     pub upstream_url: Option<String>,
 
     /// JSON payload to POST upstream (set by `RequestBuilding`, mutated on tool-loop resume).

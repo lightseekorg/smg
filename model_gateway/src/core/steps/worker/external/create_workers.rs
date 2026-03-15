@@ -22,7 +22,7 @@ fn normalize_external_url(url: &str) -> String {
     }
 }
 
-/// Step 2: Create worker objects for each discovered model.
+/// Step 2: Create a worker object for the external endpoint.
 pub struct CreateExternalWorkersStep;
 
 #[async_trait]
@@ -114,52 +114,44 @@ impl StepExecutor<WorkerWorkflowData> for CreateExternalWorkersStep {
             workers.push(worker);
         } else {
             debug!(
-                "Creating {} external workers for {}",
+                "Creating one external worker with {} discovered models for {}",
                 model_cards.len(),
                 config.url
             );
 
-            // Create a worker for each model
-            for model_card in model_cards {
-                let mut builder = BasicWorkerBuilder::new(normalized_url.clone())
-                    .model(model_card.clone())
-                    .worker_type(WorkerType::Regular)
-                    .connection_mode(ConnectionMode::Http)
-                    .runtime_type(RuntimeType::External)
-                    .circuit_breaker_config(circuit_breaker_config.clone())
-                    .health_config(health_config.clone())
-                    .health_endpoint(&health_endpoint)
-                    .priority(config.priority)
-                    .cost(config.cost);
+            let mut builder = BasicWorkerBuilder::new(normalized_url.clone())
+                .models(model_cards.clone())
+                .worker_type(WorkerType::Regular)
+                .connection_mode(ConnectionMode::Http)
+                .runtime_type(RuntimeType::External)
+                .circuit_breaker_config(circuit_breaker_config.clone())
+                .health_config(health_config.clone())
+                .health_endpoint(&health_endpoint)
+                .priority(config.priority)
+                .cost(config.cost);
 
-                if let Some(ref api_key) = config.api_key {
-                    builder = builder.api_key(api_key.clone());
-                }
+            if let Some(ref api_key) = config.api_key {
+                builder = builder.api_key(api_key.clone());
+            }
 
-                if !labels.is_empty() {
-                    builder = builder.labels(labels.clone());
-                }
+            if !labels.is_empty() {
+                builder = builder.labels(labels.clone());
+            }
 
-                let worker = Arc::new(builder.build()) as Arc<dyn Worker>;
-                if health_config.disable_health_check {
-                    worker.set_healthy(true);
-                } else {
-                    worker.set_healthy(false);
-                }
-
-                debug!(
-                    "Created external worker for model {} at {}",
-                    model_card.id, normalized_url
-                );
-
-                workers.push(worker);
+            let worker = Arc::new(builder.build()) as Arc<dyn Worker>;
+            if health_config.disable_health_check {
+                worker.set_healthy(true);
+            } else {
+                worker.set_healthy(false);
             }
 
             info!(
-                "Created {} external workers from {}",
-                workers.len(),
-                config.url
+                "Created external worker at {} with {} discovered models",
+                normalized_url,
+                model_cards.len()
             );
+
+            workers.push(worker);
         }
 
         // Store results in workflow data

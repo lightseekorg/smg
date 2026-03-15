@@ -20,8 +20,13 @@ use openai_protocol::{
     completion::CompletionRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
+    interactions::InteractionsRequest,
     messages::CreateMessageRequest,
     parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
+    realtime_session::{
+        RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
+        RealtimeTranscriptionSessionCreateRequest,
+    },
     rerank::{RerankRequest, V1RerankReqInput},
     responses::{ResponsesGetParams, ResponsesRequest},
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
@@ -59,7 +64,7 @@ use crate::{
             get_mesh_health, get_policy_state, get_policy_states, get_worker_state,
             get_worker_states, set_global_rate_limit, trigger_graceful_shutdown, update_app_config,
         },
-        openai::realtime::{rest as realtime_rest, ws as realtime_ws},
+        openai::realtime::ws::RealtimeQueryParams,
         parse,
         router_manager::RouterManager,
         tokenize, RouterTrait,
@@ -118,6 +123,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             RoutingMode::Regular { .. } => !healthy_workers.is_empty(),
             RoutingMode::OpenAI { .. } => !healthy_workers.is_empty(),
             RoutingMode::Anthropic { .. } => !healthy_workers.is_empty(),
+            RoutingMode::Gemini { .. } => !healthy_workers.is_empty(),
         }
     };
 
@@ -234,6 +240,18 @@ async fn v1_responses(
     state
         .router
         .route_responses(Some(&headers), &body, Some(&body.model))
+        .await
+}
+
+async fn v1_interactions(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    ValidatedJson(body): ValidatedJson<InteractionsRequest>,
+) -> Response {
+    let model_id = body.model.as_deref().or(body.agent.as_deref());
+    state
+        .router
+        .route_interactions(Some(&headers), &body, model_id)
         .await
 }
 
@@ -420,6 +438,68 @@ async fn v1_conversations_delete_item(
     .await
 }
 
+async fn v1_realtime_webrtc(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RealtimeQueryParams>,
+    req: Request,
+) -> Response {
+    // Model may come from query param (application/sdp) or session body
+    // (multipart/form-data). Let the handler validate per content type.
+    let model = params.model.unwrap_or_default();
+    state.router.route_realtime_webrtc(req, &model).await
+}
+
+async fn v1_realtime_ws(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RealtimeQueryParams>,
+    req: Request,
+) -> Response {
+    let model = match params.model {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing required 'model' query parameter",
+            )
+                .into_response();
+        }
+    };
+    state.router.route_realtime_ws(req, &model).await
+}
+
+async fn v1_realtime_session(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    ValidatedJson(body): ValidatedJson<RealtimeSessionCreateRequest>,
+) -> Response {
+    state
+        .router
+        .route_realtime_session(Some(&headers), &body)
+        .await
+}
+
+async fn v1_realtime_client_secret(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    ValidatedJson(body): ValidatedJson<RealtimeClientSecretCreateRequest>,
+) -> Response {
+    state
+        .router
+        .route_realtime_client_secret(Some(&headers), &body)
+        .await
+}
+
+async fn v1_realtime_transcription_session(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    ValidatedJson(body): ValidatedJson<RealtimeTranscriptionSessionCreateRequest>,
+) -> Response {
+    state
+        .router
+        .route_realtime_transcription_session(Some(&headers), &body)
+        .await
+}
+
 async fn flush_cache(State(state): State<Arc<AppState>>, _req: Request) -> Response {
     WorkerManager::flush_cache_all(&state.context.worker_registry, &state.context.client)
         .await
@@ -547,6 +627,12 @@ pub struct ServerConfig {
     /// Control plane authentication configuration
     pub control_plane_auth: Option<smg_auth::ControlPlaneAuthConfig>,
     pub mesh_server_config: Option<MeshServerConfig>,
+    /// Bind address for WebRTC UDP sockets.
+    /// `None` means use the default (0.0.0.0, auto-detect candidate IP).
+    pub webrtc_bind_addr: Option<std::net::IpAddr>,
+    /// STUN server for ICE candidate gathering (host:port).
+    /// `None` means use the default (stun.l.google.com:19302).
+    pub webrtc_stun_server: Option<String>,
 }
 
 pub fn build_app(
@@ -574,6 +660,7 @@ pub fn build_app(
         .route("/v1/responses", post(v1_responses))
         .route("/v1/embeddings", post(v1_embeddings))
         .route("/v1/messages", post(v1_messages))
+        .route("/v1/interactions", post(v1_interactions))
         .route("/v1/classify", post(v1_classify))
         .route("/v1/responses/{response_id}", get(v1_responses_get))
         .route(
@@ -603,6 +690,16 @@ pub fn build_app(
         // Tokenize / Detokenize endpoints
         .route("/v1/tokenize", post(v1_tokenize))
         .route("/v1/detokenize", post(v1_detokenize))
+        // Realtime REST endpoints (same middleware as other protected routes)
+        .route("/v1/realtime/sessions", post(v1_realtime_session))
+        .route(
+            "/v1/realtime/client_secrets",
+            post(v1_realtime_client_secret),
+        )
+        .route(
+            "/v1/realtime/transcription_sessions",
+            post(v1_realtime_transcription_session),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::concurrency_limit_middleware,
@@ -616,17 +713,12 @@ pub fn build_app(
             middleware::wasm_middleware,
         ));
 
+    // WebSocket and WebRTC routes: auth + concurrency but NO WASM middleware.
+    // WASM OnResponse reconstructs the response from status/headers/body,
+    // dropping the response extensions that carry the WebSocket upgrade future.
     let realtime_routes = Router::new()
-        .route("/v1/realtime", get(realtime_ws::ws_handler))
-        .route("/v1/realtime/sessions", post(realtime_rest::create_session))
-        .route(
-            "/v1/realtime/client_secrets",
-            post(realtime_rest::create_client_secret),
-        )
-        .route(
-            "/v1/realtime/transcription_sessions",
-            post(realtime_rest::create_transcription_session),
-        )
+        .route("/v1/realtime", get(v1_realtime_ws))
+        .route("/v1/realtime/calls", post(v1_realtime_webrtc))
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::concurrency_limit_middleware,
@@ -806,7 +898,13 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     );
 
     let app_context = Arc::new(
-        AppContext::from_config(config.router_config.clone(), config.request_timeout_secs).await?,
+        AppContext::from_config(
+            config.router_config.clone(),
+            config.request_timeout_secs,
+            config.webrtc_bind_addr,
+            config.webrtc_stun_server.clone(),
+        )
+        .await?,
     );
 
     if config.prometheus_config.is_some() {
@@ -845,7 +943,9 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     // Submit startup tokenizer job if tokenizer path is configured
     // This runs before worker initialization to ensure tokenizer is available
-    if let Some(tokenizer_source) = config
+    if config.router_config.disable_tokenizer_autoload {
+        info!("Tokenizer autoload disabled via config; skipping startup tokenizer load");
+    } else if let Some(tokenizer_source) = config
         .router_config
         .tokenizer_path
         .as_ref()
@@ -939,9 +1039,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         info!("Global health checks disabled via CLI/config; skipping health checker");
         None
     } else {
-        let hc = app_context
-            .worker_registry
-            .start_health_checker(config.router_config.health_check.check_interval_secs);
+        let hc = app_context.worker_registry.start_health_checker(
+            config.router_config.health_check.check_interval_secs,
+            config.router_config.health_check.remove_unhealthy_workers,
+        );
         debug!(
             "Started health checker for workers with {}s interval",
             config.router_config.health_check.check_interval_secs
@@ -991,6 +1092,9 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             .set_mesh_sync(Some(handle.sync_manager.clone()));
         info!("Mesh sync manager set on worker registry");
 
+        handle
+            .sync_manager
+            .register_tree_state_subscriber(app_context.policy_registry.clone());
         app_context
             .policy_registry
             .set_mesh_sync(Some(handle.sync_manager.clone()));

@@ -189,6 +189,8 @@ class _StateManagementCloudBase:
 # =============================================================================
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestStateManagementCloud(_StateManagementCloudBase):
     """State management tests against OpenAI cloud API."""
@@ -199,6 +201,8 @@ class TestStateManagementCloud(_StateManagementCloudBase):
 # =============================================================================
 
 
+@pytest.mark.vendor("xai")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["xai"], indirect=True)
 class TestStateManagementCloudXai(_StateManagementCloudBase):
     """State management tests against xAI cloud API."""
@@ -209,6 +213,8 @@ class TestStateManagementCloudXai(_StateManagementCloudBase):
 # =============================================================================
 
 
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
 @pytest.mark.storage("oracle-custom")
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestStateManagementOracleCustom(_StateManagementCloudBase):
@@ -224,6 +230,8 @@ class TestStateManagementOracleCustom(_StateManagementCloudBase):
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
@@ -352,6 +360,8 @@ class TestStateManagementLocal:
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])

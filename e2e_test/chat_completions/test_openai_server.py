@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
+@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
@@ -581,6 +583,8 @@ convenient hands-free control to your smart devices.
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
 class TestChatCompletionGptOss(TestChatCompletion):

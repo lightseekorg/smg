@@ -8,7 +8,7 @@ use super::common::{extract_output_index, get_event_type, parse_sse_block};
 
 /// Helper that parses SSE frames from the OpenAI responses stream and
 /// accumulates enough information to persist the final response locally.
-pub(super) struct StreamingResponseAccumulator {
+pub(crate) struct StreamingResponseAccumulator {
     /// The initial `response.created` payload (if emitted).
     initial_response: Option<Value>,
     /// The final `response.completed` payload (if emitted).

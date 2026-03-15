@@ -157,6 +157,12 @@ impl ConfigValidator {
                     Self::validate_urls(worker_urls)?;
                 }
             }
+            RoutingMode::Gemini { worker_urls } => {
+                // Allow empty URLs to support dynamic worker addition
+                if !worker_urls.is_empty() {
+                    Self::validate_urls(worker_urls)?;
+                }
+            }
         }
         Ok(())
     }
@@ -414,6 +420,11 @@ impl ConfigValidator {
             RoutingMode::Anthropic { .. } => {
                 return Err(ConfigError::ValidationFailed {
                     reason: "Anthropic mode does not support service discovery".to_string(),
+                });
+            }
+            RoutingMode::Gemini { .. } => {
+                return Err(ConfigError::ValidationFailed {
+                    reason: "Gemini mode does not support service discovery".to_string(),
                 });
             }
         }

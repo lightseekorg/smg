@@ -112,7 +112,7 @@ impl Default for JobQueueConfig {
     fn default() -> Self {
         Self {
             queue_capacity: 1000,
-            max_concurrent_jobs: 10,
+            max_concurrent_jobs: 200,
         }
     }
 }
@@ -487,76 +487,17 @@ impl JobQueue {
 
                         prefill_workers.chain(decode_workers).collect()
                     }
-                    RoutingMode::OpenAI { worker_urls } => {
-                        // OpenAI mode: submit AddWorker jobs with runtime: "external"
-                        // The external_worker_registration workflow handles model discovery
-                        let api_key = router_config.api_key.clone();
-                        let mut submitted_count = 0;
-
-                        for url in worker_urls {
-                            let url_for_error = url.clone();
-                            let config =
-                                build_external_worker_config(url, api_key.clone(), router_config);
-
-                            let job = Job::AddWorker {
-                                config: Box::new(config),
-                            };
-
-                            if let Some(queue) = context.worker_job_queue.get() {
-                                queue.submit(job).await.map_err(|e| {
-                                    format!(
-                                        "Failed to submit AddWorker job for external endpoint {url_for_error}: {e}"
-                                    )
-                                })?;
-                                submitted_count += 1;
-                            } else {
-                                return Err("JobQueue not available".to_string());
-                            }
-                        }
-
-                        if submitted_count == 0 {
-                            info!("OpenAI mode: no worker URLs provided");
-                            return Ok("OpenAI mode: no worker URLs to initialize".to_string());
-                        }
-
-                        return Ok(format!(
-                            "Submitted {submitted_count} AddWorker jobs for external endpoints"
-                        ));
-                    }
-                    RoutingMode::Anthropic { worker_urls } => {
-                        // Anthropic mode: similar to OpenAI, submit AddWorker jobs with runtime: "external"
-                        let api_key = router_config.api_key.clone();
-                        let mut submitted_count = 0;
-
-                        for url in worker_urls {
-                            let url_for_error = url.clone();
-                            let config =
-                                build_external_worker_config(url, api_key.clone(), router_config);
-
-                            let job = Job::AddWorker {
-                                config: Box::new(config),
-                            };
-
-                            if let Some(queue) = context.worker_job_queue.get() {
-                                queue.submit(job).await.map_err(|e| {
-                                    format!(
-                                        "Failed to submit AddWorker job for Anthropic endpoint {url_for_error}: {e}"
-                                    )
-                                })?;
-                                submitted_count += 1;
-                            } else {
-                                return Err("JobQueue not available".to_string());
-                            }
-                        }
-
-                        if submitted_count == 0 {
-                            info!("Anthropic mode: no worker URLs provided");
-                            return Ok("Anthropic mode: no worker URLs to initialize".to_string());
-                        }
-
-                        return Ok(format!(
-                            "Submitted {submitted_count} AddWorker jobs for Anthropic endpoints"
-                        ));
+                    RoutingMode::OpenAI { worker_urls }
+                    | RoutingMode::Anthropic { worker_urls }
+                    | RoutingMode::Gemini { worker_urls } => {
+                        let provider_name = router_config.mode_type();
+                        return submit_external_worker_jobs(
+                            worker_urls,
+                            provider_name,
+                            router_config,
+                            context,
+                        )
+                        .await;
                     }
                 };
 
@@ -759,6 +700,46 @@ impl JobQueue {
             );
         }
     }
+}
+
+/// Submit AddWorker jobs for external provider endpoints (OpenAI/Anthropic/Gemini).
+async fn submit_external_worker_jobs(
+    worker_urls: &[String],
+    provider_name: &str,
+    router_config: &RouterConfig,
+    context: &Arc<AppContext>,
+) -> Result<String, String> {
+    let api_key = router_config.api_key.clone();
+    let mut submitted_count = 0;
+
+    for url in worker_urls {
+        let url_for_error = url.clone();
+        let config = build_external_worker_config(url, api_key.clone(), router_config);
+
+        let job = Job::AddWorker {
+            config: Box::new(config),
+        };
+
+        if let Some(queue) = context.worker_job_queue.get() {
+            queue.submit(job).await.map_err(|e| {
+                format!("Failed to submit AddWorker job for {provider_name} endpoint {url_for_error}: {e}")
+            })?;
+            submitted_count += 1;
+        } else {
+            return Err("JobQueue not available".to_string());
+        }
+    }
+
+    if submitted_count == 0 {
+        info!("{provider_name} mode: no worker URLs provided");
+        return Ok(format!(
+            "{provider_name} mode: no worker URLs to initialize"
+        ));
+    }
+
+    Ok(format!(
+        "Submitted {submitted_count} AddWorker jobs for {provider_name} endpoints"
+    ))
 }
 
 /// Build a `WorkerSpec` for an external API endpoint (OpenAI/Anthropic mode).

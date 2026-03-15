@@ -12,6 +12,7 @@ use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{ResponseFormat, StringOrArray},
     generate::GenerateRequest,
+    messages::CreateMessageRequest,
     responses::ResponsesRequest,
     sampling_params::SamplingParams as GenerateSamplingParams,
 };
@@ -619,6 +620,95 @@ impl TrtllmServiceClient {
             }))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Build a GenerateRequest from CreateMessageRequest (Anthropic Messages API)
+    #[expect(
+        clippy::unused_self,
+        reason = "method receiver kept for consistent public API"
+    )]
+    pub fn build_generate_request_from_messages(
+        &self,
+        request_id: String,
+        body: &CreateMessageRequest,
+        processed_text: String,
+        token_ids: Vec<u32>,
+        multimodal_input: Option<proto::MultimodalInput>,
+        tool_call_constraint: Option<(String, String)>,
+    ) -> Result<proto::GenerateRequest, String> {
+        let sampling_config = Self::build_sampling_config_from_messages(body);
+        let output_config = proto::OutputConfig {
+            logprobs: None,
+            prompt_logprobs: None,
+            return_context_logits: false,
+            return_generation_logits: false,
+            exclude_input_from_output: true,
+            return_encoder_output: false,
+            return_perf_metrics: false,
+        };
+
+        let guided_decoding = Self::build_guided_decoding_from_responses(tool_call_constraint)?;
+
+        let stop = body.stop_sequences.clone().unwrap_or_default();
+        let max_tokens = body.max_tokens;
+
+        let grpc_request = proto::GenerateRequest {
+            request_id,
+            tokenized: Some(proto::TokenizedInput {
+                original_text: processed_text,
+                input_token_ids: token_ids,
+                query_token_ids: vec![],
+            }),
+            sampling_config: Some(sampling_config),
+            output_config: Some(output_config),
+            max_tokens,
+            streaming: body.stream.unwrap_or(false),
+            stop,
+            stop_token_ids: vec![],
+            ignore_eos: false,
+            bad: vec![],
+            bad_token_ids: vec![],
+            guided_decoding,
+            embedding_bias: vec![],
+            lora_config: None,
+            prompt_tuning_config: None,
+            multimodal_input,
+            kv_cache_retention: None,
+            disaggregated_params: None,
+            lookahead_config: None,
+            cache_salt_id: None,
+            arrival_time: None,
+        };
+
+        Ok(grpc_request)
+    }
+
+    /// Build SamplingConfig from CreateMessageRequest
+    fn build_sampling_config_from_messages(
+        request: &CreateMessageRequest,
+    ) -> proto::SamplingConfig {
+        proto::SamplingConfig {
+            beam_width: 1,
+            num_return_sequences: 1,
+            top_k: request.top_k.map(|v| v as i32),
+            top_p: Some(request.top_p.unwrap_or(1.0) as f32),
+            top_p_min: None,
+            top_p_reset_ids: None,
+            top_p_decay: None,
+            seed: None,
+            temperature: Some(request.temperature.unwrap_or(1.0) as f32),
+            min_tokens: None,
+            beam_search_diversity_rate: None,
+            repetition_penalty: Some(1.0),
+            presence_penalty: None,
+            frequency_penalty: None,
+            prompt_ignore_length: None,
+            length_penalty: None,
+            early_stopping: None,
+            no_repeat_ngram_size: None,
+            min_p: None,
+            beam_width_array: vec![],
         }
     }
 

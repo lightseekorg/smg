@@ -22,5 +22,6 @@
 - [ ] `cargo +nightly fmt` passes
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings` passes
 - [ ] (Optional) Documentation updated
+- [ ] (Optional) Please join us on Slack [#sig-smg](https://slack.lightseek.org) to discuss, review, and merge PRs
 
 </details>

@@ -9,7 +9,6 @@ Source: Migrated from e2e_grpc/validation/test_openai_server_ignore_eos.py
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -20,18 +19,14 @@ logger = logging.getLogger(__name__)
 
 # Lazy load tokenizer to avoid import errors if transformers not installed
 _tokenizer_cache: dict = {}
-_tokenizer_lock = threading.Lock()
 
 
 def get_tokenizer(model_path: str):
     """Get tokenizer for a model, with caching."""
     if model_path not in _tokenizer_cache:
-        with _tokenizer_lock:
-            # Re-check after acquiring the lock to handle race conditions
-            if model_path not in _tokenizer_cache:
-                from transformers import AutoTokenizer
+        from transformers import AutoTokenizer
 
-                _tokenizer_cache[model_path] = AutoTokenizer.from_pretrained(model_path)
+        _tokenizer_cache[model_path] = AutoTokenizer.from_pretrained(model_path)
     return _tokenizer_cache[model_path]
 
 
@@ -40,6 +35,8 @@ def get_tokenizer(model_path: str):
 # =============================================================================
 
 
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
 @pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support ignore_eos parameter")
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
@@ -142,6 +139,8 @@ class TestIgnoreEOS:
 # =============================================================================
 
 
+@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)

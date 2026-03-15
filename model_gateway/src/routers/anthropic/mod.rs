@@ -1,6 +1,5 @@
 pub(crate) mod context;
 pub(crate) mod mcp;
-pub mod models;
 pub(crate) mod non_streaming;
 mod router;
 pub(crate) mod sse;

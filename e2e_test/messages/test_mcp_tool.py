@@ -186,6 +186,8 @@ def assert_streaming_mcp_response(
 # =============================================================================
 
 
+@pytest.mark.vendor("anthropic")
+@pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["anthropic"], indirect=True)
 class TestMcpTool:
     """MCP tool use tests with SMG orchestration (X-SMG-MCP: enabled)."""
@@ -253,6 +255,8 @@ class TestMcpTool:
 # =============================================================================
 
 
+@pytest.mark.vendor("anthropic")
+@pytest.mark.gpu(0)
 @pytest.mark.external
 @pytest.mark.parametrize("setup_backend", ["anthropic"], indirect=True)
 class TestMcpToolPassthrough:

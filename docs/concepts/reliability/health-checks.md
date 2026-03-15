@@ -109,6 +109,7 @@ smg \
 | `--health-check-timeout-secs` | `5` | Timeout for each health check request |
 | `--health-check-endpoint` | `/health` | Endpoint path for health checks |
 | `--disable-health-check` | `false` | Disable background health checks |
+| `--remove-unhealthy-workers` | `false` | Remove workers after being marked unhealthy |
 
 ---
 

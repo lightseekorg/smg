@@ -655,13 +655,22 @@ impl Gossip for GossipService {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        // Apply app state directly to the store
+                                                        // Apply app state directly to the store, skipping stale versions
                                                         if let Some(ref stores) = stores {
-                                                            if let Err(err) = stores.app.insert(
-                                                                app_state.key.clone(),
-                                                                app_state,
-                                                            ) {
-                                                                log::warn!(error = %err, "Failed to apply app state update");
+                                                            let dominated = stores
+                                                                .app
+                                                                .get(&app_state.key)
+                                                                .is_some_and(|existing| {
+                                                                    existing.version
+                                                                        >= app_state.version
+                                                                });
+                                                            if !dominated {
+                                                                if let Err(err) = stores.app.insert(
+                                                                    app_state.key.clone(),
+                                                                    app_state,
+                                                                ) {
+                                                                    log::warn!(error = %err, "Failed to apply app state update");
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -916,7 +925,11 @@ impl Gossip for GossipService {
                                                             }
                                                             LocalStoreType::App => {
                                                                 if let Ok(app_state) = serde_json::from_slice::<super::stores::AppState>(&entry.value) {
-                                                                    let _ = stores.app.insert(key, app_state);
+                                                                    let dominated = stores.app.get(&key)
+                                                                        .is_some_and(|existing| existing.version >= app_state.version);
+                                                                    if !dominated {
+                                                                        let _ = stores.app.insert(key, app_state);
+                                                                    }
                                                                 }
                                                             }
                                                             LocalStoreType::Worker => {
@@ -930,12 +943,11 @@ impl Gossip for GossipService {
                                                             }
                                                             LocalStoreType::Policy => {
                                                                 if let Ok(policy_state) = serde_json::from_slice::<super::stores::PolicyState>(&entry.value) {
-                                                                    let _ = stores.policy.insert(key, policy_state.clone());
-                                                                    // Also update sync manager if available
                                                                     if let Some(ref sync_manager) = sync_manager {
-                                                                        // Check if this is a tree state update
                                                                         if policy_state.policy_type == "tree_state" {
-                                                                            // Deserialize tree state
+                                                                            // Let apply_remote_tree_operation handle the store
+                                                                            // update + subscriber notification (avoids version-
+                                                                            // check skip from a prior direct store insert)
                                                                             if let Ok(tree_state) = serde_json::from_slice::<
                                                                                 super::tree_ops::TreeState,
                                                                             >(
@@ -948,8 +960,11 @@ impl Gossip for GossipService {
                                                                                 );
                                                                             }
                                                                         } else {
+                                                                            let _ = stores.policy.insert(key, policy_state.clone());
                                                                             sync_manager.apply_remote_policy_state(policy_state, Some(entry.actor.clone()));
                                                                         }
+                                                                    } else {
+                                                                        let _ = stores.policy.insert(key, policy_state.clone());
                                                                     }
                                                                 }
                                                             }

@@ -11,6 +11,7 @@ use validator::{Validate, ValidationError};
 use super::{
     common::{default_model, default_true, Function, GenerationRequest},
     sampling_params::validate_top_p_value,
+    validated::Normalizable,
 };
 
 // ============================================================================
@@ -91,6 +92,10 @@ impl Default for InteractionsRequest {
             store: true,
         }
     }
+}
+
+impl Normalizable for InteractionsRequest {
+    // Use default no-op implementation
 }
 
 impl GenerationRequest for InteractionsRequest {

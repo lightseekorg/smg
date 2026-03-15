@@ -86,6 +86,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn gemini_mode(mut self, worker_urls: Vec<String>) -> Self {
+        self.config.mode = RoutingMode::Gemini { worker_urls };
+        self
+    }
+
     pub fn mode(mut self, mode: RoutingMode) -> Self {
         self.config.mode = mode;
         self
@@ -377,6 +382,11 @@ impl RouterConfigBuilder {
 
     pub fn chat_template<S: Into<String>>(mut self, path: S) -> Self {
         self.config.chat_template = Some(path.into());
+        self
+    }
+
+    pub fn disable_tokenizer_autoload(mut self, disable: bool) -> Self {
+        self.config.disable_tokenizer_autoload = disable;
         self
     }
 

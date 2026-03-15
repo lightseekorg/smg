@@ -18,7 +18,6 @@ Requirements:
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Any
 
 import numpy as np
@@ -29,9 +28,8 @@ from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
-# Thread-safe storage for HF reference embeddings
+# Cached HF reference embeddings
 _hf_embeddings_cache: dict[str, Any] | None = None
-_hf_embeddings_lock = threading.Lock()
 
 
 # Test data for semantic similarity checks
@@ -167,55 +165,54 @@ def get_input_texts(test_json: dict) -> list[str]:
 def hf_reference_embeddings(request):
     """Pre-compute HuggingFace reference embeddings on CPU.
 
-    This is done once per session with thread-safe initialization to support
-    pytest-parallel execution. Uses CPU to avoid GPU memory conflicts.
+    Computed once per session and cached. Uses CPU to avoid GPU memory conflicts.
     """
     global _hf_embeddings_cache
 
-    # Thread-safe initialization - only one thread computes embeddings
-    with _hf_embeddings_lock:
-        if _hf_embeddings_cache is not None:
-            return _hf_embeddings_cache
-
-        from infra.model_specs import MODEL_SPECS
-
-        # Get model path from MODEL_SPECS for the embedding model
-        model_path = MODEL_SPECS.get("embedding", {}).get("model")
-        if model_path is None:
-            pytest.skip("Embedding model not found in MODEL_SPECS")
-
-        logger.info("Pre-computing HuggingFace reference embeddings (CPU) for %s", model_path)
-
-        # Flatten all test texts for semantic similarity
-        all_semantic_texts = []
-        for text_set in SEMANTIC_TEST_SETS:
-            all_semantic_texts.extend(text_set)
-
-        # Get relevance test texts
-        query = (
-            f"Instruct: Given a search query, retrieve relevant passages that answer the query\n"
-            f"Query: {RELEVANCE_TEST_DATA['sample_query']}"
-        )
-        docs = get_input_texts(RELEVANCE_TEST_DATA)
-
-        # Compute all reference embeddings at once
-        hf_semantic = get_hf_st_embeddings(all_semantic_texts, model_path)
-        hf_query = get_hf_st_embeddings(query, model_path)
-        hf_docs = get_hf_st_embeddings(docs, model_path)
-
-        logger.info("Reference embeddings computed on CPU")
-
-        _hf_embeddings_cache = {
-            "semantic": hf_semantic,
-            "query": hf_query,
-            "docs": hf_docs,
-        }
-
+    if _hf_embeddings_cache is not None:
         return _hf_embeddings_cache
 
+    from infra.model_specs import MODEL_SPECS
 
+    # Get model path from MODEL_SPECS for the embedding model
+    model_path = MODEL_SPECS.get("embedding", {}).get("model")
+    if model_path is None:
+        pytest.skip("Embedding model not found in MODEL_SPECS")
+
+    logger.info("Pre-computing HuggingFace reference embeddings (CPU) for %s", model_path)
+
+    # Flatten all test texts for semantic similarity
+    all_semantic_texts = []
+    for text_set in SEMANTIC_TEST_SETS:
+        all_semantic_texts.extend(text_set)
+
+    # Get relevance test texts
+    query = (
+        f"Instruct: Given a search query, retrieve relevant passages that answer the query\n"
+        f"Query: {RELEVANCE_TEST_DATA['sample_query']}"
+    )
+    docs = get_input_texts(RELEVANCE_TEST_DATA)
+
+    # Compute all reference embeddings at once
+    hf_semantic = get_hf_st_embeddings(all_semantic_texts, model_path)
+    hf_query = get_hf_st_embeddings(query, model_path)
+    hf_docs = get_hf_st_embeddings(docs, model_path)
+
+    logger.info("Reference embeddings computed on CPU")
+
+    _hf_embeddings_cache = {
+        "semantic": hf_semantic,
+        "query": hf_query,
+        "docs": hf_docs,
+    }
+
+    return _hf_embeddings_cache
+
+
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
+@pytest.mark.model("intfloat/e5-mistral-7b-instruct")
 @pytest.mark.e2e
-@pytest.mark.model("embedding")
 @pytest.mark.parametrize("setup_backend", ["grpc", "http"], indirect=True)
 class TestEmbeddingCorrectness:
     """Test embedding correctness by comparing gateway output against HuggingFace reference.

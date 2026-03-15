@@ -34,7 +34,7 @@ pub struct SharedComponents {
 }
 
 pub struct ResponsesComponents {
-    pub shared: SharedComponents,
+    pub shared: Arc<SharedComponents>,
     pub mcp_orchestrator: Arc<McpOrchestrator>,
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,

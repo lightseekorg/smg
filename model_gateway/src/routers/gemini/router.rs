@@ -1,28 +1,25 @@
 //! GeminiRouter — entry point for the Gemini Interactions API.
 
-use std::{
-    any::Any,
-    sync::{atomic::AtomicBool, Arc},
-};
+use std::{any::Any, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use axum::{
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-};
-use openai_protocol::{chat::ChatCompletionRequest, interactions::InteractionsRequest};
-use smg_mcp::McpOrchestrator;
+use axum::{http::HeaderMap, response::Response};
+use openai_protocol::interactions::InteractionsRequest;
 
 use super::{
     context::{RequestContext, SharedComponents},
     driver,
 };
-use crate::{core::WorkerRegistry, routers::RouterTrait};
+use crate::{
+    app_context::AppContext,
+    config::types::RetryConfig,
+    core::{is_retryable_status, RetryExecutor},
+    routers::RouterTrait,
+};
 
 pub struct GeminiRouter {
     shared_components: Arc<SharedComponents>,
-    #[expect(dead_code)]
-    healthy: AtomicBool,
+    retry_config: RetryConfig,
 }
 
 impl std::fmt::Debug for GeminiRouter {
@@ -32,47 +29,28 @@ impl std::fmt::Debug for GeminiRouter {
 }
 
 impl GeminiRouter {
-    /// Create a new `GeminiRouter`.
-    pub fn new(
-        worker_registry: Arc<WorkerRegistry>,
-        mcp_orchestrator: Arc<McpOrchestrator>,
-        client: reqwest::Client,
-    ) -> Self {
+    /// Create a new `GeminiRouter` from the application context.
+    pub fn new(ctx: Arc<AppContext>) -> Result<Self, String> {
+        let mcp_orchestrator = ctx
+            .mcp_orchestrator
+            .get()
+            .ok_or_else(|| "Gemini router requires MCP orchestrator".to_string())?
+            .clone();
+
+        let request_timeout = Duration::from_secs(ctx.router_config.request_timeout_secs);
+
         let shared_components = Arc::new(SharedComponents {
-            client,
-            worker_registry,
+            client: ctx.client.clone(),
+            worker_registry: ctx.worker_registry.clone(),
             mcp_orchestrator,
+            request_timeout,
         });
-        Self {
+        let retry_config = ctx.router_config.effective_retry_config();
+
+        Ok(Self {
             shared_components,
-            healthy: AtomicBool::new(true),
-        }
-    }
-
-    /// Main handler for `POST /v1/interactions`.
-    ///
-    /// Builds a `RequestContext` and runs the driver state machine.
-    ///
-    /// For **non-streaming** requests the driver returns the HTTP response directly.
-    ///
-    /// For **streaming** requests the terminal streaming step (`StreamRequest` or
-    /// `StreamRequestWithTool`) creates an SSE channel internally, spawns the
-    /// streaming work in a background task, and returns the SSE `Response` — the
-    /// same pattern as `process_streaming_response` in the gRPC router.
-    pub async fn route_interactions(
-        &self,
-        headers: Option<HeaderMap>,
-        body: InteractionsRequest,
-        model_id: Option<String>,
-    ) -> Response {
-        let mut ctx = RequestContext::new(
-            Arc::new(body),
-            headers,
-            model_id,
-            self.shared_components.clone(),
-        );
-
-        driver::execute(&mut ctx).await
+            retry_config,
+        })
     }
 }
 
@@ -90,12 +68,37 @@ impl RouterTrait for GeminiRouter {
         "gemini"
     }
 
-    async fn route_chat(
+    async fn route_interactions(
         &self,
-        _headers: Option<&HeaderMap>,
-        _body: &ChatCompletionRequest,
-        _model_id: Option<&str>,
+        headers: Option<&HeaderMap>,
+        body: &InteractionsRequest,
+        model_id: Option<&str>,
     ) -> Response {
-        (StatusCode::NOT_IMPLEMENTED, "Not implemented").into_response()
+        let request = Arc::new(body.clone());
+        let headers_cloned = headers.cloned();
+        let model_id_cloned = model_id.map(String::from);
+        let components = self.shared_components.clone();
+
+        RetryExecutor::execute_response_with_retry(
+            &self.retry_config,
+            |_attempt| {
+                let request = Arc::clone(&request);
+                let headers = headers_cloned.clone();
+                let model_id = model_id_cloned.clone();
+                let components = Arc::clone(&components);
+                async move {
+                    let mut ctx = RequestContext::new(request, headers, model_id, components);
+                    driver::execute(&mut ctx).await
+                }
+            },
+            |res, _attempt| is_retryable_status(res.status()),
+            |_delay, _attempt| {
+                // TODO: record retry metrics when Gemini metrics are added
+            },
+            || {
+                // TODO: record retries-exhausted metric when Gemini metrics are added
+            },
+        )
+        .await
     }
 }

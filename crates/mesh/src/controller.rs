@@ -479,11 +479,15 @@ impl MeshController {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        if let Err(err) = stores.app.insert(
-                                                            app_state.key.clone(),
-                                                            app_state,
-                                                        ) {
-                                                            log::warn!(error = %err, "Failed to apply app state update");
+                                                        let dominated = stores.app.get(&app_state.key)
+                                                            .is_some_and(|existing| existing.version >= app_state.version);
+                                                        if !dominated {
+                                                            if let Err(err) = stores.app.insert(
+                                                                app_state.key.clone(),
+                                                                app_state,
+                                                            ) {
+                                                                log::warn!(error = %err, "Failed to apply app state update");
+                                                            }
                                                         }
                                                     }
                                                 }

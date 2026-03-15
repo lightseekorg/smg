@@ -8,17 +8,23 @@
 use std::{any::Any, collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
+use axum::{http::HeaderMap, response::Response};
 use openai_protocol::messages::CreateMessageRequest;
 use tracing::{error, info};
 
 use super::{
     context::{RequestContext, RouterContext},
-    mcp, models, non_streaming, streaming, worker,
+    mcp, non_streaming, streaming,
 };
 use crate::{
     app_context::AppContext,
-    routers::{error::bad_gateway, header_utils, mcp_utils, RouterTrait},
+    core::ProviderType,
+    routers::{
+        error::bad_gateway,
+        header_utils, mcp_utils,
+        worker_selection::{SelectWorkerRequest, WorkerSelector},
+        RouterTrait,
+    },
 };
 
 /// Router for Anthropic-specific APIs
@@ -136,11 +142,22 @@ impl RouterTrait for AnthropicRouter {
             "Processing Messages API request"
         );
 
-        let selected_worker =
-            match worker::select_worker(&self.router_ctx.worker_registry, model_id) {
-                Ok(w) => w,
-                Err(resp) => return resp,
-            };
+        let selector = WorkerSelector::new(
+            &self.router_ctx.worker_registry,
+            &self.router_ctx.http_client,
+        );
+        let selected_worker = match selector
+            .select_worker(&SelectWorkerRequest {
+                model_id,
+                headers,
+                provider: Some(ProviderType::Anthropic),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(w) => w,
+            Err(resp) => return resp,
+        };
 
         let req_ctx = RequestContext {
             request,
@@ -155,11 +172,6 @@ impl RouterTrait for AnthropicRouter {
         } else {
             non_streaming::execute(&self.router_ctx, req_ctx).await
         }
-    }
-
-    /// Get available models from Anthropic API
-    async fn get_models(&self, req: Request<Body>) -> Response {
-        models::handle_list_models(self, req).await
     }
 
     fn router_type(&self) -> &'static str {

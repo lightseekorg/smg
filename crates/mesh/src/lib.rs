@@ -38,5 +38,5 @@ pub use stores::{
     AppState, MembershipState, RateLimitConfig, StateStores, WorkerState,
     GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
 };
-pub use sync::{MeshSyncManager, OptionalMeshSyncManager};
-pub use tree_ops::{TreeInsertOp, TreeOperation, TreeRemoveOp, TreeState};
+pub use sync::{MeshSyncManager, OptionalMeshSyncManager, TreeStateSubscriber};
+pub use tree_ops::{TreeInsertOp, TreeKey, TreeOperation, TreeRemoveOp, TreeState};

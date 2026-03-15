@@ -443,6 +443,12 @@ fn sort_json_keys(value: &JsonValue) -> JsonValue {
 fn build_environment(template: String) -> Result<Environment<'static>> {
     let mut env = Environment::new();
 
+    // Match HuggingFace's Jinja2 defaults: trim_blocks and lstrip_blocks are
+    // enabled in Python's transformers but default to false in minijinja.
+    // Without these, templates like GLM-5's produce incorrect whitespace.
+    env.set_trim_blocks(true);
+    env.set_lstrip_blocks(true);
+
     // Register the template with owned storage (no lifetime dependency on caller)
     env.add_template_owned("chat".to_owned(), template)
         .map_err(|e| anyhow!("Failed to add template: {e}"))?;

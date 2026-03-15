@@ -8,14 +8,13 @@ use openai_protocol::event_types::{
 use serde_json::Value;
 use tracing::warn;
 
-use super::{
-    accumulator::StreamingResponseAccumulator,
-    common::{extract_output_index, get_event_type},
+use crate::routers::openai::responses::{
+    extract_output_index, get_event_type, StreamingResponseAccumulator,
 };
 
 /// Action to take based on streaming event processing
 #[derive(Debug)]
-pub(super) enum StreamAction {
+pub(crate) enum StreamAction {
     Forward,      // Pass event to client
     Buffer,       // Accumulate for tool execution
     ExecuteTools, // Function call complete, execute now
@@ -23,7 +22,7 @@ pub(super) enum StreamAction {
 
 /// Maps upstream output indices to sequential downstream indices
 #[derive(Debug, Default)]
-pub(super) struct OutputIndexMapper {
+pub(crate) struct OutputIndexMapper {
     next_index: usize,
     // Map upstream output_index -> remapped output_index
     assigned: HashMap<usize, usize>,
@@ -62,7 +61,7 @@ impl OutputIndexMapper {
 
 /// Represents a function call being accumulated across delta events
 #[derive(Debug, Clone)]
-pub(super) struct FunctionCallInProgress {
+pub(crate) struct FunctionCallInProgress {
     pub call_id: String,
     pub name: String,
     pub arguments_buffer: String,
@@ -93,7 +92,7 @@ impl FunctionCallInProgress {
 }
 
 /// Handles streaming responses with MCP tool call interception
-pub(super) struct StreamingToolHandler {
+pub(crate) struct StreamingToolHandler {
     /// Accumulator for response persistence
     pub accumulator: StreamingResponseAccumulator,
     /// Function calls being built from deltas

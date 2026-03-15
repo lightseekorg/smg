@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(false)
         .build_client(false)
+        .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(&["proto/common.proto"], &["proto"])?;
 
     // Pass 2: compile engine protos, referencing common types via extern_path

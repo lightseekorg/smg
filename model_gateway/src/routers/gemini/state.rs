@@ -13,7 +13,6 @@ pub(crate) enum RequestState {
     /// Entry state for every request.
     SelectWorker,
     /// A healthy worker has been selected for this model.
-    #[expect(dead_code, reason = "used once worker_selection step is implemented")]
     LoadPreviousInteraction,
     /// Previous interaction loading is complete (or was not needed).
     BuildRequest,
@@ -22,10 +21,6 @@ pub(crate) enum RequestState {
     /// The upstream payload is ready for a non-streaming POST.
     NonStreamRequest,
     /// The upstream response has been received (no more tool calls to execute).
-    #[expect(
-        dead_code,
-        reason = "used once non_stream_execution step is implemented"
-    )]
     ProcessResponse,
 
     // ── Streaming path ──────────────────────────────────────────

@@ -390,6 +390,7 @@ struct Router {
     service_discovery_namespace: Option<String>,
     prefill_selector: HashMap<String, String>,
     decode_selector: HashMap<String, String>,
+    router_selector: HashMap<String, String>,
     bootstrap_port_annotation: String,
     model_id_from: Option<String>,
     prometheus_port: Option<u16>,
@@ -423,6 +424,7 @@ struct Router {
     health_check_interval_secs: u64,
     health_check_endpoint: String,
     disable_health_check: bool,
+    remove_unhealthy_workers: bool,
     enable_igw: bool,
     queue_size: usize,
     queue_timeout_secs: u64,
@@ -431,6 +433,7 @@ struct Router {
     model_path: Option<String>,
     tokenizer_path: Option<String>,
     chat_template: Option<String>,
+    disable_tokenizer_autoload: bool,
     tokenizer_cache_enable_l0: bool,
     tokenizer_cache_l0_max_entries: usize,
     tokenizer_cache_enable_l1: bool,
@@ -559,7 +562,7 @@ impl Router {
                 prefill_selector: self.prefill_selector.clone(),
                 decode_selector: self.decode_selector.clone(),
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
-                router_selector: HashMap::new(),
+                router_selector: self.router_selector.clone(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
                 model_id_source: self.model_id_from.clone(),
             })
@@ -670,6 +673,7 @@ impl Router {
                 check_interval_secs: self.health_check_interval_secs,
                 endpoint: self.health_check_endpoint.clone(),
                 disable_health_check: self.disable_health_check,
+                remove_unhealthy_workers: self.remove_unhealthy_workers,
             })
             .tokenizer_cache(config::TokenizerCacheConfig {
                 enable_l0: self.tokenizer_cache_enable_l0,
@@ -677,6 +681,7 @@ impl Router {
                 enable_l1: self.tokenizer_cache_enable_l1,
                 l1_max_memory: self.tokenizer_cache_l1_max_memory,
             })
+            .disable_tokenizer_autoload(self.disable_tokenizer_autoload)
             .history_backend(history_backend)
             .maybe_api_key(self.api_key.as_ref())
             .maybe_discovery(discovery)
@@ -744,6 +749,7 @@ impl Router {
         service_discovery_namespace = None,
         prefill_selector = HashMap::new(),
         decode_selector = HashMap::new(),
+        router_selector = HashMap::new(),
         bootstrap_port_annotation = String::from("sglang.ai/bootstrap-port"),
         model_id_from = None,
         prometheus_port = None,
@@ -777,6 +783,7 @@ impl Router {
         health_check_interval_secs = 60,
         health_check_endpoint = String::from("/health"),
         disable_health_check = false,
+        remove_unhealthy_workers = false,
         enable_igw = false,
         queue_size = 100,
         queue_timeout_secs = 60,
@@ -806,6 +813,7 @@ impl Router {
         otlp_traces_endpoint = String::from("localhost:4317"),
         control_plane_auth = None,
         schema_config = None,
+        disable_tokenizer_autoload = false,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -840,6 +848,7 @@ impl Router {
         service_discovery_namespace: Option<String>,
         prefill_selector: HashMap<String, String>,
         decode_selector: HashMap<String, String>,
+        router_selector: HashMap<String, String>,
         bootstrap_port_annotation: String,
         model_id_from: Option<String>,
         prometheus_port: Option<u16>,
@@ -873,6 +882,7 @@ impl Router {
         health_check_interval_secs: u64,
         health_check_endpoint: String,
         disable_health_check: bool,
+        remove_unhealthy_workers: bool,
         enable_igw: bool,
         queue_size: usize,
         queue_timeout_secs: u64,
@@ -902,6 +912,7 @@ impl Router {
         otlp_traces_endpoint: String,
         control_plane_auth: Option<PyControlPlaneAuthConfig>,
         schema_config: Option<String>,
+        disable_tokenizer_autoload: bool,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -945,6 +956,7 @@ impl Router {
             service_discovery_namespace,
             prefill_selector,
             decode_selector,
+            router_selector,
             bootstrap_port_annotation,
             model_id_from,
             prometheus_port,
@@ -978,6 +990,7 @@ impl Router {
             health_check_interval_secs,
             health_check_endpoint,
             disable_health_check,
+            remove_unhealthy_workers,
             enable_igw,
             queue_size,
             queue_timeout_secs,
@@ -986,6 +999,7 @@ impl Router {
             model_path,
             tokenizer_path,
             chat_template,
+            disable_tokenizer_autoload,
             tokenizer_cache_enable_l0,
             tokenizer_cache_l0_max_entries,
             tokenizer_cache_enable_l1,
@@ -1045,7 +1059,7 @@ impl Router {
                 prefill_selector: self.prefill_selector.clone(),
                 decode_selector: self.decode_selector.clone(),
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
-                router_selector: HashMap::new(),
+                router_selector: self.router_selector.clone(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
                 model_id_source,
             })
@@ -1084,6 +1098,8 @@ impl Router {
                     .as_ref()
                     .map(|c| c.to_auth_control_plane_config()),
                 mesh_server_config: None,
+                webrtc_bind_addr: None,
+                webrtc_stun_server: None,
             })
             .await
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
