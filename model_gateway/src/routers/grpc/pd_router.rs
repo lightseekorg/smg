@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{http::HeaderMap, response::Response};
-use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
+use openai_protocol::{
+    chat::ChatCompletionRequest, generate::GenerateRequest, messages::CreateMessageRequest,
+};
 use tracing::debug;
 
 use super::{
@@ -24,6 +26,7 @@ use crate::{
 pub struct GrpcPDRouter {
     worker_registry: Arc<WorkerRegistry>,
     pipeline: RequestPipeline,
+    messages_pipeline: RequestPipeline,
     shared_components: Arc<SharedComponents>,
     retry_config: RetryConfig,
 }
@@ -76,9 +79,20 @@ impl GrpcPDRouter {
             ctx.configured_reasoning_parser.clone(),
         );
 
+        // Create Messages PD pipeline
+        let messages_pipeline = RequestPipeline::new_messages_pd(
+            worker_registry.clone(),
+            policy_registry.clone(),
+            tool_parser_factory.clone(),
+            reasoning_parser_factory.clone(),
+            ctx.configured_tool_parser.clone(),
+            ctx.configured_reasoning_parser.clone(),
+        );
+
         Ok(GrpcPDRouter {
             worker_registry,
             pipeline,
+            messages_pipeline,
             shared_components,
             retry_config: ctx.router_config.effective_retry_config(),
         })
@@ -136,6 +150,64 @@ impl GrpcPDRouter {
                 Metrics::record_worker_retries_exhausted(
                     metrics_labels::WORKER_DECODE,
                     metrics_labels::ENDPOINT_GENERATE,
+                );
+            },
+        )
+        .await
+    }
+
+    /// Main route_messages implementation with PD dual dispatch
+    async fn route_messages_impl(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &CreateMessageRequest,
+        model_id: &str,
+    ) -> Response {
+        debug!(
+            "Processing messages request for model: {} (PD mode)",
+            model_id
+        );
+
+        // Clone values needed for retry closure
+        let request = Arc::new(body.clone());
+        let headers_cloned = headers.cloned();
+        let model_id_cloned = Some(model_id.to_string());
+        let components = self.shared_components.clone();
+        let pipeline = &self.messages_pipeline;
+
+        RetryExecutor::execute_response_with_retry(
+            &self.retry_config,
+            |_attempt| {
+                let request = Arc::clone(&request);
+                let headers = headers_cloned.clone();
+                let model_id = model_id_cloned.clone();
+                let components = Arc::clone(&components);
+                async move {
+                    pipeline
+                        .execute_messages(request, headers, model_id, components)
+                        .await
+                }
+            },
+            |res, _attempt| is_retryable_status(res.status()),
+            |delay, attempt| {
+                Metrics::record_worker_retry(
+                    metrics_labels::WORKER_PREFILL,
+                    metrics_labels::ENDPOINT_MESSAGES,
+                );
+                Metrics::record_worker_retry(
+                    metrics_labels::WORKER_DECODE,
+                    metrics_labels::ENDPOINT_MESSAGES,
+                );
+                Metrics::record_worker_retry_backoff(attempt, delay);
+            },
+            || {
+                Metrics::record_worker_retries_exhausted(
+                    metrics_labels::WORKER_PREFILL,
+                    metrics_labels::ENDPOINT_MESSAGES,
+                );
+                Metrics::record_worker_retries_exhausted(
+                    metrics_labels::WORKER_DECODE,
+                    metrics_labels::ENDPOINT_MESSAGES,
                 );
             },
         )
@@ -246,6 +318,15 @@ impl RouterTrait for GrpcPDRouter {
         model_id: Option<&str>,
     ) -> Response {
         self.route_chat_impl(headers, body, model_id).await
+    }
+
+    async fn route_messages(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &CreateMessageRequest,
+        model_id: &str,
+    ) -> Response {
+        self.route_messages_impl(headers, body, model_id).await
     }
 
     fn router_type(&self) -> &'static str {

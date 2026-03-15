@@ -151,38 +151,111 @@ impl ApiProvider {
             ApiProvider::Generic
         }
     }
+
+    /// Extract auth credential from request headers with provider-specific logic.
+    ///
+    /// - **Gemini**: prefers `x-goog-api-key`, then `Authorization`, then worker key.
+    /// - **Anthropic**: prefers `x-api-key`, then `Authorization`, then worker key.
+    /// - **All others**: prefers `Authorization`, then worker key with `Bearer` prefix.
+    pub fn extract_auth_header(
+        self,
+        headers: Option<&HeaderMap>,
+        worker_api_key: Option<&String>,
+    ) -> Option<HeaderValue> {
+        if let Some(h) = headers {
+            match self {
+                ApiProvider::Anthropic => {
+                    // Prefer x-api-key
+                    if let Some(v) = h.get("x-api-key").and_then(|v| {
+                        v.to_str()
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                            .map(|_| v.clone())
+                    }) {
+                        return Some(v);
+                    }
+                }
+                ApiProvider::Gemini => {
+                    // Prefer x-goog-api-key
+                    if let Some(v) = h.get("x-goog-api-key").and_then(|v| {
+                        v.to_str()
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                            .map(|_| v.clone())
+                    }) {
+                        return Some(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Standard: Authorization header first, then worker key with Bearer
+        extract_auth_header(headers, worker_api_key)
+    }
+
+    /// Apply provider-specific auth headers to a reqwest request builder.
+    ///
+    /// - **Anthropic**: strips `Bearer` prefix and sets `x-api-key` + `anthropic-version`.
+    /// - **Gemini**: strips `Bearer` prefix and sets `x-goog-api-key`.
+    /// - **Others**: forwards the `Authorization` header as-is.
+    pub fn apply_headers(
+        self,
+        mut req: reqwest::RequestBuilder,
+        auth_header: Option<&HeaderValue>,
+    ) -> reqwest::RequestBuilder {
+        match self {
+            ApiProvider::Anthropic => {
+                if let Some(auth) = auth_header {
+                    if let Ok(auth_str) = auth.to_str() {
+                        // Strip Bearer scheme case-insensitively (RFC 7235)
+                        let api_key = auth_str
+                            .split_once(' ')
+                            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+                            .map(|(_, token)| token)
+                            .unwrap_or(auth_str)
+                            .trim();
+                        if !api_key.is_empty() {
+                            req = req
+                                .header("x-api-key", api_key)
+                                .header("anthropic-version", "2023-06-01");
+                        }
+                    }
+                }
+            }
+            ApiProvider::Gemini => {
+                if let Some(auth) = auth_header {
+                    if let Ok(auth_str) = auth.to_str() {
+                        let api_key = auth_str
+                            .split_once(' ')
+                            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+                            .map(|(_, token)| token)
+                            .unwrap_or(auth_str)
+                            .trim();
+                        if !api_key.is_empty() {
+                            req = req.header("x-goog-api-key", api_key);
+                        }
+                    }
+                }
+            }
+            ApiProvider::Xai | ApiProvider::OpenAi | ApiProvider::Generic => {
+                if let Some(auth) = auth_header {
+                    req = req.header("Authorization", auth);
+                }
+            }
+        }
+
+        req
+    }
 }
 
 /// Apply provider-specific headers to request
 pub fn apply_provider_headers(
-    mut req: reqwest::RequestBuilder,
+    req: reqwest::RequestBuilder,
     url: &str,
     auth_header: Option<&HeaderValue>,
 ) -> reqwest::RequestBuilder {
-    let provider = ApiProvider::from_url(url);
-
-    match provider {
-        ApiProvider::Anthropic => {
-            // Anthropic requires x-api-key instead of Authorization
-            // Extract Bearer token and use as x-api-key
-            if let Some(auth) = auth_header {
-                if let Ok(auth_str) = auth.to_str() {
-                    let api_key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
-                    req = req
-                        .header("x-api-key", api_key)
-                        .header("anthropic-version", "2023-06-01");
-                }
-            }
-        }
-        ApiProvider::Gemini | ApiProvider::Xai | ApiProvider::OpenAi | ApiProvider::Generic => {
-            // Standard OpenAI-compatible: use Authorization header as-is
-            if let Some(auth) = auth_header {
-                req = req.header("Authorization", auth);
-            }
-        }
-    }
-
-    req
+    ApiProvider::from_url(url).apply_headers(req, auth_header)
 }
 
 /// Extract auth header with passthrough semantics.

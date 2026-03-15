@@ -64,8 +64,27 @@ impl PolicyRegistry {
 
     /// Set mesh sync manager (thread-safe, can be called after initialization)
     pub fn set_mesh_sync(&self, mesh_sync: OptionalMeshSyncManager) {
-        let mut guard = self.mesh_sync.write();
-        *guard = mesh_sync;
+        {
+            let mut guard = self.mesh_sync.write();
+            guard.clone_from(&mesh_sync);
+        }
+
+        Self::maybe_inject_mesh_sync(&self.default_policy, mesh_sync.as_ref());
+        if let Some(policy) = self.prefill_policy.get() {
+            if !Arc::ptr_eq(policy, &self.default_policy) {
+                Self::maybe_inject_mesh_sync(policy, mesh_sync.as_ref());
+            }
+        }
+        if let Some(policy) = self.decode_policy.get() {
+            if !Arc::ptr_eq(policy, &self.default_policy) {
+                Self::maybe_inject_mesh_sync(policy, mesh_sync.as_ref());
+            }
+        }
+        for entry in self.model_policies.iter() {
+            if !Arc::ptr_eq(entry.value(), &self.default_policy) {
+                Self::maybe_inject_mesh_sync(entry.value(), mesh_sync.as_ref());
+            }
+        }
     }
 
     /// Set KV event monitor (thread-safe, can be called after initialization).
@@ -98,6 +117,15 @@ impl PolicyRegistry {
     ) {
         if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
             cache_aware.set_kv_event_monitor(monitor.cloned());
+        }
+    }
+
+    fn maybe_inject_mesh_sync(
+        policy: &Arc<dyn LoadBalancingPolicy>,
+        mesh_sync: Option<&Arc<smg_mesh::MeshSyncManager>>,
+    ) {
+        if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
+            cache_aware.set_mesh_sync(mesh_sync.cloned());
         }
     }
 
@@ -238,7 +266,7 @@ impl PolicyRegistry {
     /// Create a policy from a type string (delegates to PolicyFactory)
     fn create_policy_from_type(&self, policy_type: &str) -> Arc<dyn LoadBalancingPolicy> {
         if policy_type == "cache_aware" {
-            let mut cache_aware = CacheAwarePolicy::new();
+            let cache_aware = CacheAwarePolicy::new();
             {
                 let guard = self.mesh_sync.read();
                 cache_aware.set_mesh_sync(guard.clone());
@@ -451,8 +479,9 @@ impl PolicyRegistry {
     /// Apply remote tree operation to cache-aware policy for a model
     /// This is called when receiving tree state updates from mesh
     pub fn apply_remote_tree_operation(&self, model_id: &str, operation: &smg_mesh::TreeOperation) {
-        // Try to find the policy for this model
-        if let Some(policy) = self.get_policy(model_id) {
+        let model_policy = self.get_policy(model_id);
+
+        if let Some(ref policy) = model_policy {
             if policy.name() == "cache_aware" {
                 if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
                     cache_aware.apply_remote_tree_operation(model_id, operation);
@@ -460,8 +489,12 @@ impl PolicyRegistry {
             }
         }
 
-        // Also check default policy if it's cache-aware
-        if self.default_policy.name() == "cache_aware" {
+        // Skip default if same Arc as model policy (avoid double application)
+        if !model_policy
+            .as_ref()
+            .is_some_and(|p| Arc::ptr_eq(p, &self.default_policy))
+            && self.default_policy.name() == "cache_aware"
+        {
             if let Some(cache_aware) = self
                 .default_policy
                 .as_any()
@@ -471,7 +504,6 @@ impl PolicyRegistry {
             }
         }
 
-        // Check prefill and decode policies for PD mode
         if let Some(prefill_policy) = self.prefill_policy.get() {
             if prefill_policy.name() == "cache_aware" {
                 if let Some(cache_aware) =
@@ -491,6 +523,58 @@ impl PolicyRegistry {
             }
         }
     }
+
+    pub fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
+        let model_policy = self.get_policy(model_id);
+
+        if let Some(ref policy) = model_policy {
+            if policy.name() == "cache_aware" {
+                if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
+                    cache_aware.apply_remote_tree_state(model_id, tree_state);
+                }
+            }
+        }
+
+        // Skip default if same Arc as model policy (avoid double application)
+        if !model_policy
+            .as_ref()
+            .is_some_and(|p| Arc::ptr_eq(p, &self.default_policy))
+            && self.default_policy.name() == "cache_aware"
+        {
+            if let Some(cache_aware) = self
+                .default_policy
+                .as_any()
+                .downcast_ref::<CacheAwarePolicy>()
+            {
+                cache_aware.apply_remote_tree_state(model_id, tree_state);
+            }
+        }
+
+        if let Some(prefill_policy) = self.prefill_policy.get() {
+            if prefill_policy.name() == "cache_aware" {
+                if let Some(cache_aware) =
+                    prefill_policy.as_any().downcast_ref::<CacheAwarePolicy>()
+                {
+                    cache_aware.apply_remote_tree_state(model_id, tree_state);
+                }
+            }
+        }
+
+        if let Some(decode_policy) = self.decode_policy.get() {
+            if decode_policy.name() == "cache_aware" {
+                if let Some(cache_aware) = decode_policy.as_any().downcast_ref::<CacheAwarePolicy>()
+                {
+                    cache_aware.apply_remote_tree_state(model_id, tree_state);
+                }
+            }
+        }
+    }
+}
+
+impl smg_mesh::TreeStateSubscriber for PolicyRegistry {
+    fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
+        PolicyRegistry::apply_remote_tree_state(self, model_id, tree_state);
+    }
 }
 
 impl std::fmt::Debug for PolicyRegistry {
@@ -505,7 +589,15 @@ impl std::fmt::Debug for PolicyRegistry {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use smg_mesh::{MeshSyncManager, StateStores};
+
     use super::*;
+    use crate::{
+        core::{BasicWorkerBuilder, Worker, WorkerType, UNKNOWN_MODEL_ID},
+        policies::SelectWorkerInfo,
+    };
 
     #[test]
     fn test_policy_registry_basic() {
@@ -565,5 +657,104 @@ mod tests {
         // Get default directly
         let default = registry.get_default_policy();
         assert_eq!(default.name(), "round_robin");
+    }
+
+    #[test]
+    fn test_set_mesh_sync_propagates_to_default_cache_aware_policy() {
+        let registry = PolicyRegistry::new(PolicyConfig::CacheAware {
+            cache_threshold: 0.5,
+            balance_abs_threshold: 32,
+            balance_rel_threshold: 1.1,
+            eviction_interval_secs: 0,
+            max_tree_size: 10_000,
+            block_size: 16,
+        });
+
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
+        registry.set_mesh_sync(Some(mesh_sync.clone()));
+
+        let policy = registry.get_default_policy();
+        let cache_aware = policy
+            .as_any()
+            .downcast_ref::<CacheAwarePolicy>()
+            .expect("default policy should be cache_aware");
+
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .worker_type(WorkerType::Regular)
+                .api_key("test_api_key")
+                .build(),
+        )];
+
+        cache_aware.init_workers(&workers);
+        let selected = cache_aware.select_worker(
+            &workers,
+            &SelectWorkerInfo {
+                request_text: Some("mesh aware"),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(selected, Some(0));
+        assert!(mesh_sync.get_tree_state(UNKNOWN_MODEL_ID).is_some());
+    }
+
+    #[test]
+    fn test_remote_tree_state_push_updates_default_cache_aware_policy() {
+        use smg_mesh::{TreeInsertOp, TreeKey, TreeOperation, TreeState};
+
+        let registry = Arc::new(PolicyRegistry::new(PolicyConfig::CacheAware {
+            cache_threshold: 0.5,
+            balance_abs_threshold: 32,
+            balance_rel_threshold: 1.1,
+            eviction_interval_secs: 0,
+            max_tree_size: 10_000,
+            block_size: 16,
+        }));
+
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
+        mesh_sync.register_tree_state_subscriber(registry.clone());
+        registry.set_mesh_sync(Some(mesh_sync.clone()));
+
+        let worker1: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .worker_type(WorkerType::Regular)
+                .api_key("test_api_key")
+                .build(),
+        );
+        let worker2: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w2:8000")
+                .worker_type(WorkerType::Regular)
+                .api_key("test_api_key")
+                .build(),
+        );
+        let workers = vec![worker1, worker2];
+
+        let default_policy = registry.get_default_policy();
+        let cache_aware = default_policy
+            .as_any()
+            .downcast_ref::<CacheAwarePolicy>()
+            .expect("default policy should be cache_aware");
+        cache_aware.init_workers(&workers);
+
+        let mut tree_state = TreeState::new(UNKNOWN_MODEL_ID.to_string());
+        tree_state.add_operation(TreeOperation::Insert(TreeInsertOp {
+            key: TreeKey::Text("mesh push".to_string()),
+            tenant: "http://w2:8000".to_string(),
+        }));
+
+        mesh_sync.apply_remote_tree_operation(UNKNOWN_MODEL_ID.to_string(), tree_state, None);
+
+        let selected = cache_aware.select_worker(
+            &workers,
+            &SelectWorkerInfo {
+                request_text: Some("mesh push"),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(selected, Some(1));
     }
 }

@@ -24,7 +24,6 @@ use crate::core::{Worker, WorkerRegistry};
 /// into every `RequestContext`.
 ///
 /// TODO: Create InteractionsStorage and add in context
-#[expect(dead_code)]
 pub(crate) struct SharedComponents {
     /// HTTP client for upstream requests.
     pub client: reqwest::Client,
@@ -32,7 +31,8 @@ pub(crate) struct SharedComponents {
     /// Worker registry for model → worker resolution.
     pub worker_registry: Arc<WorkerRegistry>,
 
-    /// MCP orchestrator for creating tool sessions.
+    /// MCP orchestrator for creating tool sessions (used in Phase 2).
+    #[expect(dead_code, reason = "MCP tool integration is Phase 2")]
     pub mcp_orchestrator: Arc<McpOrchestrator>,
 
     /// Per-request timeout from router config.
@@ -85,7 +85,7 @@ pub(crate) struct ProcessingState {
     /// Selected upstream worker (set by `WorkerSelection`).
     pub worker: Option<Arc<dyn Worker>>,
 
-    /// Upstream URL: `{worker.url()}/v1/interactions` (set by `WorkerSelection`).
+    /// Upstream URL: `{worker.url()}/v1beta/interactions` (set by `WorkerSelection`).
     pub upstream_url: Option<String>,
 
     /// JSON payload to POST upstream (set by `RequestBuilding`, mutated on tool-loop resume).

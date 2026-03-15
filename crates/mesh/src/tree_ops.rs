@@ -2,13 +2,64 @@
 //!
 //! Defines serializable tree operations that can be synchronized across mesh cluster nodes
 
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum TreeKey {
+    Text(String),
+    Tokens(Vec<u32>),
+}
 
 /// Tree insert operation
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TreeInsertOp {
-    pub text: String,
+    pub key: TreeKey,
     pub tenant: String, // worker URL
+}
+
+/// Custom Serialize that writes both `key` (new format) and `text` (legacy format)
+/// so old nodes can still deserialize during rolling upgrades.
+impl Serialize for TreeInsertOp {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("TreeInsertOp", 3)?;
+        state.serialize_field("key", &self.key)?;
+        match &self.key {
+            TreeKey::Text(text) => state.serialize_field("text", text)?,
+            TreeKey::Tokens(_) => state.serialize_field("text", "")?,
+        }
+        state.serialize_field("tenant", &self.tenant)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for TreeInsertOp {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct TreeInsertOpCompat {
+            #[serde(default)]
+            key: Option<TreeKey>,
+            #[serde(default)]
+            text: Option<String>,
+            tenant: String,
+        }
+
+        let compat = TreeInsertOpCompat::deserialize(deserializer)?;
+        let key = compat
+            .key
+            .or_else(|| compat.text.map(TreeKey::Text))
+            .ok_or_else(|| serde::de::Error::missing_field("key"))?;
+
+        Ok(Self {
+            key,
+            tenant: compat.tenant,
+        })
+    }
 }
 
 /// Tree remove operation
@@ -23,6 +74,10 @@ pub enum TreeOperation {
     Insert(TreeInsertOp),
     Remove(TreeRemoveOp),
 }
+
+/// Maximum number of operations stored in a TreeState before compaction.
+/// Prevents unbounded growth of the operation log, especially with token payloads.
+const MAX_TREE_OPERATIONS: usize = 2048;
 
 /// Tree state for a specific model
 /// Contains a sequence of operations that can be applied to reconstruct the tree
@@ -45,6 +100,11 @@ impl TreeState {
     pub fn add_operation(&mut self, operation: TreeOperation) {
         self.operations.push(operation);
         self.version += 1;
+        if self.operations.len() > MAX_TREE_OPERATIONS {
+            // Keep the most recent half — oldest operations are least relevant for routing
+            let drain_count = self.operations.len() - MAX_TREE_OPERATIONS / 2;
+            self.operations.drain(..drain_count);
+        }
     }
 }
 
@@ -55,10 +115,10 @@ mod tests {
     #[test]
     fn test_tree_insert_op_creation() {
         let op = TreeInsertOp {
-            text: "test_text".to_string(),
+            key: TreeKey::Text("test_text".to_string()),
             tenant: "http://worker1:8000".to_string(),
         };
-        assert_eq!(op.text, "test_text");
+        assert_eq!(op.key, TreeKey::Text("test_text".to_string()));
         assert_eq!(op.tenant, "http://worker1:8000");
     }
 
@@ -73,14 +133,14 @@ mod tests {
     #[test]
     fn test_tree_operation_insert() {
         let insert_op = TreeInsertOp {
-            text: "test_text".to_string(),
+            key: TreeKey::Text("test_text".to_string()),
             tenant: "http://worker1:8000".to_string(),
         };
         let operation = TreeOperation::Insert(insert_op.clone());
 
         match &operation {
             TreeOperation::Insert(op) => {
-                assert_eq!(op.text, "test_text");
+                assert_eq!(op.key, TreeKey::Text("test_text".to_string()));
                 assert_eq!(op.tenant, "http://worker1:8000");
             }
             TreeOperation::Remove(_) => panic!("Expected Insert operation"),
@@ -105,7 +165,7 @@ mod tests {
     #[test]
     fn test_tree_operation_serialization() {
         let insert_op = TreeInsertOp {
-            text: "test_text".to_string(),
+            key: TreeKey::Text("test_text".to_string()),
             tenant: "http://worker1:8000".to_string(),
         };
         let operation = TreeOperation::Insert(insert_op);
@@ -115,10 +175,59 @@ mod tests {
 
         match (&operation, &deserialized) {
             (TreeOperation::Insert(a), TreeOperation::Insert(b)) => {
-                assert_eq!(a.text, b.text);
+                assert_eq!(a.key, b.key);
                 assert_eq!(a.tenant, b.tenant);
             }
             _ => panic!("Operations should match"),
+        }
+    }
+
+    #[test]
+    fn test_tree_operation_token_serialization() {
+        let insert_op = TreeInsertOp {
+            key: TreeKey::Tokens(vec![1, 2, 3, 4]),
+            tenant: "http://worker1:8000".to_string(),
+        };
+        let operation = TreeOperation::Insert(insert_op);
+
+        let serialized = serde_json::to_string(&operation).unwrap();
+        let deserialized: TreeOperation = serde_json::from_str(&serialized).unwrap();
+
+        match (&operation, &deserialized) {
+            (TreeOperation::Insert(a), TreeOperation::Insert(b)) => {
+                assert_eq!(a.key, b.key);
+                assert_eq!(a.tenant, b.tenant);
+            }
+            _ => panic!("Operations should match"),
+        }
+    }
+
+    #[test]
+    fn test_tree_insert_op_deserializes_legacy_text_field() {
+        let deserialized: TreeInsertOp =
+            serde_json::from_str(r#"{"text":"legacy_text","tenant":"http://worker1:8000"}"#)
+                .unwrap();
+
+        assert_eq!(deserialized.key, TreeKey::Text("legacy_text".to_string()));
+        assert_eq!(deserialized.tenant, "http://worker1:8000");
+    }
+
+    #[test]
+    fn test_tree_state_deserializes_legacy_insert_payload() {
+        let deserialized: TreeState = serde_json::from_str(
+            r#"{"model_id":"model1","operations":[{"Insert":{"text":"legacy_text","tenant":"http://worker1:8000"}}],"version":1}"#,
+        )
+        .unwrap();
+
+        assert_eq!(deserialized.model_id, "model1");
+        assert_eq!(deserialized.version, 1);
+        assert_eq!(deserialized.operations.len(), 1);
+        match &deserialized.operations[0] {
+            TreeOperation::Insert(op) => {
+                assert_eq!(op.key, TreeKey::Text("legacy_text".to_string()));
+                assert_eq!(op.tenant, "http://worker1:8000");
+            }
+            TreeOperation::Remove(_) => panic!("Expected Insert operation"),
         }
     }
 
@@ -161,7 +270,7 @@ mod tests {
         let mut state = TreeState::new("model1".to_string());
 
         let insert_op = TreeInsertOp {
-            text: "text1".to_string(),
+            key: TreeKey::Text("text1".to_string()),
             tenant: "http://worker1:8000".to_string(),
         };
         state.add_operation(TreeOperation::Insert(insert_op));
@@ -184,7 +293,7 @@ mod tests {
 
         for i in 0..5 {
             let insert_op = TreeInsertOp {
-                text: format!("text_{i}"),
+                key: TreeKey::Text(format!("text_{i}")),
                 tenant: format!("http://worker{i}:8000"),
             };
             state.add_operation(TreeOperation::Insert(insert_op));
@@ -199,7 +308,7 @@ mod tests {
         let mut state = TreeState::new("model1".to_string());
 
         let insert_op = TreeInsertOp {
-            text: "test_text".to_string(),
+            key: TreeKey::Text("test_text".to_string()),
             tenant: "http://worker1:8000".to_string(),
         };
         state.add_operation(TreeOperation::Insert(insert_op));
@@ -222,7 +331,7 @@ mod tests {
         let mut state = TreeState::new("model1".to_string());
 
         let insert_op = TreeInsertOp {
-            text: "test_text".to_string(),
+            key: TreeKey::Text("test_text".to_string()),
             tenant: "http://worker1:8000".to_string(),
         };
         state.add_operation(TreeOperation::Insert(insert_op));
@@ -239,7 +348,7 @@ mod tests {
         let mut state2 = TreeState::new("model1".to_string());
 
         let insert_op = TreeInsertOp {
-            text: "test_text".to_string(),
+            key: TreeKey::Text("test_text".to_string()),
             tenant: "http://worker1:8000".to_string(),
         };
         state1.add_operation(TreeOperation::Insert(insert_op.clone()));
@@ -253,11 +362,11 @@ mod tests {
         use std::collections::HashSet;
 
         let insert_op1 = TreeInsertOp {
-            text: "text1".to_string(),
+            key: TreeKey::Text("text1".to_string()),
             tenant: "http://worker1:8000".to_string(),
         };
         let insert_op2 = TreeInsertOp {
-            text: "text1".to_string(),
+            key: TreeKey::Text("text1".to_string()),
             tenant: "http://worker1:8000".to_string(),
         };
 

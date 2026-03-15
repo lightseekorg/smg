@@ -31,7 +31,7 @@ use crate::{
 };
 
 /// State for tracking multi-turn tool calling loop
-pub(super) struct ToolLoopState {
+pub(crate) struct ToolLoopState {
     /// Current iteration number (starts at 0, increments with each tool call)
     pub iteration: usize,
     /// Total number of tool calls executed
@@ -88,7 +88,7 @@ impl ToolLoopState {
 
 /// Execute detected tool calls and send completion events to client
 /// Returns false if client disconnected during execution
-pub(super) async fn execute_streaming_tool_calls(
+pub(crate) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
     session: &McpToolSession<'_>,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
@@ -201,7 +201,7 @@ pub(super) async fn execute_streaming_tool_calls(
 ///
 /// Retains existing function tools from the request, removes non-function tools
 /// (MCP, builtin), and appends function tools for discovered MCP server tools.
-pub(super) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpToolSession<'_>) {
+pub(crate) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpToolSession<'_>) {
     let Some(obj) = payload.as_object_mut() else {
         return;
     };
@@ -233,7 +233,7 @@ pub(super) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpT
 }
 
 /// Build a resume payload with conversation history
-pub(super) fn build_resume_payload(
+pub(crate) fn build_resume_payload(
     base_payload: &Value,
     conversation_history: &[Value],
     original_input: &ResponseInput,
@@ -283,7 +283,7 @@ pub(super) fn build_resume_payload(
 
 /// Send mcp_list_tools events to client at the start of streaming
 /// Returns false if client disconnected
-pub(super) fn send_mcp_list_tools_events(
+pub(crate) fn send_mcp_list_tools_events(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     session: &McpToolSession<'_>,
     server_label: &str,
@@ -410,7 +410,7 @@ fn send_tool_call_intermediate_event(
 /// Send tool call completion events after tool execution.
 /// Handles mcp_call, web_search_call, code_interpreter_call, and file_search_call items.
 /// Returns false if client disconnected.
-pub(super) fn send_tool_call_completion_events(
+fn send_tool_call_completion_events(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     call: &FunctionCallInProgress,
     tool_call_item: Value,
@@ -468,7 +468,7 @@ pub(super) fn send_tool_call_completion_events(
 }
 
 /// Inject MCP metadata into a streaming response
-pub(super) fn inject_mcp_metadata_streaming(
+pub(crate) fn inject_mcp_metadata_streaming(
     response: &mut Value,
     state: &ToolLoopState,
     session: &McpToolSession<'_>,
@@ -480,18 +480,12 @@ pub(super) fn inject_mcp_metadata_streaming(
             item.get("type").and_then(|t| t.as_str()) != Some(ItemType::MCP_LIST_TOOLS)
         });
 
-        for binding in mcp_servers.iter().rev() {
-            let list_tools_item =
-                session.build_mcp_list_tools_json(&binding.label, &binding.server_key);
-            output_array.insert(0, list_tools_item);
+        let mut prefix = Vec::with_capacity(mcp_servers.len() + state.mcp_call_items.len());
+        for binding in mcp_servers {
+            prefix.push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
         }
-
-        // Use stored transformed items (no reconstruction needed)
-        let mut insert_pos = mcp_servers.len();
-        for item in &state.mcp_call_items {
-            output_array.insert(insert_pos, item.clone());
-            insert_pos += 1;
-        }
+        prefix.extend(state.mcp_call_items.iter().cloned());
+        output_array.splice(0..0, prefix);
     } else if let Some(obj) = response.as_object_mut() {
         let mut output_items = Vec::new();
         for binding in mcp_servers {
@@ -505,7 +499,7 @@ pub(super) fn inject_mcp_metadata_streaming(
 }
 
 /// Execute the tool calling loop
-pub(super) async fn execute_tool_loop(
+pub(crate) async fn execute_tool_loop(
     client: &reqwest::Client,
     url: &str,
     headers: Option<&HeaderMap>,
@@ -678,7 +672,7 @@ pub(super) async fn execute_tool_loop(
 }
 
 /// Build an incomplete response when limits are exceeded
-pub(super) fn build_incomplete_response(
+fn build_incomplete_response(
     mut response: Value,
     state: ToolLoopState,
     reason: &str,
@@ -728,24 +722,15 @@ pub(super) fn build_incomplete_response(
 
         // Add mcp_list_tools and executed mcp_call items at the beginning
         if state.total_calls > 0 || !incomplete_items.is_empty() {
-            for binding in mcp_servers.iter().rev() {
-                let list_tools_item =
-                    session.build_mcp_list_tools_json(&binding.label, &binding.server_key);
-                output_array.insert(0, list_tools_item);
+            let mut prefix = Vec::with_capacity(
+                mcp_servers.len() + state.mcp_call_items.len() + incomplete_items.len(),
+            );
+            for binding in mcp_servers {
+                prefix.push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
             }
-
-            // Insert stored transformed items for executed calls (no reconstruction needed)
-            let mut insert_pos = mcp_servers.len();
-            for item in &state.mcp_call_items {
-                output_array.insert(insert_pos, item.clone());
-                insert_pos += 1;
-            }
-
-            // Add incomplete mcp_call items (never executed, so no stored item)
-            for item in incomplete_items {
-                output_array.insert(insert_pos, item);
-                insert_pos += 1;
-            }
+            prefix.extend(state.mcp_call_items.iter().cloned());
+            prefix.extend(incomplete_items);
+            output_array.splice(0..0, prefix);
         }
     }
 
@@ -769,7 +754,7 @@ pub(super) fn build_incomplete_response(
 }
 
 /// Build a mcp_call output item
-pub(super) fn build_mcp_call_item(
+fn build_mcp_call_item(
     tool_name: &str,
     arguments: &str,
     output: &str,
@@ -795,7 +780,7 @@ pub(super) fn build_mcp_call_item(
 /// Converts the output using the tool's response_format to the correctly-typed
 /// output item (mcp_call, web_search_call, code_interpreter_call, file_search_call).
 /// Returns the result as a JSON Value for SSE event streaming.
-pub(super) fn build_transformed_mcp_call_item(
+fn build_transformed_mcp_call_item(
     output: &Value,
     response_format: &ResponseFormat,
     call_id: &str,
@@ -818,14 +803,14 @@ pub(super) fn build_transformed_mcp_call_item(
 }
 
 /// A function call extracted from a non-streaming response
-pub(super) struct ExtractedFunctionCall {
+struct ExtractedFunctionCall {
     pub call_id: String,
     pub name: String,
     pub arguments: String,
 }
 
 /// Extract all function calls from a response
-pub(super) fn extract_function_calls(resp: &Value) -> Vec<ExtractedFunctionCall> {
+fn extract_function_calls(resp: &Value) -> Vec<ExtractedFunctionCall> {
     let Some(output) = resp.get("output").and_then(|v| v.as_array()) else {
         return Vec::new();
     };

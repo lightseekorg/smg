@@ -32,11 +32,6 @@ use tracing::warn;
 use super::{
     accumulator::StreamingResponseAccumulator,
     common::{extract_output_index, get_event_type, parse_sse_block, ChunkProcessor},
-    mcp::{
-        build_resume_payload, execute_streaming_tool_calls, inject_mcp_metadata_streaming,
-        prepare_mcp_tools_as_functions, send_mcp_list_tools_events, ToolLoopState,
-    },
-    tool_handler::{StreamAction, StreamingToolHandler},
     utils::{
         patch_response_with_request_metadata, response_tool_to_value, restore_original_tools,
         rewrite_streaming_block,
@@ -48,7 +43,14 @@ use crate::{
         error,
         header_utils::{apply_request_headers, preserve_response_headers},
         mcp_utils::DEFAULT_MAX_ITERATIONS,
-        openai::context::{RequestContext, StreamingEventContext, StreamingRequest},
+        openai::{
+            context::{RequestContext, StreamingEventContext, StreamingRequest},
+            mcp::{
+                build_resume_payload, execute_streaming_tool_calls, inject_mcp_metadata_streaming,
+                prepare_mcp_tools_as_functions, send_mcp_list_tools_events, StreamAction,
+                StreamingToolHandler, ToolLoopState,
+            },
+        },
         persistence_utils::persist_conversation_items,
     },
 };

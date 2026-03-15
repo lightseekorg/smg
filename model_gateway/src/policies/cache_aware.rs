@@ -47,7 +47,7 @@ use dashmap::DashMap;
 use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
 use parking_lot::RwLock;
 use rand::Rng;
-use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeOperation};
+use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeKey, TreeOperation};
 use tracing::{debug, warn};
 
 use super::{
@@ -74,7 +74,7 @@ pub struct CacheAwarePolicy {
     string_trees: Arc<DashMap<String, Arc<Tree>>>,
     /// Token-based trees for gRPC connections (pre-tokenized input)
     token_trees: Arc<DashMap<String, Arc<TokenTree>>>,
-    mesh_sync: OptionalMeshSyncManager,
+    mesh_sync: RwLock<OptionalMeshSyncManager>,
     _eviction_task: Option<PeriodicTask>,
     /// Event-driven KV cache monitor for overlap scoring (gRPC workers only).
     /// Set via `set_kv_event_monitor`. When present and the indexer has data for
@@ -135,15 +135,15 @@ impl CacheAwarePolicy {
             config,
             string_trees,
             token_trees,
-            mesh_sync: None,
+            mesh_sync: RwLock::new(None),
             _eviction_task: eviction_task,
             kv_monitor: RwLock::new(None),
         }
     }
 
     /// Set mesh sync manager (can be called after construction)
-    pub fn set_mesh_sync(&mut self, mesh_sync: OptionalMeshSyncManager) {
-        self.mesh_sync.clone_from(&mesh_sync);
+    pub fn set_mesh_sync(&self, mesh_sync: OptionalMeshSyncManager) {
+        self.mesh_sync.write().clone_from(&mesh_sync);
         if mesh_sync.is_some() {
             self.restore_tree_state_from_mesh();
         }
@@ -248,38 +248,19 @@ impl CacheAwarePolicy {
         // No-op: rely on LRU eviction to clean up stale entries
     }
 
-    /// Restore tree state from mesh store
-    /// This is called during initialization to rebuild trees from synchronized state
-    /// Note: Mesh sync currently only supports text-based operations (HTTP string trees)
     fn restore_tree_state_from_mesh(&self) {
-        if let Some(ref mesh_sync) = self.mesh_sync {
-            // Get all tree states from mesh
-            // We need to iterate through all models that have tree states
-            // For now, we'll restore trees for models that are already in our trees map
-            // In a full implementation, we might want to query mesh for all tree states
+        let tree_states = {
+            let guard = self.mesh_sync.read();
+            guard
+                .as_ref()
+                .map(|mesh_sync| mesh_sync.get_all_tree_states())
+        };
 
-            for tree_ref in self.string_trees.iter() {
-                let model_id = tree_ref.key();
-                if let Some(tree_state) = mesh_sync.get_tree_state(model_id) {
-                    debug!(
-                        "Restoring tree state for model {} with {} operations",
-                        model_id,
-                        tree_state.operations.len()
-                    );
-
-                    let tree = tree_ref.value();
-                    // Apply all operations to rebuild the tree
-                    for operation in &tree_state.operations {
-                        match operation {
-                            TreeOperation::Insert(insert_op) => {
-                                tree.insert_text(&insert_op.text, &insert_op.tenant);
-                            }
-                            TreeOperation::Remove(_) => {
-                                // No-op: rely on LRU eviction for cleanup
-                            }
-                        }
-                    }
-                }
+        if let Some(tree_states) = tree_states {
+            for tree_state in &tree_states {
+                // Use the merge path (not replace) so concurrent live updates
+                // arriving via subscriber callbacks are not overwritten.
+                self.apply_remote_tree_state(&tree_state.model_id, tree_state);
             }
         }
     }
@@ -294,31 +275,69 @@ impl CacheAwarePolicy {
         }
     }
 
-    /// Apply remote tree operation from mesh
-    /// This is called when receiving tree state updates from other nodes
-    /// Note: Mesh sync currently only supports text-based operations (HTTP string trees)
     pub fn apply_remote_tree_operation(&self, model_id: &str, operation: &TreeOperation) {
         let tree_key = Self::normalize_mesh_model_id(model_id);
 
-        let tree = self
-            .string_trees
-            .entry(tree_key.to_string())
-            .or_insert_with(|| Arc::new(Tree::new()));
-
         match operation {
             TreeOperation::Insert(insert_op) => {
-                tree.insert_text(&insert_op.text, &insert_op.tenant);
-                debug!(
-                    "Applied remote tree insert: model={}, text={}, tenant={}",
-                    model_id, insert_op.text, insert_op.tenant
-                );
+                self.apply_insert_operation(tree_key, insert_op);
             }
             TreeOperation::Remove(remove_op) => {
-                // No-op: rely on LRU eviction for cleanup
                 debug!(
                     "Skipping remote tree remove (LRU will clean up): model={}, tenant={}",
                     model_id, remove_op.tenant
                 );
+            }
+        }
+    }
+
+    fn apply_insert_operation(&self, model_id: &str, insert_op: &TreeInsertOp) {
+        let string_tree = self
+            .string_trees
+            .entry(model_id.to_string())
+            .or_insert_with(|| Arc::new(Tree::new()))
+            .clone();
+        let token_tree = self
+            .token_trees
+            .entry(model_id.to_string())
+            .or_insert_with(|| Arc::new(TokenTree::new()))
+            .clone();
+
+        Self::apply_insert_to_trees(&string_tree, &token_tree, insert_op);
+    }
+
+    fn apply_insert_to_trees(
+        string_tree: &Arc<Tree>,
+        token_tree: &Arc<TokenTree>,
+        insert_op: &TreeInsertOp,
+    ) {
+        match &insert_op.key {
+            TreeKey::Text(text) => string_tree.insert_text(text, &insert_op.tenant),
+            TreeKey::Tokens(tokens) => token_tree.insert_tokens(tokens, &insert_op.tenant),
+        }
+    }
+
+    fn sync_insert_operation(&self, model_id: &str, key: TreeKey, tenant: &str) {
+        let mesh_sync = self.mesh_sync.read().clone();
+        if let Some(mesh_sync) = mesh_sync {
+            let op = TreeOperation::Insert(TreeInsertOp {
+                key,
+                tenant: tenant.to_string(),
+            });
+            let mesh_model_id = Self::normalize_mesh_model_id(model_id);
+            if let Err(error) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
+                warn!("Failed to sync tree insert operation to mesh: {}", error);
+            }
+        }
+    }
+
+    /// Merge remote tree state into local trees incrementally.
+    /// Uses entry-based insertion to preserve existing local routing state.
+    pub fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
+        let model_id = Self::normalize_mesh_model_id(model_id);
+        for operation in &tree_state.operations {
+            if let TreeOperation::Insert(insert_op) = operation {
+                self.apply_insert_operation(model_id, insert_op);
             }
         }
     }
@@ -381,6 +400,7 @@ impl CacheAwarePolicy {
                 .map(|entry| entry.value().clone());
             if let Some(tree) = tree {
                 tree.insert_tokens(tokens, worker_url);
+                self.sync_insert_operation(model_id, TreeKey::Tokens(tokens.to_vec()), worker_url);
             }
         } else if let Some(text) = info.request_text {
             // HTTP request: update string tree
@@ -391,18 +411,7 @@ impl CacheAwarePolicy {
 
             if let Some(tree) = tree {
                 tree.insert_text(text, worker_url);
-
-                // Sync insert operation to mesh if enabled (only for text operations)
-                if let Some(ref mesh_sync) = self.mesh_sync {
-                    let op = TreeOperation::Insert(TreeInsertOp {
-                        text: text.to_string(),
-                        tenant: worker_url.to_string(),
-                    });
-                    let mesh_model_id = Self::normalize_mesh_model_id(model_id);
-                    if let Err(e) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
-                        warn!("Failed to sync tree insert operation to mesh: {}", e);
-                    }
-                }
+                self.sync_insert_operation(model_id, TreeKey::Text(text.to_string()), worker_url);
             } else {
                 debug!(
                     "Warning: No string tree found for model '{}', skipping cache update",
@@ -640,6 +649,11 @@ impl CacheAwarePolicy {
 
             if let Some(idx) = selected_idx {
                 tree.insert_tokens(tokens, workers[idx].url());
+                self.sync_insert_operation(
+                    model_id,
+                    TreeKey::Tokens(tokens.to_vec()),
+                    workers[idx].url(),
+                );
                 workers[idx].increment_processed();
                 return Some(idx);
             }
@@ -694,18 +708,11 @@ impl CacheAwarePolicy {
 
             if let Some(idx) = selected_idx {
                 tree.insert_text(text, workers[idx].url());
-
-                // Sync insert operation to mesh if enabled (only for text operations)
-                if let Some(ref mesh_sync) = self.mesh_sync {
-                    let op = TreeOperation::Insert(TreeInsertOp {
-                        text: text.to_string(),
-                        tenant: workers[idx].url().to_string(),
-                    });
-                    let mesh_model_id = Self::normalize_mesh_model_id(model_id);
-                    if let Err(e) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
-                        warn!("Failed to sync tree insert operation to mesh: {}", e);
-                    }
-                }
+                self.sync_insert_operation(
+                    model_id,
+                    TreeKey::Text(text.to_string()),
+                    workers[idx].url(),
+                );
 
                 workers[idx].increment_processed();
                 return Some(idx);
@@ -907,7 +914,7 @@ mod tests {
             eviction_interval_secs: 0,
             ..Default::default()
         };
-        let mut policy = CacheAwarePolicy::with_config(config);
+        let policy = CacheAwarePolicy::with_config(config);
         policy.set_mesh_sync(Some(mesh_sync.clone()));
 
         let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
@@ -941,14 +948,14 @@ mod tests {
     fn test_cache_aware_restore_tree_state_from_mesh() {
         use std::sync::Arc;
 
-        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeOperation};
+        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
 
         // Pre-populate mesh with tree state
         let op1 = TreeOperation::Insert(TreeInsertOp {
-            text: "test_text_1".to_string(),
+            key: TreeKey::Text("test_text_1".to_string()),
             tenant: "http://w1:8000".to_string(),
         });
         mesh_sync
@@ -956,7 +963,7 @@ mod tests {
             .unwrap();
 
         let op2 = TreeOperation::Insert(TreeInsertOp {
-            text: "test_text_2".to_string(),
+            key: TreeKey::Text("test_text_2".to_string()),
             tenant: "http://w2:8000".to_string(),
         });
         mesh_sync
@@ -967,36 +974,21 @@ mod tests {
             eviction_interval_secs: 0,
             ..Default::default()
         };
-        let mut policy = CacheAwarePolicy::with_config(config);
+        let policy = CacheAwarePolicy::with_config(config);
         policy.set_mesh_sync(Some(mesh_sync.clone()));
 
-        // Initialize with a model to trigger restore
-        let _workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
-            BasicWorkerBuilder::new("http://w1:8000")
-                .worker_type(WorkerType::Regular)
-                .api_key("test_api_key")
-                .build(),
-        )];
+        let tree = policy.string_trees.get("model1");
+        assert!(tree.is_some());
 
-        // Create a tree entry for model1 to trigger restore
-        let _tree = policy
-            .string_trees
-            .entry("model1".to_string())
-            .or_insert_with(|| Arc::new(Tree::new()));
-
-        // Manually trigger restore (normally done in constructor)
-        // For testing, we'll verify the tree state exists in mesh
-        let tree_state = mesh_sync.get_tree_state("model1");
-        assert!(tree_state.is_some());
-        let state = tree_state.unwrap();
-        assert_eq!(state.operations.len(), 2);
+        let tree_state = mesh_sync.get_tree_state("model1").unwrap();
+        assert_eq!(tree_state.operations.len(), 2);
     }
 
     #[test]
     fn test_cache_aware_apply_remote_tree_operation() {
         use std::sync::Arc;
 
-        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeOperation};
+        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
@@ -1005,19 +997,46 @@ mod tests {
             eviction_interval_secs: 0,
             ..Default::default()
         };
-        let mut policy = CacheAwarePolicy::with_config(config);
+        let policy = CacheAwarePolicy::with_config(config);
         policy.set_mesh_sync(Some(mesh_sync.clone()));
 
         // Apply remote tree operation
         let remote_op = TreeOperation::Insert(TreeInsertOp {
-            text: "remote_text".to_string(),
+            key: TreeKey::Text("remote_text".to_string()),
             tenant: "http://remote:8000".to_string(),
         });
 
         policy.apply_remote_tree_operation("model1", &remote_op);
 
-        // Verify the string tree was updated (mesh sync only affects string trees)
+        // Verify the string tree was updated.
         let tree = policy.string_trees.get("model1");
+        assert!(tree.is_some());
+    }
+
+    #[test]
+    fn test_cache_aware_apply_remote_token_tree_operation() {
+        use std::sync::Arc;
+
+        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
+
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
+
+        let config = CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        };
+        let policy = CacheAwarePolicy::with_config(config);
+        policy.set_mesh_sync(Some(mesh_sync));
+
+        let remote_op = TreeOperation::Insert(TreeInsertOp {
+            key: TreeKey::Tokens(vec![1; 16]),
+            tenant: "http://remote:8000".to_string(),
+        });
+
+        policy.apply_remote_tree_operation("model1", &remote_op);
+
+        let tree = policy.token_trees.get("model1");
         assert!(tree.is_some());
     }
 
@@ -1025,7 +1044,7 @@ mod tests {
     fn test_cache_aware_multi_node_consistency() {
         use std::sync::Arc;
 
-        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeOperation};
+        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
 
         // Simulate two nodes
         let stores1 = Arc::new(StateStores::with_self_name("node1".to_string()));
@@ -1039,14 +1058,14 @@ mod tests {
             ..Default::default()
         };
 
-        let mut _policy1 = CacheAwarePolicy::with_config(config.clone());
+        let _policy1 = CacheAwarePolicy::with_config(config.clone());
         _policy1.set_mesh_sync(Some(mesh_sync1.clone()));
-        let mut _policy2 = CacheAwarePolicy::with_config(config);
+        let _policy2 = CacheAwarePolicy::with_config(config);
         _policy2.set_mesh_sync(Some(mesh_sync2.clone()));
 
         // Node1 syncs a tree operation
         let op = TreeOperation::Insert(TreeInsertOp {
-            text: "shared_text".to_string(),
+            key: TreeKey::Text("shared_text".to_string()),
             tenant: "http://shared:8000".to_string(),
         });
         mesh_sync1

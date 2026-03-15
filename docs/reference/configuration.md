@@ -529,6 +529,7 @@ delay = min(initial_backoff * multiplier^attempt, max_backoff) * (1 + random(0, 
 | `--health-check-interval-secs` | Interval between health checks | `60` |
 | `--health-check-endpoint` | Health check endpoint path | `/health` |
 | `--disable-health-check` | Disable all health checks | `false` |
+| `--remove-unhealthy-workers` | Remove workers after being marked unhealthy | `false` |
 
 ---
 

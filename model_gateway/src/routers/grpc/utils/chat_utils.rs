@@ -91,7 +91,7 @@ pub(crate) fn resolve_tokenizer(
 
 /// Process tool call arguments in messages
 /// Per Transformers docs, tool call arguments in assistant messages should be dicts
-fn process_tool_call_arguments(messages: &mut [Value]) -> Result<(), String> {
+pub(crate) fn process_tool_call_arguments(messages: &mut [Value]) -> Result<(), String> {
     for msg in messages {
         let role = msg.get("role").and_then(|v| v.as_str());
         if role != Some("assistant") {

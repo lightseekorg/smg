@@ -66,7 +66,9 @@ fn bench_wasm_middleware_buffering(c: &mut Criterion) {
     // Setup AppContext with WASM enabled
     let config = RouterConfig::builder().enable_wasm(true).build_unchecked();
 
-    let context = rt.block_on(AppContext::from_config(config, 30)).unwrap();
+    let context = rt
+        .block_on(AppContext::from_config(config, 30, None, None))
+        .unwrap();
     let app_state = Arc::new(AppState {
         router: Arc::new(MockRouter),
         context: Arc::new(context),

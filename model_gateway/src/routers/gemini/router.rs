@@ -1,10 +1,6 @@
 //! GeminiRouter — entry point for the Gemini Interactions API.
 
-use std::{
-    any::Any,
-    sync::{atomic::AtomicBool, Arc},
-    time::Duration,
-};
+use std::{any::Any, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::{http::HeaderMap, response::Response};
@@ -14,12 +10,16 @@ use super::{
     context::{RequestContext, SharedComponents},
     driver,
 };
-use crate::{app_context::AppContext, routers::RouterTrait};
+use crate::{
+    app_context::AppContext,
+    config::types::RetryConfig,
+    core::{is_retryable_status, RetryExecutor},
+    routers::RouterTrait,
+};
 
 pub struct GeminiRouter {
     shared_components: Arc<SharedComponents>,
-    #[expect(dead_code)]
-    healthy: AtomicBool,
+    retry_config: RetryConfig,
 }
 
 impl std::fmt::Debug for GeminiRouter {
@@ -45,9 +45,11 @@ impl GeminiRouter {
             mcp_orchestrator,
             request_timeout,
         });
+        let retry_config = ctx.router_config.effective_retry_config();
+
         Ok(Self {
             shared_components,
-            healthy: AtomicBool::new(true),
+            retry_config,
         })
     }
 }
@@ -72,13 +74,31 @@ impl RouterTrait for GeminiRouter {
         body: &InteractionsRequest,
         model_id: Option<&str>,
     ) -> Response {
-        let mut ctx = RequestContext::new(
-            Arc::new(body.clone()),
-            headers.cloned(),
-            model_id.map(String::from),
-            self.shared_components.clone(),
-        );
+        let request = Arc::new(body.clone());
+        let headers_cloned = headers.cloned();
+        let model_id_cloned = model_id.map(String::from);
+        let components = self.shared_components.clone();
 
-        driver::execute(&mut ctx).await
+        RetryExecutor::execute_response_with_retry(
+            &self.retry_config,
+            |_attempt| {
+                let request = Arc::clone(&request);
+                let headers = headers_cloned.clone();
+                let model_id = model_id_cloned.clone();
+                let components = Arc::clone(&components);
+                async move {
+                    let mut ctx = RequestContext::new(request, headers, model_id, components);
+                    driver::execute(&mut ctx).await
+                }
+            },
+            |res, _attempt| is_retryable_status(res.status()),
+            |_delay, _attempt| {
+                // TODO: record retry metrics when Gemini metrics are added
+            },
+            || {
+                // TODO: record retries-exhausted metric when Gemini metrics are added
+            },
+        )
+        .await
     }
 }

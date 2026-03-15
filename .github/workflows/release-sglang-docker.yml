@@ -4,7 +4,7 @@ run-name: >-
   SMG+SGLang |
   base=${{ inputs.base_image_ref || 'lmsysorg/sglang:v0.5.9' }} |
   engine=${{ inputs.sglang_commit || 'latest' }} |
-  smg=${{ inputs.smg_commit || 'v1.2.0' }} |
+  smg=${{ inputs.smg_commit || 'v1.3.0' }} |
   by @${{ github.actor }}
 
 on:
@@ -43,10 +43,10 @@ on:
       smg_commit:
         description: 'SMG commit/ref ("latest" for HEAD)'
         required: false
-        default: 'v1.2.0'
+        default: 'v1.3.0'
         type: string
       tag:
-        description: 'Override image tag (e.g. v1.2.0-sglang-v0.5.9)'
+        description: 'Override image tag (e.g. v1.3.0-sglang-v0.5.9)'
         required: false
         type: string
 
@@ -63,7 +63,7 @@ jobs:
       engine_repo: ${{ inputs.sglang_repo }}
       engine_commit: ${{ inputs.sglang_commit || 'latest' }}
       smg_repo: ${{ inputs.smg_repo || 'https://github.com/lightseekorg/smg' }}
-      smg_commit: ${{ inputs.smg_commit || 'v1.2.0' }}
+      smg_commit: ${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.3.0' }}
       tag: ${{ inputs.tag }}
       dry_run: ${{ github.event_name == 'pull_request' }}
     secrets: inherit

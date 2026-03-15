@@ -438,6 +438,17 @@ async fn v1_conversations_delete_item(
     .await
 }
 
+async fn v1_realtime_webrtc(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RealtimeQueryParams>,
+    req: Request,
+) -> Response {
+    // Model may come from query param (application/sdp) or session body
+    // (multipart/form-data). Let the handler validate per content type.
+    let model = params.model.unwrap_or_default();
+    state.router.route_realtime_webrtc(req, &model).await
+}
+
 async fn v1_realtime_ws(
     State(state): State<Arc<AppState>>,
     Query(params): Query<RealtimeQueryParams>,
@@ -622,6 +633,12 @@ pub struct ServerConfig {
     /// Control plane authentication configuration
     pub control_plane_auth: Option<smg_auth::ControlPlaneAuthConfig>,
     pub mesh_server_config: Option<MeshServerConfig>,
+    /// Bind address for WebRTC UDP sockets.
+    /// `None` means use the default (0.0.0.0, auto-detect candidate IP).
+    pub webrtc_bind_addr: Option<std::net::IpAddr>,
+    /// STUN server for ICE candidate gathering (host:port).
+    /// `None` means use the default (stun.l.google.com:19302).
+    pub webrtc_stun_server: Option<String>,
 }
 
 pub fn build_app(
@@ -702,11 +719,12 @@ pub fn build_app(
             middleware::wasm_middleware,
         ));
 
-    // WebSocket route: auth + concurrency but NO WASM middleware.
+    // WebSocket and WebRTC routes: auth + concurrency but NO WASM middleware.
     // WASM OnResponse reconstructs the response from status/headers/body,
     // dropping the response extensions that carry the WebSocket upgrade future.
-    let ws_routes = Router::new()
+    let realtime_routes = Router::new()
         .route("/v1/realtime", get(v1_realtime_ws))
+        .route("/v1/realtime/calls", post(v1_realtime_webrtc))
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::concurrency_limit_middleware,
@@ -795,7 +813,7 @@ pub fn build_app(
 
     Router::new()
         .merge(protected_routes)
-        .merge(ws_routes)
+        .merge(realtime_routes)
         .merge(public_routes)
         .merge(admin_routes)
         .merge(worker_routes)
@@ -887,7 +905,13 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     );
 
     let app_context = Arc::new(
-        AppContext::from_config(config.router_config.clone(), config.request_timeout_secs).await?,
+        AppContext::from_config(
+            config.router_config.clone(),
+            config.request_timeout_secs,
+            config.webrtc_bind_addr,
+            config.webrtc_stun_server.clone(),
+        )
+        .await?,
     );
 
     if config.prometheus_config.is_some() {
@@ -926,7 +950,9 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     // Submit startup tokenizer job if tokenizer path is configured
     // This runs before worker initialization to ensure tokenizer is available
-    if let Some(tokenizer_source) = config
+    if config.router_config.disable_tokenizer_autoload {
+        info!("Tokenizer autoload disabled via config; skipping startup tokenizer load");
+    } else if let Some(tokenizer_source) = config
         .router_config
         .tokenizer_path
         .as_ref()
@@ -1020,9 +1046,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         info!("Global health checks disabled via CLI/config; skipping health checker");
         None
     } else {
-        let hc = app_context
-            .worker_registry
-            .start_health_checker(config.router_config.health_check.check_interval_secs);
+        let hc = app_context.worker_registry.start_health_checker(
+            config.router_config.health_check.check_interval_secs,
+            config.router_config.health_check.remove_unhealthy_workers,
+        );
         debug!(
             "Started health checker for workers with {}s interval",
             config.router_config.health_check.check_interval_secs
@@ -1076,6 +1103,9 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             .set_mesh_sync(Some(handle.sync_manager.clone()));
         info!("Mesh sync manager set on worker registry");
 
+        handle
+            .sync_manager
+            .register_tree_state_subscriber(app_context.policy_registry.clone());
         app_context
             .policy_registry
             .set_mesh_sync(Some(handle.sync_manager.clone()));

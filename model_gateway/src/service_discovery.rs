@@ -118,7 +118,7 @@ impl Default for ServiceDiscoveryConfig {
             decode_selector: HashMap::new(),
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
             router_selector: HashMap::new(),
-            router_mesh_port_annotation: "sglang.ai/ha-port".to_string(),
+            router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
             model_id_source: None,
         }
     }
@@ -931,6 +931,8 @@ mod tests {
             inflight_tracker: InFlightRequestTracker::new(),
             kv_event_monitor: None,
             realtime_registry: Arc::new(RealtimeRegistry::new()),
+            webrtc_bind_addr: None,
+            webrtc_stun_server: None,
         })
     }
 
@@ -954,7 +956,7 @@ mod tests {
             decode_selector,
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
             router_selector: HashMap::new(),
-            router_mesh_port_annotation: "sglang.ai/ha-port".to_string(),
+            router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
             model_id_source: None,
         }
     }

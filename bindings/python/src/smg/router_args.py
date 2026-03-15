@@ -55,6 +55,7 @@ class RouterArgs:
     # PD service discovery configuration
     prefill_selector: dict[str, str] = dataclasses.field(default_factory=dict)
     decode_selector: dict[str, str] = dataclasses.field(default_factory=dict)
+    router_selector: dict[str, str] = dataclasses.field(default_factory=dict)
     bootstrap_port_annotation: str = "sglang.ai/bootstrap-port"
     model_id_from: str | None = None
     # Prometheus configuration
@@ -91,6 +92,7 @@ class RouterArgs:
     health_check_interval_secs: int = 60
     health_check_endpoint: str = "/health"
     disable_health_check: bool = False
+    remove_unhealthy_workers: bool = False
     # Circuit breaker configuration
     cb_failure_threshold: int = 10
     cb_success_threshold: int = 3
@@ -100,11 +102,14 @@ class RouterArgs:
     model_path: str | None = None
     tokenizer_path: str | None = None
     chat_template: str | None = None
+    # Disable automatic tokenizer loading at startup and worker registration
+    disable_tokenizer_autoload: bool = False
     # Tokenizer cache configuration
     tokenizer_cache_enable_l0: bool = False
     tokenizer_cache_l0_max_entries: int = 10000
     tokenizer_cache_enable_l1: bool = False
     tokenizer_cache_l1_max_memory: int = 50 * 1024 * 1024  # 50MB
+    # Parser configuration
     reasoning_parser: str | None = None
     tool_call_parser: str | None = None
     # MCP server configuration
@@ -489,6 +494,15 @@ class RouterArgs:
             ),
         )
         k8s_group.add_argument(
+            f"--{prefix}router-selector",
+            type=str,
+            nargs="+",
+            default=[],
+            help=(
+                "Label selector for router pod discovery in HA mesh mode (format: key1=value1 key2=value2)"
+            ),
+        )
+        k8s_group.add_argument(
             f"--{prefix}model-id-from",
             type=str,
             default=None,
@@ -693,6 +707,12 @@ class RouterArgs:
             default=RouterArgs.disable_health_check,
             help="Disable all worker health checks at startup",
         )
+        health_group.add_argument(
+            f"--{prefix}remove-unhealthy-workers",
+            action="store_true",
+            default=RouterArgs.remove_unhealthy_workers,
+            help="Remove workers from the registry when they are marked unhealthy",
+        )
         # Tokenizer configuration
         tokenizer_group.add_argument(
             f"--{prefix}model-path",
@@ -712,6 +732,13 @@ class RouterArgs:
             type=str,
             default=None,
             help="Chat template path (optional)",
+        )
+        tokenizer_group.add_argument(
+            f"--{prefix}disable-tokenizer-autoload",
+            action="store_true",
+            default=RouterArgs.disable_tokenizer_autoload,
+            help="Disable automatic tokenizer loading at startup. "
+            "Use this when tokenizers are not needed (e.g., pure load balancing).",
         )
         tokenizer_group.add_argument(
             f"--{prefix}tokenizer-cache-enable-l0",
@@ -1049,6 +1076,9 @@ class RouterArgs:
         )
         args_dict["decode_selector"] = cls._parse_selector(
             cli_args_dict.get(f"{prefix}decode_selector", None)
+        )
+        args_dict["router_selector"] = cls._parse_selector(
+            cli_args_dict.get(f"{prefix}router_selector", None)
         )
 
         # Mooncake-specific annotation

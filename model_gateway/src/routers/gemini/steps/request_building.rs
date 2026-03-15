@@ -2,70 +2,58 @@
 //!
 //! Transition: BuildRequest → NonStreamRequest | StreamRequestWithTool | StreamRequest
 
-use axum::{
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
+use axum::response::Response;
+use serde_json::Value;
 
-use crate::routers::gemini::{
-    context::RequestContext,
-    state::{RequestState, StepResult},
+use crate::routers::{
+    error,
+    gemini::{
+        context::RequestContext,
+        state::{RequestState, StepResult},
+    },
 };
 
 /// Build the upstream request payload and create an MCP session if needed.
 ///
-/// ## Reads
-/// - `ctx.input.original_request` — the client's `InteractionsRequest`.
-/// - `ctx.components.mcp_orchestrator` — for MCP tool session creation.
+/// ## Payload transformations
+/// 1. Override `model` with `model_id` if set (e.g. from URL path).
+/// 2. Set `store: false` — the gateway handles persistence, not the worker.
 ///
-/// ## Writes
-/// - `ctx.processing.payload` — the JSON payload to POST upstream.
-/// - `ctx.state`:
-///   - `NonStreamRequest` — non-streaming request.
-///   - `StreamRequestWithTool` — streaming request with MCP tools.
-///   - `StreamRequest` — streaming request without MCP tools.
-///
-/// ## MCP handling (planned)
+/// ## MCP handling (Phase 2)
 /// When the request contains `InteractionsTool::McpServer` tools, this step will:
 /// 1. Validate MCP server connectivity via `ensure_request_mcp_client()`.
 /// 2. Create an `McpToolSession` for the request lifetime.
 /// 3. Convert MCP tool definitions to function tool definitions in the payload
 ///    (via `prepare_mcp_tools_as_functions`), so the upstream worker sees only
 ///    function tools.
-///
-/// MCP-related fields will be stored on `RequestContext` once the MCP context
-/// fields are added in a later phase. Currently, MCP tools are not detected
-/// and the payload is forwarded as-is.
 pub(crate) async fn request_building(ctx: &mut RequestContext) -> Result<StepResult, Response> {
-    // TODO: implement request building
-    //
-    // 1. Serialize ctx.input.original_request to serde_json::Value (the payload).
-    // 2. Check if tools contains any InteractionsTool::McpServer entries.
-    // 3. If MCP tools present:
-    //    a. Call ensure_request_mcp_client() to validate servers → Vec<(label, key)>.
-    //    b. Create McpToolSession::new(orchestrator, mcp_servers, request_id).
-    //    c. Call prepare_mcp_tools_as_functions(&mut payload, &session) to convert
-    //       MCP tool defs → function tool defs in the payload.
-    //    d. Store session and tool_loop_state on ctx (fields to be added in MCP phase).
-    // 4. Set ctx.processing.payload = Some(payload).
-    // 5. Determine has_mcp_tools from step 2.
-    // 6. Branch on stream / tools:
-    //    - stream && has_mcp_tools: ctx.state = StreamRequestWithTool.
-    //    - stream && !has_mcp_tools: ctx.state = StreamRequest.
-    //    - !stream:                  ctx.state = NonStreamRequest.
+    // Phase 1: interaction persistence is not implemented yet.
+    // Reject store=true for model requests (agent requests proxy store to upstream).
+    if ctx.input.original_request.agent.is_none() && ctx.input.original_request.store {
+        return Err(error::not_implemented(
+            "not_implemented",
+            "Interaction persistence (store=true) is not yet implemented for model requests",
+        ));
+    }
 
     // Serialize the original request as the upstream payload.
-    // MCP tool rewriting will modify this payload in a later phase.
-    let payload = serde_json::to_value(ctx.input.original_request.as_ref()).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to serialize request: {e}"),
-        )
-            .into_response()
+    let mut payload = serde_json::to_value(ctx.input.original_request.as_ref()).map_err(|e| {
+        tracing::error!(error = %e, "Failed to serialize Gemini interactions request");
+        error::internal_error("internal_error", "Failed to build upstream request payload")
     })?;
-    ctx.processing.payload = Some(payload);
 
-    let has_mcp_tools = false; // TODO: detect from tools list
+    // Apply payload transformations for the upstream worker.
+    transform_payload(&mut payload, ctx);
+
+    // TODO (Phase 2): Check if tools contains any InteractionsTool::McpServer entries.
+    // If MCP tools present:
+    //   a. Call ensure_request_mcp_client() to validate servers.
+    //   b. Create McpToolSession.
+    //   c. Call prepare_mcp_tools_as_functions(&mut payload, &session).
+    //   d. Store session and tool_loop_state on ctx.
+    let has_mcp_tools = false;
+
+    ctx.processing.payload = Some(payload);
 
     if ctx.input.original_request.stream {
         if has_mcp_tools {
@@ -77,4 +65,24 @@ pub(crate) async fn request_building(ctx: &mut RequestContext) -> Result<StepRes
         ctx.state = RequestState::NonStreamRequest;
     }
     Ok(StepResult::Continue)
+}
+
+/// Apply transformations to the upstream payload.
+fn transform_payload(payload: &mut Value, ctx: &RequestContext) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+
+    // Override model if this is a model request.
+    if let Some(model_id) = &ctx.input.model_id {
+        if ctx.input.original_request.agent.is_none() {
+            obj.insert("model".to_string(), Value::String(model_id.clone()));
+        }
+    }
+
+    // For model requests, the gateway handles persistence — tell the worker not to store.
+    // For agent requests, the upstream API requires store: true (agent+background mode), so we leave it unchanged.
+    if ctx.input.original_request.agent.is_none() {
+        obj.insert("store".to_string(), Value::Bool(false));
+    }
 }
