@@ -737,7 +737,8 @@ class RouterArgs:
             f"--{prefix}disable-tokenizer-autoload",
             action="store_true",
             default=RouterArgs.disable_tokenizer_autoload,
-            help="Disable automatic tokenizer loading at startup. Use this to avoid loading tokenizers when not needed (e.g., pure load balancing scenarios).",
+            help="Disable automatic tokenizer loading at startup. "
+            "Use this when tokenizers are not needed (e.g., pure load balancing).",
         )
         tokenizer_group.add_argument(
             f"--{prefix}tokenizer-cache-enable-l0",
