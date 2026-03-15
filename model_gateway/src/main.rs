@@ -406,6 +406,10 @@ struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "Health Checks")]
     disable_health_check: bool,
 
+    /// Remove workers from the registry when they are marked unhealthy
+    #[arg(long, default_value_t = false, help_heading = "Health Checks")]
+    remove_unhealthy_workers: bool,
+
     // ==================== Tokenizer ====================
     /// Model path for loading tokenizer (HuggingFace ID or local path)
     #[arg(long, alias = "model", help_heading = "Tokenizer")]
@@ -418,6 +422,10 @@ struct CliArgs {
     /// Chat template path
     #[arg(long, help_heading = "Tokenizer")]
     chat_template: Option<String>,
+
+    /// Disable automatic tokenizer loading at startup and worker registration
+    #[arg(long, default_value_t = false, help_heading = "Tokenizer")]
+    disable_tokenizer_autoload: bool,
 
     /// Enable L0 (exact match) tokenizer cache
     #[arg(long, default_value_t = false, help_heading = "Tokenizer")]
@@ -1102,6 +1110,7 @@ impl CliArgs {
                 check_interval_secs: self.health_check_interval_secs,
                 endpoint: self.health_check_endpoint.clone(),
                 disable_health_check: self.disable_health_check,
+                remove_unhealthy_workers: self.remove_unhealthy_workers,
             })
             .tokenizer_cache(TokenizerCacheConfig {
                 enable_l0: self.tokenizer_cache_enable_l0,
@@ -1109,6 +1118,7 @@ impl CliArgs {
                 enable_l1: self.tokenizer_cache_enable_l1,
                 l1_max_memory: self.tokenizer_cache_l1_max_memory,
             })
+            .disable_tokenizer_autoload(self.disable_tokenizer_autoload)
             .history_backend(history_backend)
             .log_level(&self.log_level)
             .maybe_api_key(self.api_key.as_ref())

@@ -950,7 +950,9 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     // Submit startup tokenizer job if tokenizer path is configured
     // This runs before worker initialization to ensure tokenizer is available
-    if let Some(tokenizer_source) = config
+    if config.router_config.disable_tokenizer_autoload {
+        info!("Tokenizer autoload disabled via config; skipping startup tokenizer load");
+    } else if let Some(tokenizer_source) = config
         .router_config
         .tokenizer_path
         .as_ref()
@@ -1044,9 +1046,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         info!("Global health checks disabled via CLI/config; skipping health checker");
         None
     } else {
-        let hc = app_context
-            .worker_registry
-            .start_health_checker(config.router_config.health_check.check_interval_secs);
+        let hc = app_context.worker_registry.start_health_checker(
+            config.router_config.health_check.check_interval_secs,
+            config.router_config.health_check.remove_unhealthy_workers,
+        );
         debug!(
             "Started health checker for workers with {}s interval",
             config.router_config.health_check.check_interval_secs
