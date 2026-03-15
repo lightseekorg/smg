@@ -439,7 +439,7 @@ jobs:
       gpu_tier: "1"
       runner: ${{ matrix.runner }}
       timeout: ${{ matrix.timeout }}
-      test_dirs: e2e_test/chat_completions
+      test_dirs: "e2e_test/chat_completions e2e_test/messages"
       test_filter: ${{ matrix.test_filter }}
     secrets: inherit
 
