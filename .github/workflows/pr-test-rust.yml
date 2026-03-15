@@ -286,7 +286,10 @@ jobs:
 
   benchmarks:
     needs: build-wheel
-    if: github.actor != 'dependabot[bot]'
+    if: >-
+      github.actor != 'dependabot[bot]'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: 4-gpu-h100
     timeout-minutes: 30
     permissions:
@@ -414,7 +417,8 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
+          || (github.event.pull_request.head.repo.full_name == github.repository
+              && needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.chat-completions == 'true')))
     strategy:
@@ -451,7 +455,8 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
+          || (github.event.pull_request.head.repo.full_name == github.repository
+              && needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.embeddings == 'true')))
     uses: ./.github/workflows/e2e-gpu-job.yml
@@ -473,7 +478,8 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
+          || (github.event.pull_request.head.repo.full_name == github.repository
+              && needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.chat-completions == 'true')))
     strategy:
@@ -515,7 +521,8 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
+          || (github.event.pull_request.head.repo.full_name == github.repository
+              && needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.agentic == 'true')))
     uses: ./.github/workflows/e2e-gpu-job.yml
@@ -536,7 +543,8 @@ jobs:
       && !cancelled()
       && needs.e2e-1gpu-gateway.result == 'success'
       && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
+          || (github.event.pull_request.head.repo.full_name == github.repository
+              && needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.chat-completions == 'true')))
     strategy:
@@ -580,7 +588,8 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
+          || (github.event.pull_request.head.repo.full_name == github.repository
+              && needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.agentic == 'true')))
     permissions:
@@ -730,7 +739,8 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
+          || (github.event.pull_request.head.repo.full_name == github.repository
+              && needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.go-bindings == 'true')))
     runs-on: 1-gpu-h100
