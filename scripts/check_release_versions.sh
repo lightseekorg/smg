@@ -123,6 +123,9 @@ if ! git rev-parse "$TAG" >/dev/null 2>&1; then
 fi
 
 echo -e "${BOLD}Checking workspace versions against tag: ${BLUE}$TAG${NC}"
+if [[ -n "$VERSION_OVERRIDE" ]]; then
+    echo -e "${BOLD}Version override: ${CYAN}$VERSION_OVERRIDE${NC} (ignoring conventional commit detection)"
+fi
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -168,6 +171,12 @@ get_workspace_dep_version() {
         | grep -o 'version = "[^"]*"' \
         | sed 's/version = "\(.*\)"/\1/'
 }
+
+# ---------------------------------------------------------------------------
+# VERSION_OVERRIDE: skip conventional-commit detection and use this version
+# for all bumps. Set via: VERSION_OVERRIDE=1.3.1 ./check_release_versions.sh
+# ---------------------------------------------------------------------------
+VERSION_OVERRIDE="${VERSION_OVERRIDE:-}"
 
 # Detect semver bump level from conventional commits touching a directory.
 # Scans commit subjects and bodies for:
@@ -217,10 +226,15 @@ detect_bump_level() {
     echo "$level"
 }
 
-# Bump version by level: major, minor, or patch
+# Bump version by level: major, minor, or patch.
+# If VERSION_OVERRIDE is set, always returns the override (ignoring level).
 bump_version() {
     local version="$1"
     local level="$2"
+    if [[ -n "$VERSION_OVERRIDE" ]]; then
+        echo "$VERSION_OVERRIDE"
+        return
+    fi
     if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         echo "ERROR: bump_version only supports X.Y.Z format, got: $version" >&2
         return 1
