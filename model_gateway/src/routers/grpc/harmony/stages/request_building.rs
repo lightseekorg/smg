@@ -62,18 +62,54 @@ impl PipelineStage for HarmonyRequestBuildingStage {
         let request_id = match &ctx.input.request_type {
             RequestType::Chat(_) => format!("chatcmpl-{}", Uuid::now_v7()),
             RequestType::Responses(_) => format!("responses-{}", Uuid::now_v7()),
-            request_type @ (RequestType::Generate(_)
-            | RequestType::Embedding(_)
-            | RequestType::Classify(_)
-            | RequestType::Messages(_)) => {
+            RequestType::Generate(_) => {
                 error!(
                     function = "HarmonyRequestBuildingStage::execute",
-                    request_type = %request_type,
-                    "{request_type} request type not supported for Harmony models"
+                    "Generate request type not supported for Harmony models"
                 );
                 return Err(error::bad_request(
-                    "not_supported_in_harmony",
-                    format!("{request_type} requests are not supported with Harmony models"),
+                    "harmony_generate_not_supported",
+                    "Generate requests are not supported with Harmony models".to_string(),
+                ));
+            }
+            RequestType::Completion(_) => {
+                error!(
+                    function = "HarmonyRequestBuildingStage::execute",
+                    "Completion request type not supported for Harmony models"
+                );
+                return Err(error::bad_request(
+                    "harmony_completion_not_supported",
+                    "Completion requests are not supported with Harmony models".to_string(),
+                ));
+            }
+            RequestType::Embedding(_) => {
+                error!(
+                    function = "HarmonyRequestBuildingStage::execute",
+                    "Embedding request type not supported for Harmony models"
+                );
+                return Err(error::bad_request(
+                    "harmony_embedding_not_supported",
+                    "Embedding requests are not supported with Harmony models".to_string(),
+                ));
+            }
+            RequestType::Classify(_) => {
+                error!(
+                    function = "HarmonyRequestBuildingStage::execute",
+                    "Classify request type not supported for Harmony models"
+                );
+                return Err(error::bad_request(
+                    "harmony_classify_not_supported",
+                    "Classify requests are not supported with Harmony models".to_string(),
+                ));
+            }
+            RequestType::Messages(_) => {
+                error!(
+                    function = "HarmonyRequestBuildingStage::execute",
+                    "Messages request type not supported for Harmony models"
+                );
+                return Err(error::bad_request(
+                    "harmony_messages_not_supported",
+                    "Messages requests are not supported with Harmony models".to_string(),
                 ));
             }
         };
