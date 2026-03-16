@@ -20,6 +20,12 @@ default-features = true
 [dependencies.smg-auth]
 workspace = true
 
+[dependencies.smg-mesh]
+workspace = true
+
+[dependencies.rand]
+workspace = true
+
 [dependencies.tool-parser]
 workspace = true
 
