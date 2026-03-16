@@ -1120,23 +1120,35 @@ impl Router {
                     .map(|c| c.to_auth_control_plane_config()),
                 mesh_server_config: if self.enable_mesh {
                     let self_name = self.mesh_server_name.clone().unwrap_or_else(|| {
-                        use rand::{Rng, distr::Alphanumeric};
+                        use rand::{distr::Alphanumeric, Rng};
                         let random_string: String = (0..4)
                             .map(|_| rand::rng().sample(Alphanumeric) as char)
                             .collect();
                         format!("Mesh_{random_string}")
                     });
-                    let peer = self.mesh_peer_urls.first()
-                        .and_then(|url| url.parse::<std::net::SocketAddr>().ok());
-                    format!("{}:{}", self.mesh_host, self.mesh_port)
-                        .parse::<std::net::SocketAddr>()
-                        .ok()
-                        .map(|addr| smg_mesh::MeshServerConfig {
-                            self_name,
-                            self_addr: addr,
-                            init_peer: peer,
-                            mtls_config: None,
-                        })
+                    let peer = self
+                        .mesh_peer_urls
+                        .first()
+                        .map(|url| url.parse::<std::net::SocketAddr>())
+                        .transpose()
+                        .map_err(|e| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "Invalid mesh peer URL '{}': {e}",
+                                self.mesh_peer_urls.first().unwrap()
+                            ))
+                        })?;
+                    let self_addr_str = format!("{}:{}", self.mesh_host, self.mesh_port);
+                    let self_addr = self_addr_str.parse::<std::net::SocketAddr>().map_err(|e| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "Invalid mesh address '{self_addr_str}': {e}"
+                        ))
+                    })?;
+                    Some(smg_mesh::MeshServerConfig {
+                        self_name,
+                        self_addr,
+                        init_peer: peer,
+                        mtls_config: None,
+                    })
                 } else {
                     None
                 },
