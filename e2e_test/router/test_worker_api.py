@@ -44,12 +44,14 @@ class TestWorkerAPI:
 
         for worker in workers:
             logger.info(
-                "Worker: id=%s, url=%s, status=%s",
+                "Worker: id=%s, url=%s, model=%s, status=%s",
                 worker.id,
                 worker.url,
+                worker.model,
                 worker.status,
             )
             assert worker.url, "Worker should have a URL"
+            assert worker.model, "Worker should have a model_id"
 
         # SmgClient comparison
         with smg_compare():
