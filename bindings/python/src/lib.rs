@@ -1129,14 +1129,14 @@ impl Router {
                     let peer = self
                         .mesh_peer_urls
                         .first()
-                        .map(|url| url.parse::<std::net::SocketAddr>())
-                        .transpose()
-                        .map_err(|e| {
-                            pyo3::exceptions::PyValueError::new_err(format!(
-                                "Invalid mesh peer URL '{}': {e}",
-                                self.mesh_peer_urls.first().unwrap()
-                            ))
-                        })?;
+                        .map(|url| {
+                            url.parse::<std::net::SocketAddr>().map_err(|e| {
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "Invalid mesh peer URL '{url}': {e}"
+                                ))
+                            })
+                        })
+                        .transpose()?;
                     let self_addr_str = format!("{}:{}", self.mesh_host, self.mesh_port);
                     let self_addr = self_addr_str.parse::<std::net::SocketAddr>().map_err(|e| {
                         pyo3::exceptions::PyValueError::new_err(format!(
