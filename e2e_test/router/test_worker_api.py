@@ -51,7 +51,9 @@ class TestWorkerAPI:
                 worker.status,
             )
             assert worker.url, "Worker should have a URL"
-            assert worker.model, "Worker should have a model_id"
+            # model_id is set for workers with discovered models, None for wildcard
+            if worker.model is not None:
+                assert worker.model, "Worker model_id should be non-empty when present"
 
         # SmgClient comparison
         with smg_compare():

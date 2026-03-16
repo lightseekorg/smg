@@ -935,13 +935,12 @@ pub fn worker_to_info(worker: &Arc<dyn Worker>) -> WorkerInfo {
 
     WorkerInfo {
         id: worker.url().to_string(),
-        model_id: None,
+        model_id: spec.models.primary().map(|m| m.id.clone()),
         spec,
         is_healthy: worker.is_healthy(),
         load: worker.load(),
         job_status: None,
     }
-    .with_model_id()
 }
 
 #[cfg(test)]

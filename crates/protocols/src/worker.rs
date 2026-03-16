@@ -577,7 +577,7 @@ pub struct WorkerInfo {
 
     /// Primary model ID for backwards compatibility.
     /// Computed from `models[0].id` (single/multi) or `null` (wildcard).
-    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
 
     /// Worker identity and configuration.
@@ -605,12 +605,6 @@ impl WorkerInfo {
             load: 0,
             job_status,
         }
-    }
-
-    /// Populate the `model_id` field from the primary model in `spec.models`.
-    pub fn with_model_id(mut self) -> Self {
-        self.model_id = self.spec.models.primary().map(|m| m.id.clone());
-        self
     }
 }
 
