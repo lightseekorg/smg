@@ -377,9 +377,9 @@ impl VllmEngineClient {
             stop_token_ids: body.stop_token_ids.clone().unwrap_or_default(),
             skip_special_tokens: body.skip_special_tokens,
             ignore_eos: body.ignore_eos,
-            seed: body.sampling_seed.map(|s| s as i32).or_else(|| {
+            seed: body.sampling_seed.and_then(|s| s.try_into().ok()).or_else(|| {
                 body.seed
-                    .and_then(|s| if s >= 0 { Some(s as i32) } else { None })
+                    .and_then(|s| s.try_into().ok())
             }),
             logprobs: body.logprobs.map(|l| l as i32),
             min_tokens: body.min_tokens.unwrap_or(0),
