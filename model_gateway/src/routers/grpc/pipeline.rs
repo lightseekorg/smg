@@ -551,10 +551,6 @@ impl RequestPipeline {
     }
 
     /// Execute the complete pipeline for a completion request
-    #[expect(
-        dead_code,
-        reason = "Completion pipeline entrypoint is introduced before later stacked PRs wire the router to call it"
-    )]
     pub async fn execute_completion(
         &self,
         request: Arc<CompletionRequest>,
