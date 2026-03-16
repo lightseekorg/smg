@@ -11,6 +11,7 @@ use std::{
 use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{ResponseFormat, StringOrArray},
+    completion::CompletionRequest,
     generate::GenerateRequest,
     messages::CreateMessageRequest,
     responses::ResponsesRequest,
@@ -382,6 +383,77 @@ impl TrtllmServiceClient {
                 .as_ref()
                 .and_then(|p| p.ignore_eos)
                 .unwrap_or(false),
+            bad: vec![],
+            bad_token_ids: vec![],
+            guided_decoding,
+            embedding_bias: vec![],
+            lora_config: None,
+            prompt_tuning_config: None,
+            multimodal_input: None,
+            kv_cache_retention: None,
+            disaggregated_params: None,
+            lookahead_config: None,
+            cache_salt_id: None,
+            arrival_time: None,
+        };
+
+        Ok(grpc_request)
+    }
+
+    /// Build a GenerateRequest from CompletionRequest (OpenAI /v1/completions)
+    #[expect(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "method receiver and Result kept for API consistency"
+    )]
+    pub fn build_generate_request_from_completion(
+        &self,
+        request_id: String,
+        body: &CompletionRequest,
+        processed_text: String,
+        token_ids: Vec<u32>,
+    ) -> Result<proto::GenerateRequest, String> {
+        let sampling_config = proto::SamplingConfig {
+            beam_width: 1,
+            num_return_sequences: body.n.unwrap_or(1),
+            top_k: body.top_k.map(|v| v.max(0)),
+            top_p: Some(body.top_p.unwrap_or(1.0)),
+            seed: body.sampling_seed.or_else(|| {
+                body.seed
+                    .and_then(|s| if s >= 0 { Some(s as u64) } else { None })
+            }),
+            temperature: Some(body.temperature.unwrap_or(1.0)),
+            min_tokens: body.min_tokens,
+            repetition_penalty: Some(body.repetition_penalty.unwrap_or(1.0)),
+            presence_penalty: body.presence_penalty,
+            frequency_penalty: body.frequency_penalty,
+            min_p: body.min_p,
+            ..Default::default()
+        };
+
+        let output_config = proto::OutputConfig {
+            logprobs: body.logprobs.map(|l| l as i32),
+            exclude_input_from_output: true,
+            ..Default::default()
+        };
+
+        let stop = Self::extract_stop_strings(body.stop.as_ref());
+        let guided_decoding = Self::build_guided_decoding_from_completion(body);
+
+        let grpc_request = proto::GenerateRequest {
+            request_id,
+            tokenized: Some(proto::TokenizedInput {
+                original_text: processed_text,
+                input_token_ids: token_ids,
+                query_token_ids: vec![],
+            }),
+            sampling_config: Some(sampling_config),
+            output_config: Some(output_config),
+            max_tokens: body.max_tokens.unwrap_or(2048),
+            streaming: body.stream,
+            stop,
+            stop_token_ids: body.stop_token_ids.clone().unwrap_or_default(),
+            ignore_eos: body.ignore_eos,
             bad: vec![],
             bad_token_ids: vec![],
             guided_decoding,
@@ -787,6 +859,30 @@ impl TrtllmServiceClient {
             });
         }
         if let Some(ebnf) = &params.ebnf {
+            return Some(proto::GuidedDecodingParams {
+                guide_type: proto::guided_decoding_params::GuideType::EbnfGrammar as i32,
+                guide: ebnf.clone(),
+            });
+        }
+        None
+    }
+
+    fn build_guided_decoding_from_completion(
+        body: &CompletionRequest,
+    ) -> Option<proto::GuidedDecodingParams> {
+        if let Some(json_schema) = &body.json_schema {
+            return Some(proto::GuidedDecodingParams {
+                guide_type: proto::guided_decoding_params::GuideType::JsonSchema as i32,
+                guide: json_schema.clone(),
+            });
+        }
+        if let Some(regex) = &body.regex {
+            return Some(proto::GuidedDecodingParams {
+                guide_type: proto::guided_decoding_params::GuideType::Regex as i32,
+                guide: regex.clone(),
+            });
+        }
+        if let Some(ebnf) = &body.ebnf {
             return Some(proto::GuidedDecodingParams {
                 guide_type: proto::guided_decoding_params::GuideType::EbnfGrammar as i32,
                 guide: ebnf.clone(),

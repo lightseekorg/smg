@@ -11,6 +11,7 @@ use std::{
 use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
+    completion::CompletionRequest,
     generate::GenerateRequest,
     messages::CreateMessageRequest,
     responses::ResponsesRequest,
@@ -393,6 +394,87 @@ impl SglangSchedulerClient {
         };
 
         Ok(grpc_request)
+    }
+
+    /// Build a GenerateRequest from CompletionRequest (OpenAI /v1/completions)
+    #[expect(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "method receiver and Result kept for consistent public API"
+    )]
+    pub fn build_generate_request_from_completion(
+        &self,
+        request_id: String,
+        body: &CompletionRequest,
+        processed_text: String,
+        token_ids: Vec<u32>,
+    ) -> Result<proto::GenerateRequest, String> {
+        let sampling_params = Self::build_sampling_params_from_completion(body);
+
+        let grpc_request = proto::GenerateRequest {
+            request_id,
+            tokenized: Some(proto::TokenizedInput {
+                original_text: processed_text,
+                input_ids: token_ids,
+            }),
+            sampling_params: Some(sampling_params),
+            return_logprob: body.logprobs.is_some(),
+            logprob_start_len: -1,
+            top_logprobs_num: body.logprobs.unwrap_or(0) as i32,
+            return_hidden_states: body.return_hidden_states,
+            stream: body.stream,
+            ..Default::default()
+        };
+
+        Ok(grpc_request)
+    }
+
+    fn build_sampling_params_from_completion(body: &CompletionRequest) -> proto::SamplingParams {
+        let mut sampling = proto::SamplingParams {
+            temperature: body.temperature.unwrap_or(1.0),
+            top_p: body.top_p.unwrap_or(1.0),
+            top_k: body.top_k.unwrap_or(-1),
+            frequency_penalty: body.frequency_penalty.unwrap_or(0.0),
+            presence_penalty: body.presence_penalty.unwrap_or(0.0),
+            repetition_penalty: body.repetition_penalty.unwrap_or(1.0),
+            min_p: body.min_p.unwrap_or(0.0),
+            max_new_tokens: body.max_tokens,
+            n: body.n.unwrap_or(1),
+            ignore_eos: body.ignore_eos,
+            skip_special_tokens: body.skip_special_tokens,
+            no_stop_trim: body.no_stop_trim,
+            spaces_between_special_tokens: true,
+            ..Default::default()
+        };
+
+        if let Some(min_tokens) = body.min_tokens {
+            sampling.min_new_tokens = min_tokens;
+        }
+
+        if let Some(stop) = &body.stop {
+            match stop {
+                StringOrArray::String(s) => sampling.stop.push(s.clone()),
+                StringOrArray::Array(arr) => sampling.stop.extend(arr.clone()),
+            }
+        }
+
+        if let Some(stop_token_ids) = &body.stop_token_ids {
+            sampling.stop_token_ids.clone_from(stop_token_ids);
+        }
+
+        if let Some(ref regex) = body.regex {
+            sampling.constraint = Some(proto::sampling_params::Constraint::Regex(regex.clone()));
+        } else if let Some(ref json_schema) = body.json_schema {
+            sampling.constraint = Some(proto::sampling_params::Constraint::JsonSchema(
+                json_schema.clone(),
+            ));
+        } else if let Some(ref ebnf) = body.ebnf {
+            sampling.constraint = Some(proto::sampling_params::Constraint::EbnfGrammar(
+                ebnf.clone(),
+            ));
+        }
+
+        sampling
     }
 
     /// Build a GenerateRequest from ResponsesRequest (OpenAI Responses API)

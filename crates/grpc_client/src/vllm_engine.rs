@@ -11,6 +11,7 @@ use std::{
 use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
+    completion::CompletionRequest,
     generate::GenerateRequest,
     messages::CreateMessageRequest,
     responses::ResponsesRequest,
@@ -314,6 +315,83 @@ impl VllmEngineClient {
             input: Some(proto::generate_request::Input::Tokenized(
                 proto::TokenizedInput {
                     original_text: original_text.unwrap_or_default(),
+                    input_ids: token_ids,
+                },
+            )),
+            sampling_params: Some(sampling_params),
+            stream: body.stream,
+            kv_transfer_params: None,
+            mm_inputs: None,
+        };
+
+        Ok(grpc_request)
+    }
+
+    /// Build a GenerateRequest from CompletionRequest (OpenAI /v1/completions)
+    #[expect(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "method receiver and Result kept for consistent public API across gRPC backends"
+    )]
+    pub fn build_generate_request_from_completion(
+        &self,
+        request_id: String,
+        body: &CompletionRequest,
+        processed_text: String,
+        token_ids: Vec<u32>,
+    ) -> Result<proto::GenerateRequest, String> {
+        let mut stop: Vec<String> = Vec::new();
+        if let Some(s) = &body.stop {
+            match s {
+                StringOrArray::String(s) => stop.push(s.clone()),
+                StringOrArray::Array(arr) => stop.extend(arr.clone()),
+            }
+        }
+
+        let constraint = body
+            .regex
+            .as_ref()
+            .map(|r| proto::sampling_params::Constraint::Regex(r.clone()))
+            .or_else(|| {
+                body.json_schema
+                    .as_ref()
+                    .map(|j| proto::sampling_params::Constraint::JsonSchema(j.clone()))
+            })
+            .or_else(|| {
+                body.ebnf
+                    .as_ref()
+                    .map(|e| proto::sampling_params::Constraint::Grammar(e.clone()))
+            });
+
+        let sampling_params = proto::SamplingParams {
+            temperature: body.temperature,
+            top_p: body.top_p.unwrap_or(1.0),
+            top_k: body.top_k.map(|v| v.max(0) as u32).unwrap_or(0),
+            frequency_penalty: body.frequency_penalty.unwrap_or(0.0),
+            presence_penalty: body.presence_penalty.unwrap_or(0.0),
+            repetition_penalty: body.repetition_penalty.unwrap_or(1.0),
+            min_p: body.min_p.unwrap_or(0.0),
+            max_tokens: body.max_tokens,
+            n: body.n.unwrap_or(1),
+            stop,
+            stop_token_ids: body.stop_token_ids.clone().unwrap_or_default(),
+            skip_special_tokens: body.skip_special_tokens,
+            ignore_eos: body.ignore_eos,
+            seed: body
+                .sampling_seed
+                .and_then(|s| s.try_into().ok())
+                .or_else(|| body.seed.and_then(|s| s.try_into().ok())),
+            logprobs: body.logprobs.map(|l| l as i32),
+            min_tokens: body.min_tokens.unwrap_or(0),
+            constraint,
+            ..Default::default()
+        };
+
+        let grpc_request = proto::GenerateRequest {
+            request_id,
+            input: Some(proto::generate_request::Input::Tokenized(
+                proto::TokenizedInput {
+                    original_text: processed_text,
                     input_ids: token_ids,
                 },
             )),
