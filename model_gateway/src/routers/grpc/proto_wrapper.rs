@@ -3,7 +3,7 @@
 //! This module provides unified enums that wrap proto types from SGLang, vLLM, and TensorRT-LLM,
 //! allowing the router to work with any backend transparently.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use futures_util::StreamExt;
 use smg_grpc_client::{
@@ -878,6 +878,9 @@ fn unified_stats_from_sglang(stats: sglang::RequestStats) -> UnifiedRequestStats
     }
 }
 
+/// Timeout for fetching request stats from the engine via RPC.
+const REQUEST_STATS_FETCH_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Unified GenerateError
 /// Note: vLLM proto no longer has GenerateError - errors are returned via gRPC status
 #[derive(Clone)]
@@ -949,20 +952,33 @@ impl ProtoStream {
                 let client = stream.scheduler_client().clone();
                 let engine_request_id = stream.request_id().to_string();
                 tokio::spawn(async move {
-                    let response = match client.get_request_stats(engine_request_id).await {
-                        Ok(r) => r,
-                        Err(status) => {
+                    let response = match tokio::time::timeout(
+                        REQUEST_STATS_FETCH_TIMEOUT,
+                        client.get_request_stats(engine_request_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(r)) => r,
+                        Ok(Err(status)) => {
                             tracing::debug!("GetRequestStats failed: {}", status.message());
                             return;
                         }
-                    };
-                    let mut merged: Option<UnifiedRequestStats> = None;
-                    for sample in response.stats.into_iter().map(unified_stats_from_sglang) {
-                        match &mut merged {
-                            Some(existing) => existing.merge(&sample),
-                            None => merged = Some(sample),
+                        Err(_) => {
+                            tracing::debug!(
+                                timeout_ms = REQUEST_STATS_FETCH_TIMEOUT.as_millis(),
+                                "GetRequestStats timed out"
+                            );
+                            return;
                         }
-                    }
+                    };
+                    let merged = response
+                        .stats
+                        .into_iter()
+                        .map(unified_stats_from_sglang)
+                        .reduce(|mut merged, sample| {
+                            merged.merge(&sample);
+                            merged
+                        });
                     UnifiedRequestStats::maybe_emit_event(
                         merged,
                         &request_id,
@@ -981,8 +997,8 @@ impl ProtoStream {
 pub struct StatsProtoStream {
     stream: ProtoStream,
     enable_request_statistics: bool,
-    request_id: String,
-    model: String,
+    request_id: Option<String>,
+    model: Option<String>,
     router_backend: &'static str,
 }
 
@@ -994,11 +1010,17 @@ impl StatsProtoStream {
         model: &str,
         router_backend: &'static str,
     ) -> Self {
+        let (request_id, model) = if enable_request_statistics {
+            (Some(request_id.to_owned()), Some(model.to_owned()))
+        } else {
+            (None, None)
+        };
+
         Self {
             stream,
             enable_request_statistics,
-            request_id: request_id.to_owned(),
-            model: model.to_owned(),
+            request_id,
+            model,
             router_backend,
         }
     }
@@ -1018,11 +1040,13 @@ impl StatsProtoStream {
         if !self.enable_request_statistics {
             return;
         }
-        self.stream.spawn_stats_emission(
-            std::mem::take(&mut self.request_id),
-            std::mem::take(&mut self.model),
-            self.router_backend,
-        );
+
+        let (Some(request_id), Some(model)) = (self.request_id.take(), self.model.take()) else {
+            return;
+        };
+
+        self.stream
+            .spawn_stats_emission(request_id, model, self.router_backend);
     }
 }
 
