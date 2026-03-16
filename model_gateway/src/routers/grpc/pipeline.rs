@@ -446,7 +446,6 @@ impl RequestPipeline {
     }
 
     /// Execute the complete pipeline for a generate request
-    /// Execute the complete pipeline for a generate request
     pub async fn execute_generate(
         &self,
         request: Arc<GenerateRequest>,
