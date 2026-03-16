@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use openai_protocol::{
-    chat::ChatCompletionRequest, generate::GenerateRequest, worker::WorkerLoadResponse,
+    chat::ChatCompletionRequest, generate::GenerateRequest, messages::CreateMessageRequest,
+    worker::WorkerLoadResponse,
 };
 use smg_grpc_client::{
     tokenizer_bundle, tokenizer_bundle::StreamBundle, SglangSchedulerClient, TrtllmServiceClient,
@@ -309,6 +310,68 @@ impl GrpcClient {
                     _ => unreachable!("caller guarantees matching variant"),
                 });
                 let req = client.build_generate_request_from_chat(
+                    request_id,
+                    body,
+                    processed_text,
+                    token_ids,
+                    trtllm_mm,
+                    tool_constraints,
+                )?;
+                Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
+            }
+        }
+    }
+
+    #[expect(
+        clippy::unreachable,
+        reason = "assembly stage guarantees matching MultimodalData variant for each backend"
+    )]
+    pub fn build_messages_request(
+        &self,
+        request_id: String,
+        body: &CreateMessageRequest,
+        processed_text: String,
+        token_ids: Vec<u32>,
+        multimodal_inputs: Option<MultimodalData>,
+        tool_constraints: Option<(String, String)>,
+    ) -> Result<ProtoGenerateRequest, String> {
+        match self {
+            Self::Sglang(client) => {
+                let sglang_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Sglang(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
+                let req = client.build_generate_request_from_messages(
+                    request_id,
+                    body,
+                    processed_text,
+                    token_ids,
+                    sglang_mm,
+                    tool_constraints,
+                )?;
+                Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
+            }
+            Self::Vllm(client) => {
+                let vllm_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Vllm(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
+                let req = client.build_generate_request_from_messages(
+                    request_id,
+                    body,
+                    processed_text,
+                    token_ids,
+                    vllm_mm,
+                    tool_constraints,
+                )?;
+                Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
+            }
+            Self::Trtllm(client) => {
+                let trtllm_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Trtllm(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
+                let req = client.build_generate_request_from_messages(
                     request_id,
                     body,
                     processed_text,

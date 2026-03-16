@@ -2,6 +2,7 @@
 
 mod chat_utils;
 mod logprobs;
+pub(crate) mod message_utils;
 mod metrics;
 mod parsers;
 pub(crate) mod tonic_ext;

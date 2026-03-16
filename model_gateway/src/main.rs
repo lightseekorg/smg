@@ -262,6 +262,10 @@ struct CliArgs {
     #[arg(long, num_args = 0.., help_heading = "Service Discovery (Kubernetes)")]
     decode_selector: Vec<String>,
 
+    /// Label selector for router pod discovery in HA mesh mode (format: key=value)
+    #[arg(long, num_args = 0.., help_heading = "Service Discovery (Kubernetes)")]
+    router_selector: Vec<String>,
+
     /// Override each worker's model_id from pod metadata.
     /// Accepted values: "namespace", "label:<key>", or "annotation:<key>"
     #[arg(long, help_heading = "Service Discovery (Kubernetes)", value_parser = parse_model_id_from)]
@@ -402,6 +406,10 @@ struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "Health Checks")]
     disable_health_check: bool,
 
+    /// Remove workers from the registry when they are marked unhealthy
+    #[arg(long, default_value_t = false, help_heading = "Health Checks")]
+    remove_unhealthy_workers: bool,
+
     // ==================== Tokenizer ====================
     /// Model path for loading tokenizer (HuggingFace ID or local path)
     #[arg(long, alias = "model", help_heading = "Tokenizer")]
@@ -414,6 +422,10 @@ struct CliArgs {
     /// Chat template path
     #[arg(long, help_heading = "Tokenizer")]
     chat_template: Option<String>,
+
+    /// Disable automatic tokenizer loading at startup and worker registration
+    #[arg(long, default_value_t = false, help_heading = "Tokenizer")]
+    disable_tokenizer_autoload: bool,
 
     /// Enable L0 (exact match) tokenizer cache
     #[arg(long, default_value_t = false, help_heading = "Tokenizer")]
@@ -623,6 +635,20 @@ struct CliArgs {
 
     #[arg(long, num_args = 0..)]
     mesh_peer_urls: Vec<String>,
+
+    // ==================== WebRTC ====================
+    /// Bind address for WebRTC UDP sockets (client-facing ICE candidate IP).
+    /// Default: 0.0.0.0 (auto-detect via routing table).
+    /// Set to 127.0.0.1 for local development on the same machine.
+    #[arg(long, help_heading = "WebRTC")]
+    webrtc_bind_addr: Option<std::net::IpAddr>,
+
+    /// STUN server for ICE candidate gathering (host:port).
+    /// Set to your own STUN server for enterprise deployments that
+    /// restrict outbound traffic to external STUN servers.
+    /// Defaults to `stun.l.google.com:19302` at runtime when omitted.
+    #[arg(long, help_heading = "WebRTC")]
+    webrtc_stun_server: Option<String>,
 }
 
 enum OracleConnectSource {
@@ -987,8 +1013,8 @@ impl CliArgs {
                 prefill_selector: Self::parse_selector(&self.prefill_selector),
                 decode_selector: Self::parse_selector(&self.decode_selector),
                 bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
-                router_selector: HashMap::new(), // Can be set via config file
-                router_mesh_port_annotation: "sglang.ai/ha-port".to_string(),
+                router_selector: Self::parse_selector(&self.router_selector),
+                router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
                 model_id_source: self.model_id_from.clone(),
             })
         } else {
@@ -1084,6 +1110,7 @@ impl CliArgs {
                 check_interval_secs: self.health_check_interval_secs,
                 endpoint: self.health_check_endpoint.clone(),
                 disable_health_check: self.disable_health_check,
+                remove_unhealthy_workers: self.remove_unhealthy_workers,
             })
             .tokenizer_cache(TokenizerCacheConfig {
                 enable_l0: self.tokenizer_cache_enable_l0,
@@ -1091,6 +1118,7 @@ impl CliArgs {
                 enable_l1: self.tokenizer_cache_enable_l1,
                 l1_max_memory: self.tokenizer_cache_l1_max_memory,
             })
+            .disable_tokenizer_autoload(self.disable_tokenizer_autoload)
             .history_backend(history_backend)
             .log_level(&self.log_level)
             .maybe_api_key(self.api_key.as_ref())
@@ -1244,6 +1272,8 @@ impl CliArgs {
             shutdown_grace_period_secs: self.shutdown_grace_period_secs,
             control_plane_auth,
             mesh_server_config,
+            webrtc_bind_addr: self.webrtc_bind_addr,
+            webrtc_stun_server: self.webrtc_stun_server.clone(),
         })
     }
 }

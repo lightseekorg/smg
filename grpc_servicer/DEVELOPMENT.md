@@ -11,7 +11,7 @@ pip install -e grpc_servicer/
 
 No version concerns locally — editable installs always use the latest source.
 
-## CI
+## CI — vLLM
 
 PR tests install both `smg-grpc-proto` and `smg-grpc-servicer` from source (not PyPI),
 so changes to either package are always tested against the PR's code.
@@ -20,9 +20,21 @@ This is handled in `scripts/ci_install_vllm.sh`:
 
 ```bash
 uv pip install vllm
-pip install -e crates/grpc_client/python/
-pip install -e grpc_servicer/
+uv pip install -e crates/grpc_client/python/
+uv pip install -e grpc_servicer/
 ```
+
+## CI — SGLang
+
+PR tests install `smg-grpc-servicer` from source alongside SGLang:
+
+```bash
+uv pip install "sglang[all]"
+uv pip install -e crates/grpc_client/python/
+uv pip install -e grpc_servicer/
+```
+
+This is handled in `scripts/ci_install_sglang.sh`.
 
 ## Release Process
 

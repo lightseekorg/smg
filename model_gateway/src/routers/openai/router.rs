@@ -1,56 +1,54 @@
 use std::{
     any::Any,
     sync::{atomic::AtomicBool, Arc},
-    time::Instant,
 };
 
-use axum::{
-    body::Body,
-    extract::Request,
-    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
-    Json,
-};
-use futures_util::StreamExt;
+use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
 use openai_protocol::{
     chat::ChatCompletionRequest,
     realtime_session::{
         RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
         RealtimeTranscriptionSessionCreateRequest,
     },
-    responses::{
-        generate_id, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
-        ResponsesGetParams, ResponsesRequest,
-    },
+    responses::{ResponsesGetParams, ResponsesRequest},
 };
-use serde_json::{json, to_value, Value};
-use smg_data_connector::{ConversationId, ListParams, ResponseId, SortOrder};
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::warn;
 
 use super::{
-    context::{
-        ComponentRefs, PayloadState, RequestContext, ResponsesComponents, SharedComponents,
-        WorkerSelection,
-    },
+    chat::{self, ChatRouterContext},
+    context::{ResponsesComponents, SharedComponents},
+    health,
     provider::ProviderRegistry,
-    responses::{handle_non_streaming_response, handle_streaming_response},
+    responses::route::{self as responses_route, ResponsesRouterContext},
 };
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
-    core::{
-        is_retryable_status, Endpoint, ProviderType, RetryExecutor, RuntimeType, Worker,
-        WorkerRegistry,
-    },
-    observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
+    core::{ProviderType, Worker, WorkerRegistry},
+    observability::metrics::{metrics_labels, Metrics},
     routers::{
-        header_utils::{apply_provider_headers, extract_auth_header},
+        header_utils::extract_auth_header,
         openai::realtime::{rest::forward_realtime_rest, ws::handle_realtime_ws, RealtimeRegistry},
         worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
 };
+
+/// Resolve the provider implementation for a given worker and model.
+///
+/// Checks (in order): worker's per-model provider, model name heuristic,
+/// then falls back to the default provider.
+pub(super) fn resolve_provider(
+    registry: &ProviderRegistry,
+    worker: &dyn Worker,
+    model: &str,
+) -> Arc<dyn super::provider::Provider> {
+    if let Some(pt) = worker.provider_for_model(model) {
+        return registry.get_arc(pt);
+    }
+    if let Some(pt) = ProviderType::from_model_name(model) {
+        return registry.get_arc(&pt);
+    }
+    registry.default_provider_arc()
+}
 
 pub struct OpenAIRouter {
     worker_registry: Arc<WorkerRegistry>,
@@ -74,28 +72,7 @@ impl std::fmt::Debug for OpenAIRouter {
     }
 }
 
-use crate::routers::error;
-
 impl OpenAIRouter {
-    const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
-
-    /// Get all external workers from the registry
-    fn external_workers(&self) -> Vec<Arc<dyn Worker>> {
-        self.worker_registry
-            .get_all()
-            .into_iter()
-            .filter(|w| w.metadata().spec.runtime_type == RuntimeType::External)
-            .collect()
-    }
-
-    fn shared_components(&self) -> Arc<SharedComponents> {
-        Arc::clone(&self.shared_components)
-    }
-
-    fn responses_components(&self) -> Arc<ResponsesComponents> {
-        Arc::clone(&self.responses_components)
-    }
-
     #[expect(
         clippy::unused_async,
         reason = "async for API consistency with other router constructors"
@@ -113,9 +90,7 @@ impl OpenAIRouter {
         });
 
         let responses_components = Arc::new(ResponsesComponents {
-            shared: SharedComponents {
-                client: ctx.client.clone(),
-            },
+            shared: Arc::clone(&shared_components),
             mcp_orchestrator: mcp_orchestrator.clone(),
             response_storage: ctx.response_storage.clone(),
             conversation_storage: ctx.conversation_storage.clone(),
@@ -147,237 +122,6 @@ impl OpenAIRouter {
             })
             .await
     }
-
-    fn get_provider_arc_for_worker(
-        &self,
-        worker: &dyn Worker,
-        model_id: Option<&str>,
-    ) -> Arc<dyn super::provider::Provider> {
-        if let Some(model) = model_id {
-            if let Some(pt) = worker.provider_for_model(model) {
-                return self.provider_registry.get_arc(pt);
-            }
-            if let Some(pt) = ProviderType::from_model_name(model) {
-                return self.provider_registry.get_arc(&pt);
-            }
-        }
-        self.provider_registry.default_provider_arc()
-    }
-
-    /// Deserialize ResponseInputOutputItems from a JSON array value
-    fn deserialize_items_from_array(array: &Value) -> Vec<ResponseInputOutputItem> {
-        array
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|item| {
-                        serde_json::from_value::<ResponseInputOutputItem>(item.clone())
-                            .map_err(|e| warn!("Failed to deserialize item: {}. Item: {}", e, item))
-                            .ok()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Append current request input to items list, creating a user message if needed
-    fn append_current_input(
-        items: &mut Vec<ResponseInputOutputItem>,
-        input: &ResponseInput,
-        id_suffix: &str,
-    ) {
-        match input {
-            ResponseInput::Text(text) => {
-                items.push(ResponseInputOutputItem::Message {
-                    id: format!("msg_u_{id_suffix}"),
-                    role: "user".to_string(),
-                    content: vec![ResponseContentPart::InputText { text: text.clone() }],
-                    status: Some("completed".to_string()),
-                });
-            }
-            ResponseInput::Items(current_items) => {
-                for item in current_items {
-                    items.push(openai_protocol::responses::normalize_input_item(item));
-                }
-            }
-        }
-    }
-
-    /// Load conversation history and/or previous response chain into request input.
-    ///
-    /// Mutates `request_body.input` with the loaded items.
-    /// Returns `Ok(original_previous_response_id)` on success, or `Err(response)` on validation failure.
-    async fn load_input_history(
-        &self,
-        body: &ResponsesRequest,
-        request_body: &mut ResponsesRequest,
-        model: &str,
-    ) -> Result<Option<String>, Response> {
-        let original_previous_response_id = request_body.previous_response_id.clone();
-
-        // Load items from previous response chain if specified
-        let mut chain_items: Option<Vec<ResponseInputOutputItem>> = None;
-        if let Some(prev_id_str) = request_body.previous_response_id.take() {
-            let prev_id = ResponseId::from(prev_id_str.as_str());
-            match self
-                .responses_components
-                .response_storage
-                .get_response_chain(&prev_id, None)
-                .await
-            {
-                Ok(chain) => {
-                    let items: Vec<ResponseInputOutputItem> = chain
-                        .responses
-                        .iter()
-                        .flat_map(|stored| {
-                            Self::deserialize_items_from_array(&stored.input)
-                                .into_iter()
-                                .chain(Self::deserialize_items_from_array(
-                                    stored
-                                        .raw_response
-                                        .get("output")
-                                        .unwrap_or(&Value::Array(vec![])),
-                                ))
-                        })
-                        .collect();
-                    chain_items = Some(items);
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to load previous response chain for {}: {}",
-                        prev_id_str, e
-                    );
-                }
-            }
-        }
-
-        // Load conversation history if specified
-        if let Some(conv_id_str) = body.conversation.clone() {
-            let conv_id = ConversationId::from(conv_id_str.as_str());
-
-            if let Ok(None) = self
-                .responses_components
-                .conversation_storage
-                .get_conversation(&conv_id)
-                .await
-            {
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
-                    metrics_labels::CONNECTION_HTTP,
-                    model,
-                    metrics_labels::ENDPOINT_RESPONSES,
-                    metrics_labels::ERROR_VALIDATION,
-                );
-                return Err(error::not_found(
-                    "not_found",
-                    format!("No conversation found with id '{}'", conv_id.0),
-                ));
-            }
-
-            let params = ListParams {
-                limit: Self::MAX_CONVERSATION_HISTORY_ITEMS,
-                order: SortOrder::Asc,
-                after: None,
-            };
-
-            match self
-                .responses_components
-                .conversation_item_storage
-                .list_items(&conv_id, params)
-                .await
-            {
-                Ok(stored_items) => {
-                    let mut items: Vec<ResponseInputOutputItem> = Vec::new();
-                    for item in stored_items {
-                        match item.item_type.as_str() {
-                            "message" => {
-                                match serde_json::from_value::<Vec<ResponseContentPart>>(
-                                    item.content.clone(),
-                                ) {
-                                    Ok(content_parts) => {
-                                        items.push(ResponseInputOutputItem::Message {
-                                            id: item.id.0.clone(),
-                                            role: item
-                                                .role
-                                                .clone()
-                                                .unwrap_or_else(|| "user".to_string()),
-                                            content: content_parts,
-                                            status: item.status.clone(),
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Failed to deserialize message content: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                            "function_call" => {
-                                match serde_json::from_value::<ResponseInputOutputItem>(
-                                    item.content.clone(),
-                                ) {
-                                    Ok(func_call) => items.push(func_call),
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Failed to deserialize function_call: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                            "function_call_output" => {
-                                tracing::debug!(
-                                    "Loading function_call_output from DB - content: {}",
-                                    serde_json::to_string_pretty(&item.content)
-                                        .unwrap_or_else(|_| "failed to serialize".to_string())
-                                );
-                                match serde_json::from_value::<ResponseInputOutputItem>(
-                                    item.content.clone(),
-                                ) {
-                                    Ok(func_output) => {
-                                        tracing::debug!(
-                                            "Successfully deserialized function_call_output"
-                                        );
-                                        items.push(func_output);
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Failed to deserialize function_call_output: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                            "reasoning" => {}
-                            _ => {
-                                warn!("Unknown item type in conversation: {}", item.item_type);
-                            }
-                        }
-                    }
-
-                    Self::append_current_input(&mut items, &request_body.input, &conv_id.0);
-                    request_body.input = ResponseInput::Items(items);
-                }
-                Err(e) => {
-                    warn!("Failed to load conversation history: {}", e);
-                }
-            }
-        }
-
-        // Apply previous response chain items if loaded.
-        // Note: conversation and previous_response_id are mutually exclusive
-        // (enforced by the caller in route_responses), so this branch and the
-        // conversation branch above never both modify request_body.input.
-        if let Some(mut items) = chain_items {
-            let id_suffix = original_previous_response_id.as_deref().unwrap_or("new");
-            Self::append_current_input(&mut items, &request_body.input, id_suffix);
-            request_body.input = ResponseInput::Items(items);
-        }
-
-        Ok(original_previous_response_id)
-    }
 }
 
 #[async_trait::async_trait]
@@ -387,54 +131,11 @@ impl crate::routers::RouterTrait for OpenAIRouter {
     }
 
     async fn health_generate(&self, _req: Request<Body>) -> Response {
-        let external_workers = self.external_workers();
-        if external_workers.is_empty() {
-            return error::service_unavailable(
-                "service_unavailable",
-                "No external workers registered",
-            );
-        }
-
-        let (healthy, unhealthy): (Vec<_>, Vec<_>) =
-            external_workers.iter().partition(|w| w.is_healthy());
-
-        if unhealthy.is_empty() {
-            (
-                StatusCode::OK,
-                format!("OK - {} workers healthy", healthy.len()),
-            )
-                .into_response()
-        } else {
-            let unhealthy_info: Vec<_> = unhealthy
-                .iter()
-                .map(|w| format!("{} ({})", w.model_id(), w.url()))
-                .collect();
-            error::service_unavailable(
-                "service_unavailable",
-                format!(
-                    "{}/{} workers unhealthy: {}",
-                    unhealthy.len(),
-                    external_workers.len(),
-                    unhealthy_info.join(", ")
-                ),
-            )
-        }
+        health::health_generate(&self.worker_registry)
     }
 
     async fn get_server_info(&self, _req: Request<Body>) -> Response {
-        let stats = self.worker_registry.stats();
-        let external_workers = self.external_workers();
-        let worker_urls: Vec<_> = external_workers.iter().map(|w| w.url()).collect();
-
-        let info = json!({
-            "router_type": "openai",
-            "total_workers": stats.total_workers,
-            "external_workers": external_workers.len(),
-            "healthy_workers": stats.healthy_workers,
-            "total_models": stats.total_models,
-            "worker_urls": worker_urls
-        });
-        (StatusCode::OK, info.to_string()).into_response()
+        health::get_server_info(&self.worker_registry)
     }
 
     async fn route_chat(
@@ -443,231 +144,14 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         body: &ChatCompletionRequest,
         model_id: Option<&str>,
     ) -> Response {
-        let start = Instant::now();
-        let model = model_id.unwrap_or(body.model.as_str());
-        let streaming = body.stream;
-
-        // Record request start
-        Metrics::record_router_request(
-            metrics_labels::ROUTER_OPENAI,
-            metrics_labels::BACKEND_EXTERNAL,
-            metrics_labels::CONNECTION_HTTP,
-            model,
-            metrics_labels::ENDPOINT_CHAT,
-            bool_to_static_str(streaming),
-        );
-
-        let worker = match self.select_worker(body.model.as_str(), headers).await {
-            Ok(w) => w,
-            Err(response) => {
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
-                    metrics_labels::CONNECTION_HTTP,
-                    model,
-                    metrics_labels::ENDPOINT_CHAT,
-                    metrics_labels::ERROR_NO_WORKERS,
-                );
-                return response;
-            }
+        let deps = ChatRouterContext {
+            worker_registry: &self.worker_registry,
+            provider_registry: &self.provider_registry,
+            shared_components: &self.shared_components,
+            client: &self.shared_components.client,
+            retry_config: &self.retry_config,
         };
-
-        let mut payload = match to_value(body) {
-            Ok(v) => v,
-            Err(e) => {
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
-                    metrics_labels::CONNECTION_HTTP,
-                    model,
-                    metrics_labels::ENDPOINT_CHAT,
-                    metrics_labels::ERROR_VALIDATION,
-                );
-                return error::bad_request(
-                    "invalid_request",
-                    format!("Failed to serialize request: {e}"),
-                );
-            }
-        };
-
-        let provider = self.get_provider_arc_for_worker(worker.as_ref(), model_id);
-        if let Err(e) = provider.transform_request(&mut payload, Endpoint::Chat) {
-            Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
-                metrics_labels::CONNECTION_HTTP,
-                model,
-                metrics_labels::ENDPOINT_CHAT,
-                metrics_labels::ERROR_VALIDATION,
-            );
-            return error::bad_request("invalid_request", format!("Provider transform error: {e}"));
-        }
-
-        let mut ctx = RequestContext::for_chat(
-            Arc::new(body.clone()),
-            headers.cloned(),
-            model_id.map(String::from),
-            ComponentRefs::Shared(self.shared_components()),
-        );
-
-        ctx.state.worker = Some(WorkerSelection {
-            worker: Arc::clone(&worker),
-            provider,
-        });
-
-        let url = format!("{}/v1/chat/completions", worker.url());
-        ctx.state.payload = Some(PayloadState {
-            json: payload,
-            url: url.clone(),
-            previous_response_id: None,
-        });
-
-        // Wrap values in Arc to avoid cloning large objects on each retry attempt
-        #[expect(
-            clippy::expect_used,
-            reason = "payload is set earlier in this function; absence is a logic error"
-        )]
-        let payload_ref = ctx.payload().expect("Payload not prepared");
-        let payload_json = Arc::new(payload_ref.json.clone());
-        let client = ctx.components.client().clone();
-        let headers_cloned = Arc::new(ctx.headers().cloned());
-        let worker_api_key = Arc::new(worker.api_key().cloned());
-        let is_streaming = ctx.is_streaming();
-
-        let response = RetryExecutor::execute_response_with_retry(
-            &self.retry_config,
-            |_attempt| {
-                let client = client.clone();
-                let url = url.clone();
-                let payload = Arc::clone(&payload_json);
-                let headers = Arc::clone(&headers_cloned);
-                let worker_api_key = Arc::clone(&worker_api_key);
-                let worker = Arc::clone(&worker);
-
-                async move {
-                    let mut req = client.post(&url).json(&*payload);
-                    let auth_header = extract_auth_header((*headers).as_ref(), (*worker_api_key).as_ref());
-                    req = apply_provider_headers(req, &url, auth_header.as_ref());
-
-                    if is_streaming {
-                        req = req.header("Accept", "text/event-stream");
-                    }
-
-                    let resp = match req.send().await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            worker.circuit_breaker().record_failure();
-                            return error::service_unavailable(
-                                "upstream_error",
-                                format!("Failed to contact upstream: {e}"),
-                            );
-                        }
-                    };
-
-                    let status = StatusCode::from_u16(resp.status().as_u16())
-                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-
-                    // Record circuit breaker failure for error status codes
-                    if !status.is_success() {
-                        worker.circuit_breaker().record_failure();
-                    }
-
-                    if is_streaming {
-                        // Streaming response - record success when stream starts
-                        if status.is_success() {
-                            worker.circuit_breaker().record_success();
-                        }
-                        let stream = resp.bytes_stream();
-                        let (tx, rx) = mpsc::unbounded_channel();
-                        #[expect(clippy::disallowed_methods, reason = "fire-and-forget stream relay; gateway shutdown need not wait for individual stream forwarding")]
-                        tokio::spawn(async move {
-                            let mut s = stream;
-                            while let Some(chunk) = s.next().await {
-                                match chunk {
-                                    Ok(bytes) => {
-                                        if tx.send(Ok(bytes)).is_err() {
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = tx.send(Err(format!("Stream error: {e}")));
-                                        break;
-                                    }
-                                }
-                            }
-                        });
-                        let mut response =
-                            Response::new(Body::from_stream(UnboundedReceiverStream::new(rx)));
-                        *response.status_mut() = status;
-                        response
-                            .headers_mut()
-                            .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-                        response
-                    } else {
-                        let content_type = resp.headers().get(CONTENT_TYPE).cloned();
-                        match resp.bytes().await {
-                            Ok(body) => {
-                                // Only record success after body is fully read
-                                if status.is_success() {
-                                    worker.circuit_breaker().record_success();
-                                }
-                                let mut response = Response::new(Body::from(body));
-                                *response.status_mut() = status;
-                                if let Some(ct) = content_type {
-                                    response.headers_mut().insert(CONTENT_TYPE, ct);
-                                }
-                                response
-                            }
-                            Err(e) => {
-                                worker.circuit_breaker().record_failure();
-                                error::internal_error(
-                                    "upstream_error",
-                                    format!("Failed to read response: {e}"),
-                                )
-                            }
-                        }
-                    }
-                }
-            },
-            |res, _attempt| is_retryable_status(res.status()),
-            |delay, attempt| {
-                Metrics::record_worker_retry(
-                    metrics_labels::BACKEND_EXTERNAL,
-                    metrics_labels::ENDPOINT_CHAT,
-                );
-                Metrics::record_worker_retry_backoff(attempt, delay);
-            },
-            || {
-                Metrics::record_worker_retries_exhausted(
-                    metrics_labels::BACKEND_EXTERNAL,
-                    metrics_labels::ENDPOINT_CHAT,
-                );
-            },
-        )
-        .await;
-
-        // Record duration/error metrics after retry completes
-        if response.status().is_success() {
-            Metrics::record_router_duration(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
-                metrics_labels::CONNECTION_HTTP,
-                model,
-                metrics_labels::ENDPOINT_CHAT,
-                start.elapsed(),
-            );
-        } else {
-            Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
-                metrics_labels::CONNECTION_HTTP,
-                model,
-                metrics_labels::ENDPOINT_CHAT,
-                metrics_labels::ERROR_BACKEND,
-            );
-        }
-
-        response
+        chat::route_chat(&deps, headers, body, model_id).await
     }
 
     async fn route_responses(
@@ -676,144 +160,12 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         body: &ResponsesRequest,
         model_id: Option<&str>,
     ) -> Response {
-        let start = Instant::now();
-        let model = model_id.unwrap_or(body.model.as_str());
-        let streaming = body.stream.unwrap_or(false);
-
-        // Record request start
-        Metrics::record_router_request(
-            metrics_labels::ROUTER_OPENAI,
-            metrics_labels::BACKEND_EXTERNAL,
-            metrics_labels::CONNECTION_HTTP,
-            model,
-            metrics_labels::ENDPOINT_RESPONSES,
-            bool_to_static_str(streaming),
-        );
-
-        let worker = match self.select_worker(model, headers).await {
-            Ok(w) => w,
-            Err(response) => {
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
-                    metrics_labels::CONNECTION_HTTP,
-                    model,
-                    metrics_labels::ENDPOINT_RESPONSES,
-                    metrics_labels::ERROR_NO_WORKERS,
-                );
-                return response;
-            }
+        let deps = ResponsesRouterContext {
+            worker_registry: &self.worker_registry,
+            provider_registry: &self.provider_registry,
+            responses_components: &self.responses_components,
         };
-
-        // Validate mutual exclusivity of conversation and previous_response_id
-        // Treat empty strings as unset to match other metadata paths
-        let has_conversation = body.conversation.as_ref().is_some_and(|s| !s.is_empty());
-        let has_previous_response = body
-            .previous_response_id
-            .as_ref()
-            .is_some_and(|s| !s.is_empty());
-        if has_conversation && has_previous_response {
-            Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
-                metrics_labels::CONNECTION_HTTP,
-                model,
-                metrics_labels::ENDPOINT_RESPONSES,
-                metrics_labels::ERROR_VALIDATION,
-            );
-            return error::bad_request(
-                "invalid_request",
-                "Cannot specify both 'conversation' and 'previous_response_id'".to_string(),
-            );
-        }
-
-        let mut request_body = body.clone();
-        if let Some(model) = model_id {
-            request_body.model = model.to_string();
-        }
-        request_body.conversation = None;
-
-        let original_previous_response_id = match self
-            .load_input_history(body, &mut request_body, model)
-            .await
-        {
-            Ok(id) => id,
-            Err(response) => return response,
-        };
-
-        request_body.store = Some(false);
-        if let ResponseInput::Items(ref mut items) = request_body.input {
-            items.retain(|item| !matches!(item, ResponseInputOutputItem::Reasoning { .. }));
-        }
-
-        let mut payload = match to_value(&request_body) {
-            Ok(v) => v,
-            Err(e) => {
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
-                    metrics_labels::CONNECTION_HTTP,
-                    model,
-                    metrics_labels::ENDPOINT_RESPONSES,
-                    metrics_labels::ERROR_VALIDATION,
-                );
-                return error::bad_request(
-                    "invalid_request",
-                    format!("Failed to serialize request: {e}"),
-                );
-            }
-        };
-
-        let provider = self.get_provider_arc_for_worker(worker.as_ref(), model_id);
-        if let Err(e) = provider.transform_request(&mut payload, Endpoint::Responses) {
-            Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
-                metrics_labels::CONNECTION_HTTP,
-                model,
-                metrics_labels::ENDPOINT_RESPONSES,
-                metrics_labels::ERROR_VALIDATION,
-            );
-            return error::bad_request("invalid_request", format!("Provider transform error: {e}"));
-        }
-
-        let mut ctx = RequestContext::for_responses(
-            Arc::new(body.clone()),
-            headers.cloned(),
-            model_id.map(String::from),
-            ComponentRefs::Responses(self.responses_components()),
-        );
-
-        ctx.state.worker = Some(WorkerSelection {
-            worker: Arc::clone(&worker),
-            provider: Arc::clone(&provider),
-        });
-
-        ctx.state.payload = Some(PayloadState {
-            json: payload,
-            url: format!("{}/v1/responses", worker.url()),
-            previous_response_id: original_previous_response_id,
-        });
-
-        let response = if ctx.is_streaming() {
-            handle_streaming_response(ctx).await
-        } else {
-            handle_non_streaming_response(ctx).await
-        };
-
-        // Record duration only for successful requests (errors tracked inside handlers)
-        if response.status().is_success() {
-            Metrics::record_router_duration(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
-                metrics_labels::CONNECTION_HTTP,
-                model,
-                metrics_labels::ENDPOINT_RESPONSES,
-                start.elapsed(),
-            );
-        }
-
-        response
+        responses_route::route_responses(&deps, headers, body, model_id).await
     }
 
     async fn get_response(
@@ -822,28 +174,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         response_id: &str,
         _params: &ResponsesGetParams,
     ) -> Response {
-        let id = ResponseId::from(response_id);
-        match self
-            .responses_components
-            .response_storage
-            .get_response(&id)
-            .await
-        {
-            Ok(Some(stored)) => {
-                let mut response_json = stored.raw_response;
-                if let Some(obj) = response_json.as_object_mut() {
-                    obj.insert("id".to_string(), json!(id.0));
-                }
-                (StatusCode::OK, Json(response_json)).into_response()
-            }
-            Ok(None) => error::not_found(
-                "not_found",
-                format!("No response found with id '{response_id}'"),
-            ),
-            Err(e) => {
-                error::internal_error("storage_error", format!("Failed to get response: {e}"))
-            }
-        }
+        super::responses::get_response(&self.responses_components, response_id).await
     }
 
     async fn list_response_input_items(
@@ -851,51 +182,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         _headers: Option<&HeaderMap>,
         response_id: &str,
     ) -> Response {
-        let resp_id = ResponseId::from(response_id);
-
-        match self
-            .responses_components
-            .response_storage
-            .get_response(&resp_id)
-            .await
-        {
-            Ok(Some(stored)) => {
-                let items = stored.input.as_array().cloned().unwrap_or_default();
-
-                let items_with_ids: Vec<Value> = items
-                    .into_iter()
-                    .map(|mut item| {
-                        if item.get("id").is_none() {
-                            if let Some(obj) = item.as_object_mut() {
-                                obj.insert("id".to_string(), json!(generate_id("msg")));
-                            }
-                        }
-                        item
-                    })
-                    .collect();
-
-                let response_body = json!({
-                    "object": "list",
-                    "data": items_with_ids,
-                    "first_id": items_with_ids.first().and_then(|v| v.get("id").and_then(|i| i.as_str())),
-                    "last_id": items_with_ids.last().and_then(|v| v.get("id").and_then(|i| i.as_str())),
-                    "has_more": false
-                });
-
-                (StatusCode::OK, Json(response_body)).into_response()
-            }
-            Ok(None) => error::not_found(
-                "not_found",
-                format!("No response found with id '{response_id}'"),
-            ),
-            Err(e) => {
-                warn!("Failed to retrieve input items for {}: {}", response_id, e);
-                error::internal_error(
-                    "storage_error",
-                    format!("Failed to retrieve input items: {e}"),
-                )
-            }
-        }
+        super::responses::list_response_input_items(&self.responses_components, response_id).await
     }
 
     async fn route_realtime_session(

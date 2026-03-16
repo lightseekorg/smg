@@ -271,6 +271,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             max_context_length=model_config.max_model_len,
             vocab_size=model_config.get_vocab_size(),
             supports_vision=model_config.is_multimodal_model,
+            served_model_name=model_config.served_model_name or model_config.model,
         )
 
     async def GetServerInfo(

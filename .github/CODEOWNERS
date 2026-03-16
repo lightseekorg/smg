@@ -19,28 +19,28 @@
 /scripts @gongwei-130 @CatherineSue @key4ng @XinyueZhang369 @slin1237
 
 # Main source code (model_gateway)
-/model_gateway/src/config @slin1237
-/model_gateway/src/core @slin1237
+/model_gateway/src/config @slin1237 @CatherineSue
+/model_gateway/src/core @slin1237 @CatherineSue
 /model_gateway/src/policies @slin1237
 /model_gateway/src/routers @CatherineSue @key4ng @slin1237
 
 # Workspace crates
-/auth @slin1237
-/data_connector @key4ng
-/grpc_client @CatherineSue @slin1237
-/grpc_client/proto/vllm_engine.proto @njhill @CatherineSue @slin1237
-/grpc_client/proto/common.proto @njhill @CatherineSue @slin1237
-/grpc_servicer @njhill @CatherineSue
-/kv_index @slin1237
-/mcp @key4ng @CatherineSue @slin1237
-/mesh @slin1237 @tonyluj
-/multimodal @slin1237 @CatherineSue
-/protocols @CatherineSue @key4ng
-/reasoning_parser @CatherineSue
-/tokenizer @slin1237 @CatherineSue
-/tool_parser @slin1237 @CatherineSue
-/wasm @slin1237 @tonyluj
-/workflow @slin1237 @CatherineSue
+/crates/auth @slin1237
+/crates/data_connector @key4ng
+/crates/grpc_client @CatherineSue @slin1237
+/crates/grpc_client/proto/vllm_engine.proto @njhill @CatherineSue @slin1237
+/crates/grpc_client/proto/common.proto @njhill @CatherineSue @slin1237
+/crates/grpc_servicer @njhill @CatherineSue
+/crates/kv_index @slin1237
+/crates/mcp @key4ng @CatherineSue @slin1237
+/crates/mesh @tonyluj @llfl @slin1237
+/crates/multimodal @slin1237 @CatherineSue
+/crates/protocols @CatherineSue @key4ng
+/crates/reasoning_parser @CatherineSue
+/crates/tokenizer @slin1237 @CatherineSue
+/crates/tool_parser @slin1237 @CatherineSue
+/crates/wasm @slin1237 @tonyluj
+/crates/workflow @slin1237 @CatherineSue
 
 # Examples
 /examples/wasm @tonyluj @slin1237

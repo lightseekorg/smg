@@ -12,6 +12,7 @@ use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
     generate::GenerateRequest,
+    messages::CreateMessageRequest,
     responses::ResponsesRequest,
     sampling_params::SamplingParams as GenerateSamplingParams,
 };
@@ -538,6 +539,72 @@ impl VllmEngineClient {
         } else {
             Ok(None)
         }
+    }
+
+    /// Build a GenerateRequest from CreateMessageRequest (Anthropic Messages API)
+    #[expect(
+        clippy::unused_self,
+        reason = "method receiver kept for consistent public API across gRPC backends"
+    )]
+    pub fn build_generate_request_from_messages(
+        &self,
+        request_id: String,
+        body: &CreateMessageRequest,
+        processed_text: String,
+        token_ids: Vec<u32>,
+        multimodal_inputs: Option<proto::MultimodalInputs>,
+        tool_call_constraint: Option<(String, String)>,
+    ) -> Result<proto::GenerateRequest, String> {
+        let sampling_params =
+            Self::build_grpc_sampling_params_from_messages(body, tool_call_constraint)?;
+
+        let grpc_request = proto::GenerateRequest {
+            request_id,
+            input: Some(proto::generate_request::Input::Tokenized(
+                proto::TokenizedInput {
+                    original_text: processed_text,
+                    input_ids: token_ids,
+                },
+            )),
+            sampling_params: Some(sampling_params),
+            stream: body.stream.unwrap_or(false),
+            kv_transfer_params: None,
+            mm_inputs: multimodal_inputs,
+        };
+
+        Ok(grpc_request)
+    }
+
+    /// Build gRPC SamplingParams from CreateMessageRequest
+    fn build_grpc_sampling_params_from_messages(
+        request: &CreateMessageRequest,
+        tool_call_constraint: Option<(String, String)>,
+    ) -> Result<proto::SamplingParams, String> {
+        let stop_sequences = request.stop_sequences.clone().unwrap_or_default();
+
+        // skip_special_tokens: false when tools are present (same logic as chat)
+        let skip_special_tokens =
+            tool_call_constraint.is_none() && request.tools.as_ref().is_none_or(|t| t.is_empty());
+
+        Ok(proto::SamplingParams {
+            temperature: Some(request.temperature.unwrap_or(1.0) as f32),
+            top_p: request.top_p.unwrap_or(1.0) as f32,
+            top_k: request.top_k.unwrap_or(0), // 0 means disabled in vLLM
+            min_p: 0.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            repetition_penalty: 1.0,
+            max_tokens: Some(request.max_tokens),
+            stop: stop_sequences,
+            stop_token_ids: vec![],
+            skip_special_tokens,
+            spaces_between_special_tokens: true,
+            ignore_eos: false,
+            n: 1,
+            logprobs: None,
+            constraint: Self::build_constraint_for_responses(tool_call_constraint)?,
+            ..Default::default()
+        })
     }
 
     fn build_single_constraint_from_plain(

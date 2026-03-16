@@ -943,12 +943,11 @@ impl Gossip for GossipService {
                                                             }
                                                             LocalStoreType::Policy => {
                                                                 if let Ok(policy_state) = serde_json::from_slice::<super::stores::PolicyState>(&entry.value) {
-                                                                    let _ = stores.policy.insert(key, policy_state.clone());
-                                                                    // Also update sync manager if available
                                                                     if let Some(ref sync_manager) = sync_manager {
-                                                                        // Check if this is a tree state update
                                                                         if policy_state.policy_type == "tree_state" {
-                                                                            // Deserialize tree state
+                                                                            // Let apply_remote_tree_operation handle the store
+                                                                            // update + subscriber notification (avoids version-
+                                                                            // check skip from a prior direct store insert)
                                                                             if let Ok(tree_state) = serde_json::from_slice::<
                                                                                 super::tree_ops::TreeState,
                                                                             >(
@@ -961,8 +960,11 @@ impl Gossip for GossipService {
                                                                                 );
                                                                             }
                                                                         } else {
+                                                                            let _ = stores.policy.insert(key, policy_state.clone());
                                                                             sync_manager.apply_remote_policy_state(policy_state, Some(entry.actor.clone()));
                                                                         }
+                                                                    } else {
+                                                                        let _ = stores.policy.insert(key, policy_state.clone());
                                                                     }
                                                                 }
                                                             }

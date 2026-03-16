@@ -295,6 +295,7 @@ message GetModelInfoResponse {
   uint32 max_context_length = 3;
   uint32 vocab_size = 4;
   bool supports_vision = 5;
+  string served_model_name = 6;
 }
 
 message GetServerInfoRequest {}

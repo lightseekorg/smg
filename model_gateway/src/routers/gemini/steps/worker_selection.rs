@@ -17,17 +17,6 @@ use crate::{
 };
 
 /// Select a healthy upstream worker for the requested model.
-///
-/// ## Reads
-/// - `ctx.input.model_id` / `ctx.input.original_request.model` /
-///   `ctx.input.original_request.agent` — the model identifier (first non-`None` wins).
-/// - `ctx.components.worker_registry` — the pool of registered workers.
-/// - `ctx.input.headers` — forwarded headers (auth extraction).
-///
-/// ## Writes
-/// - `ctx.processing.worker` — the selected `Arc<dyn Worker>`.
-/// - `ctx.processing.upstream_url` — `{worker.url()}/v1/interactions`.
-/// - `ctx.state` → `LoadPreviousInteraction`.
 pub(crate) async fn worker_selection(ctx: &mut RequestContext) -> Result<StepResult, Response> {
     let model = ctx
         .input
@@ -56,7 +45,7 @@ pub(crate) async fn worker_selection(ctx: &mut RequestContext) -> Result<StepRes
         })
         .await?;
 
-    ctx.processing.upstream_url = Some(format!("{}/v1/interactions", worker.url()));
+    ctx.processing.upstream_url = Some(format!("{}/v1beta/interactions", worker.url()));
     ctx.processing.worker = Some(worker);
     ctx.state = RequestState::LoadPreviousInteraction;
 

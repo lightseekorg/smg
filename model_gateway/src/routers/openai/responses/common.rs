@@ -8,13 +8,13 @@ use serde_json::Value;
 
 /// Extract output_index from a JSON value
 #[inline]
-pub(super) fn extract_output_index(value: &Value) -> Option<usize> {
+pub(crate) fn extract_output_index(value: &Value) -> Option<usize> {
     value.get("output_index")?.as_u64().map(|v| v as usize)
 }
 
 /// Get event type from event name or parsed JSON, returning a reference to avoid allocation
 #[inline]
-pub(super) fn get_event_type<'a>(event_name: Option<&'a str>, parsed: &'a Value) -> &'a str {
+pub(crate) fn get_event_type<'a>(event_name: Option<&'a str>, parsed: &'a Value) -> &'a str {
     event_name
         .or_else(|| parsed.get("type").and_then(|v| v.as_str()))
         .unwrap_or("")

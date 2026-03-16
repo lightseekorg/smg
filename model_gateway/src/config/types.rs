@@ -56,6 +56,9 @@ pub struct RouterConfig {
     /// Overrides model_path tokenizer if provided
     pub tokenizer_path: Option<String>,
     pub chat_template: Option<String>,
+    /// Disable automatic tokenizer loading at startup and worker registration
+    #[serde(default)]
+    pub disable_tokenizer_autoload: bool,
     #[serde(default = "default_history_backend")]
     pub history_backend: HistoryBackend,
     /// Required when history_backend = "oracle"
@@ -434,6 +437,8 @@ pub struct HealthCheckConfig {
     pub check_interval_secs: u64,
     pub endpoint: String,
     pub disable_health_check: bool,
+    #[serde(default)]
+    pub remove_unhealthy_workers: bool,
 }
 
 impl Default for HealthCheckConfig {
@@ -445,6 +450,7 @@ impl Default for HealthCheckConfig {
             check_interval_secs: 60,
             endpoint: "/health".to_string(),
             disable_health_check: false,
+            remove_unhealthy_workers: false,
         }
     }
 }
@@ -550,6 +556,7 @@ impl Default for RouterConfig {
             model_path: None,
             tokenizer_path: None,
             chat_template: None,
+            disable_tokenizer_autoload: false,
             history_backend: default_history_backend(),
             oracle: None,
             postgres: None,

@@ -96,6 +96,35 @@ pull_request_rules:
       comment:
         message: |
           Hi @{{author}}, this PR has been inactive for 14 days. Please update it or close it if it's no longer needed.
+
+          > **Note:** PRs inactive for more than 30 days will be automatically closed.
       label:
         add:
+          - stale
+
+  - name: Close stale PRs
+    description: Auto-close PRs inactive for more than 30 days
+    conditions:
+      - updated-at < 30 days ago
+      - -merged
+      - -closed
+      - -draft
+    actions:
+      comment:
+        message: |
+          Hi @{{author}}, this PR has been inactive for more than 30 days and is being automatically closed.
+
+          If this work is still relevant, feel free to reopen the PR or create a new one.
+      close:
+        message: Closed due to inactivity (30+ days).
+
+  - name: Remove stale label when PR becomes active
+    description: Remove stale label when PR is updated
+    conditions:
+      - updated-at > 14 days ago
+      - -closed
+      - label = stale
+    actions:
+      label:
+        remove:
           - stale

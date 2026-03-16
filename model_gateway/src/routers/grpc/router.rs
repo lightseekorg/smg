@@ -10,6 +10,7 @@ use openai_protocol::{
     classify::ClassifyRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
+    messages::CreateMessageRequest,
     responses::{ResponsesGetParams, ResponsesRequest},
 };
 use tracing::debug;
@@ -42,6 +43,7 @@ pub struct GrpcRouter {
     harmony_pipeline: RequestPipeline,
     embedding_pipeline: RequestPipeline,
     classify_pipeline: RequestPipeline,
+    messages_pipeline: RequestPipeline,
     shared_components: Arc<SharedComponents>,
     responses_context: ResponsesContext,
     harmony_responses_context: ResponsesContext,
@@ -113,6 +115,16 @@ impl GrpcRouter {
         let classify_pipeline =
             RequestPipeline::new_classify(worker_registry.clone(), _policy_registry.clone());
 
+        // Create Messages pipeline
+        let messages_pipeline = RequestPipeline::new_messages(
+            worker_registry.clone(),
+            _policy_registry.clone(),
+            tool_parser_factory.clone(),
+            reasoning_parser_factory.clone(),
+            ctx.configured_tool_parser.clone(),
+            ctx.configured_reasoning_parser.clone(),
+        );
+
         // Extract shared dependencies for responses contexts
         let mcp_orchestrator = ctx
             .mcp_orchestrator
@@ -142,6 +154,7 @@ impl GrpcRouter {
             harmony_pipeline,
             embedding_pipeline,
             classify_pipeline,
+            messages_pipeline,
             shared_components,
             responses_context,
             harmony_responses_context,
@@ -347,6 +360,53 @@ impl GrpcRouter {
             .await
     }
 
+    /// Main route_messages implementation
+    async fn route_messages_impl(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &CreateMessageRequest,
+        model_id: &str,
+    ) -> Response {
+        debug!("Processing messages request for model: {}", model_id);
+
+        // Clone values needed for retry closure
+        let request = Arc::new(body.clone());
+        let headers_cloned = headers.cloned();
+        let model_id_cloned = Some(model_id.to_string());
+        let components = self.shared_components.clone();
+        let pipeline = &self.messages_pipeline;
+
+        RetryExecutor::execute_response_with_retry(
+            &self.retry_config,
+            |_attempt| {
+                let request = Arc::clone(&request);
+                let headers = headers_cloned.clone();
+                let model_id = model_id_cloned.clone();
+                let components = Arc::clone(&components);
+                async move {
+                    pipeline
+                        .execute_messages(request, headers, model_id, components)
+                        .await
+                }
+            },
+            |res, _attempt| is_retryable_status(res.status()),
+            |delay, attempt| {
+                Metrics::record_worker_retry(
+                    metrics_labels::WORKER_REGULAR,
+                    metrics_labels::ENDPOINT_MESSAGES,
+                );
+                Metrics::record_worker_retry_backoff(attempt, delay);
+            },
+            || {
+                Metrics::record_worker_retries_exhausted(
+                    metrics_labels::WORKER_REGULAR,
+                    metrics_labels::ENDPOINT_MESSAGES,
+                );
+            },
+        )
+        .await
+    }
+
     /// Main route_classify implementation
     async fn route_classify_impl(
         &self,
@@ -441,6 +501,15 @@ impl RouterTrait for GrpcRouter {
         model_id: Option<&str>,
     ) -> Response {
         self.route_classify_impl(headers, body, model_id).await
+    }
+
+    async fn route_messages(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &CreateMessageRequest,
+        model_id: &str,
+    ) -> Response {
+        self.route_messages_impl(headers, body, model_id).await
     }
 
     fn router_type(&self) -> &'static str {
