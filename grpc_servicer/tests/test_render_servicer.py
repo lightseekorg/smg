@@ -130,10 +130,25 @@ class TestRenderChat:
         )
 
     @patch(f"{_MOD}.from_proto")
-    async def test_generic_exception(
+    async def test_value_error_returns_invalid_argument(
         self, mock_from_proto, mock_state, mock_grpc_context
     ):
-        mock_from_proto.side_effect = ValueError("something broke")
+        mock_from_proto.side_effect = ValueError("bad input")
+        servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
+
+        with pytest.raises(grpc.aio.AbortError):
+            await servicer.RenderChat(MagicMock(), mock_grpc_context)
+
+        mock_grpc_context.abort.assert_awaited_once_with(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            "bad input",
+        )
+
+    @patch(f"{_MOD}.from_proto")
+    async def test_unexpected_exception_returns_internal(
+        self, mock_from_proto, mock_state, mock_grpc_context
+    ):
+        mock_from_proto.side_effect = RuntimeError("server crash")
         servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
 
         with pytest.raises(grpc.aio.AbortError):
@@ -141,7 +156,7 @@ class TestRenderChat:
 
         mock_grpc_context.abort.assert_awaited_once_with(
             grpc.StatusCode.INTERNAL,
-            "something broke",
+            "server crash",
         )
 
     @patch(f"{_MOD}.from_proto")
@@ -221,10 +236,25 @@ class TestRenderCompletion:
         )
 
     @patch(f"{_MOD}.from_proto")
-    async def test_generic_exception(
+    async def test_value_error_returns_invalid_argument(
         self, mock_from_proto, mock_state, mock_grpc_context
     ):
-        mock_from_proto.side_effect = RuntimeError("crash")
+        mock_from_proto.side_effect = ValueError("bad input")
+        servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
+
+        with pytest.raises(grpc.aio.AbortError):
+            await servicer.RenderCompletion(MagicMock(), mock_grpc_context)
+
+        mock_grpc_context.abort.assert_awaited_once_with(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            "bad input",
+        )
+
+    @patch(f"{_MOD}.from_proto")
+    async def test_unexpected_exception_returns_internal(
+        self, mock_from_proto, mock_state, mock_grpc_context
+    ):
+        mock_from_proto.side_effect = RuntimeError("server crash")
         servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
 
         with pytest.raises(grpc.aio.AbortError):
@@ -232,7 +262,7 @@ class TestRenderCompletion:
 
         mock_grpc_context.abort.assert_awaited_once_with(
             grpc.StatusCode.INTERNAL,
-            "crash",
+            "server crash",
         )
 
     @patch(f"{_MOD}.from_proto")

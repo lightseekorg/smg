@@ -81,6 +81,8 @@ class RenderGrpcServicer:
             )
         except grpc.aio.AbortError:
             raise
+        except (ValueError, TypeError) as e:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
         except Exception as e:
             await context.abort(grpc.StatusCode.INTERNAL, str(e))
 
@@ -112,5 +114,7 @@ class RenderGrpcServicer:
             )
         except grpc.aio.AbortError:
             raise
+        except (ValueError, TypeError) as e:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
         except Exception as e:
             await context.abort(grpc.StatusCode.INTERNAL, str(e))
