@@ -102,22 +102,30 @@ impl HarmonyPreparationStage {
         let mut body_ref = utils::filter_chat_request_by_tool_choice(request);
 
         // Step 2: Build structural tag constraint
-        // Try tool call constraint first; fall back to response_format if no tool constraint produced.
-        let constraint = if let Some(tools) = body_ref.tools.as_ref() {
+        let tool_constraint = if let Some(tools) = body_ref.tools.as_ref() {
             Self::generate_tool_call_constraint(tools, body_ref.tool_choice.as_ref())
                 .map_err(|e| *e)?
         } else {
             None
         };
-        let constraint = match constraint {
-            Some(c) => Some(c),
-            None => Self::generate_response_format_constraint(body_ref.response_format.as_ref())
-                .map_err(|e| *e)?,
-        };
+        let response_format_constraint =
+            Self::generate_response_format_constraint(body_ref.response_format.as_ref())
+                .map_err(|e| *e)?;
+
+        // Reject requests that specify both tool call and response_format constraints
+        if tool_constraint.is_some() && response_format_constraint.is_some() {
+            return Err(error::bad_request(
+                "invalid_request_parameters",
+                "Constrained decoding (response_format) is not compatible with tool calls",
+            ));
+        }
+
+        let has_response_format_constraint = response_format_constraint.is_some();
+        let constraint = tool_constraint.or(response_format_constraint);
 
         // If response_format was converted to a structural tag, clear it from the request
         // so the backend builder doesn't also try to add a json_schema constraint from it.
-        if constraint.is_some() && body_ref.response_format.is_some() {
+        if has_response_format_constraint {
             let mut owned = body_ref.into_owned();
             owned.response_format = None;
             body_ref = Cow::Owned(owned);
