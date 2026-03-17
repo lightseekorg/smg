@@ -38,7 +38,9 @@ def flatten_completion_prompt(prompt_dict: Any) -> Any:
             [int(x) for x in b["token_ids"]]
             for b in prompt_dict["token_id_batches"]["batches"]
         ]
-    return None
+    raise ValueError(
+        "Invalid CompletionPrompt payload: no supported oneof field set"
+    )
 
 
 def _parse_tool_choice(value: Any) -> Any:

@@ -48,11 +48,17 @@ class TestFlattenCompletionPrompt:
         assert flatten_completion_prompt(42) == 42
         assert flatten_completion_prompt(None) is None
 
-    def test_empty_dict_returns_none(self):
-        assert flatten_completion_prompt({}) is None
+    def test_empty_dict_raises_value_error(self):
+        import pytest
 
-    def test_unknown_keys_returns_none(self):
-        assert flatten_completion_prompt({"unknown": "value"}) is None
+        with pytest.raises(ValueError, match="no supported oneof field set"):
+            flatten_completion_prompt({})
+
+    def test_unknown_keys_raises_value_error(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="no supported oneof field set"):
+            flatten_completion_prompt({"unknown": "value"})
 
 
 class TestEnsureMessageContent:
