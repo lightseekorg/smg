@@ -156,11 +156,34 @@ sudo mkdir -p /usr/local/tensorrt
 sudo ln -sf /usr/include/x86_64-linux-gnu /usr/local/tensorrt/include
 sudo ln -sf /usr/lib/x86_64-linux-gnu /usr/local/tensorrt/lib
 
-# ── NCCL 2.27 setup ──────────────────────────────────────────────────────────
-# Use pip-installed NCCL 2.27+ which has both headers and libraries.
-# This matches the working installation guide approach.
 pip install --upgrade pip
-pip install --no-cache-dir "nvidia-nccl-cu13>=2.28.0"
+
+# ── Clone TensorRT-LLM ──────────────────────────────────────────────────────
+TRTLLM_DIR="/tmp/tensorrt-llm-src"
+if [ ! -d "$TRTLLM_DIR" ]; then
+    echo "Cloning TensorRT-LLM main branch..."
+    git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM.git "$TRTLLM_DIR"
+fi
+
+cd "$TRTLLM_DIR"
+git lfs install --force
+git lfs pull
+
+# ── Install TensorRT-LLM Python requirements ─────────────────────────────────
+# Install nvidia-cutlass first - provides cutlass_library module needed during CMake configure
+# This is cleaner than relying on CMake's FetchContent which installs to user site-packages
+pip install --no-cache-dir nvidia-cutlass
+
+if [ -f "requirements-dev.txt" ]; then
+    echo "Installing TensorRT-LLM build requirements..."
+    pip install --no-cache-dir -r requirements-dev.txt
+fi
+
+# ── NCCL 2.28+ setup ────────────────────────────────────────────────────────
+# MUST run AFTER requirements-dev.txt which pins nvidia-nccl-cu13<=2.28.9.
+# TRT-LLM PR #12015 requires NCCL 2.28+ for NCCLWindowAllocator.
+# Force-reinstall to override any version TRT-LLM requirements pulled in.
+pip install --no-cache-dir --force-reinstall "nvidia-nccl-cu13>=2.28.0"
 
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
 
@@ -172,6 +195,8 @@ echo "NCCL_ROOT=$NCCL_ROOT"
 ls -la "$NCCL_ROOT/" 2>/dev/null || echo "WARNING: NCCL_ROOT not found"
 ls -la "$NCCL_ROOT/include/" 2>/dev/null || echo "WARNING: NCCL include not found"
 ls -la "$NCCL_ROOT/lib/" 2>/dev/null || echo "WARNING: NCCL lib not found"
+# Verify NCCL version in header matches what we need
+grep "NCCL_MAJOR\|NCCL_MINOR" "$NCCL_ROOT/include/nccl.h" 2>/dev/null | head -3
 echo "=== end NCCL diagnostics ==="
 
 # Symlink pip NCCL header to system path for other tools that look there
@@ -195,27 +220,6 @@ if [ -n "$NCCL_LIB" ]; then
     ls -la "$NCCL_LIB_DIR"/libnccl*
 else
     echo "WARNING: Could not find pip-installed NCCL library"
-fi
-
-# ── Clone TensorRT-LLM ──────────────────────────────────────────────────────
-TRTLLM_DIR="/tmp/tensorrt-llm-src"
-if [ ! -d "$TRTLLM_DIR" ]; then
-    echo "Cloning TensorRT-LLM main branch..."
-    git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM.git "$TRTLLM_DIR"
-fi
-
-cd "$TRTLLM_DIR"
-git lfs install --force
-git lfs pull
-
-# ── Install TensorRT-LLM Python requirements ─────────────────────────────────
-# Install nvidia-cutlass first - provides cutlass_library module needed during CMake configure
-# This is cleaner than relying on CMake's FetchContent which installs to user site-packages
-pip install --no-cache-dir nvidia-cutlass
-
-if [ -f "requirements-dev.txt" ]; then
-    echo "Installing TensorRT-LLM build requirements..."
-    pip install --no-cache-dir -r requirements-dev.txt
 fi
 
 # ── Patch FindTensorRT.cmake ─────────────────────────────────────────────────
