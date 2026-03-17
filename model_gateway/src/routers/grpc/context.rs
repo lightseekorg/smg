@@ -139,6 +139,11 @@ pub(crate) struct PreparationOutput {
 
     /// Stop token IDs for Harmony models
     pub harmony_stop_ids: Option<Vec<u32>>,
+
+    /// When true, response processing should skip the Harmony parser and use
+    /// standard JSON parsing instead (set when json_schema constraints are active).
+    #[expect(dead_code, reason = "read in Tasks 3 & 4 (response processing bypass)")]
+    pub bypass_harmony_parser: bool,
 }
 
 /// Worker selection (Step 2)

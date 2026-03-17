@@ -79,6 +79,7 @@ impl GeneratePreparationStage {
             selection_text: None,
             harmony_messages: None,
             harmony_stop_ids: None,
+            bypass_harmony_parser: false,
         });
 
         // Store stop decoder

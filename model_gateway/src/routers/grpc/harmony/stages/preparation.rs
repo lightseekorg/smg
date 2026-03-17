@@ -132,6 +132,7 @@ impl HarmonyPreparationStage {
             selection_text: Some(build_output.selection_text),
             harmony_messages: Some(build_output.harmony_messages),
             harmony_stop_ids: Some(build_output.stop_token_ids),
+            bypass_harmony_parser: false,
         });
 
         Ok(None)
@@ -209,6 +210,7 @@ impl HarmonyPreparationStage {
             selection_text: Some(build_output.selection_text),
             harmony_messages: Some(build_output.harmony_messages),
             harmony_stop_ids: Some(build_output.stop_token_ids),
+            bypass_harmony_parser: false,
         });
 
         Ok(None)
