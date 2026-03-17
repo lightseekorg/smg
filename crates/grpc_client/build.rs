@@ -3,6 +3,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/common.proto");
     println!("cargo:rerun-if-changed=proto/sglang_scheduler.proto");
     println!("cargo:rerun-if-changed=proto/vllm_engine.proto");
+    println!("cargo:rerun-if-changed=proto/vllm_render.proto");
     println!("cargo:rerun-if-changed=proto/trtllm_service.proto");
 
     // Pass 1: compile shared message types (no gRPC service generation)
@@ -33,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[
                 "proto/sglang_scheduler.proto",
                 "proto/vllm_engine.proto",
+                "proto/vllm_render.proto",
                 "proto/trtllm_service.proto",
             ],
             &["proto"],
