@@ -47,7 +47,7 @@ def from_proto(
 def pydantic_to_proto(model: Any, message_class: type[Message]) -> Message:
     """Convert a Pydantic model to a protobuf message via model_dump."""
     data = model.model_dump(mode="json", exclude_none=True)
-    return ParseDict(data, message_class(), ignore_unknown_fields=True)
+    return ParseDict(data, message_class())
 
 
 def _apply_transforms(obj: Any, transforms: FieldTransforms) -> Any:
