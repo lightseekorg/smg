@@ -143,6 +143,5 @@ class TestPydanticToProto:
         mock_parse_dict.assert_called_once_with(
             {"request_id": "abc", "token_ids": [1, 2]},
             mock_proto_instance,
-            ignore_unknown_fields=True,
         )
         assert result is mock_proto_instance

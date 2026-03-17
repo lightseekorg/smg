@@ -38,6 +38,13 @@ class TestGetModelInfo:
         assert response.max_context_length == 4096
         assert response.vocab_size == 32000
         assert response.supports_vision is False
+        assert response.served_model_name == "/models/llama-3.1-8b"
+
+    async def test_served_model_name_override(self, mock_state, mock_grpc_context):
+        mock_state.vllm_config.model_config.served_model_name = "my-model"
+        servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
+        response = await servicer.GetModelInfo(MagicMock(), mock_grpc_context)
+        assert response.served_model_name == "my-model"
 
     async def test_non_generation_model(self, mock_state, mock_grpc_context):
         mock_state.vllm_config.model_config.runner_type = "encode"
@@ -62,6 +69,10 @@ class TestGetServerInfo:
         assert response.server_type == "vllm-render-grpc"
         assert response.uptime_seconds > 0
         assert before <= response.last_receive_timestamp <= after
+        assert response.active_requests == 0
+        assert response.is_paused is False
+        assert response.kv_connector == ""
+        assert response.kv_role == ""
 
 
 class TestRenderChat:

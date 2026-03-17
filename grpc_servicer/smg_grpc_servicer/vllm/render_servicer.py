@@ -43,13 +43,18 @@ class RenderGrpcServicer:
             max_context_length=model_config.max_model_len,
             vocab_size=model_config.get_vocab_size(),
             supports_vision=model_config.is_multimodal_model,
+            served_model_name=model_config.served_model_name or model_config.model,
         )
 
     async def GetServerInfo(self, request, context):
         return vllm_engine_pb2.GetServerInfoResponse(
+            active_requests=0,
+            is_paused=False,
             last_receive_timestamp=time.time(),
             uptime_seconds=time.time() - self.start_time,
             server_type="vllm-render-grpc",
+            kv_connector="",
+            kv_role="",
         )
 
     async def RenderChat(self, request, context):

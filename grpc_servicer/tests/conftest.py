@@ -28,6 +28,7 @@ def mock_model_config():
     mc.max_model_len = 4096
     mc.get_vocab_size.return_value = 32000
     mc.is_multimodal_model = False
+    mc.served_model_name = None
     return mc
 
 
