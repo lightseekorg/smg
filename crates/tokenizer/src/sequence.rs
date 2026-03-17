@@ -4,6 +4,12 @@ use anyhow::Result;
 
 use crate::traits::{TokenIdType, Tokenizer as TokenizerTrait};
 
+/// Number of trailing tokens kept as decode context for prefilled sequences.
+/// Matches the value used in HuggingFace TGI (`input_len - 5` in causal_lm.py)
+/// and vLLM (`INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET` in detokenizer_utils.py).
+/// Also used identically in this crate's `stream.rs`.
+const INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET: usize = 5;
+
 /// Maintains state for an ongoing sequence of tokens and their decoded text
 /// This provides a cleaner abstraction for managing token sequences
 pub struct Sequence {
@@ -16,7 +22,7 @@ pub struct Sequence {
     /// The position in the current sequence the last decoded token completed
     prefix_offset: usize,
 
-    /// Current position in the sequence
+    /// Last successfully emitted position in the sequence
     read_offset: usize,
 
     /// Whether to skip special tokens when decoding
@@ -79,7 +85,7 @@ impl Sequence {
         Self {
             tokenizer,
             token_ids,
-            prefix_offset: 0,
+            prefix_offset: len.saturating_sub(INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET),
             read_offset: len,
             skip_special_tokens,
         }
@@ -114,60 +120,86 @@ impl Sequence {
         Ok(())
     }
 
-    /// Append a single token to the sequence and return newly decoded text
-    /// Based on HuggingFace TGI incremental decoding
+    /// Append a single token to the sequence and return newly decoded text.
+    /// Based on HuggingFace TGI incremental decoding, with a content-based
+    /// comparison that correctly handles byte-fallback tokenizers (where
+    /// `\u{FFFD}` resolves to a character of the same byte length).
     #[inline]
     pub fn append_token(&mut self, token_id: TokenIdType) -> Result<String> {
-        // Store the old read offset before adding the new token
         let old_read_offset = self.read_offset;
 
         self.token_ids.push(token_id);
-        self.read_offset = self.token_ids.len();
 
-        // If this is the first token or we're at the beginning, decode everything
+        // First token: decode everything
         if self.prefix_offset == 0 && old_read_offset == 0 {
             let text = self
                 .tokenizer
                 .decode(&self.token_ids, self.skip_special_tokens)?;
-            if text.ends_with("�") {
-                // Incomplete UTF-8 sequence, wait for more tokens
+            if text.ends_with('\u{FFFD}') {
                 return Ok(String::new());
             }
-            self.prefix_offset = 0;
+            self.read_offset = self.token_ids.len();
             return Ok(text);
         }
 
-        // Decode the text up to the previous position
+        // Decode the prefix (already-committed tokens) and the full window
         let prefix_text = self.tokenizer.decode(
             &self.token_ids[self.prefix_offset..old_read_offset],
             self.skip_special_tokens,
         )?;
-
-        // Decode the text including the new token
         let new_text = self.tokenizer.decode(
             &self.token_ids[self.prefix_offset..],
             self.skip_special_tokens,
         )?;
 
-        // Handle multi-byte character boundaries
-        let mut prefix_text_len = prefix_text.len();
-        while !new_text.is_char_boundary(prefix_text_len) && prefix_text_len > 0 {
-            prefix_text_len -= 1;
+        // Trailing \u{FFFD} means an incomplete UTF-8 byte sequence — wait
+        if new_text.ends_with('\u{FFFD}') {
+            return Ok(String::new());
         }
 
-        if new_text.len() > prefix_text.len() {
-            if new_text.ends_with("�") {
-                // Incomplete UTF-8 sequence, wait for more tokens
-                return Ok(String::new());
-            } else {
-                // Return the new text portion
-                let incremental_text = new_text[prefix_text_len..].to_string().replace("�", "");
-                self.prefix_offset = old_read_offset;
-                return Ok(incremental_text);
-            }
+        // Find where new_text diverges from prefix_text by comparing bytes.
+        // This correctly handles the case where \u{FFFD} (3 bytes) resolves
+        // to a real character of the same byte length (e.g., CJK), which the
+        // previous byte-length comparison missed entirely.
+        let common_len = prefix_text
+            .as_bytes()
+            .iter()
+            .zip(new_text.as_bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+
+        // Back up to the nearest UTF-8 char boundary
+        let mut split_at = common_len;
+        while split_at > 0 && !new_text.is_char_boundary(split_at) {
+            split_at -= 1;
+        }
+
+        let incremental = &new_text[split_at..];
+        if !incremental.is_empty() {
+            self.prefix_offset = old_read_offset;
+            self.read_offset = self.token_ids.len();
+            return Ok(incremental.to_string());
         }
 
         Ok(String::new())
+    }
+
+    /// Force-emit any text buffered by trailing U+FFFD deferral.
+    /// Call at end-of-stream to ensure legitimate replacement characters are not lost.
+    pub fn flush(&mut self) -> Result<String> {
+        if self.read_offset >= self.token_ids.len() {
+            return Ok(String::new());
+        }
+
+        let remaining = self.tokenizer.decode(
+            &self.token_ids[self.read_offset..],
+            self.skip_special_tokens,
+        )?;
+
+        self.prefix_offset = self.read_offset;
+        self.read_offset = self.token_ids.len();
+
+        Ok(remaining)
     }
 
     /// Get a reference to the tokenizer

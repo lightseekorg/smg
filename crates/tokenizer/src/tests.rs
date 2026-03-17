@@ -1,10 +1,83 @@
 use std::sync::Arc;
 
+use anyhow::Result;
+
 use crate::{
     mock,
-    traits::{Decoder, Encoder},
+    sequence::Sequence,
+    stream::DecodeStream,
+    traits::{Decoder, Encoder, Encoding, SpecialTokens, Tokenizer as TokenizerTrait},
     Tokenizer,
 };
+
+/// Mock tokenizer that simulates byte-fallback behavior.
+///
+/// - Token IDs 0–127 map to the corresponding ASCII byte.
+/// - Token IDs 256+ map to byte `(id - 256)` (byte-fallback tokens).
+/// - Decoding collects bytes and applies `String::from_utf8_lossy`, which
+///   produces `\u{FFFD}` for incomplete UTF-8 — exactly like real
+///   byte-fallback tokenizers (SentencePiece, etc.).
+struct ByteFallbackTokenizer {
+    special_tokens: SpecialTokens,
+}
+
+impl ByteFallbackTokenizer {
+    /// Create a byte-fallback token ID from a raw byte value.
+    fn byte_token(byte: u8) -> u32 {
+        256 + byte as u32
+    }
+}
+
+impl Encoder for ByteFallbackTokenizer {
+    fn encode(&self, _input: &str, _add_special_tokens: bool) -> Result<Encoding> {
+        Ok(Encoding::Plain(vec![]))
+    }
+
+    fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>> {
+        inputs
+            .iter()
+            .map(|input| self.encode(input, add_special_tokens))
+            .collect()
+    }
+}
+
+impl Decoder for ByteFallbackTokenizer {
+    fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
+        let mut bytes = Vec::with_capacity(token_ids.len());
+        for &id in token_ids {
+            if id < 128 {
+                bytes.push(id as u8);
+            } else if id >= 256 {
+                bytes.push((id - 256) as u8);
+            }
+        }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+}
+
+impl TokenizerTrait for ByteFallbackTokenizer {
+    fn vocab_size(&self) -> usize {
+        512
+    }
+    fn get_special_tokens(&self) -> &SpecialTokens {
+        &self.special_tokens
+    }
+    fn token_to_id(&self, _token: &str) -> Option<u32> {
+        None
+    }
+    fn id_to_token(&self, _id: u32) -> Option<String> {
+        None
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+fn new_byte_fallback_tokenizer() -> Arc<dyn TokenizerTrait> {
+    Arc::new(ByteFallbackTokenizer {
+        special_tokens: SpecialTokens::default(),
+    })
+}
 
 #[test]
 fn test_mock_tokenizer_encode() {
@@ -249,4 +322,250 @@ fn test_decode_stream_multibyte_char_boundary() {
     //   "byte index 3 is not a char boundary; it is inside '🎉' (bytes 2..6)"
     let result = stream.step(3).unwrap();
     assert_eq!(result, Some("\u{1F389}".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// Byte-fallback regression tests
+//
+// These verify that incremental decoding correctly emits characters from
+// byte-fallback tokenizers where \u{FFFD} resolves to a real character of
+// the *same* UTF-8 byte length (3 bytes). The old byte-length comparison
+// missed this case entirely, silently dropping CJK characters and causing
+// O(N²) window growth.
+// ---------------------------------------------------------------------------
+
+/// "中" = U+4E2D = UTF-8 bytes [0xE4, 0xB8, 0xAD]
+const ZHONG_BYTES: [u8; 3] = [0xE4, 0xB8, 0xAD];
+/// "文" = U+6587 = UTF-8 bytes [0xE6, 0x96, 0x87]
+const WEN_BYTES: [u8; 3] = [0xE6, 0x96, 0x87];
+
+#[test]
+fn test_sequence_byte_fallback_cjk_character() {
+    let tokenizer = new_byte_fallback_tokenizer();
+    let mut seq = Sequence::new(tokenizer);
+    let mut output = String::new();
+
+    // 'a', then 3 byte-fallback tokens for "中", then 'b'
+    output.push_str(&seq.append_token(b'a' as u32).unwrap());
+    output.push_str(
+        &seq.append_token(ByteFallbackTokenizer::byte_token(ZHONG_BYTES[0]))
+            .unwrap(),
+    );
+    output.push_str(
+        &seq.append_token(ByteFallbackTokenizer::byte_token(ZHONG_BYTES[1]))
+            .unwrap(),
+    );
+    output.push_str(
+        &seq.append_token(ByteFallbackTokenizer::byte_token(ZHONG_BYTES[2]))
+            .unwrap(),
+    );
+    output.push_str(&seq.append_token(b'b' as u32).unwrap());
+
+    assert_eq!(output, "a中b");
+    assert_eq!(seq.text().unwrap(), "a中b");
+}
+
+#[test]
+fn test_sequence_byte_fallback_consecutive_cjk() {
+    let tokenizer = new_byte_fallback_tokenizer();
+    let mut seq = Sequence::new(tokenizer);
+    let mut output = String::new();
+
+    // "中文" — two consecutive CJK characters via byte-fallback
+    for &byte in &ZHONG_BYTES {
+        output.push_str(
+            &seq.append_token(ByteFallbackTokenizer::byte_token(byte))
+                .unwrap(),
+        );
+    }
+    for &byte in &WEN_BYTES {
+        output.push_str(
+            &seq.append_token(ByteFallbackTokenizer::byte_token(byte))
+                .unwrap(),
+        );
+    }
+
+    assert_eq!(output, "中文");
+    assert_eq!(seq.text().unwrap(), "中文");
+}
+
+#[test]
+fn test_sequence_byte_fallback_4byte_emoji() {
+    let tokenizer = new_byte_fallback_tokenizer();
+    let mut seq = Sequence::new(tokenizer);
+    let mut output = String::new();
+
+    // "🎉" = U+1F389 = UTF-8 bytes [0xF0, 0x9F, 0x8E, 0x89]
+    let emoji_bytes: [u8; 4] = [0xF0, 0x9F, 0x8E, 0x89];
+
+    output.push_str(&seq.append_token(b'x' as u32).unwrap());
+    for &byte in &emoji_bytes {
+        output.push_str(
+            &seq.append_token(ByteFallbackTokenizer::byte_token(byte))
+                .unwrap(),
+        );
+    }
+    output.push_str(&seq.append_token(b'y' as u32).unwrap());
+
+    assert_eq!(output, "x🎉y");
+    assert_eq!(seq.text().unwrap(), "x🎉y");
+}
+
+#[test]
+fn test_sequence_byte_fallback_offsets_advance() {
+    // Verify that prefix_offset advances after byte-fallback resolution,
+    // keeping the decode window bounded rather than growing to O(N).
+    let tokenizer = new_byte_fallback_tokenizer();
+    let mut seq = Sequence::new(tokenizer);
+
+    // Emit some ASCII to establish a baseline
+    for ch in b'a'..=b'e' {
+        seq.append_token(ch as u32).unwrap();
+    }
+    let offset_before = seq.prefix_offset();
+
+    // Emit a CJK character via byte-fallback
+    for &byte in &ZHONG_BYTES {
+        seq.append_token(ByteFallbackTokenizer::byte_token(byte))
+            .unwrap();
+    }
+
+    // prefix_offset must have advanced past the baseline
+    assert!(
+        seq.prefix_offset() > offset_before,
+        "prefix_offset should advance after byte-fallback resolution: {} vs {}",
+        seq.prefix_offset(),
+        offset_before,
+    );
+}
+
+#[test]
+fn test_decode_stream_byte_fallback_cjk() {
+    let tokenizer = new_byte_fallback_tokenizer();
+    // Prompt is just "a"
+    let mut stream = DecodeStream::new(tokenizer, &[b'a' as u32], false);
+    let mut output = String::new();
+
+    // Stream 3 byte-fallback tokens for "中", then "b"
+    for &byte in &ZHONG_BYTES {
+        if let Some(text) = stream
+            .step(ByteFallbackTokenizer::byte_token(byte))
+            .unwrap()
+        {
+            output.push_str(&text);
+        }
+    }
+    if let Some(text) = stream.step(b'b' as u32).unwrap() {
+        output.push_str(&text);
+    }
+
+    assert_eq!(output, "中b");
+}
+
+#[test]
+fn test_decode_stream_byte_fallback_consecutive_cjk() {
+    let tokenizer = new_byte_fallback_tokenizer();
+    let mut stream = DecodeStream::new(tokenizer, &[b'a' as u32], false);
+    let mut output = String::new();
+
+    // "中文" via byte-fallback
+    for &byte in &ZHONG_BYTES {
+        if let Some(text) = stream
+            .step(ByteFallbackTokenizer::byte_token(byte))
+            .unwrap()
+        {
+            output.push_str(&text);
+        }
+    }
+    for &byte in &WEN_BYTES {
+        if let Some(text) = stream
+            .step(ByteFallbackTokenizer::byte_token(byte))
+            .unwrap()
+        {
+            output.push_str(&text);
+        }
+    }
+
+    assert_eq!(output, "中文");
+}
+
+#[test]
+fn test_sequence_flush_emits_deferred_fffd() {
+    // When byte-fallback tokens produce a legitimate U+FFFD at end-of-stream,
+    // flush() must emit it (append_token defers trailing FFFD).
+    let tokenizer = new_byte_fallback_tokenizer();
+    let mut seq = Sequence::new(tokenizer);
+    let mut output = String::new();
+
+    // 'a' then the 3 bytes of U+FFFD itself: EF BF BD
+    output.push_str(&seq.append_token(b'a' as u32).unwrap());
+    output.push_str(
+        &seq.append_token(ByteFallbackTokenizer::byte_token(0xEF))
+            .unwrap(),
+    );
+    output.push_str(
+        &seq.append_token(ByteFallbackTokenizer::byte_token(0xBF))
+            .unwrap(),
+    );
+    output.push_str(
+        &seq.append_token(ByteFallbackTokenizer::byte_token(0xBD))
+            .unwrap(),
+    );
+
+    // append_token deferred the FFFD — incremental output is just "a"
+    assert_eq!(output, "a");
+
+    // flush() recovers the deferred replacement character
+    output.push_str(&seq.flush().unwrap());
+    assert_eq!(output, "a\u{FFFD}");
+    assert_eq!(seq.text().unwrap(), "a\u{FFFD}");
+}
+
+#[test]
+fn test_sequence_flush_noop_when_caught_up() {
+    let tokenizer = new_byte_fallback_tokenizer();
+    let mut seq = Sequence::new(tokenizer);
+
+    seq.append_token(b'a' as u32).unwrap();
+    seq.append_token(b'b' as u32).unwrap();
+
+    // All tokens emitted successfully — flush has nothing to do
+    assert_eq!(seq.flush().unwrap(), "");
+}
+
+#[test]
+fn test_sequence_flush_mid_stream_fffd_then_continue() {
+    // EF BF BD (legitimate FFFD) followed by 'x':
+    // Without flush, 'x' alone would be emitted after FFFD is consumed as common prefix.
+    // With the offset fix, flush can recover the FFFD before continuing.
+    let tokenizer = new_byte_fallback_tokenizer();
+    let mut seq = Sequence::new(tokenizer);
+    let mut output = String::new();
+
+    output.push_str(&seq.append_token(b'a' as u32).unwrap());
+    // Byte-fallback tokens for U+FFFD: EF BF BD
+    for &byte in &[0xEF, 0xBF, 0xBD] {
+        output.push_str(
+            &seq.append_token(ByteFallbackTokenizer::byte_token(byte))
+                .unwrap(),
+        );
+    }
+    // Flush before continuing to emit the deferred FFFD
+    output.push_str(&seq.flush().unwrap());
+    // Continue with more tokens
+    output.push_str(&seq.append_token(b'x' as u32).unwrap());
+
+    assert_eq!(output, "a\u{FFFD}x");
+    assert_eq!(seq.text().unwrap(), "a\u{FFFD}x");
+}
+
+#[test]
+fn test_sequence_with_tokens_bounded_prefix_offset() {
+    let tokenizer = new_byte_fallback_tokenizer();
+    let tokens = vec![b'a' as u32; 100];
+    let seq = Sequence::with_tokens(tokenizer, tokens);
+
+    // prefix_offset should be bounded, not 0
+    assert_eq!(seq.prefix_offset(), 95); // 100 - 5
+    assert_eq!(seq.read_offset(), 100);
 }
