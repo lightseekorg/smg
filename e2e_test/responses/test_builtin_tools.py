@@ -146,7 +146,6 @@ def gateway_with_mcp_config_grpc(require_brave_server, mcp_config_file):
         extra_args=[
             "--mcp-config-path",
             mcp_config_file,
-            "--reasoning-parser=gpt-oss",
             "--history-backend",
             "memory",
         ],
@@ -298,7 +297,7 @@ class TestBuiltinToolsCloudBackend:
 @pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
-@pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
+@pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestBuiltinToolsLocalBackend:
     """Built-in tool tests against local gRPC backend.
