@@ -101,13 +101,18 @@ impl HarmonyPreparationStage {
         // Step 1: Filter tools if needed
         let mut body_ref = utils::filter_chat_request_by_tool_choice(request);
 
-        // Step 2: Build structural tag constraint (tool call or response_format, mutually exclusive)
+        // Step 2: Build structural tag constraint
+        // Try tool call constraint first; fall back to response_format if no tool constraint produced.
         let constraint = if let Some(tools) = body_ref.tools.as_ref() {
             Self::generate_tool_call_constraint(tools, body_ref.tool_choice.as_ref())
                 .map_err(|e| *e)?
         } else {
-            Self::generate_response_format_constraint(body_ref.response_format.as_ref())
-                .map_err(|e| *e)?
+            None
+        };
+        let constraint = match constraint {
+            Some(c) => Some(c),
+            None => Self::generate_response_format_constraint(body_ref.response_format.as_ref())
+                .map_err(|e| *e)?,
         };
 
         // If response_format was converted to a structural tag, clear it from the request

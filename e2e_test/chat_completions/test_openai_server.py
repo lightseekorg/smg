@@ -745,6 +745,7 @@ class TestChatCompletionGptOss(TestChatCompletion):
         assert set(parsed) == {"items"}
         assert isinstance(parsed["items"], list)
         assert len(parsed["items"]) == 2
+        assert all(isinstance(item, str) for item in parsed["items"])
 
         # Should not contain leaked Harmony markers
         assert "<|channel|>" not in content
