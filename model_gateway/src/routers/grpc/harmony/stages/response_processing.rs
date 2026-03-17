@@ -73,6 +73,12 @@ impl PipelineStage for HarmonyResponseProcessingStage {
 
                 // For streaming, delegate to streaming processor and return SSE response
                 if is_streaming {
+                    let bypass_harmony_parser = ctx
+                        .state
+                        .preparation
+                        .as_ref()
+                        .map(|p| p.bypass_harmony_parser)
+                        .unwrap_or(false);
                     let response = self
                         .streaming_processor
                         .clone()
@@ -80,6 +86,7 @@ impl PipelineStage for HarmonyResponseProcessingStage {
                             execution_result,
                             ctx.chat_request_arc(),
                             dispatch,
+                            bypass_harmony_parser,
                         );
 
                     // Attach load guards to response body for proper RAII lifecycle

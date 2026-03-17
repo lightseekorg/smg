@@ -75,6 +75,7 @@ impl HarmonyStreamingProcessor {
         execution_result: context::ExecutionResult,
         chat_request: Arc<ChatCompletionRequest>,
         dispatch: context::DispatchMetadata,
+        bypass_harmony_parser: bool,
     ) -> Response {
         // Create SSE channel
         let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -83,8 +84,14 @@ impl HarmonyStreamingProcessor {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 tokio::spawn(async move {
-                    let result =
-                        Self::process_single_stream(stream, dispatch, chat_request, &tx).await;
+                    let result = Self::process_single_stream(
+                        stream,
+                        dispatch,
+                        chat_request,
+                        &tx,
+                        bypass_harmony_parser,
+                    )
+                    .await;
 
                     if let Err(e) = result {
                         error!("Harmony streaming error: {}", e);
@@ -96,9 +103,15 @@ impl HarmonyStreamingProcessor {
             }
             context::ExecutionResult::Dual { prefill, decode } => {
                 tokio::spawn(async move {
-                    let result =
-                        Self::process_dual_stream(prefill, *decode, dispatch, chat_request, &tx)
-                            .await;
+                    let result = Self::process_dual_stream(
+                        prefill,
+                        *decode,
+                        dispatch,
+                        chat_request,
+                        &tx,
+                        bypass_harmony_parser,
+                    )
+                    .await;
 
                     if let Err(e) = result {
                         error!("Harmony dual streaming error: {}", e);
@@ -129,6 +142,7 @@ impl HarmonyStreamingProcessor {
         dispatch: context::DispatchMetadata,
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        bypass_harmony_parser: bool,
     ) -> Result<(), String> {
         let mut prompt_tokens = HashMap::new();
         let mut cached_tokens = HashMap::new();
@@ -139,6 +153,7 @@ impl HarmonyStreamingProcessor {
             tx,
             &mut prompt_tokens,
             &mut cached_tokens,
+            bypass_harmony_parser,
         )
         .await
     }
@@ -150,6 +165,7 @@ impl HarmonyStreamingProcessor {
         dispatch: context::DispatchMetadata,
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        bypass_harmony_parser: bool,
     ) -> Result<(), String> {
         // Phase 1: Process prefill stream (collect metadata)
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
@@ -172,6 +188,7 @@ impl HarmonyStreamingProcessor {
             tx,
             &mut prompt_tokens,
             &mut cached_tokens,
+            bypass_harmony_parser,
         )
         .await?;
 
@@ -194,7 +211,20 @@ impl HarmonyStreamingProcessor {
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         prompt_tokens: &mut HashMap<u32, u32>,
         cached_tokens: &mut HashMap<u32, u32>,
+        bypass_harmony_parser: bool,
     ) -> Result<(), String> {
+        if bypass_harmony_parser {
+            return Self::process_chat_decode_stream_bypass(
+                decode_stream,
+                dispatch,
+                original_request,
+                tx,
+                prompt_tokens,
+                cached_tokens,
+            )
+            .await;
+        }
+
         // Timing for metrics
         let start_time = Instant::now();
         let mut first_token_time: Option<Instant> = None;
@@ -296,6 +326,208 @@ impl HarmonyStreamingProcessor {
                             tx,
                         )?;
                     }
+                }
+                ProtoResponseVariant::Error(error_wrapper) => {
+                    return Err(format!("Server error: {}", error_wrapper.message()));
+                }
+                ProtoResponseVariant::None => {}
+            }
+        }
+
+        // Mark stream as completed successfully to prevent abort on drop
+        decode_stream.mark_completed();
+
+        // Compute totals once for both usage chunk and metrics
+        let total_prompt: u32 = prompt_tokens.values().sum();
+        let total_completion: u32 = completion_tokens.total();
+        let total_cached: u32 = cached_tokens.values().sum();
+
+        // Emit final usage if requested
+        if let Some(true) = stream_options.as_ref().and_then(|so| so.include_usage) {
+            Self::emit_usage_chunk(
+                total_prompt,
+                total_completion,
+                total_cached,
+                dispatch,
+                original_request,
+                tx,
+            )?;
+        }
+
+        // Record streaming metrics
+        Metrics::record_streaming_metrics(StreamingMetricsParams {
+            router_type: metrics_labels::ROUTER_GRPC,
+            backend_type: metrics_labels::BACKEND_HARMONY,
+            model_id: &original_request.model,
+            endpoint: metrics_labels::ENDPOINT_CHAT,
+            ttft: first_token_time.map(|t| t.duration_since(start_time)),
+            generation_duration: start_time.elapsed(),
+            input_tokens: Some(total_prompt as u64),
+            output_tokens: total_completion as u64,
+        });
+
+        Ok(())
+    }
+
+    /// Process the decode stream in bypass mode (json_schema constraints active).
+    ///
+    /// Instead of parsing Harmony channels, decode raw token IDs directly to text
+    /// using the Harmony tokenizer and emit plain text deltas. At the end, the
+    /// accumulated text is parsed with `parse_json_schema_response` to extract
+    /// any tool calls.
+    async fn process_chat_decode_stream_bypass(
+        mut decode_stream: ProtoStream,
+        dispatch: &context::DispatchMetadata,
+        original_request: &ChatCompletionRequest,
+        tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        prompt_tokens: &mut HashMap<u32, u32>,
+        cached_tokens: &mut HashMap<u32, u32>,
+    ) -> Result<(), String> {
+        let start_time = Instant::now();
+        let mut first_token_time: Option<Instant> = None;
+
+        let encoding = super::builder::get_harmony_encoding();
+
+        // Per-index state for bypass mode
+        let mut is_firsts: HashMap<u32, bool> = HashMap::new();
+        let mut accumulated_text: HashMap<u32, String> = HashMap::new();
+        let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
+        let mut completion_tokens = CompletionTokenTracker::new();
+
+        let stream_options = &original_request.stream_options;
+
+        // Process stream
+        while let Some(result) = decode_stream.next().await {
+            let response = result.map_err(|e| format!("Stream error: {}", e.message()))?;
+
+            match response.into_response() {
+                ProtoResponseVariant::Chunk(chunk_wrapper) => {
+                    let index = chunk_wrapper.index();
+
+                    // Track first token time for TTFT metric
+                    if first_token_time.is_none() {
+                        first_token_time = Some(Instant::now());
+                    }
+
+                    // Initialize per-index state if needed
+                    is_firsts.entry(index).or_insert(true);
+                    accumulated_text.entry(index).or_default();
+
+                    completion_tokens.record_chunk(&chunk_wrapper);
+
+                    // Convert logprobs if present and requested
+                    let chunk_logprobs = if original_request.logprobs {
+                        chunk_wrapper
+                            .output_logprobs()
+                            .map(|lp| convert_harmony_logprobs(&lp))
+                    } else {
+                        None
+                    };
+
+                    // Decode token IDs directly to text (bypass Harmony parser)
+                    let text = encoding
+                        .tokenizer()
+                        .decode_utf8(chunk_wrapper.token_ids())
+                        .unwrap_or_default();
+
+                    if !text.is_empty() {
+                        let is_first = is_firsts.get(&index).copied().unwrap_or(false);
+
+                        // On first chunk, emit role announcement
+                        if is_first {
+                            let role_chunk = ChatCompletionStreamResponse::builder(
+                                &dispatch.request_id,
+                                &original_request.model,
+                            )
+                            .created(dispatch.created)
+                            .add_choice_role(index, "assistant")
+                            .maybe_system_fingerprint(dispatch.weight_version.as_deref())
+                            .build();
+
+                            let chunk_json = serde_json::to_string(&role_chunk)
+                                .map_err(|e| format!("JSON serialization error: {e}"))?;
+                            let sse_data = format!("data: {chunk_json}\n\n");
+                            tx.send(Ok(Bytes::from(sse_data)))
+                                .map_err(|_| "Failed to send role chunk".to_string())?;
+
+                            is_firsts.insert(index, false);
+                        }
+
+                        // Emit content delta
+                        let chat_delta = ChatMessageDelta {
+                            role: None,
+                            content: Some(text.clone()),
+                            tool_calls: None,
+                            reasoning_content: None,
+                        };
+
+                        let chunk = ChatCompletionStreamResponse::builder(
+                            &dispatch.request_id,
+                            &original_request.model,
+                        )
+                        .created(dispatch.created)
+                        .add_choice(ChatStreamChoice {
+                            index,
+                            delta: chat_delta,
+                            logprobs: chunk_logprobs,
+                            finish_reason: None,
+                            matched_stop: None,
+                        })
+                        .maybe_system_fingerprint(dispatch.weight_version.as_deref())
+                        .build();
+
+                        let chunk_json = serde_json::to_string(&chunk)
+                            .map_err(|e| format!("JSON serialization error: {e}"))?;
+                        let sse_data = format!("data: {chunk_json}\n\n");
+                        tx.send(Ok(Bytes::from(sse_data)))
+                            .map_err(|_| "Failed to send chunk".to_string())?;
+
+                        if let Some(acc) = accumulated_text.get_mut(&index) {
+                            acc.push_str(&text);
+                        }
+                    }
+                }
+                ProtoResponseVariant::Complete(complete_wrapper) => {
+                    let index = complete_wrapper.index();
+
+                    matched_stops.insert(index, complete_wrapper.matched_stop_json());
+                    prompt_tokens
+                        .entry(index)
+                        .or_insert_with(|| complete_wrapper.prompt_tokens());
+                    completion_tokens.record_complete(&complete_wrapper);
+                    cached_tokens
+                        .entry(index)
+                        .or_insert_with(|| complete_wrapper.cached_tokens());
+
+                    // Determine finish_reason: parse accumulated text for tool calls
+                    let full_text = accumulated_text
+                        .get(&index)
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let history_count = utils::get_history_tool_calls_count(original_request);
+                    let (tool_calls, _content) = utils::parse_json_schema_response(
+                        full_text,
+                        original_request.tool_choice.as_ref(),
+                        &original_request.model,
+                        history_count,
+                    );
+
+                    let finish_reason = if tool_calls.is_some() {
+                        "tool_calls"
+                    } else {
+                        complete_wrapper.finish_reason()
+                    };
+
+                    let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
+
+                    Self::emit_final_chunk(
+                        index,
+                        finish_reason,
+                        matched_stop.as_ref(),
+                        dispatch,
+                        original_request,
+                        tx,
+                    )?;
                 }
                 ProtoResponseVariant::Error(error_wrapper) => {
                     return Err(format!("Server error: {}", error_wrapper.message()));
