@@ -81,18 +81,22 @@ class RenderGrpcServicer:
                     grpc.StatusCode.INVALID_ARGUMENT,
                     result.error.message,
                 )
-
-            return vllm_render_pb2.RenderChatResponse(
-                generate_request=pydantic_to_proto(
-                    result, vllm_render_pb2.GenerateRequestProto
-                ),
-            )
         except grpc.aio.AbortError:
             raise
         except (ValueError, TypeError) as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
         except Exception as e:
             logger.exception("RenderChat failed")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+
+        try:
+            return vllm_render_pb2.RenderChatResponse(
+                generate_request=pydantic_to_proto(
+                    result, vllm_render_pb2.GenerateRequestProto
+                ),
+            )
+        except Exception as e:
+            logger.exception("RenderChat response serialization failed")
             await context.abort(grpc.StatusCode.INTERNAL, str(e))
 
     async def RenderCompletion(self, request, context):
@@ -114,17 +118,21 @@ class RenderGrpcServicer:
                     grpc.StatusCode.INVALID_ARGUMENT,
                     result.error.message,
                 )
-
-            return vllm_render_pb2.RenderCompletionResponse(
-                generate_requests=[
-                    pydantic_to_proto(gr, vllm_render_pb2.GenerateRequestProto)
-                    for gr in result
-                ],
-            )
         except grpc.aio.AbortError:
             raise
         except (ValueError, TypeError) as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
         except Exception as e:
             logger.exception("RenderCompletion failed")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+
+        try:
+            return vllm_render_pb2.RenderCompletionResponse(
+                generate_requests=[
+                    pydantic_to_proto(gr, vllm_render_pb2.GenerateRequestProto)
+                    for gr in result
+                ],
+            )
+        except Exception as e:
+            logger.exception("RenderCompletion response serialization failed")
             await context.abort(grpc.StatusCode.INTERNAL, str(e))

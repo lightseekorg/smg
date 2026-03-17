@@ -180,6 +180,24 @@ class TestRenderChat:
         with pytest.raises(grpc.aio.AbortError):
             await servicer.RenderChat(MagicMock(), mock_grpc_context)
 
+    @patch(f"{_MOD}.pydantic_to_proto")
+    @patch(f"{_MOD}.from_proto")
+    async def test_serialization_error_returns_internal(
+        self, mock_from_proto, mock_to_proto, mock_state, mock_grpc_context
+    ):
+        mock_from_proto.return_value = MagicMock()
+        mock_state.openai_serving_render.render_chat_request.return_value = MagicMock()
+        mock_to_proto.side_effect = TypeError("serialization bug")
+
+        servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
+        with pytest.raises(grpc.aio.AbortError):
+            await servicer.RenderChat(MagicMock(), mock_grpc_context)
+
+        mock_grpc_context.abort.assert_awaited_once_with(
+            grpc.StatusCode.INTERNAL,
+            "serialization bug",
+        )
+
 
 class TestRenderCompletion:
     @patch(f"{_MOD}.vllm_render_pb2")
@@ -285,3 +303,24 @@ class TestRenderCompletion:
 
         with pytest.raises(grpc.aio.AbortError):
             await servicer.RenderCompletion(MagicMock(), mock_grpc_context)
+
+    @patch(f"{_MOD}.pydantic_to_proto")
+    @patch(f"{_MOD}.from_proto")
+    async def test_serialization_error_returns_internal(
+        self, mock_from_proto, mock_to_proto, mock_state, mock_grpc_context
+    ):
+        mock_from_proto.return_value = MagicMock()
+        mock_result = MagicMock()
+        mock_state.openai_serving_render.render_completion_request.return_value = [
+            mock_result
+        ]
+        mock_to_proto.side_effect = TypeError("serialization bug")
+
+        servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
+        with pytest.raises(grpc.aio.AbortError):
+            await servicer.RenderCompletion(MagicMock(), mock_grpc_context)
+
+        mock_grpc_context.abort.assert_awaited_once_with(
+            grpc.StatusCode.INTERNAL,
+            "serialization bug",
+        )
