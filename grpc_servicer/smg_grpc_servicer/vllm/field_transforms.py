@@ -30,13 +30,16 @@ def flatten_completion_prompt(prompt_dict: Any) -> Any:
     if "text" in prompt_dict:
         return prompt_dict["text"]
     if "texts" in prompt_dict:
-        return list(prompt_dict["texts"]["texts"])
+        inner = prompt_dict["texts"].get("texts", [])
+        return list(inner)
     if "token_ids" in prompt_dict:
-        return [int(x) for x in prompt_dict["token_ids"]["token_ids"]]
+        inner = prompt_dict["token_ids"].get("token_ids", [])
+        return [int(x) for x in inner]
     if "token_id_batches" in prompt_dict:
+        batches = prompt_dict["token_id_batches"].get("batches", [])
         return [
-            [int(x) for x in b["token_ids"]]
-            for b in prompt_dict["token_id_batches"]["batches"]
+            [int(x) for x in b.get("token_ids", [])]
+            for b in batches
         ]
     raise ValueError(
         "Invalid CompletionPrompt payload: no supported oneof field set"

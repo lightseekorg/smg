@@ -60,6 +60,22 @@ class TestFlattenCompletionPrompt:
         with pytest.raises(ValueError, match="no supported oneof field set"):
             flatten_completion_prompt({"unknown": "value"})
 
+    def test_empty_texts_returns_empty_list(self):
+        """MessageToDict drops empty repeated fields, producing {"texts": {}}."""
+        assert flatten_completion_prompt({"texts": {}}) == []
+
+    def test_empty_token_ids_returns_empty_list(self):
+        assert flatten_completion_prompt({"token_ids": {}}) == []
+
+    def test_empty_token_id_batches_returns_empty_list(self):
+        assert flatten_completion_prompt({"token_id_batches": {}}) == []
+
+    def test_batch_with_empty_token_ids(self):
+        result = flatten_completion_prompt(
+            {"token_id_batches": {"batches": [{}]}}
+        )
+        assert result == [[]]
+
 
 class TestEnsureMessageContent:
     """Tests for _ensure_message_content()."""
