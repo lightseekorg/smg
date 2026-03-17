@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use llm_multimodal::{
-    AsyncMultiModalTracker, ChatContentPart, ImageFetchConfig, ImageSource, MediaConnector,
-    MediaConnectorConfig, MediaSource, Modality,
+    AsyncMultiModalTracker, ImageFetchConfig, ImageSource, MediaConnector, MediaConnectorConfig,
+    MediaContentPart, MediaSource, Modality,
 };
 use reqwest::Client;
 use tempfile::tempdir;
@@ -104,12 +104,12 @@ async fn tracker_fetches_images_and_records_uuids() {
     let mut tracker = AsyncMultiModalTracker::new(connector);
 
     tracker
-        .push_part(ChatContentPart::Text {
+        .push_part(MediaContentPart::Text {
             text: "before".into(),
         })
         .expect("text part");
     tracker
-        .push_part(ChatContentPart::ImageData {
+        .push_part(MediaContentPart::ImageData {
             data: tiny_png_bytes(),
             mime_type: Some("image/png".into()),
             uuid: Some("img-1".into()),
@@ -117,7 +117,7 @@ async fn tracker_fetches_images_and_records_uuids() {
         })
         .expect("image part");
     tracker
-        .push_part(ChatContentPart::Text {
+        .push_part(MediaContentPart::Text {
             text: "after".into(),
         })
         .expect("text part");

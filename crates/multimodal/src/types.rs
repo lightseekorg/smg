@@ -38,7 +38,7 @@ pub enum ImageDetail {
 /// A normalized content part understood by the tracker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChatContentPart {
+pub enum MediaContentPart {
     Text {
         text: String,
     },

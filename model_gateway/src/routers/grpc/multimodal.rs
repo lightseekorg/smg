@@ -14,9 +14,9 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use llm_multimodal::{
-    AsyncMultiModalTracker, ChatContentPart, FieldLayout, ImageDetail, ImageFrame,
-    ImageProcessorRegistry, MediaConnector, MediaConnectorConfig, Modality, ModelMetadata,
-    ModelRegistry, ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
+    AsyncMultiModalTracker, FieldLayout, ImageDetail, ImageFrame, ImageProcessorRegistry,
+    MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelRegistry,
+    ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
     PromptReplacement, TrackedMedia, TrackerOutput,
 };
 use llm_tokenizer::TokenizerTrait;
@@ -171,8 +171,8 @@ pub(crate) fn has_multimodal_content(messages: &[ChatMessage]) -> bool {
 }
 
 /// Extract multimodal content parts from OpenAI chat messages,
-/// converting protocol `ContentPart` to multimodal crate `ChatContentPart`.
-fn extract_content_parts(messages: &[ChatMessage]) -> Vec<ChatContentPart> {
+/// converting protocol `ContentPart` to multimodal crate `MediaContentPart`.
+fn extract_content_parts(messages: &[ChatMessage]) -> Vec<MediaContentPart> {
     let mut parts = Vec::new();
 
     for msg in messages {
@@ -188,14 +188,14 @@ fn extract_content_parts(messages: &[ChatMessage]) -> Vec<ChatContentPart> {
                 match part {
                     ContentPart::ImageUrl { image_url } => {
                         let detail = image_url.detail.as_deref().and_then(parse_detail);
-                        parts.push(ChatContentPart::ImageUrl {
+                        parts.push(MediaContentPart::ImageUrl {
                             url: image_url.url.clone(),
                             detail,
                             uuid: None,
                         });
                     }
                     ContentPart::Text { text } => {
-                        parts.push(ChatContentPart::Text { text: text.clone() });
+                        parts.push(MediaContentPart::Text { text: text.clone() });
                     }
                     ContentPart::VideoUrl { .. } => {} // Skip VideoUrl for now
                 }
@@ -236,8 +236,8 @@ pub(crate) fn has_multimodal_content_messages(messages: &[InputMessage]) -> bool
 }
 
 /// Extract multimodal content parts from Messages API input messages,
-/// converting `InputContentBlock::Image` to multimodal crate `ChatContentPart`.
-fn extract_content_parts_messages(messages: &[InputMessage]) -> Vec<ChatContentPart> {
+/// converting `InputContentBlock::Image` to multimodal crate `MediaContentPart`.
+fn extract_content_parts_messages(messages: &[InputMessage]) -> Vec<MediaContentPart> {
     let mut parts = Vec::new();
 
     for msg in messages {
@@ -255,14 +255,14 @@ fn extract_content_parts_messages(messages: &[InputMessage]) -> Vec<ChatContentP
                     ImageSource::Base64 { media_type, data } => {
                         // Convert base64 to data URL for the media connector
                         let data_url = format!("data:{media_type};base64,{data}");
-                        parts.push(ChatContentPart::ImageUrl {
+                        parts.push(MediaContentPart::ImageUrl {
                             url: data_url,
                             detail: None,
                             uuid: None,
                         });
                     }
                     ImageSource::Url { url } => {
-                        parts.push(ChatContentPart::ImageUrl {
+                        parts.push(MediaContentPart::ImageUrl {
                             url: url.clone(),
                             detail: None,
                             uuid: None,
@@ -270,7 +270,7 @@ fn extract_content_parts_messages(messages: &[InputMessage]) -> Vec<ChatContentP
                     }
                 },
                 InputContentBlock::Text(text_block) => {
-                    parts.push(ChatContentPart::Text {
+                    parts.push(MediaContentPart::Text {
                         text: text_block.text.clone(),
                     });
                 }
@@ -332,10 +332,10 @@ pub(crate) async fn process_multimodal(
 
 /// Shared multimodal processing core.
 ///
-/// Takes pre-extracted `ChatContentPart`s (from either chat or messages pipeline)
+/// Takes pre-extracted `MediaContentPart`s (from either chat or messages pipeline)
 /// and runs the full processing chain: fetch → preprocess → expand → build intermediate.
 async fn process_multimodal_parts(
-    content_parts: Vec<ChatContentPart>,
+    content_parts: Vec<MediaContentPart>,
     model_id: &str,
     tokenizer: &dyn TokenizerTrait,
     token_ids: Vec<u32>,
@@ -792,12 +792,12 @@ mod tests {
         assert_eq!(parts.len(), 2);
 
         match &parts[0] {
-            ChatContentPart::Text { text } => assert_eq!(text, "Describe this:"),
+            MediaContentPart::Text { text } => assert_eq!(text, "Describe this:"),
             _ => panic!("Expected Text part"),
         }
 
         match &parts[1] {
-            ChatContentPart::ImageUrl { url, detail, .. } => {
+            MediaContentPart::ImageUrl { url, detail, .. } => {
                 assert_eq!(url, "https://example.com/image.jpg");
                 assert_eq!(*detail, Some(ImageDetail::High));
             }
