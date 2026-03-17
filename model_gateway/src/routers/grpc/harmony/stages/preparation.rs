@@ -325,38 +325,40 @@ impl HarmonyPreparationStage {
             _ => {}
         }
 
-        // Build tags for each tool - need two patterns per tool for reasoning on/off
+        // Analysis (reasoning) channel tag: any text until <|end|>
+        // This is needed so xgrammar's `at_least_one` allows the model to
+        // generate analysis content before entering the commentary channel.
+        tags.push(json!({
+            "begin": "<|channel|>analysis<|message|>",
+            "content": { "type": "any_text" },
+            "end": "<|end|>"
+        }));
+
+        // Build commentary channel tags for each tool
         for tool in tools_to_use {
             let tool_name = &tool.function.name;
             let params_schema = &tool.function.parameters;
 
-            // Pattern 1: For reasoning-enabled mode (with analysis channel before commentary)
-            tags.push(json!({
-                "begin": format!("<|start|>assistant<|channel|>commentary to=functions.{}<|constrain|>json<|message|>", tool_name),
-                "content": {
-                    "type": "json_schema",
-                    "json_schema": params_schema
-                },
-                "end": "" // `end` is empty because <|call|> comes naturally from Harmony stop tokens
-            }));
-
-            // Pattern 2: For reasoning-disabled mode (goes directly to commentary channel)
             tags.push(json!({
                 "begin": format!("<|channel|>commentary to=functions.{}<|constrain|>json<|message|>", tool_name),
                 "content": {
                     "type": "json_schema",
                     "json_schema": params_schema
                 },
-                "end": ""
+                "end": "" // `end` is empty because <|call|> comes naturally from Harmony stop tokens
             }));
         }
 
+        // stop_after_first: true when a specific function is requested (tool_choice=function),
+        // false when any tool can be called (tool_choice=required) to allow multiple tool calls.
+        // Note: analysis tag doesn't count toward "first" since it has an end tag and the
+        // grammar returns to free text after it completes.
         let stop_after_first = specific_function.is_some();
 
         let structural_tag = json!({
             "format": {
                 "type": "triggered_tags",
-                "triggers": ["<|start|>assistant<|channel|>commentary", "<|channel|>commentary"],
+                "triggers": ["<|channel|>analysis", "<|channel|>commentary"],
                 "tags": tags,
                 "at_least_one": true,
                 "stop_after_first": stop_after_first
