@@ -5,7 +5,7 @@
 # so we build from source (main branch) which compiles the C++
 # extensions properly and includes the gRPC serve command.
 #
-# Cache version: 2 — rebuild to pick up gRPC stop_words fix (#11292)
+# Cache version: 3 — rebuild for NCCL 2.28+ (required by TRT-LLM PR #12015)
 #
 # Prerequisites (expected on k8s-runner-gpu nodes):
 #   - NVIDIA driver 580+ (CUDA 13)
@@ -58,7 +58,7 @@ if [ -n "$CACHED_WHEEL" ] && [ -f "$CACHED_WHEEL" ]; then
 
     # ── Install NCCL runtime ─────────────────────────────────────────────────
     pip install --upgrade pip
-    pip install --no-cache-dir "nvidia-nccl-cu13>=2.27.7"
+    pip install --no-cache-dir "nvidia-nccl-cu13>=2.28.0"
 
     # ── Install cached wheel ─────────────────────────────────────────────────
     echo "Installing cached wheel..."
@@ -160,7 +160,7 @@ sudo ln -sf /usr/lib/x86_64-linux-gnu /usr/local/tensorrt/lib
 # Use pip-installed NCCL 2.27+ which has both headers and libraries.
 # This matches the working installation guide approach.
 pip install --upgrade pip
-pip install --no-cache-dir "nvidia-nccl-cu13>=2.27.7"
+pip install --no-cache-dir "nvidia-nccl-cu13>=2.28.0"
 
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
 
