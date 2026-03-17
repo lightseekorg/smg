@@ -646,6 +646,112 @@ class TestChatCompletionGptOss(TestChatCompletion):
     def test_penalty(self, setup_backend, smg):
         pass
 
+    def test_response_format_json_schema(self, setup_backend, smg):
+        """Test response_format with json_schema produces valid constrained JSON."""
+        _, model, client, gateway = setup_backend
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 2,
+                },
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "List exactly 2 fruits."},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "fruits",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+            temperature=0,
+        )
+
+        content = response.choices[0].message.content
+        assert content is not None, "Expected non-empty content"
+
+        # Should be valid JSON matching the schema
+        parsed = json.loads(content)
+        assert set(parsed) == {"items"}
+        assert isinstance(parsed["items"], list)
+        assert len(parsed["items"]) == 2
+        assert all(isinstance(item, str) for item in parsed["items"])
+
+        # Should not contain leaked Harmony markers
+        assert "<|channel|>" not in content
+        assert "<|constrain|>" not in content
+        assert "<|message|>" not in content
+
+    def test_response_format_json_schema_stream(self, setup_backend, smg):
+        """Test response_format with json_schema in streaming mode."""
+        _, model, client, gateway = setup_backend
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 2,
+                },
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+
+        chunks = list(
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "user", "content": "List exactly 2 fruits."},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "fruits",
+                        "strict": True,
+                        "schema": schema,
+                    },
+                },
+                temperature=0,
+                stream=True,
+            )
+        )
+
+        # Collect streamed content
+        content = ""
+        for chunk in chunks:
+            if chunk.choices and chunk.choices[0].delta.content:
+                content += chunk.choices[0].delta.content
+
+        assert content, "Expected non-empty streamed content"
+
+        # Should be valid JSON matching the schema
+        parsed = json.loads(content)
+        assert set(parsed) == {"items"}
+        assert isinstance(parsed["items"], list)
+        assert len(parsed["items"]) == 2
+        assert all(isinstance(item, str) for item in parsed["items"])
+
+        # Should not contain leaked Harmony markers
+        assert "<|channel|>" not in content
+        assert "<|constrain|>" not in content
+        assert "<|message|>" not in content
+
     @pytest.mark.skip(reason="OSS models don't support continue_final_message")
     def test_response_prefill(self, setup_backend, smg):
         pass

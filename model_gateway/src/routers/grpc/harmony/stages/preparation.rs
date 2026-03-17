@@ -1,10 +1,12 @@
 //! Harmony Preparation Stage: Harmony encoding for chat and generate requests
 
+use std::borrow::Cow;
+
 use async_trait::async_trait;
 use axum::response::Response;
 use openai_protocol::{
     chat::ChatCompletionRequest,
-    common::{Tool, ToolChoice, ToolChoiceValue},
+    common::{ResponseFormat, Tool, ToolChoice, ToolChoiceValue},
     responses::ResponsesRequest,
 };
 use serde_json::json;
@@ -97,15 +99,29 @@ impl HarmonyPreparationStage {
         request: &ChatCompletionRequest,
     ) -> Result<Option<Response>, Response> {
         // Step 1: Filter tools if needed
-        let body_ref = utils::filter_chat_request_by_tool_choice(request);
+        let mut body_ref = utils::filter_chat_request_by_tool_choice(request);
 
-        // Step 2: Build tool constraints
-        let tool_constraints = if let Some(tools) = body_ref.tools.as_ref() {
+        // Step 2: Build structural tag constraint
+        // Try tool call constraint first; fall back to response_format if no tool constraint produced.
+        let constraint = if let Some(tools) = body_ref.tools.as_ref() {
             Self::generate_tool_call_constraint(tools, body_ref.tool_choice.as_ref())
                 .map_err(|e| *e)?
         } else {
             None
         };
+        let constraint = match constraint {
+            Some(c) => Some(c),
+            None => Self::generate_response_format_constraint(body_ref.response_format.as_ref())
+                .map_err(|e| *e)?,
+        };
+
+        // If response_format was converted to a structural tag, clear it from the request
+        // so the backend builder doesn't also try to add a json_schema constraint from it.
+        if constraint.is_some() && body_ref.response_format.is_some() {
+            let mut owned = body_ref.into_owned();
+            owned.response_format = None;
+            body_ref = Cow::Owned(owned);
+        }
 
         // Step 3: Build via Harmony
         let build_output = self.builder.build_from_chat(&body_ref).map_err(|e| {
@@ -122,8 +138,8 @@ impl HarmonyPreparationStage {
             original_text: None,
             token_ids: build_output.input_ids,
             processed_messages: None,
-            tool_constraints,
-            filtered_request: if matches!(body_ref, std::borrow::Cow::Owned(_)) {
+            tool_constraints: constraint,
+            filtered_request: if matches!(body_ref, Cow::Owned(_)) {
                 Some(body_ref.into_owned())
             } else {
                 None
@@ -253,6 +269,35 @@ impl HarmonyPreparationStage {
                 Ok(Some(("structural_tag".to_string(), tag)))
             }
         }
+    }
+
+    /// Generate Harmony structural tag for Chat Completions response_format
+    ///
+    /// Converts response_format (json_object, json_schema) to structural tag that constrains
+    /// the final channel. Uses the same `build_text_format_structural_tag` as the Responses API.
+    /// Returns None if response_format is not specified or is "text".
+    fn generate_response_format_constraint(
+        response_format: Option<&ResponseFormat>,
+    ) -> Result<Option<(String, String)>, Box<Response>> {
+        let Some(format) = response_format else {
+            return Ok(None);
+        };
+
+        let schema = match format {
+            ResponseFormat::Text => return Ok(None),
+            ResponseFormat::JsonObject => Cow::Owned(serde_json::json!({"type": "object"})),
+            ResponseFormat::JsonSchema { json_schema } => Cow::Borrowed(&json_schema.schema),
+        };
+
+        let tag = build_text_format_structural_tag(&schema).map_err(|e| {
+            error!(
+                function = "generate_response_format_constraint",
+                error = %e,
+                "Failed to build structural tag for response_format"
+            );
+            Box::new(error::internal_error("build_response_format_tag_failed", e))
+        })?;
+        Ok(Some(("structural_tag".to_string(), tag)))
     }
 
     /// Generate Harmony structural tag for tool constraints
