@@ -51,6 +51,20 @@ impl PipelineStage for HarmonyPreparationStage {
         let is_chat = matches!(&ctx.input.request_type, RequestType::Chat(_));
         let is_responses = matches!(&ctx.input.request_type, RequestType::Responses(_));
 
+        // Reject ignore_eos for Harmony models: Harmony requires EOS-based stop tokens
+        // to produce well-formed output. When ignore_eos is true, some backends skip all
+        // stop token checks, causing the Harmony parser to receive malformed token sequences.
+        if is_chat {
+            if let RequestType::Chat(request) = &ctx.input.request_type {
+                if request.ignore_eos {
+                    return Err(error::bad_request(
+                        "ignore_eos_not_supported",
+                        "ignore_eos is not supported for Harmony models",
+                    ));
+                }
+            }
+        }
+
         if is_chat {
             let request_arc = ctx.chat_request_arc();
             self.prepare_chat(ctx, &request_arc)?;

@@ -624,6 +624,23 @@ class TestChatCompletionGptOss(TestChatCompletion):
             self.STOP_SEQUENCE_TRIMMED = True
         super().test_stop_sequences_stream(setup_backend, smg)
 
+    def test_ignore_eos_rejected(self, setup_backend, smg):
+        """Test that ignore_eos is rejected for Harmony models with HTTP 400."""
+        import openai
+
+        _, model, client, gateway = setup_backend
+
+        with pytest.raises(openai.BadRequestError) as exc_info:
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "user", "content": "Hello"},
+                ],
+                extra_body={"ignore_eos": True},
+            )
+        assert exc_info.value.status_code == 400
+        assert "ignore_eos" in str(exc_info.value.message).lower()
+
     @pytest.mark.skip(reason="OSS models don't support regex constraints")
     def test_regex(self, setup_backend, smg):
         pass
