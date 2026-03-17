@@ -58,7 +58,6 @@ class RenderGrpcServicer:
                 grpc.StatusCode.UNIMPLEMENTED,
                 "RenderChat is not configured on this server.",
             )
-            return
 
         try:
             pydantic_request = from_proto(
@@ -74,7 +73,6 @@ class RenderGrpcServicer:
                     grpc.StatusCode.INVALID_ARGUMENT,
                     result.error.message,
                 )
-                return
 
             return vllm_render_pb2.RenderChatResponse(
                 generate_request=pydantic_to_proto(
@@ -92,7 +90,6 @@ class RenderGrpcServicer:
                 grpc.StatusCode.UNIMPLEMENTED,
                 "RenderCompletion is not configured on this server.",
             )
-            return
 
         try:
             pydantic_request = from_proto(request, CompletionRequest, FIELD_TRANSFORMS)
@@ -106,7 +103,6 @@ class RenderGrpcServicer:
                     grpc.StatusCode.INVALID_ARGUMENT,
                     result.error.message,
                 )
-                return
 
             return vllm_render_pb2.RenderCompletionResponse(
                 generate_requests=[

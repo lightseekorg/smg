@@ -4,14 +4,18 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+import grpc
 import pytest
 
 
 @pytest.fixture
 def mock_grpc_context():
-    """Mock gRPC async servicer context."""
+    """Mock gRPC async servicer context.
+
+    abort() raises AbortError like the real implementation.
+    """
     ctx = MagicMock()
-    ctx.abort = AsyncMock()
+    ctx.abort = AsyncMock(side_effect=grpc.aio.AbortError("", ""))
     return ctx
 
 

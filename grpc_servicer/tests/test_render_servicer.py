@@ -101,7 +101,8 @@ class TestRenderChat:
         mock_state.openai_serving_render = None
         servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
 
-        await servicer.RenderChat(MagicMock(), mock_grpc_context)
+        with pytest.raises(grpc.aio.AbortError):
+            await servicer.RenderChat(MagicMock(), mock_grpc_context)
 
         mock_grpc_context.abort.assert_awaited_once_with(
             grpc.StatusCode.UNIMPLEMENTED,
@@ -120,7 +121,8 @@ class TestRenderChat:
 
         with patch(f"{_MOD}.ErrorResponse", new=type(mock_error)):
             servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
-            await servicer.RenderChat(MagicMock(), mock_grpc_context)
+            with pytest.raises(grpc.aio.AbortError):
+                await servicer.RenderChat(MagicMock(), mock_grpc_context)
 
         mock_grpc_context.abort.assert_awaited_once_with(
             grpc.StatusCode.INVALID_ARGUMENT,
@@ -134,7 +136,8 @@ class TestRenderChat:
         mock_from_proto.side_effect = ValueError("something broke")
         servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
 
-        await servicer.RenderChat(MagicMock(), mock_grpc_context)
+        with pytest.raises(grpc.aio.AbortError):
+            await servicer.RenderChat(MagicMock(), mock_grpc_context)
 
         mock_grpc_context.abort.assert_awaited_once_with(
             grpc.StatusCode.INTERNAL,
@@ -187,7 +190,8 @@ class TestRenderCompletion:
         mock_state.openai_serving_render = None
         servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
 
-        await servicer.RenderCompletion(MagicMock(), mock_grpc_context)
+        with pytest.raises(grpc.aio.AbortError):
+            await servicer.RenderCompletion(MagicMock(), mock_grpc_context)
 
         mock_grpc_context.abort.assert_awaited_once_with(
             grpc.StatusCode.UNIMPLEMENTED,
@@ -208,7 +212,8 @@ class TestRenderCompletion:
 
         with patch(f"{_MOD}.ErrorResponse", new=type(mock_error)):
             servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
-            await servicer.RenderCompletion(MagicMock(), mock_grpc_context)
+            with pytest.raises(grpc.aio.AbortError):
+                await servicer.RenderCompletion(MagicMock(), mock_grpc_context)
 
         mock_grpc_context.abort.assert_awaited_once_with(
             grpc.StatusCode.INVALID_ARGUMENT,
@@ -222,7 +227,8 @@ class TestRenderCompletion:
         mock_from_proto.side_effect = RuntimeError("crash")
         servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
 
-        await servicer.RenderCompletion(MagicMock(), mock_grpc_context)
+        with pytest.raises(grpc.aio.AbortError):
+            await servicer.RenderCompletion(MagicMock(), mock_grpc_context)
 
         mock_grpc_context.abort.assert_awaited_once_with(
             grpc.StatusCode.INTERNAL,
