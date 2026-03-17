@@ -4,7 +4,7 @@ resolver = "2"
 
 [workspace.dependencies]
 # Internal workspace crates
-openai-protocol = { version = "1.4.0", path = "crates/protocols" }
+openai-protocol = { version = "1.4.1", path = "crates/protocols" }
 reasoning-parser = { version = "1.2.1", path = "crates/reasoning_parser" }
 tool-parser = { version = "1.1.2", path = "crates/tool_parser" }
 wfaas = { version = "1.0.3", path = "crates/workflow" }
