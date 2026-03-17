@@ -9,12 +9,12 @@ hide:
 
 # Shepherd Model Gateway
 
-**The high-performance inference gateway for production LLM deployments**
+**High-performance inference gateway for LLM deployments**
 
-Route, balance, and orchestrate traffic across your LLM fleet with enterprise-grade reliability.
+One gateway for routing, load balancing, and orchestrating traffic across your LLM fleet.
 
 [Get Started](getting-started/index.md){ .button .button--primary }
-[View on GitHub](https://github.com/lightseekorg/smg){ .button .button--secondary }
+[GitHub](https://github.com/lightseekorg/smg){ .button .button--secondary }
 
 </div>
 
@@ -29,7 +29,7 @@ Route, balance, and orchestrate traffic across your LLM fleet with enterprise-gr
 </div>
 <div class="stat">
 <span class="stat-value">40+</span>
-<span class="stat-label">Metrics</span>
+<span class="stat-label">Prometheus Metrics</span>
 </div>
 <div class="stat">
 <span class="stat-value">100%</span>
@@ -38,7 +38,7 @@ Route, balance, and orchestrate traffic across your LLM fleet with enterprise-gr
 </div>
 
 <div class="backends">
-<div class="backends-label">Works With</div>
+<div class="backends-label">Works with</div>
 <div class="backends-grid">
 <span class="backend">vLLM</span>
 <span class="backend">SGLang</span>
@@ -51,41 +51,41 @@ Route, balance, and orchestrate traffic across your LLM fleet with enterprise-gr
 
 ---
 
-## Why Shepherd Model Gateway?
+## What SMG does
 
-SMG sits between your applications and LLM workers, providing a unified control and data plane for managing inference at scale. Whether you're running a single model or orchestrating hundreds of workers across multiple clusters, SMG gives you the tools to do it reliably.
+SMG sits between your applications and LLM workers. It manages routing, failover, tokenization, and observability so you can scale inference without building that infrastructure yourself.
 
 <div class="grid" markdown>
 
 <div class="card" markdown>
 
-### :material-server-network: Full OpenAI Server Mode
+### :material-server-network: Full OpenAI server mode
 
-With gRPC workers, SMG becomes a complete OpenAI-compatible server — handling tokenization, chat templates, tool calling, MCP, reasoning loops, and detokenization at the gateway level.
-
-</div>
-
-<div class="card" markdown>
-
-### :material-speedometer: High Performance
-
-Native Rust implementation with gateway-side tokenization caching, token-level streaming, and sub-millisecond routing. Built for throughput at scale.
+In gRPC mode, SMG handles tokenization, chat templates, tool calling, MCP, reasoning loops, and detokenization at the gateway. Workers just run inference.
 
 </div>
 
 <div class="card" markdown>
 
-### :material-shield-check: Enterprise Reliability
+### :material-speedometer: Sub-millisecond routing
 
-Circuit breakers, automatic retries with exponential backoff, rate limiting, and health monitoring. Your inference stack stays up.
+Written in Rust. Gateway-side tokenizer caching, token-level streaming, cache-aware routing. Designed for throughput.
 
 </div>
 
 <div class="card" markdown>
 
-### :material-chart-line: Full Observability
+### :material-shield-check: Production reliability
 
-40+ Prometheus metrics, OpenTelemetry distributed tracing, and structured logging. Know exactly what's happening.
+Circuit breakers, retries with exponential backoff, rate limiting, health monitoring. Keeps your inference stack up.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-chart-line: Built-in observability
+
+40+ Prometheus metrics, OpenTelemetry tracing, structured logging. See what's happening without extra tooling.
 
 </div>
 
@@ -93,7 +93,7 @@ Circuit breakers, automatic retries with exponential backoff, rate limiting, and
 
 ---
 
-## How It Works
+## Three operating modes
 
 <div class="architecture-diagram">
   <img src="assets/images/architecture-animated.svg" alt="SMG Architecture">
@@ -103,31 +103,25 @@ Circuit breakers, automatic retries with exponential backoff, rate limiting, and
 
 <div class="card" markdown>
 
-### :material-lightning-bolt: gRPC Mode
+### :material-lightning-bolt: gRPC mode
 
-**Gateway = Full Server**
-
-SMG handles everything: tokenization, chat templates, tool parsing, MCP loops, detokenization, and PD routing. Workers run raw inference on SGLang, vLLM, or TensorRT-LLM.
+SMG handles everything — tokenization, chat templates, tool parsing, MCP loops, detokenization, PD routing. Workers run raw inference.
 
 </div>
 
 <div class="card" markdown>
 
-### :material-swap-horizontal: HTTP Mode
+### :material-swap-horizontal: HTTP mode
 
-**Gateway = Smart Proxy**
-
-SMG handles routing, load balancing, and failover. Workers run full OpenAI-compatible servers (SGLang, vLLM, TRT-LLM). Supports PD disaggregation.
+SMG handles routing, load balancing, and failover. Workers run full OpenAI-compatible servers. Supports prefill-decode disaggregation.
 
 </div>
 
 <div class="card" markdown>
 
-### :material-cloud-outline: External Mode
+### :material-cloud-outline: External mode
 
-**Gateway = Unified Router**
-
-Route to OpenAI, Claude, Gemini through one endpoint. Mix self-hosted and cloud models seamlessly.
+Route to OpenAI, Claude, Gemini through a single endpoint. Mix self-hosted and cloud models behind one API.
 
 </div>
 
@@ -135,47 +129,45 @@ Route to OpenAI, Claude, Gemini through one endpoint. Mix self-hosted and cloud 
 
 ---
 
-## Choose Your Path
-
 <div class="grid" markdown>
 
 <div class="card" markdown>
 
-### :material-rocket-launch: New to SMG?
+### Getting started
 
-Start here to understand what SMG does and get it running in minutes.
+Install, connect workers, send your first request.
 
-[Getting Started →](getting-started/index.md)
-
-</div>
-
-<div class="card" markdown>
-
-### :material-book-open-variant: Learn the Concepts
-
-Understand SMG's architecture, routing strategies, and reliability features.
-
-[Read Concepts →](concepts/index.md)
+[Quickstart →](getting-started/index.md)
 
 </div>
 
 <div class="card" markdown>
 
-### :material-wrench: Ops Setup
+### Architecture & concepts
 
-Continue onboarding with monitoring, logging, and TLS guides.
+Routing strategies, reliability features, extensibility.
 
-[View Getting Started Guides →](getting-started/index.md)
+[Concepts →](concepts/index.md)
 
 </div>
 
 <div class="card" markdown>
 
-### :material-api: API Reference
+### API reference
 
-Complete reference for the OpenAI-compatible API and SMG extensions.
+OpenAI-compatible API, admin endpoints, gateway extensions.
 
-[View Reference →](reference/index.md)
+[Reference →](reference/index.md)
+
+</div>
+
+<div class="card" markdown>
+
+### Contributing
+
+Development setup, code style, how to contribute.
+
+[Contribute →](contributing/index.md)
 
 </div>
 
