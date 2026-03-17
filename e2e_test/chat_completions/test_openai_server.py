@@ -638,6 +638,89 @@ class TestChatCompletionGptOss(TestChatCompletion):
         assert exc_info.value.status_code == 400
         assert exc_info.value.code == "ignore_eos_not_supported"
 
+    def test_tool_choice_required(self, setup_backend, smg):
+        """Test tool_choice=required with json_schema constraint (bypasses harmony parser)."""
+        _, model, client, gateway = setup_backend
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather for a location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string", "description": "City name"},
+                        },
+                        "required": ["location"],
+                    },
+                },
+            }
+        ]
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "What's the weather in Paris?"},
+            ],
+            tools=tools,
+            tool_choice="required",
+            temperature=0,
+        )
+
+        assert response.choices[0].finish_reason == "tool_calls"
+        assert response.choices[0].message.tool_calls is not None
+        assert len(response.choices[0].message.tool_calls) > 0
+
+        tool_call = response.choices[0].message.tool_calls[0]
+        assert tool_call.function.name == "get_weather"
+        assert tool_call.function.arguments is not None
+
+        # Verify arguments is valid JSON
+        args = json.loads(tool_call.function.arguments)
+        assert "location" in args
+
+    def test_tool_choice_required_stream(self, setup_backend, smg):
+        """Test tool_choice=required streaming with json_schema constraint."""
+        _, model, client, gateway = setup_backend
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather for a location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string", "description": "City name"},
+                        },
+                        "required": ["location"],
+                    },
+                },
+            }
+        ]
+
+        chunks = list(
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "user", "content": "What's the weather in Paris?"},
+                ],
+                tools=tools,
+                tool_choice="required",
+                temperature=0,
+                stream=True,
+            )
+        )
+
+        # Should have a finish_reason of tool_calls
+        finish_reasons = [
+            c.choices[0].finish_reason for c in chunks if c.choices and c.choices[0].finish_reason
+        ]
+        assert "tool_calls" in finish_reasons
+
     @pytest.mark.skip(reason="OSS models don't support regex constraints")
     def test_regex(self, setup_backend, smg):
         pass
