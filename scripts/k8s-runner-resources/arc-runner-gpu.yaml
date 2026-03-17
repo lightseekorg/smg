@@ -71,6 +71,26 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HUGGINGFACE_API_KEY
+                  name: huggingface-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: OPENAI_API_KEY
+                  name: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: ANTHROPIC_API_KEY
+                  name: anthropic-api-key
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: XAI_API_KEY
+                  name: xai-api-key
         - name: docker
           image: fra.ocir.io/idqj093njucb/docker:dind
           securityContext:
@@ -161,6 +181,26 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HUGGINGFACE_API_KEY
+                  name: huggingface-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: OPENAI_API_KEY
+                  name: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: ANTHROPIC_API_KEY
+                  name: anthropic-api-key
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: XAI_API_KEY
+                  name: xai-api-key
         - name: docker
           image: fra.ocir.io/idqj093njucb/docker:dind
           securityContext:
@@ -180,7 +220,7 @@ metadata:
   name: arc-runner-1-gpu-h100
   namespace: actions-runner-system
 spec:
-  replicas: 1
+  replicas: 4
   template:
     spec:
       ephemeral: true
@@ -236,7 +276,7 @@ spec:
               cpu: "32"
               memory: "128Gi"
             limits:
-              nvidia.com/gpu: 4
+              nvidia.com/gpu: 1
           volumeMounts:
             - name: model-cache
               mountPath: /models
@@ -247,6 +287,26 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HUGGINGFACE_API_KEY
+                  name: huggingface-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: OPENAI_API_KEY
+                  name: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: ANTHROPIC_API_KEY
+                  name: anthropic-api-key
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: XAI_API_KEY
+                  name: xai-api-key
         - name: docker
           image: fra.ocir.io/idqj093njucb/docker:dind
           securityContext:
@@ -329,7 +389,7 @@ spec:
               cpu: "32"
               memory: "128Gi"
             limits:
-              nvidia.com/gpu: 4
+              nvidia.com/gpu: 1
           volumeMounts:
             - name: model-cache
               mountPath: /models
@@ -340,6 +400,26 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HUGGINGFACE_API_KEY
+                  name: huggingface-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: OPENAI_API_KEY
+                  name: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: ANTHROPIC_API_KEY
+                  name: anthropic-api-key
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: XAI_API_KEY
+                  name: xai-api-key
         - name: docker
           image: fra.ocir.io/idqj093njucb/docker:dind
           securityContext:
@@ -368,7 +448,7 @@ metadata:
   name: arc-runner-2-gpu-h100
   namespace: actions-runner-system
 spec:
-  replicas: 1
+  replicas: 2
   template:
     spec:
       ephemeral: true
@@ -423,7 +503,7 @@ spec:
               cpu: "32"
               memory: "128Gi"
             limits:
-              nvidia.com/gpu: 4
+              nvidia.com/gpu: 2
           volumeMounts:
             - name: model-cache
               mountPath: /models
@@ -434,6 +514,26 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HUGGINGFACE_API_KEY
+                  name: huggingface-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: OPENAI_API_KEY
+                  name: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: ANTHROPIC_API_KEY
+                  name: anthropic-api-key
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: XAI_API_KEY
+                  name: xai-api-key
         - name: docker
           image: fra.ocir.io/idqj093njucb/docker:dind
           securityContext:

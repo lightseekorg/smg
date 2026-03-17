@@ -44,8 +44,8 @@ spec:
     kind: RunnerDeployment
     name: arc-runner-1-gpu-h100
 
-  minReplicas: 0
-  maxReplicas: 6
+  minReplicas: 4
+  maxReplicas: 20
 
   metrics:
     - type: TotalNumberOfQueuedAndInProgressWorkflowRuns
@@ -80,8 +80,8 @@ spec:
     kind: RunnerDeployment
     name: arc-runner-2-gpu-h100
 
-  minReplicas: 0
-  maxReplicas: 6
+  minReplicas: 2
+  maxReplicas: 10
 
   metrics:
     - type: TotalNumberOfQueuedAndInProgressWorkflowRuns
