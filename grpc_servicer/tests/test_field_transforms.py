@@ -5,6 +5,7 @@
 from smg_grpc_servicer.vllm.field_transforms import (
     FIELD_TRANSFORMS,
     _ensure_message_content,
+    _parse_tool_choice,
     flatten_completion_prompt,
 )
 
@@ -94,6 +95,33 @@ class TestEnsureMessageContent:
         assert result[2] == 42
 
 
+class TestParseToolChoice:
+    """Tests for _parse_tool_choice()."""
+
+    def test_simple_string_passthrough(self):
+        assert _parse_tool_choice("none") == "none"
+        assert _parse_tool_choice("auto") == "auto"
+        assert _parse_tool_choice("required") == "required"
+
+    def test_json_object_parsed(self):
+        result = _parse_tool_choice(
+            '{"type": "function", "function": {"name": "get_weather"}}'
+        )
+        assert result == {"type": "function", "function": {"name": "get_weather"}}
+
+    def test_invalid_json_passthrough(self):
+        assert _parse_tool_choice("not{json") == "not{json"
+
+    def test_json_non_dict_passthrough(self):
+        """JSON arrays or primitives stay as the original string."""
+        assert _parse_tool_choice("[1, 2]") == "[1, 2]"
+        assert _parse_tool_choice("123") == "123"
+
+    def test_non_string_passthrough(self):
+        assert _parse_tool_choice(42) == 42
+        assert _parse_tool_choice(None) is None
+
+
 class TestFieldTransformsDict:
     """Tests for the FIELD_TRANSFORMS constant."""
 
@@ -103,6 +131,7 @@ class TestFieldTransformsDict:
             "content_parts",
             "prompt",
             "messages",
+            "tool_choice",
         }
 
     def test_parameters_json_transform(self):
@@ -124,3 +153,8 @@ class TestFieldTransformsDict:
         name, fn = FIELD_TRANSFORMS["messages"]
         assert name == "messages"
         assert fn is _ensure_message_content
+
+    def test_tool_choice_uses_parse(self):
+        name, fn = FIELD_TRANSFORMS["tool_choice"]
+        assert name == "tool_choice"
+        assert fn is _parse_tool_choice

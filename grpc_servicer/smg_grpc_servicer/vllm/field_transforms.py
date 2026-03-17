@@ -41,6 +41,22 @@ def flatten_completion_prompt(prompt_dict: Any) -> Any:
     return None
 
 
+def _parse_tool_choice(value: Any) -> Any:
+    """Parse tool_choice from proto string to str or dict.
+
+    tool_choice can be a simple string ("none", "auto", "required")
+    or a JSON-encoded object (e.g. {"type": "function", "function": {"name": "..."}}).
+    """
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return value
+
+
 def _ensure_message_content(messages: list) -> list:
     """Ensure each message has a 'content' key (default None).
 
@@ -59,4 +75,5 @@ FIELD_TRANSFORMS: dict[str, tuple[str, Any]] = {
     "content_parts": ("content", None),
     "prompt": ("prompt", flatten_completion_prompt),
     "messages": ("messages", _ensure_message_content),
+    "tool_choice": ("tool_choice", _parse_tool_choice),
 }
