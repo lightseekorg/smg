@@ -6,9 +6,12 @@ gRPC servicer for GPU-less render serving.
 Implements the VllmRender service with management and rendering RPCs.
 """
 
+import logging
 import time
 
 import grpc
+
+logger = logging.getLogger(__name__)
 from smg_grpc_proto import vllm_engine_pb2  # type: ignore[import-untyped]
 from starlette.datastructures import State
 
@@ -89,6 +92,7 @@ class RenderGrpcServicer:
         except (ValueError, TypeError) as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
         except Exception as e:
+            logger.exception("RenderChat failed")
             await context.abort(grpc.StatusCode.INTERNAL, str(e))
 
     async def RenderCompletion(self, request, context):
@@ -122,4 +126,5 @@ class RenderGrpcServicer:
         except (ValueError, TypeError) as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
         except Exception as e:
+            logger.exception("RenderCompletion failed")
             await context.abort(grpc.StatusCode.INTERNAL, str(e))
