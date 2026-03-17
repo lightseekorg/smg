@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 
+import openai
 import pytest
 from conftest import smg_compare
 from infra import is_sglang, is_trtllm
@@ -329,8 +330,6 @@ convenient hands-free control to your smart devices.
     @pytest.mark.skip(reason="Skipping retrieve model test as it is not supported by the router")
     def test_retrieve_model(self, setup_backend, smg):
         """Test retrieving a specific model."""
-        import openai
-
         _, model, client, gateway = setup_backend
 
         retrieved_model = client.models.retrieve(model)
@@ -626,8 +625,6 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
     def test_ignore_eos_rejected(self, setup_backend, smg):
         """Test that ignore_eos is rejected for Harmony models with HTTP 400."""
-        import openai
-
         _, model, client, gateway = setup_backend
 
         with pytest.raises(openai.BadRequestError) as exc_info:
