@@ -653,7 +653,12 @@ class TestChatCompletionGptOss(TestChatCompletion):
         schema = {
             "type": "object",
             "properties": {
-                "items": {"type": "array", "items": {"type": "string"}},
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 2,
+                },
             },
             "required": ["items"],
             "additionalProperties": False,
@@ -680,9 +685,9 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
         # Should be valid JSON matching the schema
         parsed = json.loads(content)
-        assert "items" in parsed
+        assert set(parsed) == {"items"}
         assert isinstance(parsed["items"], list)
-        assert len(parsed["items"]) > 0
+        assert len(parsed["items"]) == 2
         assert all(isinstance(item, str) for item in parsed["items"])
 
         # Should not contain leaked Harmony markers
@@ -697,7 +702,12 @@ class TestChatCompletionGptOss(TestChatCompletion):
         schema = {
             "type": "object",
             "properties": {
-                "items": {"type": "array", "items": {"type": "string"}},
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 2,
+                },
             },
             "required": ["items"],
             "additionalProperties": False,
@@ -732,8 +742,9 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
         # Should be valid JSON matching the schema
         parsed = json.loads(content)
-        assert "items" in parsed
+        assert set(parsed) == {"items"}
         assert isinstance(parsed["items"], list)
+        assert len(parsed["items"]) == 2
 
         # Should not contain leaked Harmony markers
         assert "<|channel|>" not in content

@@ -97,7 +97,7 @@ impl HarmonyPreparationStage {
         request: &ChatCompletionRequest,
     ) -> Result<Option<Response>, Response> {
         // Step 1: Filter tools if needed
-        let body_ref = utils::filter_chat_request_by_tool_choice(request);
+        let mut body_ref = utils::filter_chat_request_by_tool_choice(request);
 
         // Step 2: Build structural tag constraint (tool call or response_format, mutually exclusive)
         let constraint = if let Some(tools) = body_ref.tools.as_ref() {
@@ -107,6 +107,14 @@ impl HarmonyPreparationStage {
             Self::generate_response_format_constraint(body_ref.response_format.as_ref())
                 .map_err(|e| *e)?
         };
+
+        // If response_format was converted to a structural tag, clear it from the request
+        // so the backend builder doesn't also try to add a json_schema constraint from it.
+        if constraint.is_some() && body_ref.response_format.is_some() {
+            let mut owned = body_ref.into_owned();
+            owned.response_format = None;
+            body_ref = std::borrow::Cow::Owned(owned);
+        }
 
         // Step 3: Build via Harmony
         let build_output = self.builder.build_from_chat(&body_ref).map_err(|e| {
@@ -270,32 +278,25 @@ impl HarmonyPreparationStage {
             return Ok(None);
         };
 
-        match format {
-            ResponseFormat::Text => Ok(None),
+        let schema = match format {
+            ResponseFormat::Text => return Ok(None),
             ResponseFormat::JsonObject => {
-                let tag = build_text_format_structural_tag(&serde_json::json!({"type": "object"}))
-                    .map_err(|e| {
-                        error!(
-                            function = "generate_response_format_constraint",
-                            error = %e,
-                            "Failed to build structural tag for JsonObject response_format"
-                        );
-                        Box::new(error::internal_error("build_response_format_tag_failed", e))
-                    })?;
-                Ok(Some(("structural_tag".to_string(), tag)))
+                std::borrow::Cow::Owned(serde_json::json!({"type": "object"}))
             }
             ResponseFormat::JsonSchema { json_schema } => {
-                let tag = build_text_format_structural_tag(&json_schema.schema).map_err(|e| {
-                    error!(
-                        function = "generate_response_format_constraint",
-                        error = %e,
-                        "Failed to build structural tag for JsonSchema response_format"
-                    );
-                    Box::new(error::internal_error("build_response_format_tag_failed", e))
-                })?;
-                Ok(Some(("structural_tag".to_string(), tag)))
+                std::borrow::Cow::Borrowed(&json_schema.schema)
             }
-        }
+        };
+
+        let tag = build_text_format_structural_tag(&schema).map_err(|e| {
+            error!(
+                function = "generate_response_format_constraint",
+                error = %e,
+                "Failed to build structural tag for response_format"
+            );
+            Box::new(error::internal_error("build_response_format_tag_failed", e))
+        })?;
+        Ok(Some(("structural_tag".to_string(), tag)))
     }
 
     /// Generate Harmony structural tag for tool constraints
