@@ -121,6 +121,7 @@ jobs:
           - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bSingle }
           - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle }
           - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bSingle }
+          - { id: minimaxai/minimax-m2, slug: minimaxai-minimax-m2, test_class: TestNightlyMinimaxM2Single }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false }
           - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false }
