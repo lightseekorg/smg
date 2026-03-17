@@ -152,7 +152,7 @@ message RenderCompletionResponse {
 // Mirrors vllm.entrypoints.serve.disagg.protocol.GenerateRequest
 message GenerateRequestProto {
   string request_id = 1;
-  repeated int32 token_ids = 2;
+  repeated uint32 token_ids = 2;
   google.protobuf.Struct sampling_params = 3;
   optional string model = 4;
   optional bool stream = 5;
