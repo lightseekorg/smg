@@ -636,7 +636,7 @@ class TestChatCompletionGptOss(TestChatCompletion):
                 extra_body={"ignore_eos": True},
             )
         assert exc_info.value.status_code == 400
-        assert "ignore_eos" in str(exc_info.value.message).lower()
+        assert exc_info.value.code == "ignore_eos_not_supported"
 
     @pytest.mark.skip(reason="OSS models don't support regex constraints")
     def test_regex(self, setup_backend, smg):
