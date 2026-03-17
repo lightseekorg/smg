@@ -5,7 +5,7 @@ use axum::response::Response;
 use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{Tool, ToolChoice, ToolChoiceValue},
-    responses::ResponsesRequest,
+    responses::{ResponsesRequest, TextFormat},
 };
 use serde_json::json;
 use tracing::error;
@@ -223,8 +223,6 @@ impl HarmonyPreparationStage {
     fn generate_text_format_constraint(
         text_config: &openai_protocol::responses::TextConfig,
     ) -> Result<Option<(String, String)>, Box<Response>> {
-        use openai_protocol::responses::TextFormat;
-
         let Some(format) = &text_config.format else {
             return Ok(None);
         };
@@ -386,7 +384,7 @@ impl HarmonyPreparationStage {
 /// - With reasoning: triggers on `<|start|>assistant<|channel|>final` (waits for analysis to complete)
 /// - Without reasoning: triggers on `<|channel|>final` (goes directly to final channel)
 ///
-/// This is used for the Responses API text.format field (json_object or json_schema).
+/// This is used for the Responses API `text.format` field (json_object or json_schema).
 pub(crate) fn build_text_format_structural_tag(
     schema: &serde_json::Value,
 ) -> Result<String, String> {
