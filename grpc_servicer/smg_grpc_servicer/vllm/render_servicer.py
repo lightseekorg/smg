@@ -10,17 +10,17 @@ import logging
 import time
 
 import grpc
-
-logger = logging.getLogger(__name__)
 from smg_grpc_proto import vllm_engine_pb2  # type: ignore[import-untyped]
+from smg_grpc_proto import vllm_render_pb2  # type: ignore[import-untyped]
 from starlette.datastructures import State
 
-from smg_grpc_proto import vllm_render_pb2  # type: ignore[import-untyped]
 from smg_grpc_servicer.vllm.field_transforms import FIELD_TRANSFORMS
 from smg_grpc_servicer.vllm.proto_utils import from_proto, pydantic_to_proto
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
+logger = logging.getLogger(__name__)
 
 
 class RenderGrpcServicer:
