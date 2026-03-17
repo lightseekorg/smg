@@ -235,6 +235,7 @@ jobs:
           - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bMulti }
           - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bMulti }
           - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bMulti }
+          - { id: minimaxai/minimax-m2, slug: minimaxai-minimax-m2, test_class: TestNightlyMinimaxM2Multi }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
           - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }

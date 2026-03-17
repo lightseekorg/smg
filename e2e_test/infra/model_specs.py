@@ -87,7 +87,7 @@ MODEL_SPECS: dict[str, dict] = {
     "minimaxai/minimax-m2": {
         "model": _resolve_model_path("minimaxai/minimax-m2"),
         "tp": 4,
-        "features": ["chat", "streaming"],
+        "features": ["chat", "streaming", "function_calling", "reasoning"],
         "worker_args": ["--trust-remote-code"],
         "vllm_args": ["--trust-remote-code"],
     },
