@@ -99,12 +99,13 @@ impl HarmonyPreparationStage {
         // Step 1: Filter tools if needed
         let body_ref = utils::filter_chat_request_by_tool_choice(request);
 
-        // Step 2: Build tool constraints
-        let tool_constraints = if let Some(tools) = body_ref.tools.as_ref() {
+        // Step 2: Build structural tag constraint (tool call or response_format, mutually exclusive)
+        let constraint = if let Some(tools) = body_ref.tools.as_ref() {
             Self::generate_tool_call_constraint(tools, body_ref.tool_choice.as_ref())
                 .map_err(|e| *e)?
         } else {
-            None
+            Self::generate_response_format_constraint(body_ref.response_format.as_ref())
+                .map_err(|e| *e)?
         };
 
         // Step 3: Build via Harmony
@@ -122,7 +123,7 @@ impl HarmonyPreparationStage {
             original_text: None,
             token_ids: build_output.input_ids,
             processed_messages: None,
-            tool_constraints,
+            tool_constraints: constraint,
             filtered_request: if matches!(body_ref, std::borrow::Cow::Owned(_)) {
                 Some(body_ref.into_owned())
             } else {
@@ -249,6 +250,48 @@ impl HarmonyPreparationStage {
                         "Failed to build text format structural tag for JsonSchema"
                     );
                     Box::new(error::internal_error("build_text_format_tag_failed", e))
+                })?;
+                Ok(Some(("structural_tag".to_string(), tag)))
+            }
+        }
+    }
+
+    /// Generate Harmony structural tag for Chat Completions response_format
+    ///
+    /// Converts response_format (json_object, json_schema) to structural tag that constrains
+    /// the final channel. Uses the same `build_text_format_structural_tag` as the Responses API.
+    /// Returns None if response_format is not specified or is "text".
+    fn generate_response_format_constraint(
+        response_format: Option<&openai_protocol::common::ResponseFormat>,
+    ) -> Result<Option<(String, String)>, Box<Response>> {
+        use openai_protocol::common::ResponseFormat;
+
+        let Some(format) = response_format else {
+            return Ok(None);
+        };
+
+        match format {
+            ResponseFormat::Text => Ok(None),
+            ResponseFormat::JsonObject => {
+                let tag = build_text_format_structural_tag(&serde_json::json!({"type": "object"}))
+                    .map_err(|e| {
+                        error!(
+                            function = "generate_response_format_constraint",
+                            error = %e,
+                            "Failed to build structural tag for JsonObject response_format"
+                        );
+                        Box::new(error::internal_error("build_response_format_tag_failed", e))
+                    })?;
+                Ok(Some(("structural_tag".to_string(), tag)))
+            }
+            ResponseFormat::JsonSchema { json_schema } => {
+                let tag = build_text_format_structural_tag(&json_schema.schema).map_err(|e| {
+                    error!(
+                        function = "generate_response_format_constraint",
+                        error = %e,
+                        "Failed to build structural tag for JsonSchema response_format"
+                    );
+                    Box::new(error::internal_error("build_response_format_tag_failed", e))
                 })?;
                 Ok(Some(("structural_tag".to_string(), tag)))
             }
