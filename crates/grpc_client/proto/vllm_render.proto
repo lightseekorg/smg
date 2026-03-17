@@ -42,10 +42,12 @@ message VideoUrlContent {
 // Content part for multimodal messages
 message ContentPart {
   string type = 1;  // "text", "image_url", "input_audio", "video_url"
-  optional string text = 2;
-  optional ImageUrlContent image_url = 3;
-  optional InputAudioContent input_audio = 4;
-  optional VideoUrlContent video_url = 5;
+  oneof payload {
+    string text = 2;
+    ImageUrlContent image_url = 3;
+    InputAudioContent input_audio = 4;
+    VideoUrlContent video_url = 5;
+  }
 }
 
 // Tool call in assistant messages
