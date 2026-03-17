@@ -1,10 +1,12 @@
 //! Harmony Preparation Stage: Harmony encoding for chat and generate requests
 
+use std::borrow::Cow;
+
 use async_trait::async_trait;
 use axum::response::Response;
 use openai_protocol::{
     chat::ChatCompletionRequest,
-    common::{Tool, ToolChoice, ToolChoiceValue},
+    common::{ResponseFormat, Tool, ToolChoice, ToolChoiceValue},
     responses::ResponsesRequest,
 };
 use serde_json::json;
@@ -113,7 +115,7 @@ impl HarmonyPreparationStage {
         if constraint.is_some() && body_ref.response_format.is_some() {
             let mut owned = body_ref.into_owned();
             owned.response_format = None;
-            body_ref = std::borrow::Cow::Owned(owned);
+            body_ref = Cow::Owned(owned);
         }
 
         // Step 3: Build via Harmony
@@ -132,7 +134,7 @@ impl HarmonyPreparationStage {
             token_ids: build_output.input_ids,
             processed_messages: None,
             tool_constraints: constraint,
-            filtered_request: if matches!(body_ref, std::borrow::Cow::Owned(_)) {
+            filtered_request: if matches!(body_ref, Cow::Owned(_)) {
                 Some(body_ref.into_owned())
             } else {
                 None
@@ -270,22 +272,16 @@ impl HarmonyPreparationStage {
     /// the final channel. Uses the same `build_text_format_structural_tag` as the Responses API.
     /// Returns None if response_format is not specified or is "text".
     fn generate_response_format_constraint(
-        response_format: Option<&openai_protocol::common::ResponseFormat>,
+        response_format: Option<&ResponseFormat>,
     ) -> Result<Option<(String, String)>, Box<Response>> {
-        use openai_protocol::common::ResponseFormat;
-
         let Some(format) = response_format else {
             return Ok(None);
         };
 
         let schema = match format {
             ResponseFormat::Text => return Ok(None),
-            ResponseFormat::JsonObject => {
-                std::borrow::Cow::Owned(serde_json::json!({"type": "object"}))
-            }
-            ResponseFormat::JsonSchema { json_schema } => {
-                std::borrow::Cow::Borrowed(&json_schema.schema)
-            }
+            ResponseFormat::JsonObject => Cow::Owned(serde_json::json!({"type": "object"})),
+            ResponseFormat::JsonSchema { json_schema } => Cow::Borrowed(&json_schema.schema),
         };
 
         let tag = build_text_format_structural_tag(&schema).map_err(|e| {
