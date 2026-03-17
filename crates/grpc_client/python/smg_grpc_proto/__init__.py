@@ -16,6 +16,8 @@ try:
         trtllm_service_pb2_grpc,
         vllm_engine_pb2,
         vllm_engine_pb2_grpc,
+        vllm_render_pb2,
+        vllm_render_pb2_grpc,
     )
 
     __all__ = [
@@ -25,6 +27,8 @@ try:
         "sglang_encoder_pb2_grpc",
         "vllm_engine_pb2",
         "vllm_engine_pb2_grpc",
+        "vllm_render_pb2",
+        "vllm_render_pb2_grpc",
         "trtllm_service_pb2",
         "trtllm_service_pb2_grpc",
     ]
