@@ -93,9 +93,20 @@ impl PipelineStage for HarmonyResponseProcessingStage {
 
                 // For non-streaming, delegate to Harmony response processor to build ChatCompletionResponse
                 let chat_request = ctx.chat_request_arc();
+                let bypass_harmony_parser = ctx
+                    .state
+                    .preparation
+                    .as_ref()
+                    .map(|p| p.bypass_harmony_parser)
+                    .unwrap_or(false);
                 let response = self
                     .processor
-                    .process_non_streaming_chat_response(execution_result, chat_request, dispatch)
+                    .process_non_streaming_chat_response(
+                        execution_result,
+                        chat_request,
+                        dispatch,
+                        bypass_harmony_parser,
+                    )
                     .await?;
 
                 ctx.state.response.final_response = Some(FinalResponse::Chat(response));
@@ -130,9 +141,20 @@ impl PipelineStage for HarmonyResponseProcessingStage {
                 })?;
 
                 let responses_request = ctx.responses_request_arc();
+                let bypass_harmony_parser = ctx
+                    .state
+                    .preparation
+                    .as_ref()
+                    .map(|p| p.bypass_harmony_parser)
+                    .unwrap_or(false);
                 let iteration_result = self
                     .processor
-                    .process_responses_iteration(execution_result, responses_request, dispatch)
+                    .process_responses_iteration(
+                        execution_result,
+                        responses_request,
+                        dispatch,
+                        bypass_harmony_parser,
+                    )
                     .await?;
 
                 ctx.state.response.responses_iteration_result = Some(iteration_result);
