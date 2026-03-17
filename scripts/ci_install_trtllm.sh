@@ -308,6 +308,17 @@ print('FindNCCL.cmake patched to use NCCL_ROOT hint')
 PYTHON_EOF
 fi
 
+# ── Patch NCCL version constraint ────────────────────────────────────────────
+# TRT-LLM requirements.txt pins nvidia-nccl-cu13<=2.28.9 which conflicts with
+# the 2.28+ requirement from PR #12015's NCCL_VERSION gate. The build_wheel.py
+# script internally runs pip install, so we patch the constraint in-place.
+for req_file in requirements.txt requirements-dev.txt; do
+    if [ -f "$req_file" ]; then
+        sed -i 's/nvidia-nccl-cu13<=2\.28\.9,>=2\.27\.7/nvidia-nccl-cu13>=2.28.0/' "$req_file"
+        echo "Patched NCCL constraint in $req_file"
+    fi
+done
+
 # ── Build TensorRT-LLM ───────────────────────────────────────────────────────
 echo "=== Building TensorRT-LLM from source (this may take a while)... ==="
 
