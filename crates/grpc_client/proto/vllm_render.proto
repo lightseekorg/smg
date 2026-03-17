@@ -99,8 +99,8 @@ message RenderChatRequest {
   repeated ChatCompletionTool tools = 3;
   optional string tool_choice = 4;  // "none"/"auto"/"required" or JSON
   optional string chat_template = 5;
-  bool add_generation_prompt = 6;
-  bool continue_final_message = 7;
+  optional bool add_generation_prompt = 6;
+  optional bool continue_final_message = 7;
 }
 
 message RenderChatResponse {
@@ -141,7 +141,7 @@ message RenderCompletionRequest {
   optional bool echo = 3;
   optional string suffix = 4;
   optional int32 prompt_logprobs = 5;
-  bool add_special_tokens = 6;
+  optional bool add_special_tokens = 6;
   optional string cache_salt = 7;
 }
 
