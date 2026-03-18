@@ -603,7 +603,7 @@ class TestToolCallingCloud:
 @pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
-@pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
+@pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestToolChoiceHarmony:
     """Tool choice tests against local gRPC backend with Harmony model."""

@@ -252,6 +252,14 @@ Note: Enabling service discovery automatically enables IGW mode.
 | Default | None |
 | Description | Path to chat template file |
 
+### Disable Tokenizer Autoload
+
+| Option | `--disable-tokenizer-autoload` |
+|--------|-------------------------------|
+| Environment | - |
+| Default | `false` |
+| Description | Disable automatic tokenizer loading at startup and during worker registration. Useful when tokenizers are loaded on-demand via the API. |
+
 ### Tokenizer Cache (L0 - Exact Match)
 
 | Option | Description | Default |
@@ -366,17 +374,17 @@ Note: Enabling service discovery automatically enables IGW mode.
 
 ---
 
-## Mesh/HA Configuration
+## Mesh Server Configuration
 
-High-availability mesh networking for router coordination.
+High-availability mesh networking for multi-router coordination.
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--enable-mesh` | Enable mesh server for HA | `false` |
-| `--mesh-server-name` | Unique name for this mesh node | Auto-generated |
-| `--mesh-host` | Host address for mesh server | `0.0.0.0` |
-| `--mesh-port` | Port for mesh server | `39527` |
-| `--mesh-peer-urls` | URLs of peer mesh nodes | Empty |
+| `--enable-mesh` | Enable mesh server for HA multi-router coordination. Requires at least two SMG instances. | `false` |
+| `--mesh-server-name` | Name for this mesh node. If not set, a random name is generated (e.g., `Mesh_a1b2`). | Auto-generated |
+| `--mesh-host` | Bind address for the mesh server. | `0.0.0.0` |
+| `--mesh-port` | Port for the mesh server. | `39527` |
+| `--mesh-peer-urls` | Peer mesh node addresses to join (format: `host:port`). Used for initial cluster formation. | (none) |
 
 **Example**:
 ```bash
@@ -529,7 +537,7 @@ delay = min(initial_backoff * multiplier^attempt, max_backoff) * (1 + random(0, 
 | `--health-check-interval-secs` | Interval between health checks | `60` |
 | `--health-check-endpoint` | Health check endpoint path | `/health` |
 | `--disable-health-check` | Disable all health checks | `false` |
-| `--remove-unhealthy-workers` | Remove workers after being marked unhealthy | `false` |
+| `--remove-unhealthy-workers` | Remove workers from the registry when marked unhealthy by health checks. Useful for ephemeral worker pools where failed workers should be deregistered. | `false` |
 
 ---
 

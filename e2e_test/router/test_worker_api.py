@@ -44,12 +44,16 @@ class TestWorkerAPI:
 
         for worker in workers:
             logger.info(
-                "Worker: id=%s, url=%s, status=%s",
+                "Worker: id=%s, url=%s, model=%s, status=%s",
                 worker.id,
                 worker.url,
+                worker.model,
                 worker.status,
             )
             assert worker.url, "Worker should have a URL"
+            # model_id is set for workers with discovered models, None for wildcard
+            if worker.model is not None:
+                assert worker.model, "Worker model_id should be non-empty when present"
 
         # SmgClient comparison
         with smg_compare():

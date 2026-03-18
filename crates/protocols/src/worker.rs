@@ -575,6 +575,11 @@ pub struct WorkerInfo {
     /// Worker unique identifier.
     pub id: String,
 
+    /// Primary model ID for backwards compatibility.
+    /// Computed from `models[0].id` (single/multi) or `null` (wildcard).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+
     /// Worker identity and configuration.
     #[serde(flatten)]
     pub spec: WorkerSpec,
@@ -594,6 +599,7 @@ impl WorkerInfo {
     pub fn pending(worker_id: &str, url: String, job_status: Option<JobStatus>) -> Self {
         Self {
             id: worker_id.to_string(),
+            model_id: None,
             spec: WorkerSpec::new(url),
             is_healthy: false,
             load: 0,

@@ -1,10 +1,12 @@
 //! Harmony Preparation Stage: Harmony encoding for chat and generate requests
 
+use std::borrow::Cow;
+
 use async_trait::async_trait;
 use axum::response::Response;
 use openai_protocol::{
     chat::ChatCompletionRequest,
-    common::{Tool, ToolChoice, ToolChoiceValue},
+    common::{ResponseFormat, Tool, ToolChoice, ToolChoiceValue},
     responses::ResponsesRequest,
 };
 use serde_json::json;
@@ -53,6 +55,15 @@ impl PipelineStage for HarmonyPreparationStage {
 
         if is_chat {
             let request_arc = ctx.chat_request_arc();
+            // Reject ignore_eos for Harmony models: Harmony requires EOS-based stop tokens
+            // to produce well-formed output. When ignore_eos is true, some backends skip all
+            // stop token checks, causing the Harmony parser to receive malformed token sequences.
+            if request_arc.ignore_eos {
+                return Err(error::bad_request(
+                    "ignore_eos_not_supported",
+                    "ignore_eos is not supported for Harmony models",
+                ));
+            }
             self.prepare_chat(ctx, &request_arc)?;
         } else if is_responses {
             let request_arc = ctx.responses_request_arc();
@@ -88,15 +99,37 @@ impl HarmonyPreparationStage {
         request: &ChatCompletionRequest,
     ) -> Result<Option<Response>, Response> {
         // Step 1: Filter tools if needed
-        let body_ref = utils::filter_chat_request_by_tool_choice(request);
+        let mut body_ref = utils::filter_chat_request_by_tool_choice(request);
 
-        // Step 2: Build tool constraints
-        let tool_constraints = if let Some(tools) = body_ref.tools.as_ref() {
+        // Step 2: Build structural tag constraint
+        let tool_constraint = if let Some(tools) = body_ref.tools.as_ref() {
             Self::generate_tool_call_constraint(tools, body_ref.tool_choice.as_ref())
                 .map_err(|e| *e)?
         } else {
             None
         };
+        let response_format_constraint =
+            Self::generate_response_format_constraint(body_ref.response_format.as_ref())
+                .map_err(|e| *e)?;
+
+        // Reject requests that specify both tool call and response_format constraints
+        if tool_constraint.is_some() && response_format_constraint.is_some() {
+            return Err(error::bad_request(
+                "invalid_request_parameters",
+                "Constrained decoding (response_format) is not compatible with tool calls",
+            ));
+        }
+
+        let has_response_format_constraint = response_format_constraint.is_some();
+        let constraint = tool_constraint.or(response_format_constraint);
+
+        // If response_format was converted to a structural tag, clear it from the request
+        // so the backend builder doesn't also try to add a json_schema constraint from it.
+        if has_response_format_constraint {
+            let mut owned = body_ref.into_owned();
+            owned.response_format = None;
+            body_ref = Cow::Owned(owned);
+        }
 
         // Step 3: Build via Harmony
         let build_output = self.builder.build_from_chat(&body_ref).map_err(|e| {
@@ -113,8 +146,8 @@ impl HarmonyPreparationStage {
             original_text: None,
             token_ids: build_output.input_ids,
             processed_messages: None,
-            tool_constraints,
-            filtered_request: if matches!(body_ref, std::borrow::Cow::Owned(_)) {
+            tool_constraints: constraint,
+            filtered_request: if matches!(body_ref, Cow::Owned(_)) {
                 Some(body_ref.into_owned())
             } else {
                 None
@@ -246,6 +279,35 @@ impl HarmonyPreparationStage {
         }
     }
 
+    /// Generate Harmony structural tag for Chat Completions response_format
+    ///
+    /// Converts response_format (json_object, json_schema) to structural tag that constrains
+    /// the final channel. Uses the same `build_text_format_structural_tag` as the Responses API.
+    /// Returns None if response_format is not specified or is "text".
+    fn generate_response_format_constraint(
+        response_format: Option<&ResponseFormat>,
+    ) -> Result<Option<(String, String)>, Box<Response>> {
+        let Some(format) = response_format else {
+            return Ok(None);
+        };
+
+        let schema = match format {
+            ResponseFormat::Text => return Ok(None),
+            ResponseFormat::JsonObject => Cow::Owned(serde_json::json!({"type": "object"})),
+            ResponseFormat::JsonSchema { json_schema } => Cow::Borrowed(&json_schema.schema),
+        };
+
+        let tag = build_text_format_structural_tag(&schema).map_err(|e| {
+            error!(
+                function = "generate_response_format_constraint",
+                error = %e,
+                "Failed to build structural tag for response_format"
+            );
+            Box::new(error::internal_error("build_response_format_tag_failed", e))
+        })?;
+        Ok(Some(("structural_tag".to_string(), tag)))
+    }
+
     /// Generate Harmony structural tag for tool constraints
     ///
     /// Uses structural tags with `triggered_tags` format to force Harmony format output.
@@ -370,10 +432,13 @@ impl HarmonyPreparationStage {
 
 /// Build Harmony structural tag for structured output (JSON schema constraint)
 ///
-/// Creates a structural tag that applies JSON schema constraint to the final channel,
-/// supporting both reasoning-enabled and reasoning-disabled modes:
-/// - With reasoning: triggers on `<|start|>assistant<|channel|>final` (waits for analysis to complete)
-/// - Without reasoning: triggers on `<|channel|>final` (goes directly to final channel)
+/// Creates a structural tag that handles the full Harmony channel flow:
+/// 1. `<|channel|>analysis` trigger → reasoning content (any_text) until `<|end|>`
+/// 2. Free text (allows `<|start|>assistant` between messages)
+/// 3. `<|channel|>final` trigger → JSON content constrained to schema
+///
+/// Both triggers are needed so xgrammar's `at_least_one` mode allows the analysis
+/// channel tokens (otherwise xgrammar blocks all non-trigger-prefix tokens).
 ///
 /// This is used for the Responses API text.format field (json_object or json_schema).
 pub(crate) fn build_text_format_structural_tag(
@@ -382,19 +447,16 @@ pub(crate) fn build_text_format_structural_tag(
     let structural_tag = json!({
         "format": {
             "type": "triggered_tags",
-            "triggers": ["<|start|>assistant<|channel|>final", "<|channel|>final"],
+            "triggers": ["<|channel|>analysis", "<|channel|>final"],
             "tags": [
                 {
-                    // Pattern 1: For reasoning-enabled mode (with analysis channel before final)
-                    "begin": "<|start|>assistant<|channel|>final<|constrain|>json<|message|>",
-                    "content": {
-                        "type": "json_schema",
-                        "json_schema": schema
-                    },
-                    "end": ""
+                    // Analysis (reasoning) channel: any text until <|end|>
+                    "begin": "<|channel|>analysis<|message|>",
+                    "content": { "type": "any_text" },
+                    "end": "<|end|>"
                 },
                 {
-                    // Pattern 2: For reasoning-disabled mode (goes directly to final channel)
+                    // Final channel: JSON content constrained to schema
                     "begin": "<|channel|>final<|constrain|>json<|message|>",
                     "content": {
                         "type": "json_schema",
@@ -404,7 +466,7 @@ pub(crate) fn build_text_format_structural_tag(
                 }
             ],
             "at_least_one": true,
-            "stop_after_first": true
+            "stop_after_first": false
         }
     });
 
