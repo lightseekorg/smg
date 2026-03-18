@@ -5,9 +5,15 @@
 
 use std::{collections::HashSet, time::Duration};
 
+use axum::{http::StatusCode, response::IntoResponse};
 use openai_protocol::worker::ResilienceUpdate;
+use tracing::debug;
 
-use crate::{config::types::RetryConfig, core::circuit_breaker::CircuitBreakerConfig};
+use crate::{
+    config::types::RetryConfig,
+    core::{circuit_breaker::CircuitBreakerConfig, retry::RetryExecutor, worker::Worker},
+    observability::metrics::Metrics,
+};
 
 /// Default retryable HTTP status codes.
 pub const DEFAULT_RETRYABLE_STATUS_CODES: &[u16] = &[408, 429, 500, 502, 503, 504];
@@ -108,9 +114,187 @@ pub fn resolve_resilience(
     (resolved, cb_config)
 }
 
+/// Execute a request with the worker's retry and circuit breaker config.
+///
+/// This is the primary resilience API. Routers call this instead of
+/// using `RetryExecutor` directly.
+///
+/// Circuit breaker outcomes are recorded automatically.
+/// Retry decisions use the worker's `is_retryable()` predicate.
+pub async fn execute_with_resilience<F, Fut>(
+    worker: &(dyn Worker + '_),
+    operation: F,
+) -> axum::response::Response
+where
+    F: FnMut(u32) -> Fut + Send,
+    Fut: std::future::Future<Output = axum::response::Response> + Send,
+{
+    let resilience = worker.resilience();
+    let worker_url = worker.url();
+
+    // Check circuit breaker before first attempt
+    if resilience.circuit_breaker_enabled && !worker.circuit_breaker().can_execute() {
+        debug!(
+            worker_url = worker_url,
+            "Circuit breaker open, rejecting request"
+        );
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Circuit breaker open for worker {worker_url}"),
+        )
+            .into_response();
+    }
+
+    if !resilience.retry_enabled {
+        // Single attempt, no retries
+        let response = execute_single(worker, operation).await;
+        if resilience.circuit_breaker_enabled {
+            let success = !worker.is_retryable(&response);
+            worker.circuit_breaker().record_outcome(success);
+        }
+        return response;
+    }
+
+    // Retry loop — delegate to RetryExecutor with worker-aware hooks
+    RetryExecutor::execute_response_with_retry(
+        &resilience.retry,
+        operation,
+        |res, _attempt| worker.is_retryable(res),
+        |delay, attempt| {
+            Metrics::record_worker_retry_backoff(attempt, delay);
+            debug!(
+                worker_url = worker_url,
+                attempt = attempt,
+                delay_ms = delay.as_millis() as u64,
+                "Worker retry backoff"
+            );
+        },
+        || {
+            debug!(worker_url = worker_url, "Worker retries exhausted");
+        },
+    )
+    .await
+}
+
+/// Execute a single attempt of an operation (no retry).
+async fn execute_single<F, Fut>(
+    _worker: &(dyn Worker + '_),
+    mut operation: F,
+) -> axum::response::Response
+where
+    F: FnMut(u32) -> Fut + Send,
+    Fut: std::future::Future<Output = axum::response::Response> + Send,
+{
+    operation(0).await
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    };
+
+    use axum::{http::StatusCode, response::IntoResponse};
+
     use super::*;
+    use crate::core::worker_builder::BasicWorkerBuilder;
+
+    #[tokio::test]
+    async fn test_execute_with_resilience_success() {
+        let worker = BasicWorkerBuilder::new("http://test:8080").build();
+        let response = execute_with_resilience(&worker, |_attempt| async {
+            (StatusCode::OK, "ok").into_response()
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_resilience_circuit_open() {
+        let worker = BasicWorkerBuilder::new("http://test:8080").build();
+        worker.circuit_breaker().force_open();
+        let response = execute_with_resilience(&worker, |_attempt| async {
+            (StatusCode::OK, "ok").into_response()
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_resilience_retries_disabled() {
+        let resolved = ResolvedResilience {
+            retry_enabled: false,
+            ..Default::default()
+        };
+        let worker = BasicWorkerBuilder::new("http://test:8080")
+            .resilience(resolved)
+            .build();
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let cc = call_count.clone();
+        let response = execute_with_resilience(&worker, move |_attempt| {
+            cc.fetch_add(1, Ordering::Relaxed);
+            async { (StatusCode::SERVICE_UNAVAILABLE, "fail").into_response() }
+        })
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(call_count.load(Ordering::Relaxed), 1); // No retries
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_resilience_retries_on_retryable_status() {
+        let resolved = ResolvedResilience {
+            retry: RetryConfig {
+                max_retries: 3,
+                initial_backoff_ms: 1,
+                max_backoff_ms: 2,
+                backoff_multiplier: 1.0,
+                jitter_factor: 0.0,
+            },
+            ..Default::default()
+        };
+        let worker = BasicWorkerBuilder::new("http://test:8080")
+            .resilience(resolved)
+            .build();
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let cc = call_count.clone();
+        let response = execute_with_resilience(&worker, move |_attempt| {
+            let count = cc.fetch_add(1, Ordering::Relaxed);
+            async move {
+                if count < 2 {
+                    (StatusCode::SERVICE_UNAVAILABLE, "fail").into_response()
+                } else {
+                    (StatusCode::OK, "ok").into_response()
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(call_count.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_resilience_cb_disabled_ignores_open() {
+        let resolved = ResolvedResilience {
+            circuit_breaker_enabled: false,
+            ..Default::default()
+        };
+        let worker = BasicWorkerBuilder::new("http://test:8080")
+            .resilience(resolved)
+            .build();
+        worker.circuit_breaker().force_open();
+
+        // CB is disabled — request should go through even though CB is open
+        let response = execute_with_resilience(&worker, |_attempt| async {
+            (StatusCode::OK, "ok").into_response()
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
     #[test]
     fn test_default_resilience() {

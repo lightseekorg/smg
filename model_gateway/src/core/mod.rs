@@ -39,7 +39,9 @@ pub use openai_protocol::{
     model_type::{Endpoint, ModelType},
     worker::{ProviderType, WorkerGroupKey},
 };
-pub use resilience::{resolve_resilience, ResolvedResilience, DEFAULT_RETRYABLE_STATUS_CODES};
+pub use resilience::{
+    execute_with_resilience, resolve_resilience, ResolvedResilience, DEFAULT_RETRYABLE_STATUS_CODES,
+};
 pub use retry::{is_retryable_status, RetryExecutor};
 pub use worker::{
     AttachedBody, BasicWorker, ConnectionMode, RuntimeType, Worker, WorkerLoadGuard, WorkerType,
