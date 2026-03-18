@@ -106,7 +106,7 @@ impl IncrementalUpdateCollector {
             let last_sent_version = last_sent_map.get(&key).copied().unwrap_or(0);
 
             if current_version > last_sent_version {
-                if let Ok(serialized) = serde_json::to_vec(&state) {
+                if let Ok(serialized) = bincode::serialize(&state) {
                     updates.push(StateUpdate {
                         key,
                         value: serialized,
@@ -185,7 +185,7 @@ impl IncrementalUpdateCollector {
 
                     // Only send if at least 1 second has passed since last send.
                     if current_timestamp > last_sent_timestamp + 1_000_000_000 {
-                        if let Ok(serialized) = serde_json::to_vec(&counter_value) {
+                        if let Ok(serialized) = bincode::serialize(&counter_value) {
                             updates.push(StateUpdate {
                                 key: key.clone(),
                                 value: serialized,

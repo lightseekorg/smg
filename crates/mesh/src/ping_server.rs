@@ -600,7 +600,7 @@ impl Gossip for GossipService {
                                             match store_type {
                                                 LocalStoreType::Worker => {
                                                     // Deserialize and apply worker state
-                                                    if let Ok(worker_state) = serde_json::from_slice::<
+                                                    if let Ok(worker_state) = bincode::deserialize::<
                                                         super::stores::WorkerState,
                                                     >(
                                                         &state_update.value
@@ -616,7 +616,7 @@ impl Gossip for GossipService {
                                                 }
                                                 LocalStoreType::Policy => {
                                                     // Deserialize and apply policy state
-                                                    if let Ok(policy_state) = serde_json::from_slice::<
+                                                    if let Ok(policy_state) = bincode::deserialize::<
                                                         super::stores::PolicyState,
                                                     >(
                                                         &state_update.value
@@ -630,9 +630,7 @@ impl Gossip for GossipService {
                                                         {
                                                             // Deserialize tree state
                                                             if let Ok(tree_state) =
-                                                                serde_json::from_slice::<
-                                                                    super::tree_ops::TreeState,
-                                                                >(
+                                                                super::tree_ops::TreeState::from_bytes(
                                                                     &policy_state.config
                                                                 )
                                                             {
@@ -656,7 +654,7 @@ impl Gossip for GossipService {
                                                 }
                                                 LocalStoreType::App => {
                                                     // Deserialize and apply app state
-                                                    if let Ok(app_state) = serde_json::from_slice::<
+                                                    if let Ok(app_state) = bincode::deserialize::<
                                                         super::stores::AppState,
                                                     >(
                                                         &state_update.value
@@ -684,7 +682,7 @@ impl Gossip for GossipService {
                                                 LocalStoreType::Membership => {
                                                     // Deserialize and apply membership state
                                                     if let Ok(membership_state) =
-                                                        serde_json::from_slice::<
+                                                        bincode::deserialize::<
                                                             super::stores::MembershipState,
                                                         >(
                                                             &state_update.value
@@ -704,7 +702,7 @@ impl Gossip for GossipService {
                                                     }
                                                 }
                                                 LocalStoreType::RateLimit => {
-                                                    if let Ok(op_log) = serde_json::from_slice::<
+                                                    if let Ok(op_log) = bincode::deserialize::<
                                                         super::crdt_kv::OperationLog,
                                                     >(
                                                         &state_update.value
@@ -729,7 +727,7 @@ impl Gossip for GossipService {
                                                             );
                                                         }
                                                     } else if let Ok(counter_value) =
-                                                        serde_json::from_slice::<i64>(
+                                                        bincode::deserialize::<i64>(
                                                             &state_update.value,
                                                         )
                                                     {
@@ -925,12 +923,12 @@ impl Gossip for GossipService {
 
                                                         match store_type {
                                                             LocalStoreType::Membership => {
-                                                                if let Ok(membership_state) = serde_json::from_slice::<super::stores::MembershipState>(&entry.value) {
+                                                                if let Ok(membership_state) = bincode::deserialize::<super::stores::MembershipState>(&entry.value) {
                                                                     let _ = stores.membership.insert(key, membership_state);
                                                                 }
                                                             }
                                                             LocalStoreType::App => {
-                                                                if let Ok(app_state) = serde_json::from_slice::<super::stores::AppState>(&entry.value) {
+                                                                if let Ok(app_state) = bincode::deserialize::<super::stores::AppState>(&entry.value) {
                                                                     let dominated = stores.app.get(&key)
                                                                         .is_some_and(|existing| existing.version >= app_state.version);
                                                                     if !dominated {
@@ -939,7 +937,7 @@ impl Gossip for GossipService {
                                                                 }
                                                             }
                                                             LocalStoreType::Worker => {
-                                                                if let Ok(worker_state) = serde_json::from_slice::<super::stores::WorkerState>(&entry.value) {
+                                                                if let Ok(worker_state) = bincode::deserialize::<super::stores::WorkerState>(&entry.value) {
                                                                     let _ = stores.worker.insert(key, worker_state.clone());
                                                                     // Also update sync manager if available
                                                                     if let Some(ref sync_manager) = sync_manager {
@@ -948,15 +946,13 @@ impl Gossip for GossipService {
                                                                 }
                                                             }
                                                             LocalStoreType::Policy => {
-                                                                if let Ok(policy_state) = serde_json::from_slice::<super::stores::PolicyState>(&entry.value) {
+                                                                if let Ok(policy_state) = bincode::deserialize::<super::stores::PolicyState>(&entry.value) {
                                                                     if let Some(ref sync_manager) = sync_manager {
                                                                         if policy_state.policy_type == "tree_state" {
                                                                             // Let apply_remote_tree_operation handle the store
                                                                             // update + subscriber notification (avoids version-
                                                                             // check skip from a prior direct store insert)
-                                                                            if let Ok(tree_state) = serde_json::from_slice::<
-                                                                                super::tree_ops::TreeState,
-                                                                            >(
+                                                                            if let Ok(tree_state) = super::tree_ops::TreeState::from_bytes(
                                                                                 &policy_state.config
                                                                             ) {
                                                                                 sync_manager.apply_remote_tree_operation(
@@ -976,7 +972,7 @@ impl Gossip for GossipService {
                                                             }
                                                             LocalStoreType::RateLimit => {
                                                                 if let Some(ref sync_manager) = sync_manager {
-                                                                    if let Ok(op_log) = serde_json::from_slice::<super::crdt_kv::OperationLog>(&entry.value) {
+                                                                    if let Ok(op_log) = bincode::deserialize::<super::crdt_kv::OperationLog>(&entry.value) {
                                                                         if let Some(counter_value) = op_log
                                                                             .latest_counter_value(&entry.key)
                                                                             .or_else(|| op_log.latest_counter_value_any())
@@ -994,7 +990,7 @@ impl Gossip for GossipService {
                                                                                 "Snapshot OperationLog does not contain a decodable rate-limit counter"
                                                                             );
                                                                         }
-                                                                    } else if let Ok(counter_value) = serde_json::from_slice::<i64>(&entry.value) {
+                                                                    } else if let Ok(counter_value) = bincode::deserialize::<i64>(&entry.value) {
                                                                         sync_manager
                                                                             .apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
                                                                                 entry.key.clone(),
