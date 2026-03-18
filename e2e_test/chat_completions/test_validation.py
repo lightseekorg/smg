@@ -37,7 +37,7 @@ def get_tokenizer(model_path: str):
 # =============================================================================
 
 
-@pytest.mark.engine("sglang")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
