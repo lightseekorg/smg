@@ -423,10 +423,16 @@ impl Gossip for GossipService {
                             // Validate message size
                             if let Err(e) = size_validator_clone.validate(batch_size) {
                                 log::warn!(
-                                    "Incremental update too large, skipping: {} (max: {} bytes)",
+                                    "Incremental update too large, skipping store {:?}: {} (max: {} bytes)",
+                                    store_type,
                                     e,
                                     size_validator_clone.max_size()
                                 );
+                                // Mark as sent to prevent infinite retry loop.
+                                // Without this, the same oversized update is re-collected,
+                                // re-serialized, and re-skipped every second forever,
+                                // burning CPU and memory.
+                                collector.mark_sent(store_type, &updates);
                                 continue;
                             }
 
