@@ -4,7 +4,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tracing::{debug, info};
-use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
+use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::core::{
     circuit_breaker::CircuitBreakerConfig,
@@ -66,7 +66,10 @@ impl StepExecutor<WorkerWorkflowData> for CreateExternalWorkersStep {
         );
 
         let http_client = build_worker_http_client(&config.http_pool, &app_context.router_config)
-            .map_err(WorkflowError::ContextValueNotFound)?;
+            .map_err(|e| WorkflowError::StepFailed {
+            step_id: StepId::new("create_external_workers"),
+            message: e,
+        })?;
 
         let (health_config, health_endpoint) = {
             let base = app_context.router_config.health_check.to_protocol_config();
