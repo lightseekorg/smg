@@ -19,6 +19,7 @@ futures-util = "0.3"
 tracing = "0.1"
 libc = "0.2.179"
 async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false }
 
 [dependencies.smg]
 path = "../../model_gateway"

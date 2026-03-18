@@ -8,6 +8,8 @@ use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowRe
 
 use crate::core::{
     circuit_breaker::CircuitBreakerConfig,
+    http_client::build_worker_http_client,
+    resilience::resolve_resilience,
     steps::workflow_data::{WorkerKind, WorkerList, WorkerWorkflowData},
     worker::{RuntimeType, WorkerType},
     BasicWorkerBuilder, ConnectionMode, Worker,
@@ -43,8 +45,9 @@ impl StepExecutor<WorkerWorkflowData> for CreateExternalWorkersStep {
             .ok_or_else(|| WorkflowError::ContextValueNotFound("app_context".to_string()))?;
         let model_cards = &context.data.model_cards;
 
-        // Build configs from router settings
-        let circuit_breaker_config = {
+        // Build configs from router settings — resolve per-worker resilience
+        let base_retry = app_context.router_config.effective_retry_config();
+        let base_cb = {
             let cfg = app_context.router_config.effective_circuit_breaker_config();
             CircuitBreakerConfig {
                 failure_threshold: cfg.failure_threshold,
@@ -53,6 +56,17 @@ impl StepExecutor<WorkerWorkflowData> for CreateExternalWorkersStep {
                 window_duration: Duration::from_secs(cfg.window_duration_secs),
             }
         };
+
+        let (resolved_resilience, circuit_breaker_config) = resolve_resilience(
+            &base_retry,
+            &base_cb,
+            !app_context.router_config.disable_retries,
+            !app_context.router_config.disable_circuit_breaker,
+            &config.resilience,
+        );
+
+        let http_client = build_worker_http_client(&config.http_pool, &app_context.router_config)
+            .map_err(WorkflowError::ContextValueNotFound)?;
 
         let (health_config, health_endpoint) = {
             let base = app_context.router_config.health_check.to_protocol_config();
@@ -86,6 +100,8 @@ impl StepExecutor<WorkerWorkflowData> for CreateExternalWorkersStep {
                 .connection_mode(ConnectionMode::Http)
                 .runtime_type(RuntimeType::External)
                 .circuit_breaker_config(circuit_breaker_config.clone())
+                .http_client(http_client.clone())
+                .resilience(resolved_resilience.clone())
                 .health_config(health_config.clone())
                 .health_endpoint(&health_endpoint)
                 .priority(config.priority)
@@ -125,6 +141,8 @@ impl StepExecutor<WorkerWorkflowData> for CreateExternalWorkersStep {
                 .connection_mode(ConnectionMode::Http)
                 .runtime_type(RuntimeType::External)
                 .circuit_breaker_config(circuit_breaker_config.clone())
+                .http_client(http_client.clone())
+                .resilience(resolved_resilience.clone())
                 .health_config(health_config.clone())
                 .health_endpoint(&health_endpoint)
                 .priority(config.priority)
