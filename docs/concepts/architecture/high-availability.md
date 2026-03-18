@@ -110,6 +110,18 @@ Real-time synchronization of all cluster state.
 
 ## Configuration
 
+### Quick Start
+
+Enable mesh networking with minimal flags:
+
+```bash
+# Start first node
+smg --enable-mesh --mesh-port 39527
+
+# Start second node, joining the first
+smg --enable-mesh --mesh-port 39528 --mesh-peer-urls 10.0.0.1:39527
+```
+
 ### Command Line Options
 
 | Flag | Default | Description |
@@ -119,6 +131,15 @@ Real-time synchronization of all cluster state.
 | `--mesh-host` | `0.0.0.0` | Host address for mesh communication |
 | `--mesh-port` | `39527` | Port for mesh gRPC communication |
 | `--mesh-peer-urls` | (none) | Initial peer URLs for cluster bootstrap |
+| `--router-selector` | (none) | Label selector for Kubernetes pod discovery (e.g. `app=smg tier=router`) |
+
+### Python Entrypoint
+
+`--enable-mesh` is also available in the Python entrypoint used by the Docker image:
+
+```bash
+smg launch --enable-mesh --mesh-port 39527
+```
 
 ### Basic Configuration
 
@@ -269,6 +290,17 @@ Routing policy configuration and state.
 
 </div>
 
+### Cache-Aware State Sync
+
+Cache-aware routing policy state is synchronized across mesh nodes. This ensures that KV cache routing decisions are consistent across all routers in the cluster, preventing redundant cache misses and enabling optimal prefix reuse regardless of which router handles the request.
+
+!!! info "Sync Endpoints"
+    The following endpoints expose cache-aware state across the mesh:
+
+    - `GET /mesh/cluster/status` — Cluster membership
+    - `GET /mesh/workers/state` — Worker state sync
+    - `GET /mesh/policies/state` — Policy state sync
+
 ### CRDT Implementation
 
 SMG uses several CRDT types for conflict-free synchronization:
@@ -401,6 +433,17 @@ spec:
   - port: 39527
     name: mesh
 ```
+
+### Kubernetes Pod Discovery
+
+Use `--router-selector` to enable automatic pod discovery via the Kubernetes API. SMG will find and join other router pods matching the given label selector, removing the need for static `--mesh-peer-urls`:
+
+```bash
+smg --enable-mesh --service-discovery --router-selector app=smg tier=router
+```
+
+!!! tip "Label Selectors"
+    The `--router-selector` flag accepts space-separated `key=value` pairs that map to Kubernetes label selectors. All matching pods with an exposed mesh port are automatically added as peers.
 
 ---
 

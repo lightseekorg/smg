@@ -6,6 +6,8 @@
 
 <p align="center">
   <a href="https://github.com/lightseekorg/smg/releases/latest"><img src="https://img.shields.io/github/v/release/lightseekorg/smg?logo=github&label=Release" alt="Release"></a>
+  <a href="https://github.com/orgs/lightseekorg/packages/container/package/smg"><img src="https://img.shields.io/badge/ghcr.io-lightseekorg%2Fsmg-blue?logo=docker" alt="Docker"></a>
+  <a href="https://pypi.org/project/smg/"><img src="https://img.shields.io/pypi/v/smg?logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
   <a href="https://lightseekorg.github.io/smg"><img src="https://img.shields.io/badge/docs-latest-brightgreen.svg" alt="Docs"></a>
   <a href="https://discord.lightseek.org"><img src="https://img.shields.io/badge/Discord-Join%20Us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>

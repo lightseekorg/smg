@@ -328,7 +328,6 @@ jobs:
 
       - name: Run benchmarks
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           ROUTER_LOCAL_MODEL_PATH: /home/ubuntu/models
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
@@ -665,9 +664,6 @@ jobs:
 
       - name: Run E2E tests
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
           BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
           ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.test_path }} \
@@ -779,8 +775,6 @@ jobs:
           bash scripts/ci_install_e2e_deps.sh
 
       - name: Run Go OAI server E2E tests
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"

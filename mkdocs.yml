@@ -157,6 +157,7 @@ nav:
           - Load Balancing: getting-started/load-balancing.md
           - Tokenizer Caching: getting-started/tokenizer-caching.md
           - MCP in Responses API: getting-started/mcp.md
+          - External Providers: getting-started/external-providers.md
   - Concepts:
       - concepts/index.md
       - Architecture:
@@ -188,6 +189,7 @@ nav:
       - API:
           - OpenAI Compatible: reference/api/openai.md
           - Responses API: reference/api/responses.md
+          - Anthropic Messages API: reference/api/messages.md
           - Admin API: reference/api/admin.md
           - Gateway Extensions: reference/api/extensions.md
       - Configuration: reference/configuration.md

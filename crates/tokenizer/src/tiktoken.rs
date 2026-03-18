@@ -451,9 +451,23 @@ impl Encoder for TiktokenTokenizer {
 
 impl Decoder for TiktokenTokenizer {
     fn decode(&self, token_ids: &[TokenIdType], _skip_special_tokens: bool) -> Result<String> {
-        self.tokenizer
-            .decode(token_ids.to_vec())
-            .map_err(|e| Error::msg(format!("Decoding failed: {e}")))
+        match self.tokenizer.decode(token_ids.to_vec()) {
+            Ok(text) => Ok(text),
+            Err(err) => {
+                // Fallback to lossy decoding for incomplete UTF-8 sequences
+                let bytes: Vec<u8> = self
+                    .tokenizer
+                    ._decode_native_and_split(token_ids.to_vec())
+                    .flatten()
+                    .collect();
+                tracing::warn!(
+                    error = %err,
+                    token_count = token_ids.len(),
+                    "tiktoken decode failed; returning lossy UTF-8 fallback"
+                );
+                Ok(String::from_utf8_lossy(&bytes).into_owned())
+            }
+        }
     }
 }
 
@@ -733,5 +747,48 @@ mod tests {
         assert!(config.special_tokens.bos_token.is_none());
         assert!(config.added_tokens.is_empty());
         assert!(config.chat_template.is_none());
+    }
+
+    #[test]
+    fn test_decode_lossy_fallback_for_invalid_utf8() {
+        // cl100k_base maps individual bytes to token IDs via its byte-level BPE.
+        // Encode a multi-byte UTF-8 character, then decode only a prefix of its
+        // tokens so the raw bytes form an incomplete (invalid) UTF-8 sequence.
+        // The old implementation would return an error; the new one should fall
+        // back to lossy decoding and produce U+FFFD replacement characters.
+        let tokenizer = TiktokenTokenizer::new(TiktokenModel::Cl100kBase).unwrap();
+
+        // "😀" is U+1F600, encoded as 4 UTF-8 bytes: [0xF0, 0x9F, 0x98, 0x80].
+        // With cl100k_base this encodes to multiple tokens. Taking a strict
+        // subset of those tokens gives bytes that aren't valid UTF-8.
+        let full_encoding = tokenizer.encode("😀", false).unwrap();
+        let full_ids = full_encoding.token_ids();
+        assert!(
+            full_ids.len() > 1,
+            "emoji should encode to multiple tokens in cl100k_base"
+        );
+
+        // Take only the first token — its raw bytes are an incomplete UTF-8 prefix.
+        let partial_ids = &full_ids[..1];
+        let result = tokenizer.decode(partial_ids, false);
+        assert!(
+            result.is_ok(),
+            "decode of partial UTF-8 should succeed via lossy fallback"
+        );
+        let decoded = result.unwrap();
+        assert!(
+            decoded.contains('\u{FFFD}') || decoded.is_empty(),
+            "lossy decode should contain replacement char or be empty, got: {decoded:?}"
+        );
+    }
+
+    #[test]
+    fn test_decode_valid_utf8_does_not_use_fallback() {
+        // Ensure that valid UTF-8 round-trips through the happy path unchanged.
+        let tokenizer = TiktokenTokenizer::new(TiktokenModel::Cl100kBase).unwrap();
+        let text = "Hello, 世界!";
+        let encoding = tokenizer.encode(text, false).unwrap();
+        let decoded = tokenizer.decode(encoding.token_ids(), false).unwrap();
+        assert_eq!(decoded, text);
     }
 }

@@ -11,7 +11,7 @@ pub use media::{ImageFetchConfig, MediaConnector, MediaConnectorConfig, MediaSou
 pub use registry::{ModelMetadata, ModelProcessorSpec, ModelRegistry};
 pub use tracker::{AsyncMultiModalTracker, TrackerOutput};
 pub use types::{
-    ChatContentPart, FieldLayout, ImageDetail, ImageFrame, ImageSize, ImageSource, Modality,
+    FieldLayout, ImageDetail, ImageFrame, ImageSize, ImageSource, MediaContentPart, Modality,
     MultiModalData, MultiModalUUIDs, PlaceholderRange, PromptReplacement, TokenId, TrackedMedia,
 };
 // Re-export vision processing components

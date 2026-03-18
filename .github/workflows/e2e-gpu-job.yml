@@ -110,10 +110,6 @@ jobs:
       # Run tests
       - name: Run E2E tests
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
           SHOW_WORKER_LOGS: "0"
           SHOW_ROUTER_LOGS: "1"
           BRAVE_MCP_HOST: ${{ inputs.setup_agentic_deps && 'brave-search-mcp' || '' }}
