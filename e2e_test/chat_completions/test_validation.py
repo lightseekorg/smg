@@ -167,7 +167,7 @@ class TestLargeMaxNewTokens:
 # =============================================================================
 
 
-@pytest.mark.engine("sglang")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(2)
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])

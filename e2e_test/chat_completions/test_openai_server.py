@@ -327,7 +327,7 @@ convenient hands-free control to your smart devices.
         return delta.content or getattr(delta, "reasoning_content", "") or ""
 
 
-@pytest.mark.engine("sglang")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(2)
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
