@@ -148,7 +148,6 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             worker_registry: &self.worker_registry,
             provider_registry: &self.provider_registry,
             shared_components: &self.shared_components,
-            client: &self.shared_components.client,
             retry_config: &self.retry_config,
         };
         chat::route_chat(&deps, headers, body, model_id).await

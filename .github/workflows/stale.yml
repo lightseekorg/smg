@@ -27,11 +27,6 @@ jobs:
           days-before-pr-close: 16
           stale-pr-label: 'stale'
 
-          # Use creation/update of stale label to track staleness instead of
-          # updated_at, which GitHub silently bumps for invisible events like
-          # merge conflict recalculation when main changes.
-          ignore-pr-updates: true
-
           stale-pr-message: >
             This pull request has been automatically marked as stale because it
             has not had any activity within 14 days. It will be automatically
