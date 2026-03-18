@@ -118,8 +118,7 @@ from smg_client._errors import SmgError
 def smg(setup_backend):
     """SmgClient pointing at the same gateway as setup_backend.
 
-    Uses max_retries=0 to avoid amplifying load on GPU backends —
-    SmgClient comparison calls already double the inference load.
+    Kept for backwards compatibility. New tests should use api_client instead.
     """
     _, _, _, gateway = setup_backend
     client = SmgClient(base_url=gateway.base_url, max_retries=0)
@@ -127,14 +126,28 @@ def smg(setup_backend):
     client.close()
 
 
+@pytest.fixture(params=["openai", "smg"])
+def api_client(request, setup_backend):
+    """Parametrized client — each test runs with both OpenAI SDK and SmgClient.
+
+    Replaces the old smg_compare() pattern that duplicated every API call
+    manually and swallowed SmgClient failures. Tests using this fixture run
+    twice automatically (once per client) against the same backend.
+    """
+    _, _, openai_client, gateway = setup_backend
+    if request.param == "openai":
+        yield openai_client
+    else:
+        client = SmgClient(base_url=gateway.base_url, max_retries=0)
+        yield client
+        client.close()
+
+
 @contextlib.contextmanager
 def smg_compare():
-    """Wrap SmgClient comparison blocks to handle backend errors gracefully.
+    """DEPRECATED: Use api_client fixture instead.
 
-    SmgClient assertions double the inference load on GPU backends. When the
-    backend returns a server error (5xx), the request fails, or an assertion
-    differs (e.g. enum vs string comparison), log a warning instead of failing
-    the test — the primary SDK assertion already passed.
+    Kept for backwards compatibility during migration.
     """
     try:
         yield
