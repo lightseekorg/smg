@@ -93,6 +93,7 @@ class TestChatCompletion:
         is_finished = {}
         finish_reason_counts = {}
         for response in generator:
+            # Capture usage from the final chunk
             usage = response.usage
             if usage is not None:
                 assert usage.prompt_tokens > 0, "usage.prompt_tokens was zero"
@@ -100,6 +101,7 @@ class TestChatCompletion:
                 assert usage.total_tokens > 0, "usage.total_tokens was zero"
                 continue
 
+            # Skip if no choices
             if not response.choices:
                 continue
 
@@ -232,15 +234,20 @@ convenient hands-free control to your smart devices.
             if not response.choices:
                 continue
             delta = response.choices[0].delta
+            # Count chunks that have actual content (not just role or finish_reason)
+            # Each chunk with content or reasoning_content represents one token
             if delta.content or getattr(delta, "reasoning_content", None):
                 content_chunk_count += 1
 
         assert usage_completion_tokens is not None, "No usage chunk received"
         assert content_chunk_count > 0, "No content chunks received"
+        # completion_tokens should be >= content chunks because some tokens
+        # (like EOS) don't produce visible content
         assert usage_completion_tokens >= content_chunk_count, (
             f"completion_tokens ({usage_completion_tokens}) should be >= "
             f"content chunk count ({content_chunk_count})"
         )
+        # But they should be close - allow small difference for special tokens
         token_tolerance = getattr(self, "STREAMING_TOKEN_TOLERANCE", 2)
         assert usage_completion_tokens - content_chunk_count <= token_tolerance, (
             f"completion_tokens ({usage_completion_tokens}) differs too much from "
@@ -298,11 +305,13 @@ convenient hands-free control to your smart devices.
             )
         )
 
+        # Find the chunk with finish_reason
         finish_reasons = [
             c.choices[0].finish_reason for c in chunks if c.choices and c.choices[0].finish_reason
         ]
         assert "stop" in finish_reasons
 
+        # Collect all content (fall back to reasoning_content for models like Harmony)
         content = "".join(
             self._delta_text(c.choices[0].delta)
             for c in chunks

@@ -25,7 +25,6 @@ setup_backend: Class-scoped fixture that launches workers + gateway per test cla
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import sys
 from importlib.util import find_spec
@@ -111,14 +110,15 @@ from fixtures import (
     setup_backend,
 )
 from smg_client import SmgClient
-from smg_client._errors import SmgError
 
 
 @pytest.fixture
 def smg(setup_backend):
-    """SmgClient pointing at the same gateway as setup_backend.
+    """DEPRECATED: SmgClient pointing at the same gateway as setup_backend.
 
-    Kept for backwards compatibility. New tests should use api_client instead.
+    This fixture is deprecated. New tests should use the ``api_client``
+    fixture instead, which automatically parametrizes tests to run with
+    both the OpenAI SDK and SmgClient.
     """
     _, _, _, gateway = setup_backend
     client = SmgClient(base_url=gateway.base_url, max_retries=0)
@@ -128,7 +128,7 @@ def smg(setup_backend):
 
 @pytest.fixture(params=["openai", "smg"])
 def api_client(request, setup_backend):
-    """Parametrized client — each test runs with both OpenAI SDK and SmgClient.
+    """Parametrized client -- each test runs with both OpenAI SDK and SmgClient.
 
     Replaces the old smg_compare() pattern that duplicated every API call
     manually and swallowed SmgClient failures. Tests using this fixture run
@@ -143,20 +143,6 @@ def api_client(request, setup_backend):
         client.close()
 
 
-@contextlib.contextmanager
-def smg_compare():
-    """DEPRECATED: Use api_client fixture instead.
-
-    Kept for backwards compatibility during migration.
-    """
-    try:
-        yield
-    except SmgError as exc:
-        logger.warning("SmgClient comparison skipped (SmgError): %s", exc)
-    except AssertionError as exc:
-        logger.warning("SmgClient comparison mismatch: %s", exc)
-
-
 # Re-export for pytest discovery
 __all__ = [
     # Hooks
@@ -168,4 +154,5 @@ __all__ = [
     "setup_backend",
     "backend_router",
     "smg",
+    "api_client",
 ]
