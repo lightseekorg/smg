@@ -442,6 +442,38 @@ jobs:
       test_filter: ${{ matrix.test_filter }}
     secrets: inherit
 
+  e2e-1gpu-responses:
+    name: e2e-1gpu-responses (${{ matrix.engine }})
+    needs: [build-wheel, detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.build-wheel.result == 'success'
+      && github.actor != 'dependabot[bot]'
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.agentic == 'true')))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sglang
+            timeout: 30
+          - engine: vllm
+            timeout: 30
+          - engine: trtllm
+            timeout: 40
+    uses: ./.github/workflows/e2e-gpu-job.yml
+    with:
+      engine: ${{ matrix.engine }}
+      gpu_tier: "1"
+      runner: 1-gpu
+      timeout: ${{ matrix.timeout }}
+      test_dirs: e2e_test/responses
+      setup_agentic_deps: true
+    secrets: inherit
+
   e2e-1gpu-embeddings:
     needs: [build-wheel, detect-changes]
     if: >-
@@ -518,7 +550,6 @@ jobs:
     secrets: inherit
 
   e2e-2gpu-responses:
-    name: e2e-2gpu-responses (${{ matrix.engine }})
     needs: [build-wheel, detect-changes]
     if: >-
       always()
@@ -529,22 +560,12 @@ jobs:
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.agentic == 'true')))
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - engine: sglang
-            timeout: 30
-          - engine: vllm
-            timeout: 30
-          - engine: trtllm
-            timeout: 40
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
-      engine: ${{ matrix.engine }}
+      engine: sglang
       gpu_tier: "2"
       runner: 2-gpu-h100
-      timeout: ${{ matrix.timeout }}
+      timeout: 30
       test_dirs: e2e_test/responses
       setup_agentic_deps: true
     secrets: inherit
@@ -580,13 +601,24 @@ jobs:
   # === 4 GPU ===
 
   e2e-4gpu-chat:
+    name: e2e-4gpu-chat (${{ matrix.engine }})
     needs: [e2e-2gpu-chat]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sglang
+            timeout: 20
+          - engine: vllm
+            timeout: 20
+          - engine: trtllm
+            timeout: 30
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
-      engine: sglang
+      engine: ${{ matrix.engine }}
       gpu_tier: "4"
       runner: 4-gpu-h100
-      timeout: 20
+      timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/chat_completions
     secrets: inherit
 
@@ -869,7 +901,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-2gpu-chat, e2e-2gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-vendor, go-unit-tests, go-bindings-e2e]
+    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-responses, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-2gpu-chat, e2e-2gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-vendor, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -884,6 +916,7 @@ jobs:
                 "${{ needs.unit-tests.result }}" == "failure" || \
                 "${{ needs.benchmarks.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-chat.result }}" == "failure" || \
+                "${{ needs.e2e-1gpu-responses.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-embeddings.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-gateway.result }}" == "failure" || \
                 "${{ needs.e2e-2gpu-chat.result }}" == "failure" || \
