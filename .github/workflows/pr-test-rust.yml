@@ -427,7 +427,7 @@ jobs:
           - engine: vllm
             timeout: 20
             runner: 1-gpu
-            test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
+            test_filter: ""
           - engine: trtllm
             timeout: 90
             runner: 1-gpu-h100

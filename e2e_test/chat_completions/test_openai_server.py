@@ -10,10 +10,9 @@ from __future__ import annotations
 import json
 import logging
 
-import openai
 import pytest
 from conftest import smg_compare
-from infra import is_sglang, is_trtllm
+from infra import is_sglang, is_trtllm, is_vllm
 
 logger = logging.getLogger(__name__)
 
@@ -327,18 +326,6 @@ convenient hands-free control to your smart devices.
             smg_models = smg.models.list()
             assert len(smg_models.data) == 1
 
-    @pytest.mark.skip(reason="Skipping retrieve model test as it is not supported by the router")
-    def test_retrieve_model(self, setup_backend, smg):
-        """Test retrieving a specific model."""
-        _, model, client, gateway = setup_backend
-
-        retrieved_model = client.models.retrieve(model)
-        assert retrieved_model.id == model
-        assert retrieved_model.root == model
-
-        with pytest.raises(openai.NotFoundError):
-            client.models.retrieve("non-existent-model")
-
     def test_stop_sequences(self, setup_backend, smg):
         """Test that stop sequences cause the model to stop generating."""
         _, model, client, gateway = setup_backend
@@ -596,8 +583,7 @@ class TestChatCompletionHarmony(TestChatCompletion):
     # Harmony channel markers add ~10 special tokens
     STREAMING_TOKEN_TOLERANCE = 10
 
-    # Harmony doesn't trim stop sequences (detokenization is not channel-aware)
-    STOP_SEQUENCE_TRIMMED = False
+    STOP_SEQUENCE_TRIMMED = True
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
@@ -612,25 +598,19 @@ class TestChatCompletionHarmony(TestChatCompletion):
         super().test_chat_completion_stream(setup_backend, smg, logprobs, parallel_sample_num)
 
     def test_stop_sequences(self, setup_backend, smg):
-        if is_trtllm():
-            pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
+        if is_vllm() or is_sglang():
+            self.STOP_SEQUENCE_TRIMMED = False
         super().test_stop_sequences(setup_backend, smg)
 
     def test_stop_sequences_stream(self, setup_backend, smg):
-        if is_trtllm():
-            pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
-        if is_sglang():
-            self.STOP_SEQUENCE_TRIMMED = True
+        if is_vllm():
+            self.STOP_SEQUENCE_TRIMMED = False
         super().test_stop_sequences_stream(setup_backend, smg)
 
-    @pytest.mark.skip(reason="OSS models don't support regex constraints")
+    @pytest.mark.skip(reason="GPT-OSS models don't support regex constraints")
     def test_regex(self, setup_backend, smg):
         pass
 
-    @pytest.mark.skip(reason="OSS models don't support frequency_penalty")
-    def test_penalty(self, setup_backend, smg):
-        pass
-
-    @pytest.mark.skip(reason="OSS models don't support continue_final_message")
+    @pytest.mark.skip(reason="GPT-OSS Harmony pipeline doesn't implement continue_final_message")
     def test_response_prefill(self, setup_backend, smg):
         pass
