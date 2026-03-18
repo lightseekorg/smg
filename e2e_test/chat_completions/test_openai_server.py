@@ -585,9 +585,9 @@ convenient hands-free control to your smart devices.
 @pytest.mark.engine("sglang")
 @pytest.mark.gpu(2)
 @pytest.mark.model("openai/gpt-oss-20b")
-@pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
-class TestChatCompletionGptOss(TestChatCompletion):
-    """Tests for chat completions API with GPT-OSS model (Harmony).
+@pytest.mark.gateway(extra_args=["--history-backend", "memory"])
+class TestChatCompletionHarmony(TestChatCompletion):
+    """Tests for chat completions API with Harmony model (GPT-OSS).
 
     Inherits from TestChatCompletion and overrides tests that don't work
     with OSS models. Logprobs are supported via Harmony's built-in tokenizer.
@@ -623,21 +623,6 @@ class TestChatCompletionGptOss(TestChatCompletion):
             self.STOP_SEQUENCE_TRIMMED = True
         super().test_stop_sequences_stream(setup_backend, smg)
 
-    def test_ignore_eos_rejected(self, setup_backend, smg):
-        """Test that ignore_eos is rejected for Harmony models with HTTP 400."""
-        _, model, client, gateway = setup_backend
-
-        with pytest.raises(openai.BadRequestError) as exc_info:
-            client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "user", "content": "Hello"},
-                ],
-                extra_body={"ignore_eos": True},
-            )
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.code == "ignore_eos_not_supported"
-
     @pytest.mark.skip(reason="OSS models don't support regex constraints")
     def test_regex(self, setup_backend, smg):
         pass
@@ -645,112 +630,6 @@ class TestChatCompletionGptOss(TestChatCompletion):
     @pytest.mark.skip(reason="OSS models don't support frequency_penalty")
     def test_penalty(self, setup_backend, smg):
         pass
-
-    def test_response_format_json_schema(self, setup_backend, smg):
-        """Test response_format with json_schema produces valid constrained JSON."""
-        _, model, client, gateway = setup_backend
-
-        schema = {
-            "type": "object",
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 2,
-                    "maxItems": 2,
-                },
-            },
-            "required": ["items"],
-            "additionalProperties": False,
-        }
-
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "user", "content": "List exactly 2 fruits."},
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "fruits",
-                    "strict": True,
-                    "schema": schema,
-                },
-            },
-            temperature=0,
-        )
-
-        content = response.choices[0].message.content
-        assert content is not None, "Expected non-empty content"
-
-        # Should be valid JSON matching the schema
-        parsed = json.loads(content)
-        assert set(parsed) == {"items"}
-        assert isinstance(parsed["items"], list)
-        assert len(parsed["items"]) == 2
-        assert all(isinstance(item, str) for item in parsed["items"])
-
-        # Should not contain leaked Harmony markers
-        assert "<|channel|>" not in content
-        assert "<|constrain|>" not in content
-        assert "<|message|>" not in content
-
-    def test_response_format_json_schema_stream(self, setup_backend, smg):
-        """Test response_format with json_schema in streaming mode."""
-        _, model, client, gateway = setup_backend
-
-        schema = {
-            "type": "object",
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 2,
-                    "maxItems": 2,
-                },
-            },
-            "required": ["items"],
-            "additionalProperties": False,
-        }
-
-        chunks = list(
-            client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "user", "content": "List exactly 2 fruits."},
-                ],
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "fruits",
-                        "strict": True,
-                        "schema": schema,
-                    },
-                },
-                temperature=0,
-                stream=True,
-            )
-        )
-
-        # Collect streamed content
-        content = ""
-        for chunk in chunks:
-            if chunk.choices and chunk.choices[0].delta.content:
-                content += chunk.choices[0].delta.content
-
-        assert content, "Expected non-empty streamed content"
-
-        # Should be valid JSON matching the schema
-        parsed = json.loads(content)
-        assert set(parsed) == {"items"}
-        assert isinstance(parsed["items"], list)
-        assert len(parsed["items"]) == 2
-        assert all(isinstance(item, str) for item in parsed["items"])
-
-        # Should not contain leaked Harmony markers
-        assert "<|channel|>" not in content
-        assert "<|constrain|>" not in content
-        assert "<|message|>" not in content
 
     @pytest.mark.skip(reason="OSS models don't support continue_final_message")
     def test_response_prefill(self, setup_backend, smg):

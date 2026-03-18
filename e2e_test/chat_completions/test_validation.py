@@ -1,6 +1,7 @@
 """Validation E2E Tests.
 
-Tests for validation features like ignore_eos and large token handling.
+Tests for validation features like ignore_eos, large token handling,
+and request parameter conflict detection.
 
 Source: Migrated from e2e_grpc/validation/test_openai_server_ignore_eos.py
         and e2e_grpc/validation/test_large_max_new_tokens.py
@@ -12,6 +13,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import openai
 import pytest
 from conftest import smg_compare
 
@@ -208,3 +210,77 @@ class TestLargeMaxNewTokens:
             assert smg_resp.choices[0].finish_reason in ("stop", "length"), (
                 f"SmgClient: unexpected finish_reason: {smg_resp.choices[0].finish_reason}"
             )
+
+
+# =============================================================================
+# Harmony Validation Tests (GPT-OSS)
+# =============================================================================
+
+
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(2)
+@pytest.mark.model("openai/gpt-oss-20b")
+@pytest.mark.gateway(extra_args=["--history-backend", "memory"])
+@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+class TestHarmonyValidation:
+    """Validation tests for Harmony models (GPT-OSS)."""
+
+    def test_ignore_eos_rejected(self, setup_backend, smg):
+        """Test that ignore_eos is rejected for Harmony models with HTTP 400."""
+        _, model, client, gateway = setup_backend
+
+        with pytest.raises(openai.BadRequestError) as exc_info:
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "user", "content": "Hello"},
+                ],
+                extra_body={"ignore_eos": True},
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.code == "ignore_eos_not_supported"
+
+    def test_tool_choice_with_response_format_rejected(self, setup_backend, smg):
+        """Test that tool_choice + response_format is rejected with HTTP 400."""
+        _, model, client, gateway = setup_backend
+
+        with pytest.raises(openai.BadRequestError) as exc_info:
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "user", "content": "List 2 fruits."},
+                ],
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_fruits",
+                            "description": "Get a list of fruits",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "count": {"type": "integer"},
+                                },
+                                "required": ["count"],
+                            },
+                        },
+                    }
+                ],
+                tool_choice="required",
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "fruits",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "items": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "required": ["items"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+            )
+        assert exc_info.value.status_code == 400
