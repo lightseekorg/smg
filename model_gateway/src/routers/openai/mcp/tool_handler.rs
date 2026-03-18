@@ -144,14 +144,8 @@ impl StreamingToolHandler {
 
     /// Process an SSE event and determine what action to take
     pub fn process_event(&mut self, event_name: Option<&str>, data: &str) -> StreamAction {
-        // Always feed to accumulator for storage
-        self.accumulator.ingest_block(&format!(
-            "{}data: {}",
-            event_name
-                .map(|n| format!("event: {n}\n"))
-                .unwrap_or_default(),
-            data
-        ));
+        // Always feed to accumulator for storage (bypasses format+reparse overhead)
+        self.accumulator.ingest_event(event_name, data);
 
         let parsed: Value = match serde_json::from_str(data) {
             Ok(v) => v,

@@ -42,7 +42,7 @@ use crate::{
     routers::{
         error,
         header_utils::{apply_request_headers, preserve_response_headers},
-        mcp_utils::DEFAULT_MAX_ITERATIONS,
+        mcp_utils::effective_tool_call_limit,
         openai::{
             context::{RequestContext, StreamingEventContext, StreamingRequest},
             mcp::{
@@ -61,6 +61,7 @@ use crate::{
 pub(super) fn apply_event_transformations_inplace(
     parsed_data: &mut Value,
     ctx: &StreamingEventContext<'_>,
+    is_mcp_args_done: bool,
 ) -> bool {
     let mut changed = false;
 
@@ -70,8 +71,10 @@ pub(super) fn apply_event_transformations_inplace(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let should_patch = is_response_event(event_type);
-    // Owned copy needed for the match below since we mutate parsed_data
-    let event_type = event_type.to_string();
+    // Pre-compute match arms as booleans before mutating parsed_data (avoids .to_string())
+    let is_output_item_event =
+        event_type == OutputItemEvent::ADDED || event_type == OutputItemEvent::DONE;
+    let is_args_done = event_type == FunctionCallEvent::ARGUMENTS_DONE;
 
     if should_patch {
         if let Some(response_obj) = parsed_data
@@ -122,64 +125,60 @@ pub(super) fn apply_event_transformations_inplace(
     }
 
     // 2. Apply transform_streaming_event logic (function_call → mcp_call/web_search_call)
-    match event_type.as_str() {
-        OutputItemEvent::ADDED | OutputItemEvent::DONE => {
-            if let Some(item) = parsed_data.get_mut("item") {
-                if let Some(item_type) = item.get("type").and_then(|v| v.as_str()) {
-                    if is_function_call_type(item_type) {
-                        // Look up response_format for the tool
-                        let tool_name = item
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
+    if is_output_item_event {
+        if let Some(item) = parsed_data.get_mut("item") {
+            if let Some(item_type) = item.get("type").and_then(|v| v.as_str()) {
+                if is_function_call_type(item_type) {
+                    // Look up response_format for the tool
+                    let tool_name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
 
-                        // Only transform if this is an MCP tool; keep function_call unchanged
-                        if let Some(session) =
-                            ctx.session.filter(|s| s.has_exposed_tool(&tool_name))
-                        {
-                            let response_format = session.tool_response_format(&tool_name);
+                    // Only transform if this is an MCP tool; keep function_call unchanged
+                    if let Some(session) = ctx.session.filter(|s| s.has_exposed_tool(&tool_name)) {
+                        let response_format = session.tool_response_format(&tool_name);
 
-                            // Determine item type and ID prefix based on response_format
-                            let (new_type, id_prefix) = match response_format {
-                                ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
-                                _ => (ItemType::MCP_CALL, "mcp_"),
-                            };
+                        // Determine item type and ID prefix based on response_format
+                        let (new_type, id_prefix) = match response_format {
+                            ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
+                            _ => (ItemType::MCP_CALL, "mcp_"),
+                        };
 
-                            item["type"] = json!(new_type);
-                            if new_type == ItemType::MCP_CALL {
-                                let label = session.resolve_tool_server_label(&tool_name);
-                                item["server_label"] = json!(label);
-                            }
-
-                            // Transform ID from fc_* to appropriate prefix
-                            if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                                if let Some(stripped) = id.strip_prefix("fc_") {
-                                    let new_id = format!("{id_prefix}{stripped}");
-                                    item["id"] = json!(new_id);
-                                }
-                            }
-
-                            changed = true;
+                        item["type"] = json!(new_type);
+                        if new_type == ItemType::MCP_CALL {
+                            let label = session.resolve_tool_server_label(&tool_name);
+                            item["server_label"] = json!(label);
                         }
+
+                        // Transform ID from fc_* to appropriate prefix
+                        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                            if let Some(stripped) = id.strip_prefix("fc_") {
+                                let new_id = format!("{id_prefix}{stripped}");
+                                item["id"] = json!(new_id);
+                            }
+                        }
+
+                        changed = true;
                     }
                 }
             }
         }
-        FunctionCallEvent::ARGUMENTS_DONE => {
-            parsed_data["type"] = json!(McpEvent::CALL_ARGUMENTS_DONE);
+    } else if is_args_done && is_mcp_args_done {
+        // Only transform arguments_done to MCP format for MCP-exposed tools;
+        // regular function tools pass through unchanged.
+        parsed_data["type"] = json!(McpEvent::CALL_ARGUMENTS_DONE);
 
-            // Transform item_id from fc_* to mcp_*
-            if let Some(item_id) = parsed_data.get("item_id").and_then(|v| v.as_str()) {
-                if let Some(stripped) = item_id.strip_prefix("fc_") {
-                    let new_id = format!("mcp_{stripped}");
-                    parsed_data["item_id"] = json!(new_id);
-                }
+        // Transform item_id from fc_* to mcp_*
+        if let Some(item_id) = parsed_data.get("item_id").and_then(|v| v.as_str()) {
+            if let Some(stripped) = item_id.strip_prefix("fc_") {
+                let new_id = format!("mcp_{stripped}");
+                parsed_data["item_id"] = json!(new_id);
             }
-
-            changed = true;
         }
-        _ => {}
+
+        changed = true;
     }
 
     changed
@@ -350,9 +349,16 @@ pub(super) fn forward_streaming_event(
         return true;
     }
 
-    // Handle function_call_arguments.done - send buffered args first
+    // Determine if this arguments_done event is for an MCP-exposed tool.
+    // Regular function tool events should pass through without MCP transformation.
+    let is_mcp_args_done = event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
+        && extract_output_index(&parsed_data)
+            .and_then(|idx| handler.pending_calls.iter().find(|c| c.output_index == idx))
+            .is_some_and(|call| ctx.session.is_some_and(|s| s.has_exposed_tool(&call.name)));
+
+    // Handle function_call_arguments.done - send buffered args only for MCP tools
     let mut mapped_output_index: Option<usize> = None;
-    if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
+    if is_mcp_args_done
         && !send_buffered_arguments(
             &mut parsed_data,
             handler,
@@ -373,7 +379,7 @@ pub(super) fn forward_streaming_event(
         parsed_data["output_index"] = json!(mapped);
     }
 
-    apply_event_transformations_inplace(&mut parsed_data, ctx);
+    apply_event_transformations_inplace(&mut parsed_data, ctx, is_mcp_args_done);
 
     if let Some(response_obj) = parsed_data
         .get_mut("response")
@@ -398,7 +404,15 @@ pub(super) fn forward_streaming_event(
     };
 
     let final_block = match event_name {
-        Some(evt) => format!("event: {}\ndata: {}\n\n", map_event_name(evt), final_data),
+        Some(evt) => {
+            // Only remap function_call event names to mcp_call for MCP-exposed tools
+            let mapped = if is_mcp_args_done {
+                map_event_name(evt)
+            } else {
+                evt
+            };
+            format!("event: {mapped}\ndata: {final_data}\n\n")
+        }
         None => format!("data: {final_data}\n\n"),
     };
 
@@ -792,14 +806,21 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         })
                                     };
 
+                                    // Check in_progress before potentially moving parsed
+                                    let is_in_progress = !seen_in_progress
+                                        && parsed.as_ref().is_some_and(|v| {
+                                            v.get("type").and_then(|t| t.as_str())
+                                                == Some(ResponseEvent::IN_PROGRESS)
+                                        });
+
                                     if !should_skip {
-                                        // Forward the event with pre-parsed value
+                                        // Forward the event, moving parsed to avoid clone
                                         if !forward_streaming_event(
                                             SseEventData {
                                                 raw_block: &raw_block,
                                                 event_name,
                                                 data: data.as_ref(),
-                                                pre_parsed: parsed.clone(),
+                                                pre_parsed: parsed,
                                             },
                                             &mut handler,
                                             &tx,
@@ -810,31 +831,25 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         }
                                     }
 
-                                    if !seen_in_progress {
-                                        let is_in_progress = parsed.as_ref().is_some_and(|v| {
-                                            v.get("type").and_then(|t| t.as_str())
-                                                == Some(ResponseEvent::IN_PROGRESS)
-                                        });
-                                        if is_in_progress {
-                                            seen_in_progress = true;
-                                            if !mcp_list_tools_sent {
-                                                for binding in session.mcp_servers() {
-                                                    let list_tools_index =
-                                                        handler.allocate_synthetic_output_index();
-                                                    if !send_mcp_list_tools_events(
-                                                        &tx,
-                                                        &session,
-                                                        &binding.label,
-                                                        list_tools_index,
-                                                        &mut sequence_number,
-                                                        &binding.server_key,
-                                                    ) {
-                                                        // Client disconnected
-                                                        return;
-                                                    }
+                                    if is_in_progress {
+                                        seen_in_progress = true;
+                                        if !mcp_list_tools_sent {
+                                            for binding in session.mcp_servers() {
+                                                let list_tools_index =
+                                                    handler.allocate_synthetic_output_index();
+                                                if !send_mcp_list_tools_events(
+                                                    &tx,
+                                                    &session,
+                                                    &binding.label,
+                                                    list_tools_index,
+                                                    &mut sequence_number,
+                                                    &binding.server_key,
+                                                ) {
+                                                    // Client disconnected
+                                                    return;
                                                 }
-                                                mcp_list_tools_sent = true;
                                             }
+                                            mcp_list_tools_sent = true;
                                         }
                                     }
                                 }
@@ -946,10 +961,7 @@ pub(super) fn handle_streaming_with_tool_interception(
             // Record tool loop iteration metric
             Metrics::record_mcp_tool_iteration(&original_request.model);
 
-            let effective_limit = match max_tool_calls {
-                Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
-                None => DEFAULT_MAX_ITERATIONS,
-            };
+            let effective_limit = effective_tool_call_limit(max_tool_calls);
 
             if state.total_calls > effective_limit {
                 warn!(
