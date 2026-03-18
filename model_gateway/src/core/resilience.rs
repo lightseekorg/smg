@@ -123,7 +123,7 @@ pub fn resolve_resilience(
 /// Retry decisions use the worker's `is_retryable()` predicate.
 pub async fn execute_with_resilience<F, Fut>(
     worker: &(dyn Worker + '_),
-    operation: F,
+    mut operation: F,
 ) -> axum::response::Response
 where
     F: FnMut(u32) -> Fut + Send,
@@ -140,14 +140,14 @@ where
         );
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("Circuit breaker open for worker {worker_url}"),
+            "Upstream worker temporarily unavailable",
         )
             .into_response();
     }
 
     if !resilience.retry_enabled {
         // Single attempt, no retries
-        let response = execute_single(worker, operation).await;
+        let response = operation(0).await;
         if resilience.circuit_breaker_enabled {
             let success = !worker.is_retryable(&response);
             worker.circuit_breaker().record_outcome(success);
@@ -156,7 +156,7 @@ where
     }
 
     // Retry loop — delegate to RetryExecutor with worker-aware hooks
-    RetryExecutor::execute_response_with_retry(
+    let response = RetryExecutor::execute_response_with_retry(
         &resilience.retry,
         operation,
         |res, _attempt| worker.is_retryable(res),
@@ -173,19 +173,15 @@ where
             debug!(worker_url = worker_url, "Worker retries exhausted");
         },
     )
-    .await
-}
+    .await;
 
-/// Execute a single attempt of an operation (no retry).
-async fn execute_single<F, Fut>(
-    _worker: &(dyn Worker + '_),
-    mut operation: F,
-) -> axum::response::Response
-where
-    F: FnMut(u32) -> Fut + Send,
-    Fut: std::future::Future<Output = axum::response::Response> + Send,
-{
-    operation(0).await
+    // Record final outcome for circuit breaker after all retries
+    if resilience.circuit_breaker_enabled {
+        let success = !worker.is_retryable(&response);
+        worker.circuit_breaker().record_outcome(success);
+    }
+
+    response
 }
 
 #[cfg(test)]
