@@ -135,7 +135,7 @@ impl RequestPipeline {
 
         Self {
             stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_REGULAR,
+            backend_type: metrics_labels::BACKEND_HARMONY,
         }
     }
 
