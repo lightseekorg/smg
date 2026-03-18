@@ -1,4 +1,4 @@
-name: 'Close inactive issues and PRs'
+name: 'Close stale PRs'
 
 on:
   schedule:
@@ -7,10 +7,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  close-issues-and-pull-requests:
+  close-stale-prs:
     if: github.repository == 'lightseekorg/smg'
     permissions:
-      issues: write
       pull-requests: write
     runs-on: ubuntu-latest
     steps:
@@ -19,21 +18,20 @@ jobs:
           operations-per-run: 500
           exempt-draft-pr: true
 
-          days-before-issue-stale: 90
-          days-before-issue-close: 30
-          stale-issue-label: 'stale'
-          stale-issue-message: >
-            This issue has been automatically marked as stale because it has not
-            had any activity within 90 days. It will be automatically closed if no
-            further activity occurs within 30 days. Leave a comment if
-            you feel this issue should remain open. Thank you!
-          close-issue-message: >
-            This issue has been automatically closed due to inactivity. Please
-            feel free to reopen if you feel it is still relevant. Thank you!
+          # Disable issue processing
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
 
+          # PR staleness
           days-before-pr-stale: 14
           days-before-pr-close: 16
           stale-pr-label: 'stale'
+
+          # Use creation/update of stale label to track staleness instead of
+          # updated_at, which GitHub silently bumps for invisible events like
+          # merge conflict recalculation when main changes.
+          ignore-pr-updates: true
+
           stale-pr-message: >
             This pull request has been automatically marked as stale because it
             has not had any activity within 14 days. It will be automatically
