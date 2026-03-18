@@ -124,13 +124,13 @@ class TestStructuredOutputCloud:
 # =============================================================================
 
 
-@pytest.mark.engine("sglang")
-@pytest.mark.gpu(2)
+@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
-class TestStructuredOutputHarmony:
+class TestStructuredOutputGptOss:
     """Structured output tests against local gRPC backend with Harmony model."""
 
     def test_structured_output_json_schema(self, setup_backend, smg):

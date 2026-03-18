@@ -294,7 +294,7 @@ class TestBuiltinToolsCloudBackend:
 
 
 @pytest.mark.engine("sglang")
-@pytest.mark.gpu(2)
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
@@ -696,7 +696,7 @@ class TestWebSearchStreamingEvents:
 
 
 @pytest.mark.engine("sglang")
-@pytest.mark.gpu(2)
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 class TestBuiltinToolRoutingGrpc:
@@ -769,7 +769,7 @@ class TestBuiltinToolRoutingGrpc:
 
 
 @pytest.mark.engine("sglang")
-@pytest.mark.gpu(2)
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 class TestWebSearchStreamingEventsGrpc:

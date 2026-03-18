@@ -140,14 +140,19 @@ class TestStructuredOutputRegular(_TestStructuredOutputBase):
 # =============================================================================
 
 
-@pytest.mark.engine("sglang")
-@pytest.mark.gpu(2)
+@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.gpu(1)
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
-class TestStructuredOutputHarmony(_TestStructuredOutputBase):
-    """Structured output tests for Harmony models (GPT-OSS).
+class TestStructuredOutputGptOss(_TestStructuredOutputBase):
+    """Structured output tests for Harmony models (GPT-OSS 20B, 1 GPU)."""
 
-    Inherits all tests from _TestStructuredOutputBase. The Harmony path uses
-    structural tags for json_schema enforcement on the final channel.
-    """
+
+@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.gpu(4)
+@pytest.mark.model("openai/gpt-oss-120b")
+@pytest.mark.gateway(extra_args=["--history-backend", "memory"])
+@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+class TestStructuredOutputGptOss120B(_TestStructuredOutputBase):
+    """Structured output tests for Harmony models (GPT-OSS 120B, 4 GPU)."""
