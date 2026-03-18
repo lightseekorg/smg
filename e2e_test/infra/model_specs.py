@@ -82,11 +82,24 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["embedding"],
     },
-    # GPT-OSS model (Harmony)
+    # GPT-OSS models (Harmony)
     "openai/gpt-oss-20b": {
         "model": _resolve_model_path("openai/gpt-oss-20b"),
-        "tp": 2,
+        "tp": 1,
         "features": ["chat", "streaming", "reasoning", "harmony"],
+        "vllm_args": [
+            "--structured-outputs-config",
+            '{"enable_in_reasoning": true}',
+        ],
+    },
+    "openai/gpt-oss-120b": {
+        "model": _resolve_model_path("openai/gpt-oss-120b"),
+        "tp": 4,
+        "features": ["chat", "streaming", "reasoning", "harmony"],
+        "vllm_args": [
+            "--structured-outputs-config",
+            '{"enable_in_reasoning": true}',
+        ],
     },
     # MiniMax M2 - nightly benchmarks
     "minimaxai/minimax-m2": {
