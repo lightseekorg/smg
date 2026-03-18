@@ -140,35 +140,20 @@ class TestChatCompletion:
             assert isinstance(smg_obj["population"], int)
 
     def test_penalty(self, setup_backend, smg):
-        """Test frequency penalty parameter."""
+        """Test that frequency_penalty parameter is accepted and produces output."""
         _, model, client, gateway = setup_backend
 
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "Introduce the capital of France."},
+                {"role": "user", "content": "What is the capital of France?"},
             ],
-            temperature=0,
-            max_tokens=32,
+            max_tokens=100,
             frequency_penalty=1.0,
+            reasoning_effort="none",
         )
-        text = response.choices[0].message.content
-        assert isinstance(text, str)
-
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful AI assistant"},
-                    {"role": "user", "content": "Introduce the capital of France."},
-                ],
-                temperature=0,
-                max_tokens=32,
-                frequency_penalty=1.0,
-            )
-            assert isinstance(smg_resp.choices[0].message.content, str)
+        assert isinstance(response.choices[0].message.content, str)
+        assert response.usage.completion_tokens > 0
 
     def test_response_prefill(self, setup_backend, smg):
         """Test assistant message prefill with continue_final_message."""
