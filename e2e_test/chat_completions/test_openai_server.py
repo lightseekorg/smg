@@ -12,7 +12,7 @@ import logging
 
 import pytest
 from conftest import smg_compare
-from infra import is_sglang, is_trtllm, is_vllm
+from infra import is_sglang, is_trtllm
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +38,13 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion(self, setup_backend, smg, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
-        if (is_trtllm() or is_vllm()) and parallel_sample_num > 1:
-            pytest.skip("n>1 not supported with greedy decoding (temperature=0)")
         _, model, client, gateway = setup_backend
         self._run_chat_completion(client, model, logprobs, parallel_sample_num)
 
         # SmgClient comparison
         with smg_compare():
+            # Use temperature > 0 for n > 1 (greedy sampling rejects n > 1)
+            temperature = 0.7 if parallel_sample_num > 1 else 0
             smg_resp = smg.chat.completions.create(
                 model=model,
                 messages=[
@@ -54,7 +54,7 @@ class TestChatCompletion:
                         "content": "What is the capital of France? Answer in a few words.",
                     },
                 ],
-                temperature=0,
+                temperature=temperature,
                 logprobs=logprobs is not None and logprobs > 0,
                 top_logprobs=logprobs,
                 n=parallel_sample_num,
@@ -67,13 +67,12 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion_stream(self, setup_backend, smg, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
-        if (is_trtllm() or is_vllm()) and parallel_sample_num > 1:
-            pytest.skip("n>1 not supported with greedy decoding (temperature=0)")
         _, model, client, gateway = setup_backend
         self._run_chat_completion_stream(client, model, logprobs, parallel_sample_num)
 
         # SmgClient streaming comparison
         with smg_compare():
+            temperature = 0.7 if parallel_sample_num > 1 else 0
             content_pieces = []
             with smg.chat.completions.create(
                 model=model,
@@ -81,7 +80,7 @@ class TestChatCompletion:
                     {"role": "system", "content": "You are a helpful AI assistant"},
                     {"role": "user", "content": "What is the capital of France?"},
                 ],
-                temperature=0,
+                temperature=temperature,
                 logprobs=logprobs is not None and logprobs > 0,
                 top_logprobs=logprobs,
                 n=parallel_sample_num,
@@ -458,6 +457,8 @@ convenient hands-free control to your smart devices.
 
     def _run_chat_completion(self, client, model, logprobs, parallel_sample_num):
         """Run a non-streaming chat completion and verify response."""
+        # Use temperature > 0 for n > 1 (greedy sampling rejects n > 1)
+        temperature = 0.7 if parallel_sample_num > 1 else 0
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -467,7 +468,7 @@ convenient hands-free control to your smart devices.
                     "content": "What is the capital of France? Answer in a few words.",
                 },
             ],
-            temperature=0,
+            temperature=temperature,
             logprobs=logprobs is not None and logprobs > 0,
             top_logprobs=logprobs,
             n=parallel_sample_num,
@@ -490,13 +491,15 @@ convenient hands-free control to your smart devices.
 
     def _run_chat_completion_stream(self, client, model, logprobs, parallel_sample_num=1):
         """Run a streaming chat completion and verify response chunks."""
+        # Use temperature > 0 for n > 1 (greedy sampling rejects n > 1)
+        temperature = 0.7 if parallel_sample_num > 1 else 0
         generator = client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant"},
                 {"role": "user", "content": "What is the capital of France?"},
             ],
-            temperature=0,
+            temperature=temperature,
             logprobs=logprobs is not None and logprobs > 0,
             top_logprobs=logprobs,
             stream=True,
@@ -573,7 +576,8 @@ class TestChatCompletionHarmony(TestChatCompletion):
     # Harmony channel markers add ~10 special tokens
     STREAMING_TOKEN_TOLERANCE = 10
 
-    STOP_SEQUENCE_TRIMMED = True
+    # Harmony doesn't trim stop sequences (detokenization is not channel-aware)
+    STOP_SEQUENCE_TRIMMED = False
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
@@ -588,13 +592,15 @@ class TestChatCompletionHarmony(TestChatCompletion):
         super().test_chat_completion_stream(setup_backend, smg, logprobs, parallel_sample_num)
 
     def test_stop_sequences(self, setup_backend, smg):
-        if is_vllm() or is_sglang():
-            self.STOP_SEQUENCE_TRIMMED = False
+        if is_trtllm():
+            pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
         super().test_stop_sequences(setup_backend, smg)
 
     def test_stop_sequences_stream(self, setup_backend, smg):
-        if is_vllm():
-            self.STOP_SEQUENCE_TRIMMED = False
+        if is_trtllm():
+            pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
+        if is_sglang():
+            self.STOP_SEQUENCE_TRIMMED = True
         super().test_stop_sequences_stream(setup_backend, smg)
 
     @pytest.mark.skip(reason="gpt-oss models don't support regex constraints")
