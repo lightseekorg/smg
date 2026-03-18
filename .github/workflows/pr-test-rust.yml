@@ -559,7 +559,7 @@ jobs:
 
   e2e-4gpu-chat:
     name: e2e-4gpu-chat (${{ matrix.engine }})
-    needs: [e2e-2gpu-chat]
+    needs: [e2e-1gpu-chat]
     strategy:
       fail-fast: false
       matrix:
