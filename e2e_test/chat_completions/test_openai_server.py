@@ -559,16 +559,6 @@ convenient hands-free control to your smart devices.
             )
 
 
-# =============================================================================
-# Chat Completion Tests (GPT-OSS)
-#
-# NOTE: Some tests are skipped because they don't work with OSS models:
-# - test_regex: OSS models don't support regex constraints
-# - test_penalty: OSS models don't support frequency_penalty
-# - test_response_prefill: OSS models don't support continue_final_message
-# =============================================================================
-
-
 @pytest.mark.engine("sglang")
 @pytest.mark.gpu(2)
 @pytest.mark.model("openai/gpt-oss-20b")
@@ -607,10 +597,10 @@ class TestChatCompletionHarmony(TestChatCompletion):
             self.STOP_SEQUENCE_TRIMMED = False
         super().test_stop_sequences_stream(setup_backend, smg)
 
-    @pytest.mark.skip(reason="GPT-OSS models don't support regex constraints")
+    @pytest.mark.skip(reason="gpt-oss models don't support regex constraints")
     def test_regex(self, setup_backend, smg):
         pass
 
-    @pytest.mark.skip(reason="GPT-OSS Harmony pipeline doesn't implement continue_final_message")
+    @pytest.mark.skip(reason="gpt-oss Harmony pipeline doesn't implement continue_final_message")
     def test_response_prefill(self, setup_backend, smg):
         pass
