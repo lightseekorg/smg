@@ -496,17 +496,29 @@ jobs:
   # === 2 GPU ===
 
   e2e-2gpu-chat:
+    name: e2e-2gpu-chat (${{ matrix.engine }})
     needs: [e2e-1gpu-chat]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sglang
+            timeout: 20
+          - engine: vllm
+            timeout: 20
+          - engine: trtllm
+            timeout: 30
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
-      engine: sglang
+      engine: ${{ matrix.engine }}
       gpu_tier: "2"
       runner: 2-gpu-h100
-      timeout: 20
+      timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/chat_completions
     secrets: inherit
 
   e2e-2gpu-responses:
+    name: e2e-2gpu-responses (${{ matrix.engine }})
     needs: [build-wheel, detect-changes]
     if: >-
       always()
@@ -517,12 +529,22 @@ jobs:
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.agentic == 'true')))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sglang
+            timeout: 30
+          - engine: vllm
+            timeout: 30
+          - engine: trtllm
+            timeout: 40
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
-      engine: sglang
+      engine: ${{ matrix.engine }}
       gpu_tier: "2"
       runner: 2-gpu-h100
-      timeout: 30
+      timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/responses
       setup_agentic_deps: true
     secrets: inherit
