@@ -366,7 +366,7 @@ class TestStateManagementLocal:
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
-class TestStateManagementHarmony:
+class TestStateManagementGptOss:
     """State management tests against local gRPC backend with Harmony model."""
 
     @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")

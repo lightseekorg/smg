@@ -586,7 +586,7 @@ convenient hands-free control to your smart devices.
 @pytest.mark.gpu(1)
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
-class TestChatCompletionHarmony(TestChatCompletion):
+class TestChatCompletionGptOss(TestChatCompletion):
     """Tests for chat completions API with Harmony model (GPT-OSS).
 
     Inherits from TestChatCompletion and overrides tests that don't work
@@ -634,3 +634,11 @@ class TestChatCompletionHarmony(TestChatCompletion):
     @pytest.mark.skip(reason="OSS models don't support continue_final_message")
     def test_response_prefill(self, setup_backend, smg):
         pass
+
+
+@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.gpu(4)
+@pytest.mark.model("openai/gpt-oss-120b")
+@pytest.mark.gateway(extra_args=["--history-backend", "memory"])
+class TestChatCompletionGptOss120B(TestChatCompletionGptOss):
+    """Tests for chat completions API with Harmony model (GPT-OSS 120B, 4 GPU)."""
