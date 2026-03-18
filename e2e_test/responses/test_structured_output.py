@@ -122,7 +122,7 @@ class TestStructuredOutputCloud:
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
-class TestStructuredOutputHarmony:
+class TestStructuredOutputGptOss:
     """Structured output tests against local gRPC backend with Harmony model."""
 
     def test_structured_output_json_schema(self, model, api_client):
