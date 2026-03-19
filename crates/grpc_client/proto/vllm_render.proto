@@ -39,14 +39,19 @@ message VideoUrlContent {
   string url = 1;
 }
 
+message AudioUrlContent {
+  string url = 1;
+}
+
 // Content part for multimodal messages
 message ContentPart {
-  string type = 1;  // "text", "image_url", "input_audio", "video_url"
+  string type = 1;  // "text", "image_url", "input_audio", "video_url", "audio_url"
   oneof payload {
     string text = 2;
     ImageUrlContent image_url = 3;
     InputAudioContent input_audio = 4;
     VideoUrlContent video_url = 5;
+    AudioUrlContent audio_url = 6;
   }
 }
 
