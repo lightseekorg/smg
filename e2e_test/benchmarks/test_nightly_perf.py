@@ -142,10 +142,7 @@ def _make_test_class(model_id, worker_count, backends, extra_kwargs):
 
 
 for _model_id, _name, _multi_workers, _backends, _extra in _NIGHTLY_MODELS:
-    _variants = [("Single", 1), ("Multi", _multi_workers)]
-    if _model_id == "minimaxai/minimax-m2":
-        _variants = [("Single", 1)]
-    for _suffix, _count in _variants:
+    for _suffix, _count in [("Single", 1), ("Multi", _multi_workers)]:
         _cls_name = f"TestNightly{_name}{_suffix}"
         _cls = _make_test_class(_model_id, _count, _backends, _extra)
         _cls.__name__ = _cls_name
