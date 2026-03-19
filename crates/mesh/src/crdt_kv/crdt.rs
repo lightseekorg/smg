@@ -293,6 +293,11 @@ impl CrdtOrMap {
         self.store.contains_key(key)
     }
 
+    /// Mutation generation counter. Increments on every insert/remove/upsert.
+    pub fn generation(&self) -> u64 {
+        self.store.generation()
+    }
+
     /// Get all key-value pairs
     pub fn all(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
         self.store.all()
