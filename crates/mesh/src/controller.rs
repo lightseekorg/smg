@@ -29,6 +29,7 @@ use super::{
     stores::StateStores,
     sync::MeshSyncManager,
 };
+use crate::flow_control::MessageSizeValidator;
 
 pub struct MeshController {
     state: ClusterState,
@@ -376,6 +377,7 @@ impl MeshController {
                     let self_name_incremental = self_name.clone();
                     let peer_name_incremental = peer_name.clone();
                     let shared_sequence = sequence.clone();
+                    let size_validator = MessageSizeValidator::default();
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
@@ -390,6 +392,19 @@ impl MeshController {
                             if !all_updates.is_empty() {
                                 for (store_type, updates) in all_updates {
                                     let proto_store_type = store_type.to_proto();
+
+                                    // Validate message size before sending
+                                    let batch_size: usize = updates.iter().map(|u| u.value.len()).sum();
+                                    if let Err(e) = size_validator.validate(batch_size) {
+                                        log::warn!(
+                                            "Incremental update too large, skipping store {:?}: {} (max: {} bytes)",
+                                            store_type,
+                                            e,
+                                            size_validator.max_size()
+                                        );
+                                        collector.mark_sent(store_type, &updates);
+                                        continue;
+                                    }
 
                                     let incremental_update = StreamMessage {
                                         message_type: StreamMessageType::IncrementalUpdate as i32,
@@ -406,12 +421,11 @@ impl MeshController {
                                         peer_id: self_name_incremental.clone(),
                                     };
 
-                                    log::info!(
-                                        "Sending incremental update to {}: store={:?}, {} updates, versions: {:?}",
+                                    log::debug!(
+                                        "Sending incremental update to {}: store={:?}, {} updates",
                                         peer_name_incremental,
                                         store_type,
                                         updates.len(),
-                                        updates.iter().map(|u| (u.key.clone(), u.version)).collect::<Vec<_>>()
                                     );
 
                                     match tx_incremental.try_send(incremental_update) {

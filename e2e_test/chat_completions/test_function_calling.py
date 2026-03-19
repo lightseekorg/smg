@@ -100,11 +100,8 @@ PYTHONIC_MESSAGES = [
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
-@pytest.mark.skip_for_runtime(
-    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
-)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
@@ -884,7 +881,7 @@ class TestOpenAIServerFunctionCalling:
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "pythonic", "--history-backend", "memory"])
@@ -1865,11 +1862,8 @@ class _TestToolChoiceBase:
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
-@pytest.mark.skip_for_runtime(
-    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
-)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
@@ -1888,11 +1882,8 @@ class TestToolChoiceLlama(_TestToolChoiceBase):
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
-@pytest.mark.skip_for_runtime(
-    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
-)
 @pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
@@ -1908,11 +1899,8 @@ class TestToolChoiceQwen(_TestToolChoiceBase):
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
-@pytest.mark.skip_for_runtime(
-    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
-)
 @pytest.mark.model("mistralai/Mistral-7B-Instruct-v0.3")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "mistral", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)

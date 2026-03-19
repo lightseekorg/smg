@@ -37,6 +37,8 @@ use super::{
         rewrite_streaming_block,
     },
 };
+const SSE_DONE: &str = "data: [DONE]\n\n";
+
 use crate::{
     observability::metrics::Metrics,
     routers::{
@@ -792,14 +794,21 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         })
                                     };
 
+                                    // Check in_progress before moving parsed into SseEventData
+                                    let is_in_progress = !seen_in_progress
+                                        && parsed.as_ref().is_some_and(|v| {
+                                            v.get("type").and_then(|t| t.as_str())
+                                                == Some(ResponseEvent::IN_PROGRESS)
+                                        });
+
                                     if !should_skip {
-                                        // Forward the event with pre-parsed value
+                                        // Forward the event with pre-parsed value (moved, not cloned)
                                         if !forward_streaming_event(
                                             SseEventData {
                                                 raw_block: &raw_block,
                                                 event_name,
                                                 data: data.as_ref(),
-                                                pre_parsed: parsed.clone(),
+                                                pre_parsed: parsed,
                                             },
                                             &mut handler,
                                             &tx,
@@ -810,31 +819,25 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         }
                                     }
 
-                                    if !seen_in_progress {
-                                        let is_in_progress = parsed.as_ref().is_some_and(|v| {
-                                            v.get("type").and_then(|t| t.as_str())
-                                                == Some(ResponseEvent::IN_PROGRESS)
-                                        });
-                                        if is_in_progress {
-                                            seen_in_progress = true;
-                                            if !mcp_list_tools_sent {
-                                                for binding in session.mcp_servers() {
-                                                    let list_tools_index =
-                                                        handler.allocate_synthetic_output_index();
-                                                    if !send_mcp_list_tools_events(
-                                                        &tx,
-                                                        &session,
-                                                        &binding.label,
-                                                        list_tools_index,
-                                                        &mut sequence_number,
-                                                        &binding.server_key,
-                                                    ) {
-                                                        // Client disconnected
-                                                        return;
-                                                    }
+                                    if is_in_progress {
+                                        seen_in_progress = true;
+                                        if !mcp_list_tools_sent {
+                                            for binding in session.mcp_servers() {
+                                                let list_tools_index =
+                                                    handler.allocate_synthetic_output_index();
+                                                if !send_mcp_list_tools_events(
+                                                    &tx,
+                                                    &session,
+                                                    &binding.label,
+                                                    list_tools_index,
+                                                    &mut sequence_number,
+                                                    &binding.server_key,
+                                                ) {
+                                                    // Client disconnected
+                                                    return;
                                                 }
-                                                mcp_list_tools_sent = true;
                                             }
+                                            mcp_list_tools_sent = true;
                                         }
                                     }
                                 }
@@ -932,7 +935,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     }
                 }
 
-                let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
                 return;
             }
 
@@ -961,7 +964,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     "error",
                     &json!({"error": {"message": "Exceeded max_tool_calls limit"}}),
                 );
-                let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
                 return;
             }
 
@@ -997,7 +1000,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                         "error",
                         &json!({"error": {"message": format!("Failed to build resume payload: {}", e)}}),
                     );
-                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                    let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
                     return;
                 }
             }

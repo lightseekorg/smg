@@ -25,7 +25,7 @@ API_KEY = "not-used"
 # =============================================================================
 
 
-@pytest.mark.engine("sglang")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(4)
 @pytest.mark.model("Qwen/Qwen3-30B-A3B")
 @pytest.mark.gateway(extra_args=["--reasoning-parser", "qwen3", "--history-backend", "memory"])

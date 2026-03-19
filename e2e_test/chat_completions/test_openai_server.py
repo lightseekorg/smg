@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 
-import openai
 import pytest
 from conftest import smg_compare
 from infra import is_sglang, is_trtllm
@@ -39,13 +38,13 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion(self, setup_backend, smg, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
-        if is_trtllm() and parallel_sample_num > 1:
-            pytest.skip("TRT-LLM does not support n>1 with greedy decoding")
         _, model, client, gateway = setup_backend
         self._run_chat_completion(client, model, logprobs, parallel_sample_num)
 
         # SmgClient comparison
         with smg_compare():
+            # Use temperature > 0 for n > 1 (greedy sampling rejects n > 1)
+            temperature = 0.7 if parallel_sample_num > 1 else 0
             smg_resp = smg.chat.completions.create(
                 model=model,
                 messages=[
@@ -55,7 +54,7 @@ class TestChatCompletion:
                         "content": "What is the capital of France? Answer in a few words.",
                     },
                 ],
-                temperature=0,
+                temperature=temperature,
                 logprobs=logprobs is not None and logprobs > 0,
                 top_logprobs=logprobs,
                 n=parallel_sample_num,
@@ -68,13 +67,12 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion_stream(self, setup_backend, smg, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
-        if is_trtllm() and parallel_sample_num > 1:
-            pytest.skip("TRT-LLM does not support n>1 with greedy decoding")
         _, model, client, gateway = setup_backend
         self._run_chat_completion_stream(client, model, logprobs, parallel_sample_num)
 
         # SmgClient streaming comparison
         with smg_compare():
+            temperature = 0.7 if parallel_sample_num > 1 else 0
             content_pieces = []
             with smg.chat.completions.create(
                 model=model,
@@ -82,7 +80,7 @@ class TestChatCompletion:
                     {"role": "system", "content": "You are a helpful AI assistant"},
                     {"role": "user", "content": "What is the capital of France?"},
                 ],
-                temperature=0,
+                temperature=temperature,
                 logprobs=logprobs is not None and logprobs > 0,
                 top_logprobs=logprobs,
                 n=parallel_sample_num,
@@ -142,35 +140,20 @@ class TestChatCompletion:
             assert isinstance(smg_obj["population"], int)
 
     def test_penalty(self, setup_backend, smg):
-        """Test frequency penalty parameter."""
+        """Test that frequency_penalty parameter is accepted and produces output."""
         _, model, client, gateway = setup_backend
 
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "Introduce the capital of France."},
+                {"role": "user", "content": "What is the capital of France?"},
             ],
-            temperature=0,
-            max_tokens=32,
+            max_tokens=100,
             frequency_penalty=1.0,
+            reasoning_effort="none",
         )
-        text = response.choices[0].message.content
-        assert isinstance(text, str)
-
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful AI assistant"},
-                    {"role": "user", "content": "Introduce the capital of France."},
-                ],
-                temperature=0,
-                max_tokens=32,
-                frequency_penalty=1.0,
-            )
-            assert isinstance(smg_resp.choices[0].message.content, str)
+        assert isinstance(response.choices[0].message.content, str)
+        assert response.usage.completion_tokens > 0
 
     def test_response_prefill(self, setup_backend, smg):
         """Test assistant message prefill with continue_final_message."""
@@ -327,18 +310,6 @@ convenient hands-free control to your smart devices.
             smg_models = smg.models.list()
             assert len(smg_models.data) == 1
 
-    @pytest.mark.skip(reason="Skipping retrieve model test as it is not supported by the router")
-    def test_retrieve_model(self, setup_backend, smg):
-        """Test retrieving a specific model."""
-        _, model, client, gateway = setup_backend
-
-        retrieved_model = client.models.retrieve(model)
-        assert retrieved_model.id == model
-        assert retrieved_model.root == model
-
-        with pytest.raises(openai.NotFoundError):
-            client.models.retrieve("non-existent-model")
-
     def test_stop_sequences(self, setup_backend, smg):
         """Test that stop sequences cause the model to stop generating."""
         _, model, client, gateway = setup_backend
@@ -471,6 +442,8 @@ convenient hands-free control to your smart devices.
 
     def _run_chat_completion(self, client, model, logprobs, parallel_sample_num):
         """Run a non-streaming chat completion and verify response."""
+        # Use temperature > 0 for n > 1 (greedy sampling rejects n > 1)
+        temperature = 0.7 if parallel_sample_num > 1 else 0
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -480,7 +453,7 @@ convenient hands-free control to your smart devices.
                     "content": "What is the capital of France? Answer in a few words.",
                 },
             ],
-            temperature=0,
+            temperature=temperature,
             logprobs=logprobs is not None and logprobs > 0,
             top_logprobs=logprobs,
             n=parallel_sample_num,
@@ -503,13 +476,15 @@ convenient hands-free control to your smart devices.
 
     def _run_chat_completion_stream(self, client, model, logprobs, parallel_sample_num=1):
         """Run a streaming chat completion and verify response chunks."""
+        # Use temperature > 0 for n > 1 (greedy sampling rejects n > 1)
+        temperature = 0.7 if parallel_sample_num > 1 else 0
         generator = client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant"},
                 {"role": "user", "content": "What is the capital of France?"},
             ],
-            temperature=0,
+            temperature=temperature,
             logprobs=logprobs is not None and logprobs > 0,
             top_logprobs=logprobs,
             stream=True,
@@ -572,16 +547,6 @@ convenient hands-free control to your smart devices.
             )
 
 
-# =============================================================================
-# Chat Completion Tests (GPT-OSS)
-#
-# NOTE: Some tests are skipped because they don't work with OSS models:
-# - test_regex: OSS models don't support regex constraints
-# - test_penalty: OSS models don't support frequency_penalty
-# - test_response_prefill: OSS models don't support continue_final_message
-# =============================================================================
-
-
 @pytest.mark.engine("sglang")
 @pytest.mark.gpu(2)
 @pytest.mark.model("openai/gpt-oss-20b")
@@ -623,14 +588,10 @@ class TestChatCompletionHarmony(TestChatCompletion):
             self.STOP_SEQUENCE_TRIMMED = True
         super().test_stop_sequences_stream(setup_backend, smg)
 
-    @pytest.mark.skip(reason="OSS models don't support regex constraints")
+    @pytest.mark.skip(reason="gpt-oss models don't support regex constraints")
     def test_regex(self, setup_backend, smg):
         pass
 
-    @pytest.mark.skip(reason="OSS models don't support frequency_penalty")
-    def test_penalty(self, setup_backend, smg):
-        pass
-
-    @pytest.mark.skip(reason="OSS models don't support continue_final_message")
+    @pytest.mark.skip(reason="gpt-oss Harmony pipeline doesn't implement continue_final_message")
     def test_response_prefill(self, setup_backend, smg):
         pass
