@@ -19,8 +19,8 @@ fi
 
 echo "Using uv version: $(uv --version)"
 
-echo "Installing vLLM (nightly with smg-grpc-servicer support)..."
-uv pip install "vllm[grpc]" --extra-index-url https://wheels.vllm.ai/nightly/cu129
+echo "Installing vLLM (nightly for smg-grpc-servicer support)..."
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cu129
 
 # Install nixl for vLLM PD disaggregation (NIXL KV transfer)
 echo "Installing nixl..."
