@@ -90,7 +90,6 @@ MODEL_SPECS: dict[str, dict] = {
         "features": ["chat", "streaming", "function_calling", "reasoning"],
         "worker_args": ["--trust-remote-code"],
         "vllm_args": ["--trust-remote-code"],
-        "startup_timeout": 900,  # 15 min: large model, may need to download on first run
     },
     # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
