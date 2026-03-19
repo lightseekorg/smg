@@ -154,6 +154,12 @@ class RouterArgs:
     jwt_audience: str | None = None
     jwt_jwks_uri: str | None = None
     jwt_role_mapping: dict[str, str] = dataclasses.field(default_factory=dict)
+    # Mesh server configuration
+    enable_mesh: bool = False
+    mesh_server_name: str | None = None
+    mesh_host: str = "0.0.0.0"
+    mesh_port: int = 39527
+    mesh_peer_urls: list[str] = dataclasses.field(default_factory=list)
 
     @staticmethod
     def add_cli_args(
@@ -1023,6 +1029,40 @@ class RouterArgs:
                 " Format: 'idp_role=gateway_role'."
                 " Example: --jwt-role-mapping 'Gateway.Admin=admin' 'Gateway.User=user'"
             ),
+        )
+
+        # Mesh server configuration
+        mesh_group = parser.add_argument_group("Mesh Server")
+        mesh_group.add_argument(
+            f"--{prefix}enable-mesh",
+            action="store_true",
+            default=False,
+            help="Enable mesh server for HA multi-router coordination",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-server-name",
+            type=str,
+            default=None,
+            help="Mesh server name (default: auto-generated random name)",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-host",
+            type=str,
+            default="0.0.0.0",
+            help="Mesh server bind address (default: 0.0.0.0)",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-port",
+            type=int,
+            default=39527,
+            help="Mesh server port (default: 39527)",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-peer-urls",
+            type=str,
+            nargs="*",
+            default=[],
+            help="Peer mesh server addresses to join (format: host:port)",
         )
 
     @classmethod

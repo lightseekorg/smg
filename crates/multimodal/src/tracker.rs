@@ -6,7 +6,7 @@ use super::{
     error::{MultiModalError, MultiModalResult},
     media::{ImageFetchConfig, MediaConnector, MediaSource},
     types::{
-        ChatContentPart, ImageDetail, Modality, MultiModalData, MultiModalUUIDs, TrackedMedia,
+        ImageDetail, MediaContentPart, Modality, MultiModalData, MultiModalUUIDs, TrackedMedia,
     },
 };
 
@@ -33,17 +33,17 @@ impl AsyncMultiModalTracker {
         }
     }
 
-    pub fn push_part(&mut self, part: ChatContentPart) -> MultiModalResult<()> {
+    pub fn push_part(&mut self, part: MediaContentPart) -> MultiModalResult<()> {
         match part {
-            ChatContentPart::Text { .. } => {}
-            ChatContentPart::ImageUrl { url, detail, uuid } => {
+            MediaContentPart::Text { .. } => {}
+            MediaContentPart::ImageUrl { url, detail, uuid } => {
                 let source = match url::Url::parse(&url) {
                     Ok(parsed) if parsed.scheme() == "data" => MediaSource::DataUrl(url),
                     _ => MediaSource::Url(url),
                 };
                 self.enqueue_image(source, detail.unwrap_or_default(), uuid);
             }
-            ChatContentPart::ImageData {
+            MediaContentPart::ImageData {
                 data,
                 mime_type: _,
                 uuid,
@@ -55,7 +55,7 @@ impl AsyncMultiModalTracker {
                     uuid,
                 );
             }
-            ChatContentPart::ImageEmbeds { .. } => {
+            MediaContentPart::ImageEmbeds { .. } => {
                 return Err(MultiModalError::UnsupportedContent("image_embeds"));
             }
         }

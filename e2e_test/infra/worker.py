@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import IO, Any
@@ -243,6 +244,13 @@ class Worker:
 
     def _build_trtllm_cmd(self, model_path: str, tp_size: int, spec: dict) -> list[str]:
         """Build TensorRT-LLM gRPC server command."""
+        # Create config file to enable xgrammar guided decoding
+        config_path = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False, prefix="trtllm_"
+        )
+        config_path.write("guided_decoding_backend: xgrammar\n")
+        config_path.close()
+
         cmd = [
             "python3",
             "-m",
@@ -258,6 +266,8 @@ class Worker:
             "pytorch",
             "--tp_size",
             str(tp_size),
+            "--extra_llm_api_options",
+            config_path.name,
         ]
         extra = spec.get("trtllm_args", [])
         if extra:

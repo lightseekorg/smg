@@ -300,6 +300,58 @@ pub trait RouterTrait: Send + Sync + Debug {
 
     /// Check if this is a PD router
     fn is_pd_mode(&self) -> bool {
-        self.router_type() == "pd"
+        matches!(self.router_type(), "pd" | "grpc_pd")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal stub implementing RouterTrait so we can test the default
+    /// `is_pd_mode` logic without spinning up a real router.
+    #[derive(Debug)]
+    struct StubRouter {
+        type_name: &'static str,
+    }
+
+    #[async_trait]
+    impl RouterTrait for StubRouter {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn router_type(&self) -> &'static str {
+            self.type_name
+        }
+    }
+
+    #[test]
+    fn test_is_pd_mode_for_pd_router_types() {
+        // "pd" (HTTP PD) and "grpc_pd" should both be recognized as PD mode
+        let pd = StubRouter { type_name: "pd" };
+        assert!(pd.is_pd_mode());
+
+        let grpc_pd = StubRouter {
+            type_name: "grpc_pd",
+        };
+        assert!(grpc_pd.is_pd_mode());
+    }
+
+    #[test]
+    fn test_is_pd_mode_false_for_non_pd_router_types() {
+        for name in &[
+            "openai",
+            "regular",
+            "grpc",
+            "gemini",
+            "anthropic",
+            "manager",
+        ] {
+            let router = StubRouter { type_name: name };
+            assert!(
+                !router.is_pd_mode(),
+                "router_type {name:?} should NOT be pd mode"
+            );
+        }
     }
 }

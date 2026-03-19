@@ -87,8 +87,8 @@ pub struct OperationLog {
 
 impl OperationLog {
     fn decode_counter_payload(value: &[u8]) -> Option<i64> {
-        serde_json::from_slice::<i64>(value).ok().or_else(|| {
-            serde_json::from_slice::<HashMap<String, i64>>(value)
+        bincode::deserialize::<i64>(value).ok().or_else(|| {
+            bincode::deserialize::<HashMap<String, i64>>(value)
                 .ok()
                 .and_then(|map| map.get("value").copied())
         })
@@ -111,14 +111,14 @@ impl OperationLog {
         &self.operations
     }
 
-    /// Serialize to JSON bytes
-    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(self)
+    /// Serialize to bincode bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Box<bincode::ErrorKind>> {
+        bincode::serialize(self)
     }
 
-    /// Deserialize from JSON bytes
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
+    /// Deserialize from bincode bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<bincode::ErrorKind>> {
+        bincode::deserialize(bytes)
     }
 
     /// Get number of operations

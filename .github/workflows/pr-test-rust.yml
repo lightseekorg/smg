@@ -328,7 +328,6 @@ jobs:
 
       - name: Run benchmarks
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           ROUTER_LOCAL_MODEL_PATH: /home/ubuntu/models
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
@@ -358,7 +357,7 @@ jobs:
       go-bindings: ${{ steps.filter.outputs.go-bindings }}
     steps:
       - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -428,7 +427,7 @@ jobs:
           - engine: vllm
             timeout: 20
             runner: 1-gpu
-            test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
+            test_filter: ""
           - engine: trtllm
             timeout: 90
             runner: 1-gpu-h100
@@ -559,13 +558,24 @@ jobs:
   # === 4 GPU ===
 
   e2e-4gpu-chat:
-    needs: [e2e-2gpu-chat]
+    name: e2e-4gpu-chat (${{ matrix.engine }})
+    needs: [e2e-1gpu-chat]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sglang
+            timeout: 20
+          - engine: vllm
+            timeout: 20
+          - engine: trtllm
+            timeout: 30
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
-      engine: sglang
+      engine: ${{ matrix.engine }}
       gpu_tier: "4"
       runner: 4-gpu-h100
-      timeout: 20
+      timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/chat_completions
     secrets: inherit
 
@@ -665,9 +675,6 @@ jobs:
 
       - name: Run E2E tests
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
           BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
           ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.test_path }} \
@@ -779,8 +786,6 @@ jobs:
           bash scripts/ci_install_e2e_deps.sh
 
       - name: Run Go OAI server E2E tests
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"

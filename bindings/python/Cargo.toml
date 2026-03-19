@@ -1,6 +1,6 @@
 [package]
 name = "smg-python"
-version = "1.3.0"
+version = "1.3.2"
 edition = "2021"
 
 [lib]
@@ -18,6 +18,12 @@ path = "../../model_gateway"
 default-features = true
 
 [dependencies.smg-auth]
+workspace = true
+
+[dependencies.smg-mesh]
+workspace = true
+
+[dependencies.rand]
 workspace = true
 
 [dependencies.tool-parser]

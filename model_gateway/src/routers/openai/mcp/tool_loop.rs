@@ -76,7 +76,7 @@ impl ToolLoopState {
         self.conversation_history.push(func_item);
 
         let output_item = json!({
-            "type": "function_call_output",
+            "type": ItemType::FUNCTION_CALL_OUTPUT,
             "call_id": call_id,
             "output": output_str
         });
@@ -133,12 +133,7 @@ pub(crate) async fn execute_streaming_tool_calls(
                     &call.name,
                     &call.arguments_buffer,
                 );
-                if !send_tool_call_completion_events(
-                    tx,
-                    &call,
-                    mcp_call_item.clone(),
-                    sequence_number,
-                ) {
+                if !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number) {
                     return false;
                 }
                 state.record_call(
@@ -182,7 +177,7 @@ pub(crate) async fn execute_streaming_tool_calls(
             json!({})
         });
 
-        if !send_tool_call_completion_events(tx, &call, mcp_call_item.clone(), sequence_number) {
+        if !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number) {
             return false;
         }
 
@@ -413,7 +408,7 @@ fn send_tool_call_intermediate_event(
 fn send_tool_call_completion_events(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     call: &FunctionCallInProgress,
-    tool_call_item: Value,
+    tool_call_item: &Value,
     sequence_number: &mut u64,
 ) -> bool {
     let effective_output_index = call.effective_output_index();
@@ -815,7 +810,7 @@ fn extract_function_calls(resp: &Value) -> Vec<ExtractedFunctionCall> {
         return Vec::new();
     };
 
-    let mut calls = Vec::new();
+    let mut calls = Vec::with_capacity(4);
     for item in output {
         let Some(obj) = item.as_object() else {
             continue;
