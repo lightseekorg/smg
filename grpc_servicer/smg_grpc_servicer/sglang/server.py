@@ -273,9 +273,10 @@ async def serve_grpc(
     # Start a lightweight HTTP server to serve /metrics for Prometheus scraping.
     # The gRPC port can't serve HTTP, so we use grpc_port + 1 by convention.
     # SMG's /engine_metrics endpoint fans out to this sidecar to collect engine metrics.
+    metrics_httpd = None
     if server_args.enable_metrics:
         metrics_port = server_args.port + 1
-        _start_metrics_http_server(server_args.host, metrics_port)
+        metrics_httpd = _start_metrics_http_server(server_args.host, metrics_port)
 
     # Start warmup in a separate thread
     warmup_thread = threading.Thread(
@@ -306,6 +307,11 @@ async def serve_grpc(
         # Stop the gRPC server
         await server.stop(5.0)
 
+        # Gracefully shut down the metrics HTTP server so metrics are flushed
+        if metrics_httpd is not None:
+            logger.info("Shutting down HTTP metrics server")
+            metrics_httpd.shutdown()
+
         # Wait for warmup thread to finish
         if warmup_thread.is_alive():
             logger.info("Waiting for warmup thread to finish...")
@@ -331,6 +337,8 @@ def _start_metrics_http_server(host: str, port: int):
 
     Uses the same multiprocess collector pattern as TGL's HTTP mode
     (see sglang.srt.utils.common.add_prometheus_middleware).
+
+    Returns the HTTPServer so the caller can call httpd.shutdown() for graceful cleanup.
     """
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -354,16 +362,13 @@ def _start_metrics_http_server(host: str, port: int):
         def log_message(self, format, *args):
             pass
 
-    def _run():
-        try:
-            httpd = HTTPServer((host, port), MetricsHandler)
-            logger.info(f"Metrics HTTP server listening on {host}:{port}")
-            httpd.serve_forever()
-        except Exception as e:
-            logger.error(f"Metrics HTTP server failed: {e}")
+    httpd = HTTPServer((host, port), MetricsHandler)
+    logger.info(f"Metrics HTTP server listening on {host}:{port}")
 
-    thread = threading.Thread(target=_run, daemon=True, name="metrics-http-server")
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True, name="metrics-http-server")
     thread.start()
+
+    return httpd
 
 
 def _execute_grpc_server_warmup(server_args: ServerArgs):
