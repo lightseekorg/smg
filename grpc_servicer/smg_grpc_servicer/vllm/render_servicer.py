@@ -24,6 +24,20 @@ from smg_grpc_servicer.vllm.proto_utils import from_proto, pydantic_to_proto
 
 logger = logging.getLogger(__name__)
 
+_HTTP_TO_GRPC = {
+    400: grpc.StatusCode.INVALID_ARGUMENT,
+    404: grpc.StatusCode.NOT_FOUND,
+    409: grpc.StatusCode.ALREADY_EXISTS,
+    422: grpc.StatusCode.INVALID_ARGUMENT,
+    429: grpc.StatusCode.RESOURCE_EXHAUSTED,
+    503: grpc.StatusCode.UNAVAILABLE,
+}
+
+
+def _http_to_grpc_status(http_code: int) -> grpc.StatusCode:
+    """Map an HTTP status code to the closest gRPC status code."""
+    return _HTTP_TO_GRPC.get(http_code, grpc.StatusCode.INTERNAL)
+
 
 class RenderGrpcServicer:
     """gRPC servicer for GPU-less render serving.
@@ -76,7 +90,7 @@ class RenderGrpcServicer:
 
             if isinstance(result, ErrorResponse):
                 await context.abort(
-                    grpc.StatusCode.INVALID_ARGUMENT,
+                    _http_to_grpc_status(result.error.code),
                     result.error.message,
                 )
         except grpc.aio.AbortError:
@@ -111,7 +125,7 @@ class RenderGrpcServicer:
 
             if isinstance(result, ErrorResponse):
                 await context.abort(
-                    grpc.StatusCode.INVALID_ARGUMENT,
+                    _http_to_grpc_status(result.error.code),
                     result.error.message,
                 )
         except grpc.aio.AbortError:

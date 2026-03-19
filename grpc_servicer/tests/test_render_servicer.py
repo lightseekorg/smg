@@ -123,6 +123,7 @@ class TestRenderChat:
 
         mock_error = MagicMock()
         mock_error.error.message = "Invalid model"
+        mock_error.error.code = 400
         mock_state.openai_serving_render.render_chat_request.return_value = mock_error
 
         with patch(f"{_MOD}.ErrorResponse", new=type(mock_error)):
@@ -241,6 +242,7 @@ class TestRenderCompletion:
 
         mock_error = MagicMock()
         mock_error.error.message = "Bad prompt"
+        mock_error.error.code = 400
         mock_state.openai_serving_render.render_completion_request.return_value = mock_error
 
         with patch(f"{_MOD}.ErrorResponse", new=type(mock_error)):
