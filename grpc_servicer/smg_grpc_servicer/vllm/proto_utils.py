@@ -58,6 +58,11 @@ def _apply_transforms(obj: Any, transforms: FieldTransforms) -> Any:
             value = _apply_transforms(value, transforms)
             if key in transforms:
                 new_key, fn = transforms[key]
+                if new_key in result:
+                    raise ValueError(
+                        f"Transform key collision: '{key}' -> '{new_key}', "
+                        f"but '{new_key}' already exists"
+                    )
                 result[new_key] = fn(value) if fn else value
             else:
                 result[key] = value
