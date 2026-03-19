@@ -71,9 +71,7 @@ class TestFlattenCompletionPrompt:
         assert flatten_completion_prompt({"token_id_batches": {}}) == []
 
     def test_batch_with_empty_token_ids(self):
-        result = flatten_completion_prompt(
-            {"token_id_batches": {"batches": [{}]}}
-        )
+        result = flatten_completion_prompt({"token_id_batches": {"batches": [{}]}})
         assert result == [[]]
 
 
@@ -126,9 +124,7 @@ class TestParseToolChoice:
         assert _parse_tool_choice("required") == "required"
 
     def test_json_object_parsed(self):
-        result = _parse_tool_choice(
-            '{"type": "function", "function": {"name": "get_weather"}}'
-        )
+        result = _parse_tool_choice('{"type": "function", "function": {"name": "get_weather"}}')
         assert result == {"type": "function", "function": {"name": "get_weather"}}
 
     def test_invalid_json_passthrough(self):

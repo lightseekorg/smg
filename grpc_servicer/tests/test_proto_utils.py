@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 from smg_grpc_servicer.vllm.proto_utils import (
     _apply_transforms,
     from_proto,
-    pydantic_to_proto,
     proto_to_dict,
+    pydantic_to_proto,
 )
 
 
@@ -18,9 +18,7 @@ class TestApplyTransforms:
 
     def test_simple_rename(self):
         transforms = {"old_name": ("new_name", None)}
-        assert _apply_transforms({"old_name": "value"}, transforms) == {
-            "new_name": "value"
-        }
+        assert _apply_transforms({"old_name": "value"}, transforms) == {"new_name": "value"}
 
     def test_rename_with_transform(self):
         transforms = {"count_str": ("count", int)}
@@ -32,9 +30,7 @@ class TestApplyTransforms:
 
     def test_nested_dict(self):
         transforms = {"old": ("new", None)}
-        assert _apply_transforms({"outer": {"old": "val"}}, transforms) == {
-            "outer": {"new": "val"}
-        }
+        assert _apply_transforms({"outer": {"old": "val"}}, transforms) == {"outer": {"new": "val"}}
 
     def test_list_of_dicts(self):
         transforms = {"old": ("new", None)}
@@ -45,9 +41,7 @@ class TestApplyTransforms:
 
     def test_nested_list_in_dict(self):
         transforms = {"k": ("renamed", None)}
-        result = _apply_transforms(
-            {"items": [{"k": "a"}, {"k": "b"}]}, transforms
-        )
+        result = _apply_transforms({"items": [{"k": "a"}, {"k": "b"}]}, transforms)
         assert result == {"items": [{"renamed": "a"}, {"renamed": "b"}]}
 
     def test_scalar_passthrough(self):
@@ -64,9 +58,7 @@ class TestApplyTransforms:
 
     def test_transform_receives_recursed_value(self):
         """Transform fn receives the already-recursed value."""
-        transforms = {
-            "nested": ("flat", lambda d: sorted(d.keys()) if isinstance(d, dict) else d)
-        }
+        transforms = {"nested": ("flat", lambda d: sorted(d.keys()) if isinstance(d, dict) else d)}
         result = _apply_transforms({"nested": {"b": 1, "a": 2}}, transforms)
         assert result == {"flat": ["a", "b"]}
 
@@ -81,9 +73,7 @@ class TestProtoToDict:
 
         result = proto_to_dict(mock_message)
 
-        mock_msg_to_dict.assert_called_once_with(
-            mock_message, preserving_proto_field_name=True
-        )
+        mock_msg_to_dict.assert_called_once_with(mock_message, preserving_proto_field_name=True)
         assert result == {"field": "value"}
 
     @patch("smg_grpc_servicer.vllm.proto_utils.MessageToDict")

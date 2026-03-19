@@ -3,11 +3,10 @@
 """Unit tests for render_servicer.py — the RenderGrpcServicer gRPC service."""
 
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import grpc
 import pytest
-
 from smg_grpc_servicer.vllm.render_servicer import RenderGrpcServicer
 
 # Module path prefix for patching
@@ -91,9 +90,7 @@ class TestRenderChat:
         mock_from_proto.return_value = mock_pydantic_req
 
         mock_render_result = MagicMock()
-        mock_state.openai_serving_render.render_chat_request.return_value = (
-            mock_render_result
-        )
+        mock_state.openai_serving_render.render_chat_request.return_value = mock_render_result
 
         mock_proto_response = MagicMock()
         mock_to_proto.return_value = mock_proto_response
@@ -121,9 +118,7 @@ class TestRenderChat:
         )
 
     @patch(f"{_MOD}.from_proto")
-    async def test_error_response(
-        self, mock_from_proto, mock_state, mock_grpc_context
-    ):
+    async def test_error_response(self, mock_from_proto, mock_state, mock_grpc_context):
         mock_from_proto.return_value = MagicMock()
 
         mock_error = MagicMock()
@@ -171,9 +166,7 @@ class TestRenderChat:
         )
 
     @patch(f"{_MOD}.from_proto")
-    async def test_abort_error_propagates(
-        self, mock_from_proto, mock_state, mock_grpc_context
-    ):
+    async def test_abort_error_propagates(self, mock_from_proto, mock_state, mock_grpc_context):
         mock_from_proto.side_effect = grpc.aio.AbortError("", "")
         servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
 
@@ -243,16 +236,12 @@ class TestRenderCompletion:
         )
 
     @patch(f"{_MOD}.from_proto")
-    async def test_error_response(
-        self, mock_from_proto, mock_state, mock_grpc_context
-    ):
+    async def test_error_response(self, mock_from_proto, mock_state, mock_grpc_context):
         mock_from_proto.return_value = MagicMock()
 
         mock_error = MagicMock()
         mock_error.error.message = "Bad prompt"
-        mock_state.openai_serving_render.render_completion_request.return_value = (
-            mock_error
-        )
+        mock_state.openai_serving_render.render_completion_request.return_value = mock_error
 
         with patch(f"{_MOD}.ErrorResponse", new=type(mock_error)):
             servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
@@ -295,9 +284,7 @@ class TestRenderCompletion:
         )
 
     @patch(f"{_MOD}.from_proto")
-    async def test_abort_error_propagates(
-        self, mock_from_proto, mock_state, mock_grpc_context
-    ):
+    async def test_abort_error_propagates(self, mock_from_proto, mock_state, mock_grpc_context):
         mock_from_proto.side_effect = grpc.aio.AbortError("", "")
         servicer = RenderGrpcServicer(mock_state, start_time=1000.0)
 
@@ -311,9 +298,7 @@ class TestRenderCompletion:
     ):
         mock_from_proto.return_value = MagicMock()
         mock_result = MagicMock()
-        mock_state.openai_serving_render.render_completion_request.return_value = [
-            mock_result
-        ]
+        mock_state.openai_serving_render.render_completion_request.return_value = [mock_result]
         mock_to_proto.side_effect = TypeError("serialization bug")
 
         servicer = RenderGrpcServicer(mock_state, start_time=1000.0)

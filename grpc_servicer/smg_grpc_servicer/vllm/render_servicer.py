@@ -10,15 +10,17 @@ import logging
 import time
 
 import grpc
-from smg_grpc_proto import vllm_engine_pb2  # type: ignore[import-untyped]
-from smg_grpc_proto import vllm_render_pb2  # type: ignore[import-untyped]
+from smg_grpc_proto import (
+    vllm_engine_pb2,  # type: ignore[import-untyped]
+    vllm_render_pb2,  # type: ignore[import-untyped]
+)
 from starlette.datastructures import State
-
-from smg_grpc_servicer.vllm.field_transforms import FIELD_TRANSFORMS
-from smg_grpc_servicer.vllm.proto_utils import from_proto, pydantic_to_proto
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
+from smg_grpc_servicer.vllm.field_transforms import FIELD_TRANSFORMS
+from smg_grpc_servicer.vllm.proto_utils import from_proto, pydantic_to_proto
 
 logger = logging.getLogger(__name__)
 
@@ -68,13 +70,9 @@ class RenderGrpcServicer:
             )
 
         try:
-            pydantic_request = from_proto(
-                request, ChatCompletionRequest, FIELD_TRANSFORMS
-            )
+            pydantic_request = from_proto(request, ChatCompletionRequest, FIELD_TRANSFORMS)
 
-            result = await self.state.openai_serving_render.render_chat_request(
-                pydantic_request
-            )
+            result = await self.state.openai_serving_render.render_chat_request(pydantic_request)
 
             if isinstance(result, ErrorResponse):
                 await context.abort(
@@ -91,9 +89,7 @@ class RenderGrpcServicer:
 
         try:
             return vllm_render_pb2.RenderChatResponse(
-                generate_request=pydantic_to_proto(
-                    result, vllm_render_pb2.GenerateRequestProto
-                ),
+                generate_request=pydantic_to_proto(result, vllm_render_pb2.GenerateRequestProto),
             )
         except Exception as e:
             logger.exception("RenderChat response serialization failed")
@@ -129,8 +125,7 @@ class RenderGrpcServicer:
         try:
             return vllm_render_pb2.RenderCompletionResponse(
                 generate_requests=[
-                    pydantic_to_proto(gr, vllm_render_pb2.GenerateRequestProto)
-                    for gr in result
+                    pydantic_to_proto(gr, vllm_render_pb2.GenerateRequestProto) for gr in result
                 ],
             )
         except Exception as e:
