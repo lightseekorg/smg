@@ -126,16 +126,17 @@ def smg(setup_backend):
     client.close()
 
 
-@pytest.fixture(params=["openai", "smg"])
+@pytest.fixture
 def api_client(request, setup_backend):
-    """Parametrized client -- each test runs with both OpenAI SDK and SmgClient.
+    """Client fixture that supports parametrization with OpenAI SDK and SmgClient.
 
-    Replaces the old smg_compare() pattern that duplicated every API call
-    manually and swallowed SmgClient failures. Tests using this fixture run
-    twice automatically (once per client) against the same backend.
+    By default returns the OpenAI client. To run a test with both clients,
+    add ``@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)``
+    to the test class or method.
     """
     _, _, openai_client, gateway = setup_backend
-    if request.param == "openai":
+    param = getattr(request, "param", "openai")
+    if param == "openai":
         yield openai_client
     else:
         client = SmgClient(base_url=gateway.base_url, max_retries=0)
