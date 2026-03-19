@@ -36,19 +36,36 @@ struct WorkerResponse {
     result: Result<reqwest::Response, reqwest::Error>,
 }
 
-/// Fan out requests to workers in parallel
+/// Fan out requests to workers in parallel, using `{worker_url}/{endpoint}`
+/// for the request URL.
 async fn fan_out(
     workers: &[Arc<dyn Worker>],
     client: &reqwest::Client,
     endpoint: &str,
     method: reqwest::Method,
 ) -> Vec<WorkerResponse> {
+    fan_out_with(workers, client, endpoint, method, |w, ep| {
+        format!("{}/{}", w.url(), ep)
+    })
+    .await
+}
+
+/// Fan out requests to workers in parallel with a custom URL builder.
+///
+/// Each worker's request URL is computed via `url_fn(worker, endpoint)`.
+async fn fan_out_with(
+    workers: &[Arc<dyn Worker>],
+    client: &reqwest::Client,
+    endpoint: &str,
+    method: reqwest::Method,
+    url_fn: impl Fn(&Arc<dyn Worker>, &str) -> String,
+) -> Vec<WorkerResponse> {
     let futures: Vec<_> = workers
         .iter()
         .map(|worker| {
             let client = client.clone();
-            let url = worker.url().to_string();
-            let full_url = format!("{url}/{endpoint}");
+            let worker_url = worker.url().to_string();
+            let full_url = url_fn(worker, endpoint);
             let api_key = worker.api_key().cloned();
             let method = method.clone();
 
@@ -58,7 +75,7 @@ async fn fan_out(
                     req = req.bearer_auth(key);
                 }
                 WorkerResponse {
-                    url,
+                    url: worker_url,
                     result: req.send().await,
                 }
             }
@@ -69,6 +86,30 @@ async fn fan_out(
         .buffer_unordered(MAX_CONCURRENT)
         .collect()
         .await
+}
+
+/// Build the HTTP URL for fetching Prometheus metrics from a worker.
+///
+/// For HTTP workers, uses the worker URL directly (e.g. `http://host:8000/metrics`).
+/// For gRPC workers, the gRPC servicer runs a metrics HTTP sidecar on `grpc_port + 1`,
+/// so we convert `grpc://host:port` to `http://host:(port+1)/metrics`.
+fn metrics_url(worker: &Arc<dyn Worker>, endpoint: &str) -> String {
+    let url = worker.url();
+    match worker.connection_mode() {
+        ConnectionMode::Http => format!("{url}/{endpoint}"),
+        ConnectionMode::Grpc => {
+            let stripped = url
+                .trim_start_matches("grpc://")
+                .trim_start_matches("http://")
+                .trim_start_matches("https://");
+            if let Some((host, port_str)) = stripped.rsplit_once(':') {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    return format!("http://{}:{}/{}", host, port + 1, endpoint);
+                }
+            }
+            format!("http://{stripped}/{endpoint}")
+        }
+    }
 }
 
 pub enum EngineMetricsResult {
@@ -273,7 +314,14 @@ impl WorkerManager {
             return EngineMetricsResult::Err("No available workers".to_string());
         }
 
-        let responses = fan_out(&workers, client, "metrics", reqwest::Method::GET).await;
+        let responses = fan_out_with(
+            &workers,
+            client,
+            "metrics",
+            reqwest::Method::GET,
+            metrics_url,
+        )
+        .await;
 
         let mut metric_packs = Vec::new();
         for resp in responses {

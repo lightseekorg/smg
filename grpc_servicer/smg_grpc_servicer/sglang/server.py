@@ -39,6 +39,13 @@ async def serve_grpc(
 ):
     """Start the standalone gRPC server with integrated scheduler."""
 
+    # Set up Prometheus multiprocess directory before launching schedulers so that
+    # child scheduler processes inherit the env var and write metrics to shared files.
+    if server_args.enable_metrics:
+        from sglang.srt.utils import set_prometheus_multiproc_dir
+
+        set_prometheus_multiproc_dir()
+
     # Start bootstrap server BEFORE launching scheduler processes (only in PREFILL mode)
     # This ensures the bootstrap server is ready when prefill schedulers try to register
     bootstrap_server = None
@@ -263,6 +270,13 @@ async def serve_grpc(
 
     await server.start()
 
+    # Start a lightweight HTTP server to serve /metrics for Prometheus scraping.
+    # The gRPC port can't serve HTTP, so we use grpc_port + 1 by convention.
+    # SMG's /engine_metrics endpoint fans out to this sidecar to collect engine metrics.
+    if server_args.enable_metrics:
+        metrics_port = server_args.port + 1
+        _start_metrics_http_server(server_args.host, metrics_port)
+
     # Start warmup in a separate thread
     warmup_thread = threading.Thread(
         target=_wait_and_warmup_grpc,
@@ -310,6 +324,46 @@ async def serve_grpc(
                     proc.join(timeout=1.0)
 
         logger.info("All scheduler processes terminated")
+
+
+def _start_metrics_http_server(host: str, port: int):
+    """Start a background HTTP server that serves Prometheus metrics from PROMETHEUS_MULTIPROC_DIR.
+
+    Uses the same multiprocess collector pattern as TGL's HTTP mode
+    (see sglang.srt.utils.common.add_prometheus_middleware).
+    """
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from prometheus_client import CollectorRegistry, generate_latest, multiprocess
+
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry)
+
+    class MetricsHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/metrics" or self.path.startswith("/metrics?"):
+                output = generate_latest(registry)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(output)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    def _run():
+        try:
+            httpd = HTTPServer((host, port), MetricsHandler)
+            logger.info(f"Metrics HTTP server listening on {host}:{port}")
+            httpd.serve_forever()
+        except Exception as e:
+            logger.error(f"Metrics HTTP server failed: {e}")
+
+    thread = threading.Thread(target=_run, daemon=True, name="metrics-http-server")
+    thread.start()
 
 
 def _execute_grpc_server_warmup(server_args: ServerArgs):
