@@ -114,11 +114,10 @@ from smg_client import SmgClient
 
 @pytest.fixture
 def smg(setup_backend):
-    """DEPRECATED: SmgClient pointing at the same gateway as setup_backend.
+    """DEPRECATED: Use ``api_client`` fixture instead.
 
-    This fixture is deprecated. New tests should use the ``api_client``
-    fixture instead, which automatically parametrizes tests to run with
-    both the OpenAI SDK and SmgClient.
+    To test with SmgClient, add to your test class:
+    ``@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)``
     """
     _, _, _, gateway = setup_backend
     client = SmgClient(base_url=gateway.base_url, max_retries=0)
@@ -138,10 +137,12 @@ def api_client(request, setup_backend):
     param = getattr(request, "param", "openai")
     if param == "openai":
         yield openai_client
-    else:
+    elif param == "smg":
         client = SmgClient(base_url=gateway.base_url, max_retries=0)
         yield client
         client.close()
+    else:
+        raise ValueError(f"Unknown api_client param: {param!r} (expected 'openai' or 'smg')")
 
 
 # Re-export for pytest discovery

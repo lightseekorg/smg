@@ -427,12 +427,11 @@ class TestMcpWebSearchStreamingEvents:
         This verifies the baseline MCP streaming behavior that built-in
         tools should eventually match (with different event types).
         """
-        _, model, _, gateway = setup_backend
-        client = api_client
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
-        resp = client.responses.create(
+        resp = api_client.responses.create(
             model=model,
             input=(
                 "Search the web for Python programming language. "

@@ -32,7 +32,7 @@ class TestEnableThinking:
 
     def test_chat_completion_with_reasoning(self, setup_backend, api_client):
         """Test non-streaming with enable_thinking=True, reasoning_content should not be empty."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         response = api_client.chat.completions.create(
             model=model,

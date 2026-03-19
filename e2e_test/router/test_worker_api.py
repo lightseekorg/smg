@@ -33,7 +33,7 @@ pytestmark = pytest.mark.skip_for_runtime("vllm", reason="vLLM does not support 
 class TestWorkerAPI:
     """Tests for worker management APIs using setup_backend fixture."""
 
-    def test_list_workers(self, setup_backend, api_client):
+    def test_list_workers(self, setup_backend):
         """Test listing workers via /workers endpoint."""
         backend, model, _, gateway = setup_backend
 
@@ -54,7 +54,7 @@ class TestWorkerAPI:
             if worker.model is not None:
                 assert worker.model, "Worker model_id should be non-empty when present"
 
-    def test_list_models(self, setup_backend, api_client):
+    def test_list_models(self, setup_backend):
         """Test listing models via /v1/models endpoint."""
         backend, model, _, gateway = setup_backend
 
@@ -66,7 +66,7 @@ class TestWorkerAPI:
             logger.info("Model: %s", m.get("id", "unknown"))
             assert "id" in m, "Model should have an id"
 
-    def test_health_endpoint(self, setup_backend, api_client):
+    def test_health_endpoint(self, setup_backend):
         """Test health check endpoint."""
         backend, model, _, gateway = setup_backend
 

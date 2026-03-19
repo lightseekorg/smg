@@ -333,27 +333,6 @@ convenient hands-free control to your smart devices.
         """Extract text from delta, falling back to reasoning_content for Harmony."""
         return delta.content or getattr(delta, "reasoning_content", "") or ""
 
-    def _run_multiple_choices_stream(self, client, model):
-        """Run streaming with n=2 to test multiple parallel choices."""
-        chunks = list(
-            client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "user", "content": "What is the capital of France?"},
-                ],
-                temperature=0.7,
-                n=2,
-                stream=True,
-            )
-        )
-
-        finish_reasons = [
-            c.choices[0].finish_reason for c in chunks if c.choices and c.choices[0].finish_reason
-        ]
-        assert len(finish_reasons) >= 2, (
-            f"Expected finish_reason chunks for 2 indices, got {len(finish_reasons)}"
-        )
-
 
 @pytest.mark.engine("sglang")
 @pytest.mark.gpu(1)
