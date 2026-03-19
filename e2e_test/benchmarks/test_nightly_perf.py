@@ -101,7 +101,7 @@ _NIGHTLY_MODELS: list[tuple[str, str, int, list[str], dict]] = [
     ("Qwen/Qwen2.5-7B-Instruct", "Qwen7b", 4, ["http", "grpc"], {}),
     ("Qwen/Qwen3-30B-A3B", "Qwen30b", 4, ["http", "grpc"], {}),
     ("openai/gpt-oss-20b", "GptOss20b", 1, ["http", "grpc"], {}),
-    ("minimaxai/minimax-m2", "MinimaxM2", 0, ["http"], {}),
+    ("minimaxai/minimax-m2", "MinimaxM2", 1, ["http", "grpc"], {}),
     (
         "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
         "Llama4Maverick",
@@ -142,9 +142,9 @@ def _make_test_class(model_id, worker_count, backends, extra_kwargs):
 
 
 for _model_id, _name, _multi_workers, _backends, _extra in _NIGHTLY_MODELS:
-    _variants = [("Single", 1)]
-    if _multi_workers > 0:
-        _variants.append(("Multi", _multi_workers))
+    _variants = [("Single", 1), ("Multi", _multi_workers)]
+    if _model_id == "minimaxai/minimax-m2":
+        _variants = [("Single", 1)]
     for _suffix, _count in _variants:
         _cls_name = f"TestNightly{_name}{_suffix}"
         _cls = _make_test_class(_model_id, _count, _backends, _extra)
