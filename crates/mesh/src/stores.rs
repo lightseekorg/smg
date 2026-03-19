@@ -82,6 +82,11 @@ impl<T: CrdtValue> CrdtStore<T> {
         }
     }
 
+    /// Mutation generation counter. Cheap check to skip unchanged stores.
+    fn generation(&self) -> u64 {
+        self.inner.generation()
+    }
+
     fn get(&self, key: &str) -> Option<T> {
         self.inner.get(key).and_then(|bytes| {
             T::from_bytes(&bytes)
@@ -351,6 +356,11 @@ macro_rules! define_state_store {
                 Self {
                     inner: CrdtStore::new(),
                 }
+            }
+
+            /// Mutation generation counter. Cheap check to skip unchanged stores.
+            pub fn generation(&self) -> u64 {
+                self.inner.generation()
             }
 
             pub fn get(&self, key: &str) -> Option<$value_type> {

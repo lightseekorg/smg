@@ -219,6 +219,37 @@ pub fn shutdown_otel() {
     }
 }
 
+/// Extract W3C trace context from incoming HTTP request headers.
+///
+/// Returns an [`opentelemetry::Context`] that can be set as the parent of a
+/// `tracing::Span` via [`OpenTelemetrySpanExt::set_parent`], linking
+/// server-side spans into the caller's distributed trace.
+///
+/// When OTel is disabled or no `traceparent` header is present the returned
+/// context is empty, which is a no-op when passed to `set_parent`.
+#[inline]
+pub fn extract_trace_context_http(headers: &HeaderMap) -> opentelemetry::Context {
+    if !is_otel_enabled() {
+        return opentelemetry::Context::new();
+    }
+
+    struct HeaderExtractor<'a>(&'a HeaderMap);
+
+    impl opentelemetry::propagation::Extractor for HeaderExtractor<'_> {
+        #[inline]
+        fn get(&self, key: &str) -> Option<&str> {
+            self.0.get(key).and_then(|v| v.to_str().ok())
+        }
+
+        #[inline]
+        fn keys(&self) -> Vec<&str> {
+            self.0.keys().map(|k| k.as_str()).collect()
+        }
+    }
+
+    global::get_text_map_propagator(|propagator| propagator.extract(&HeaderExtractor(headers)))
+}
+
 /// Inject W3C trace context headers into an HTTP request.
 #[inline]
 pub fn inject_trace_context_http(headers: &mut HeaderMap) {
