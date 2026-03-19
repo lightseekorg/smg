@@ -13,9 +13,9 @@ on:
         description: 'Runtime: sglang, vllm, or all (default: all)'
         required: false
         default: 'all'
-    pull_request:
-      paths:
-        - 'e2e_test/benchmarks/**'
+  pull_request:
+    paths:
+      - 'e2e_test/benchmarks/**'
 
 concurrency:
   group: nightly-benchmark-${{ github.event_name }}
