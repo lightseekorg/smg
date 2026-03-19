@@ -209,3 +209,189 @@ fn extract_prompt_text(req: &proto::RenderCompletionRequest) -> Result<String, S
         None => Err("Missing prompt field".to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_proto_message_system() {
+        let msg = proto::ChatCompletionMessage {
+            role: "system".to_string(),
+            content: Some("You are helpful.".to_string()),
+            name: None,
+            ..Default::default()
+        };
+        let result = proto_message_to_chat_message(&msg).unwrap();
+        assert!(matches!(result, ChatMessage::System { .. }));
+    }
+
+    #[test]
+    fn test_proto_message_user() {
+        let msg = proto::ChatCompletionMessage {
+            role: "user".to_string(),
+            content: Some("hello".to_string()),
+            name: Some("alice".to_string()),
+            ..Default::default()
+        };
+        let result = proto_message_to_chat_message(&msg).unwrap();
+        match result {
+            ChatMessage::User { content, name } => {
+                assert_eq!(content, MessageContent::Text("hello".to_string()));
+                assert_eq!(name, Some("alice".to_string()));
+            }
+            _ => panic!("Expected User variant"),
+        }
+    }
+
+    #[test]
+    fn test_proto_message_assistant_with_tool_calls() {
+        let msg = proto::ChatCompletionMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: vec![proto::ToolCall {
+                id: "call_1".to_string(),
+                r#type: "function".to_string(),
+                function: Some(proto::ToolCallFunction {
+                    name: "get_weather".to_string(),
+                    arguments: "{}".to_string(),
+                }),
+            }],
+            ..Default::default()
+        };
+        let result = proto_message_to_chat_message(&msg).unwrap();
+        match result {
+            ChatMessage::Assistant { tool_calls, .. } => {
+                let calls = tool_calls.unwrap();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "call_1");
+                assert_eq!(calls[0].function.name, "get_weather");
+            }
+            _ => panic!("Expected Assistant variant"),
+        }
+    }
+
+    #[test]
+    fn test_proto_message_tool() {
+        let msg = proto::ChatCompletionMessage {
+            role: "tool".to_string(),
+            content: Some("sunny".to_string()),
+            tool_call_id: Some("call_1".to_string()),
+            ..Default::default()
+        };
+        let result = proto_message_to_chat_message(&msg).unwrap();
+        match result {
+            ChatMessage::Tool {
+                content,
+                tool_call_id,
+            } => {
+                assert_eq!(content, MessageContent::Text("sunny".to_string()));
+                assert_eq!(tool_call_id, "call_1");
+            }
+            _ => panic!("Expected Tool variant"),
+        }
+    }
+
+    #[test]
+    fn test_proto_message_unknown_role() {
+        let msg = proto::ChatCompletionMessage {
+            role: "unknown".to_string(),
+            ..Default::default()
+        };
+        let result = proto_message_to_chat_message(&msg);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown role"));
+    }
+
+    #[test]
+    fn test_proto_to_chat_request_basic() {
+        let req = proto::RenderChatRequest {
+            model: "test-model".to_string(),
+            messages: vec![proto::ChatCompletionMessage {
+                role: "user".to_string(),
+                content: Some("hello".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let result = proto_to_chat_request(&req).unwrap();
+        assert_eq!(result.model, "test-model");
+        assert_eq!(result.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_proto_to_chat_request_with_tools() {
+        let req = proto::RenderChatRequest {
+            model: "test-model".to_string(),
+            messages: vec![],
+            tools: vec![proto::ChatCompletionTool {
+                r#type: "function".to_string(),
+                function: Some(proto::FunctionDefinition {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters_json: Some(r#"{"type":"object"}"#.to_string()),
+                    strict: None,
+                }),
+            }],
+            tool_choice: Some("auto".to_string()),
+            ..Default::default()
+        };
+        let result = proto_to_chat_request(&req).unwrap();
+        assert!(result.tools.is_some());
+        assert_eq!(result.tools.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_extract_prompt_text_string() {
+        let req = proto::RenderCompletionRequest {
+            model: "test".to_string(),
+            prompt: Some(proto::CompletionPrompt {
+                prompt: Some(proto::completion_prompt::Prompt::Text("hello".to_string())),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(extract_prompt_text(&req).unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_extract_prompt_text_texts() {
+        let req = proto::RenderCompletionRequest {
+            model: "test".to_string(),
+            prompt: Some(proto::CompletionPrompt {
+                prompt: Some(proto::completion_prompt::Prompt::Texts(
+                    proto::CompletionPromptTexts {
+                        texts: vec!["first".to_string(), "second".to_string()],
+                    },
+                )),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(extract_prompt_text(&req).unwrap(), "first");
+    }
+
+    #[test]
+    fn test_extract_prompt_text_token_ids_rejected() {
+        let req = proto::RenderCompletionRequest {
+            model: "test".to_string(),
+            prompt: Some(proto::CompletionPrompt {
+                prompt: Some(proto::completion_prompt::Prompt::TokenIds(
+                    proto::TokenIdSequence {
+                        token_ids: vec![1, 2, 3],
+                    },
+                )),
+            }),
+            ..Default::default()
+        };
+        assert!(extract_prompt_text(&req).is_err());
+    }
+
+    #[test]
+    fn test_extract_prompt_missing() {
+        let req = proto::RenderCompletionRequest {
+            model: "test".to_string(),
+            prompt: None,
+            ..Default::default()
+        };
+        assert!(extract_prompt_text(&req).is_err());
+    }
+}

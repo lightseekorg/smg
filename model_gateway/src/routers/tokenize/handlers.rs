@@ -515,4 +515,24 @@ mod tests {
             Ok(_) => panic!("Expected error"),
         }
     }
+
+    #[test]
+    fn test_render_completion_core_model_not_found() {
+        let registry = TokenizerRegistry::new();
+        let result = render_completion_core(&registry, "nonexistent", "hello", true);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No tokenizers available"));
+    }
+
+    #[test]
+    fn test_render_chat_core_model_not_found() {
+        let registry = TokenizerRegistry::new();
+        let chat_request = ChatCompletionRequest {
+            model: "nonexistent".to_string(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let result = render_chat_core(&registry, &chat_request);
+        assert!(result.is_err());
+    }
 }
