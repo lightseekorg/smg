@@ -308,6 +308,45 @@ Note: Enabling service discovery automatically enables IGW mode.
 | Default | None |
 | Description | Path to MCP (Model Context Protocol) server configuration file |
 
+### MCP YAML Schema
+
+The file referenced by `--mcp-config-path` supports additional semantic tool discovery settings.
+
+```yaml
+semantic_search:
+  enabled: false
+  refresh_on_startup: false
+  refresh_interval: 60
+  min_description_chars: 16
+
+resolution:
+  fallback_policy: disabled
+  confidence_threshold: 0.82
+  conflict_policy: error
+  namespace_style: server_colon_tool
+  server_precedence: []
+```
+
+`semantic_search` controls indexing of MCP tool descriptions for intent-based search.
+
+`resolution` controls how tool lookup should behave when exact-name resolution is insufficient.
+
+Conservative defaults:
+
+- `semantic_search.enabled: false`
+- `semantic_search.refresh_on_startup: false`
+- `resolution.fallback_policy: disabled`
+
+Validation rules:
+
+- `resolution.confidence_threshold` must be between `0.0` and `1.0`
+- `resolution.fallback_policy: on_no_exact_match` requires `semantic_search.enabled: true`
+- `resolution.conflict_policy: server_precedence` requires a non-empty `server_precedence`
+- `resolution.server_precedence` entries must be non-blank, canonical (no leading/trailing whitespace), unique, and match configured MCP server names
+- `semantic_search.refresh_interval` and `semantic_search.min_description_chars` must be greater than `0` when semantic search is enabled
+
+See [MCP in Responses API](../getting-started/mcp.md) for a fuller MCP configuration example.
+
 ---
 
 ## Backend Configuration

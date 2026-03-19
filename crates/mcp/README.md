@@ -131,6 +131,21 @@ inventory:
   refresh_interval: 60    # seconds
   refresh_on_error: true
 
+# Semantic tool search settings
+semantic_search:
+  enabled: false
+  refresh_on_startup: false
+  refresh_interval: 60    # seconds
+  min_description_chars: 16
+
+# Tool resolution settings
+resolution:
+  fallback_policy: disabled           # or: on_no_exact_match
+  confidence_threshold: 0.82
+  conflict_policy: error              # or: highest_score, server_precedence
+  namespace_style: server_colon_tool  # or: server_dot_tool, both
+  server_precedence: []               # used when conflict_policy=server_precedence
+
 # Global proxy (for MCP traffic only, not LLM API)
 proxy:
   http: "http://proxy.internal:8080"
@@ -189,6 +204,46 @@ let config = McpConfig {
     ..Default::default()
 };
 ```
+
+### Semantic Search and Resolution
+
+`mcp.yaml` now accepts two additional top-level blocks:
+
+- `semantic_search`: settings for indexing MCP tool descriptions for intent-based search
+- `resolution`: settings for fallback, confidence thresholds, namespace handling, and conflicts
+
+Example:
+
+```yaml
+semantic_search:
+  enabled: true
+  refresh_on_startup: false
+  refresh_interval: 60
+  min_description_chars: 16
+
+resolution:
+  fallback_policy: on_no_exact_match
+  confidence_threshold: 0.82
+  conflict_policy: server_precedence
+  namespace_style: both
+  server_precedence:
+    - brave
+    - filesystem
+```
+
+Current rollout status:
+
+- This PR adds the config contract, defaults, and validation.
+- Semantic indexing and dispatch fallback behavior land in follow-up PRs.
+- Defaults are conservative: semantic indexing and startup refresh are opt-in until the runtime pieces land.
+
+Validation rules:
+
+- `resolution.confidence_threshold` must be between `0.0` and `1.0`
+- `resolution.fallback_policy: on_no_exact_match` requires `semantic_search.enabled: true`
+- `resolution.conflict_policy: server_precedence` requires a non-empty `server_precedence`
+- `resolution.server_precedence` entries must be non-blank, canonical (no leading/trailing whitespace), unique, and match configured server names
+- `semantic_search.refresh_interval` and `semantic_search.min_description_chars` must be greater than `0` when semantic search is enabled
 
 ## Tool Configuration
 

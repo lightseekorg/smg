@@ -571,6 +571,8 @@ impl AppContextBuilder {
             proxy: None,
             warmup: Vec::new(),
             inventory: Default::default(),
+            semantic_search: Default::default(),
+            resolution: Default::default(),
             policy: Default::default(),
         };
 

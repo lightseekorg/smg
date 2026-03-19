@@ -26,7 +26,7 @@ use openai_protocol::{
 use serde_json::json;
 use smg::{
     config::{ConfigError, HistoryBackend, OracleConfig, PolicyConfig, RouterConfig, RoutingMode},
-    core::{BasicWorkerBuilder, RuntimeType, Worker, WorkerType},
+    core::{circuit_breaker::CircuitState, BasicWorkerBuilder, RuntimeType, Worker, WorkerType},
     routers::{
         factory::router_ids, openai::OpenAIRouter, router_manager::RouterManager, RouterFactory,
         RouterTrait,
@@ -812,20 +812,19 @@ async fn test_openai_router_chat_streaming_with_mock() {
 #[tokio::test]
 async fn test_openai_router_circuit_breaker() {
     let ctx = create_test_app_context().await;
-    register_external_worker(&ctx, "http://invalid-url-that-will-fail", None);
+    register_external_worker(&ctx, "http://127.0.0.1:1", None);
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     let chat_request = create_minimal_chat_request();
 
-    // First few requests should fail and record failures
+    // Closed loopback ports fail deterministically without depending on DNS or proxies.
     for _ in 0..3 {
         let response = router.route_chat(None, &chat_request, None).await;
-        // Should get either an error or circuit breaker response
-        assert!(
-            response.status() == StatusCode::INTERNAL_SERVER_ERROR
-                || response.status() == StatusCode::SERVICE_UNAVAILABLE
-        );
+        assert!(!response.status().is_success());
     }
+
+    let worker = ctx.worker_registry.get_all().pop().unwrap();
+    assert_eq!(worker.circuit_breaker().state(), CircuitState::Open);
 }
 
 /// Test that /v1/models returns models from registered workers' ModelCards

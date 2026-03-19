@@ -37,6 +37,8 @@ async fn test_mcp_server_initialization() {
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
 
@@ -73,6 +75,8 @@ async fn test_server_connection_with_mock() {
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
 
@@ -116,6 +120,8 @@ async fn test_tool_availability_checking() {
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
 
@@ -182,6 +188,8 @@ async fn test_multi_server_connection() {
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
 
@@ -222,6 +230,8 @@ async fn test_tool_execution_with_mock() {
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
 
@@ -294,6 +304,8 @@ async fn test_concurrent_tool_execution() {
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
 
@@ -360,6 +372,8 @@ async fn test_tool_execution_errors() {
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
 
@@ -414,6 +428,8 @@ async fn test_connection_without_server() {
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
 
@@ -453,6 +469,8 @@ async fn test_tool_info_structure() {
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
 
@@ -499,6 +517,8 @@ async fn test_sse_connection() {
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
 
@@ -592,6 +612,8 @@ async fn test_complete_workflow() {
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        semantic_search: Default::default(),
+        resolution: Default::default(),
         policy: Default::default(),
     };
 
