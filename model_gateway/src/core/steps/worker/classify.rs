@@ -1,8 +1,9 @@
 //! Worker type classification step.
 //!
-//! Auto-detects whether a worker endpoint is a local inference backend
-//! (sglang, vllm, trtllm) or an external cloud API (OpenAI, Anthropic, etc.)
-//! by probing the endpoint. Users no longer need to set `runtime_type`.
+//! Classifies a worker as Local or External based on the `runtime_type` field.
+//! Only `RuntimeType::External` yields an external worker; all other explicit
+//! runtime types (Sglang, Vllm, Trtllm) are local. When `Unspecified`
+//! (the default), the step auto-detects by probing the endpoint.
 
 use std::time::Duration;
 
@@ -49,8 +50,8 @@ async fn is_models_endpoint_reachable(
 ///
 /// Detection logic:
 /// 1. Explicit `RuntimeType::External` → External
-/// 2. Explicit non-default runtime (`Vllm`/`Trtllm`) → Local
-/// 3. Auto-detect (default `Sglang` = "auto"):
+/// 2. Explicit local runtime (Sglang, Vllm, Trtllm) → Local
+/// 3. `Unspecified` (default) → auto-detect via endpoint probes:
 ///    a. `/health` responds → Local (only local backends expose `/health`)
 ///    b. gRPC health responds → Local (external APIs never use gRPC)
 ///    c. `/v1/models` returns non-5xx → External (5xx ignored — could be starting local)
@@ -64,21 +65,16 @@ impl StepExecutor<WorkerWorkflowData> for ClassifyWorkerTypeStep {
         context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
         let config = &context.data.config;
-        let app_context = context
-            .data
-            .app_context
-            .as_ref()
-            .ok_or_else(|| WorkflowError::ContextValueNotFound("app_context".to_string()))?;
 
-        // 1. Explicit override: user set runtime_type to External
+        // Explicit External → External
         if config.runtime_type == RuntimeType::External {
             debug!("Worker {} explicitly configured as External", config.url);
             context.data.worker_kind = Some(WorkerKind::External);
             return Ok(StepResult::Success);
         }
 
-        // 2. Explicit non-default runtime (Vllm/Trtllm) → must be Local
-        if config.runtime_type != RuntimeType::default() {
+        // Explicit local runtime (Sglang, Vllm, Trtllm) → Local
+        if config.runtime_type.is_specified() {
             debug!(
                 "Worker {} explicitly configured as {} → Local",
                 config.url, config.runtime_type
@@ -87,7 +83,12 @@ impl StepExecutor<WorkerWorkflowData> for ClassifyWorkerTypeStep {
             return Ok(StepResult::Success);
         }
 
-        // 3. Auto-detect with quick probes
+        // Unspecified — auto-detect with quick probes
+        let app_context = context
+            .data
+            .app_context
+            .as_ref()
+            .ok_or_else(|| WorkflowError::ContextValueNotFound("app_context".to_string()))?;
         let timeout = CLASSIFY_PROBE_TIMEOUT_SECS;
         let client = &app_context.client;
 

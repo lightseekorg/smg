@@ -116,8 +116,10 @@ impl std::fmt::Display for WorkerGroupKey {
 )]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeType {
-    /// SGLang runtime (default).
+    /// No runtime type specified — the backend will be auto-detected.
     #[default]
+    Unspecified,
+    /// SGLang runtime.
     Sglang,
     /// vLLM runtime.
     Vllm,
@@ -127,9 +129,17 @@ pub enum RuntimeType {
     External,
 }
 
+impl RuntimeType {
+    /// Returns `true` when the caller supplied an explicit runtime type.
+    pub fn is_specified(self) -> bool {
+        !matches!(self, RuntimeType::Unspecified)
+    }
+}
+
 impl std::fmt::Display for RuntimeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RuntimeType::Unspecified => write!(f, "unspecified"),
             RuntimeType::Sglang => write!(f, "sglang"),
             RuntimeType::Vllm => write!(f, "vllm"),
             RuntimeType::Trtllm => write!(f, "trtllm"),
@@ -142,7 +152,9 @@ impl std::str::FromStr for RuntimeType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.eq_ignore_ascii_case("sglang") {
+        if s.eq_ignore_ascii_case("unspecified") {
+            Ok(RuntimeType::Unspecified)
+        } else if s.eq_ignore_ascii_case("sglang") {
             Ok(RuntimeType::Sglang)
         } else if s.eq_ignore_ascii_case("vllm") {
             Ok(RuntimeType::Vllm)
