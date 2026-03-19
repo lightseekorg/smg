@@ -393,6 +393,8 @@ class GrpcRequestManager:
                     response = await state.out_queue.get()
 
                     if is_stream:
+                        if state.time_stats.response_sent_to_client_time == 0.0:
+                            state.time_stats.set_response_sent_to_client_time()
                         yield response
 
                     # Non-streaming: yield final response with accumulated tokens from state
@@ -401,6 +403,9 @@ class GrpcRequestManager:
                             final_response = response.copy()
                             final_response["token_ids"] = state.output_ids
                             yield final_response
+                        if state.time_stats.response_sent_to_client_time == 0.0:
+                            state.time_stats.set_response_sent_to_client_time()
+                        self._populate_timestamps(response["meta_info"], state.time_stats)
                         self._store_request_stats(
                             request_id,
                             response,
@@ -626,6 +631,7 @@ class GrpcRequestManager:
             }
 
             if is_finished:
+                state.time_stats.set_finished_time()
                 meta_info.update(self._build_finished_meta(state, batch_out, i))
 
             output_data = {
@@ -703,7 +709,6 @@ class GrpcRequestManager:
             # Handle completion
             if output_data["finished"]:
                 state.finished = True
-                state.time_stats.set_finished_time()
                 state.stream_finished = True
                 state.event.set()
 
