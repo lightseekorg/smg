@@ -489,6 +489,7 @@ message GetServerInfoResponse {
   // Server metadata
   string server_type = 8;  // "grpc"
   google.protobuf.Timestamp start_time = 9;
+  int32 max_total_num_tokens = 10;
 
   // Note: internal_states not provided in gRPC mode
   // Scheduler-side metrics (memory usage, throughput) require
