@@ -336,6 +336,9 @@ pub struct ChatTemplateParams<'a> {
     pub tools: Option<&'a [serde_json::Value]>,
     pub documents: Option<&'a [serde_json::Value]>,
     pub template_kwargs: Option<&'a HashMap<String, serde_json::Value>>,
+    /// Special tokens (bos_token, eos_token, etc.) to inject into the template context.
+    /// Many chat templates (e.g., Llama 2) reference these directly.
+    pub special_tokens: Option<&'a crate::traits::SpecialTokens>,
 }
 
 /// Custom tojson filter compatible with HuggingFace transformers' implementation.
@@ -486,11 +489,40 @@ fn render_chat_template(
         .documents
         .map_or(Value::UNDEFINED, Value::from_serialize);
 
+    // Build special token values — use UNDEFINED for missing tokens so templates
+    // can check `{% if bos_token is defined %}` correctly.
+    let (bos_token, eos_token, unk_token, pad_token) = match params.special_tokens {
+        Some(st) => (
+            st.bos_token
+                .as_deref()
+                .map_or(Value::UNDEFINED, Value::from),
+            st.eos_token
+                .as_deref()
+                .map_or(Value::UNDEFINED, Value::from),
+            st.unk_token
+                .as_deref()
+                .map_or(Value::UNDEFINED, Value::from),
+            st.pad_token
+                .as_deref()
+                .map_or(Value::UNDEFINED, Value::from),
+        ),
+        None => (
+            Value::UNDEFINED,
+            Value::UNDEFINED,
+            Value::UNDEFINED,
+            Value::UNDEFINED,
+        ),
+    };
+
     let base_context = context! {
         messages => &minijinja_messages,
         add_generation_prompt => params.add_generation_prompt,
         tools => tools_value,
         documents => documents_value,
+        bos_token => bos_token,
+        eos_token => eos_token,
+        unk_token => unk_token,
+        pad_token => pad_token,
     };
 
     // Merge with template_kwargs if provided
