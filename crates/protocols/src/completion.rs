@@ -25,12 +25,53 @@ pub struct CompletionRequest {
     #[validate(custom(function = "validate_completion_prompt"))]
     pub prompt: StringOrArray,
 
-    /// The suffix that comes after a completion of inserted text
-    pub suffix: Option<String>,
+    /// Generates `best_of` completions server-side and returns the "best"
+    #[validate(range(min = 0, max = 20))]
+    pub best_of: Option<u32>,
+
+    /// Echo back the prompt in addition to the completion
+    #[serde(default)]
+    pub echo: bool,
+
+    /// Number between -2.0 and 2.0. Positive values penalize new tokens based on their existing frequency in the text so far
+    #[validate(range(min = -2.0, max = 2.0))]
+    pub frequency_penalty: Option<f32>,
+
+    /// Modify the likelihood of specified tokens appearing in the completion
+    pub logit_bias: Option<HashMap<String, f32>>,
+
+    /// Include the log probabilities on the `logprobs` most likely tokens
+    #[validate(range(min = 0, max = 5))]
+    pub logprobs: Option<u32>,
 
     /// The maximum number of tokens to generate
     #[validate(range(min = 1))]
     pub max_tokens: Option<u32>,
+
+    /// How many completions to generate for each prompt
+    #[validate(range(min = 1, max = 128))]
+    pub n: Option<u32>,
+
+    /// Number between -2.0 and 2.0. Positive values penalize new tokens based on whether they appear in the text so far
+    #[validate(range(min = -2.0, max = 2.0))]
+    pub presence_penalty: Option<f32>,
+
+    /// If specified, our system will make a best effort to sample deterministically
+    pub seed: Option<i64>,
+
+    /// Up to 4 sequences where the API will stop generating further tokens
+    #[validate(custom(function = "validate_stop"))]
+    pub stop: Option<StringOrArray>,
+
+    /// Whether to stream back partial progress
+    #[serde(default)]
+    pub stream: bool,
+
+    /// Options for streaming response
+    pub stream_options: Option<StreamOptions>,
+
+    /// The suffix that comes after a completion of inserted text
+    pub suffix: Option<String>,
 
     /// What sampling temperature to use, between 0 and 2
     #[validate(range(min = 0.0, max = 2.0))]
@@ -40,51 +81,10 @@ pub struct CompletionRequest {
     #[validate(custom(function = "validate_top_p_value"))]
     pub top_p: Option<f32>,
 
-    /// How many completions to generate for each prompt
-    #[validate(range(min = 1, max = 10))]
-    pub n: Option<u32>,
-
-    /// Whether to stream back partial progress
-    #[serde(default)]
-    pub stream: bool,
-
-    /// Options for streaming response
-    pub stream_options: Option<StreamOptions>,
-
-    /// Include the log probabilities on the logprobs most likely tokens
-    #[validate(range(min = 0, max = 20))]
-    pub logprobs: Option<u32>,
-
-    /// Echo back the prompt in addition to the completion
-    #[serde(default)]
-    pub echo: bool,
-
-    /// Up to 4 sequences where the API will stop generating further tokens
-    #[validate(custom(function = "validate_stop"))]
-    pub stop: Option<StringOrArray>,
-
-    /// Number between -2.0 and 2.0. Positive values penalize new tokens based on whether they appear in the text so far
-    #[validate(range(min = -2.0, max = 2.0))]
-    pub presence_penalty: Option<f32>,
-
-    /// Number between -2.0 and 2.0. Positive values penalize new tokens based on their existing frequency in the text so far
-    #[validate(range(min = -2.0, max = 2.0))]
-    pub frequency_penalty: Option<f32>,
-
-    /// Generates best_of completions server-side and returns the "best"
-    #[validate(range(min = 1))]
-    pub best_of: Option<u32>,
-
-    /// Modify the likelihood of specified tokens appearing in the completion
-    pub logit_bias: Option<HashMap<String, f32>>,
-
     /// A unique identifier representing your end-user
     pub user: Option<String>,
 
-    /// If specified, our system will make a best effort to sample deterministically
-    pub seed: Option<i64>,
-
-    // -------- Engine Specific Sampling Parameters --------
+    // Engine-specific sampling parameters
     /// Top-k sampling parameter (-1 to disable)
     #[validate(custom(function = "validate_top_k_value"))]
     pub top_k: Option<i32>,
@@ -190,14 +190,8 @@ fn validate_completion_cross_parameters(
         }
     }
 
-    let constraint_count = [
-        req.regex.is_some(),
-        req.ebnf.is_some(),
-        req.json_schema.is_some(),
-    ]
-    .iter()
-    .filter(|&&enabled| enabled)
-    .count();
+    let constraint_count =
+        req.regex.is_some() as u8 + req.ebnf.is_some() as u8 + req.json_schema.is_some() as u8;
     if constraint_count > 1 {
         let mut error = validator::ValidationError::new("multiple_constraints");
         error.message = Some(
