@@ -427,7 +427,7 @@ jobs:
           - engine: vllm
             timeout: 20
             runner: 1-gpu
-            test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
+            test_filter: ""
           - engine: trtllm
             timeout: 90
             runner: 1-gpu-h100
@@ -558,13 +558,24 @@ jobs:
   # === 4 GPU ===
 
   e2e-4gpu-chat:
-    needs: [e2e-2gpu-chat]
+    name: e2e-4gpu-chat (${{ matrix.engine }})
+    needs: [e2e-1gpu-chat]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sglang
+            timeout: 20
+          - engine: vllm
+            timeout: 20
+          - engine: trtllm
+            timeout: 30
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
-      engine: sglang
+      engine: ${{ matrix.engine }}
       gpu_tier: "4"
       runner: 4-gpu-h100
-      timeout: 20
+      timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/chat_completions
     secrets: inherit
 

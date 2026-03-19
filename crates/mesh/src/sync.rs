@@ -362,7 +362,7 @@ impl MeshSyncManager {
         self.stores
             .app
             .get(GLOBAL_RATE_LIMIT_KEY)
-            .and_then(|app_state| serde_json::from_slice::<RateLimitConfig>(&app_state.value).ok())
+            .and_then(|app_state| bincode::deserialize::<RateLimitConfig>(&app_state.value).ok())
     }
 
     /// Check if global rate limit is exceeded
@@ -416,8 +416,7 @@ impl MeshSyncManager {
 
         // Get current tree state or create new one
         let mut tree_state = if let Some(policy_state) = self.stores.policy.get(&key) {
-            // Deserialize existing tree state
-            serde_json::from_slice::<TreeState>(&policy_state.config)
+            TreeState::from_bytes(&policy_state.config)
                 .unwrap_or_else(|_| TreeState::new(model_id.clone()))
         } else {
             TreeState::new(model_id.clone())
@@ -426,9 +425,8 @@ impl MeshSyncManager {
         // Add the new operation
         tree_state.add_operation(operation);
 
-        // Serialize and store back
-        let serialized = serde_json::to_vec(&tree_state)
-            .map_err(|e| format!("Failed to serialize tree state: {e}"))?;
+        // Serialize with bincode (compact binary, ~3-5x smaller than JSON for token arrays)
+        let serialized = tree_state.to_bytes()?;
 
         // Get current version if exists
         let current_version = self.stores.policy.get(&key).map(|s| s.version).unwrap_or(0);
@@ -458,7 +456,7 @@ impl MeshSyncManager {
         self.stores
             .policy
             .get(&key)
-            .and_then(|policy_state| serde_json::from_slice::<TreeState>(&policy_state.config).ok())
+            .and_then(|ps| TreeState::from_bytes(&ps.config).ok())
     }
 
     pub fn get_all_tree_states(&self) -> Vec<TreeState> {
@@ -471,7 +469,7 @@ impl MeshSyncManager {
                     return None;
                 }
 
-                match serde_json::from_slice::<TreeState>(&state.config) {
+                match TreeState::from_bytes(&state.config) {
                     Ok(tree_state) => Some(tree_state),
                     Err(error) => {
                         warn!(error = %error, store_key = %key, model_id = %state.model_id, "Failed to deserialize tree state from mesh store");
@@ -493,7 +491,7 @@ impl MeshSyncManager {
         let key = tree_state_key(&model_id);
         let actor = actor.unwrap_or_else(|| "remote".to_string());
 
-        let serialized = match serde_json::to_vec(&tree_state) {
+        let serialized = match tree_state.to_bytes() {
             Ok(bytes) => bytes,
             Err(err) => {
                 debug!(error = %err, model_id = %model_id, "Failed to serialize remote tree state");
@@ -1106,7 +1104,7 @@ mod tests {
         let config = RateLimitConfig {
             limit_per_second: 100,
         };
-        let serialized = serde_json::to_vec(&config).unwrap();
+        let serialized = bincode::serialize(&config).unwrap();
         let _ = manager.stores.app.insert(
             GLOBAL_RATE_LIMIT_KEY.to_string(),
             AppState {
@@ -1128,7 +1126,7 @@ mod tests {
         let config = RateLimitConfig {
             limit_per_second: 10,
         };
-        let serialized = serde_json::to_vec(&config).unwrap();
+        let serialized = bincode::serialize(&config).unwrap();
         let _ = manager.stores.app.insert(
             GLOBAL_RATE_LIMIT_KEY.to_string(),
             AppState {

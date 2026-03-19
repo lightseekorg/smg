@@ -9,6 +9,8 @@ use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, Wo
 
 use crate::core::{
     circuit_breaker::CircuitBreakerConfig,
+    http_client::build_worker_http_client,
+    resilience::resolve_resilience,
     steps::workflow_data::{WorkerKind, WorkerWorkflowData},
     worker::RuntimeType,
     BasicWorkerBuilder, ConnectionMode, Worker, UNKNOWN_MODEL_ID,
@@ -80,14 +82,30 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
         // Normalize URL
         let url = normalize_url(&config.url, *connection_mode);
 
-        // Build workers
-        let cb_cfg = app_context.router_config.effective_circuit_breaker_config();
-        let circuit_breaker = CircuitBreakerConfig {
-            failure_threshold: cb_cfg.failure_threshold,
-            success_threshold: cb_cfg.success_threshold,
-            timeout_duration: Duration::from_secs(cb_cfg.timeout_duration_secs),
-            window_duration: Duration::from_secs(cb_cfg.window_duration_secs),
+        // Build workers — resolve per-worker resilience and HTTP client
+        let base_retry = app_context.router_config.effective_retry_config();
+        let base_cb_cfg = app_context.router_config.effective_circuit_breaker_config();
+        let base_cb = CircuitBreakerConfig {
+            failure_threshold: base_cb_cfg.failure_threshold,
+            success_threshold: base_cb_cfg.success_threshold,
+            timeout_duration: Duration::from_secs(base_cb_cfg.timeout_duration_secs),
+            window_duration: Duration::from_secs(base_cb_cfg.window_duration_secs),
         };
+
+        let (resolved_resilience, circuit_breaker) = resolve_resilience(
+            &base_retry,
+            &base_cb,
+            !app_context.router_config.disable_retries,
+            !app_context.router_config.disable_circuit_breaker,
+            &config.resilience,
+        );
+
+        let http_client = build_worker_http_client(&config.http_pool, &app_context.router_config)
+            .map_err(|e| WorkflowError::StepFailed {
+            step_id: StepId::new("create_worker"),
+            message: e,
+        })?;
+
         let health_base = app_context.router_config.health_check.to_protocol_config();
         let health_config = config.health.apply_to(&health_base);
         let health_endpoint = &app_context.router_config.health_check.endpoint;
@@ -114,6 +132,8 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
                     .connection_mode(*connection_mode)
                     .runtime_type(runtime_type)
                     .circuit_breaker_config(circuit_breaker.clone())
+                    .http_client(http_client.clone())
+                    .resilience(resolved_resilience.clone())
                     .health_config(health_config.clone())
                     .health_endpoint(health_endpoint)
                     .bootstrap_port(config.bootstrap_port)

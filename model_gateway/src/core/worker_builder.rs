@@ -8,8 +8,10 @@ use openai_protocol::{
 
 use super::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
+    resilience::ResolvedResilience,
     worker::{
         BasicWorker, ConnectionMode, RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad, WorkerType,
+        DEFAULT_WORKER_HTTP_TIMEOUT_SECS,
     },
 };
 use crate::{observability::metrics::Metrics, routers::grpc::client::GrpcClient};
@@ -26,6 +28,10 @@ pub struct BasicWorkerBuilder {
     health_endpoint: String,
     circuit_breaker_config: CircuitBreakerConfig,
     grpc_client: Option<GrpcClient>,
+    /// Pre-built per-worker HTTP client (if not set, a default is created).
+    http_client: Option<reqwest::Client>,
+    /// Resolved resilience config (if not set, defaults are used).
+    resilience: Option<ResolvedResilience>,
 }
 
 impl BasicWorkerBuilder {
@@ -37,6 +43,8 @@ impl BasicWorkerBuilder {
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            http_client: None,
+            resilience: None,
         }
     }
 
@@ -48,6 +56,8 @@ impl BasicWorkerBuilder {
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            http_client: None,
+            resilience: None,
         }
     }
 
@@ -61,6 +71,8 @@ impl BasicWorkerBuilder {
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            http_client: None,
+            resilience: None,
         }
     }
 
@@ -130,6 +142,18 @@ impl BasicWorkerBuilder {
     /// Set gRPC client for gRPC workers
     pub fn grpc_client(mut self, client: GrpcClient) -> Self {
         self.grpc_client = Some(client);
+        self
+    }
+
+    /// Set a pre-built per-worker HTTP client.
+    pub fn http_client(mut self, client: reqwest::Client) -> Self {
+        self.http_client = Some(client);
+        self
+    }
+
+    /// Set the resolved resilience config.
+    pub fn resilience(mut self, resilience: ResolvedResilience) -> Self {
+        self.resilience = Some(resilience);
         self
     }
 
@@ -218,6 +242,18 @@ impl BasicWorkerBuilder {
         let healthy = true;
         Metrics::set_worker_health(&metadata.spec.url, healthy);
 
+        let http_client = self.http_client.unwrap_or_else(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(
+                    DEFAULT_WORKER_HTTP_TIMEOUT_SECS,
+                ))
+                .pool_max_idle_per_host(8)
+                .build()
+                .unwrap_or_default()
+        });
+
+        let resilience = self.resilience.unwrap_or_default();
+
         BasicWorker {
             load_counter: Arc::new(AtomicUsize::new(0)),
             worker_routing_key_load: Arc::new(WorkerRoutingKeyLoad::new(&metadata.spec.url)),
@@ -232,6 +268,8 @@ impl BasicWorkerBuilder {
             metadata,
             grpc_client,
             models_override: Arc::new(ArcSwap::from_pointee(WorkerModels::Wildcard)),
+            http_client,
+            resilience,
         }
     }
 }
