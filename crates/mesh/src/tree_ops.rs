@@ -2,7 +2,7 @@
 //!
 //! Defines serializable tree operations that can be synchronized across mesh cluster nodes
 
-use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum TreeKey {
@@ -11,55 +11,10 @@ pub enum TreeKey {
 }
 
 /// Tree insert operation
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct TreeInsertOp {
     pub key: TreeKey,
     pub tenant: String, // worker URL
-}
-
-/// Custom Serialize that writes both `key` (new format) and `text` (legacy format)
-/// so old nodes can still deserialize during rolling upgrades.
-impl Serialize for TreeInsertOp {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("TreeInsertOp", 3)?;
-        state.serialize_field("key", &self.key)?;
-        match &self.key {
-            TreeKey::Text(text) => state.serialize_field("text", text)?,
-            TreeKey::Tokens(_) => state.serialize_field("text", "")?,
-        }
-        state.serialize_field("tenant", &self.tenant)?;
-        state.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for TreeInsertOp {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct TreeInsertOpCompat {
-            #[serde(default)]
-            key: Option<TreeKey>,
-            #[serde(default)]
-            text: Option<String>,
-            tenant: String,
-        }
-
-        let compat = TreeInsertOpCompat::deserialize(deserializer)?;
-        let key = compat
-            .key
-            .or_else(|| compat.text.map(TreeKey::Text))
-            .ok_or_else(|| serde::de::Error::missing_field("key"))?;
-
-        Ok(Self {
-            key,
-            tenant: compat.tenant,
-        })
-    }
 }
 
 /// Tree remove operation
@@ -105,6 +60,17 @@ impl TreeState {
             let drain_count = self.operations.len() - MAX_TREE_OPERATIONS / 2;
             self.operations.drain(..drain_count);
         }
+    }
+
+    /// Serialize to bincode (compact binary format).
+    /// A Vec<u32> of 1000 tokens is ~4KB in bincode vs ~7KB in JSON.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        bincode::serialize(self).map_err(|e| format!("Failed to serialize TreeState: {e}"))
+    }
+
+    /// Deserialize from bincode bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        bincode::deserialize(bytes).map_err(|e| format!("Failed to deserialize TreeState: {e}"))
     }
 }
 
@@ -203,31 +169,89 @@ mod tests {
     }
 
     #[test]
-    fn test_tree_insert_op_deserializes_legacy_text_field() {
-        let deserialized: TreeInsertOp =
-            serde_json::from_str(r#"{"text":"legacy_text","tenant":"http://worker1:8000"}"#)
-                .unwrap();
+    fn test_tree_state_bincode_round_trip_with_tokens() {
+        let tokens = vec![12345u32, 67890, 0, u32::MAX, 42];
+        let mut state = TreeState::new("test-model".to_string());
+        state.add_operation(TreeOperation::Insert(TreeInsertOp {
+            key: TreeKey::Tokens(tokens.clone()),
+            tenant: "http://worker1:8000".to_string(),
+        }));
+        state.add_operation(TreeOperation::Insert(TreeInsertOp {
+            key: TreeKey::Text("text_key".to_string()),
+            tenant: "http://worker2:8000".to_string(),
+        }));
+        state.add_operation(TreeOperation::Remove(TreeRemoveOp {
+            tenant: "http://worker3:8000".to_string(),
+        }));
 
-        assert_eq!(deserialized.key, TreeKey::Text("legacy_text".to_string()));
-        assert_eq!(deserialized.tenant, "http://worker1:8000");
+        let bytes = state.to_bytes().unwrap();
+        let restored = TreeState::from_bytes(&bytes).unwrap();
+
+        assert_eq!(restored.model_id, "test-model");
+        assert_eq!(restored.version, state.version);
+        assert_eq!(restored.operations.len(), 3);
+
+        match &restored.operations[0] {
+            TreeOperation::Insert(op) => {
+                assert_eq!(op.key, TreeKey::Tokens(tokens));
+                assert_eq!(op.tenant, "http://worker1:8000");
+            }
+            TreeOperation::Remove(_) => panic!("Expected Insert"),
+        }
+        match &restored.operations[1] {
+            TreeOperation::Insert(op) => {
+                assert_eq!(op.key, TreeKey::Text("text_key".to_string()));
+            }
+            TreeOperation::Remove(_) => panic!("Expected Insert"),
+        }
+        match &restored.operations[2] {
+            TreeOperation::Remove(op) => {
+                assert_eq!(op.tenant, "http://worker3:8000");
+            }
+            TreeOperation::Insert(_) => panic!("Expected Remove"),
+        }
     }
 
     #[test]
-    fn test_tree_state_deserializes_legacy_insert_payload() {
-        let deserialized: TreeState = serde_json::from_str(
-            r#"{"model_id":"model1","operations":[{"Insert":{"text":"legacy_text","tenant":"http://worker1:8000"}}],"version":1}"#,
-        )
-        .unwrap();
+    fn test_tree_state_bincode_round_trip_large_tokens() {
+        let mut state = TreeState::new("large-model".to_string());
+        for i in 0..100 {
+            let tokens: Vec<u32> = (0..1000).map(|j| (i * 1000 + j) as u32).collect();
+            state.add_operation(TreeOperation::Insert(TreeInsertOp {
+                key: TreeKey::Tokens(tokens),
+                tenant: format!("http://worker-{i}:8000"),
+            }));
+        }
 
-        assert_eq!(deserialized.model_id, "model1");
-        assert_eq!(deserialized.version, 1);
-        assert_eq!(deserialized.operations.len(), 1);
-        match &deserialized.operations[0] {
+        let bytes = state.to_bytes().unwrap();
+        let restored = TreeState::from_bytes(&bytes).unwrap();
+
+        assert_eq!(restored.operations.len(), 100);
+        assert_eq!(restored.version, state.version);
+
+        // Spot-check exact token preservation
+        match &restored.operations[0] {
             TreeOperation::Insert(op) => {
-                assert_eq!(op.key, TreeKey::Text("legacy_text".to_string()));
-                assert_eq!(op.tenant, "http://worker1:8000");
+                if let TreeKey::Tokens(tokens) = &op.key {
+                    assert_eq!(tokens.len(), 1000);
+                    assert_eq!(tokens[0], 0);
+                    assert_eq!(tokens[999], 999);
+                } else {
+                    panic!("Expected Tokens key");
+                }
             }
-            TreeOperation::Remove(_) => panic!("Expected Insert operation"),
+            TreeOperation::Remove(_) => panic!("Expected Insert"),
+        }
+        match &restored.operations[99] {
+            TreeOperation::Insert(op) => {
+                if let TreeKey::Tokens(tokens) = &op.key {
+                    assert_eq!(tokens[0], 99000);
+                    assert_eq!(tokens[999], 99999);
+                } else {
+                    panic!("Expected Tokens key");
+                }
+            }
+            TreeOperation::Remove(_) => panic!("Expected Insert"),
         }
     }
 

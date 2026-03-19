@@ -78,6 +78,8 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
                 .health_config(updated_health_config.clone())
                 .health_endpoint(&health_endpoint)
                 .models(worker.metadata().spec.models.clone())
+                .http_client(worker.http_client().clone())
+                .resilience(worker.resilience().clone())
                 .priority(updated_priority)
                 .cost(updated_cost);
 
