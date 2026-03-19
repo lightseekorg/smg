@@ -62,8 +62,8 @@ class TestEnableThinking:
         )
 
         assert len(response.choices) > 0
-        if response.choices[0].message.reasoning_content is not None:
-            assert response.choices[0].message.reasoning_content is None
+        # With enable_thinking=False, reasoning_content should be empty
+        assert response.choices[0].message.reasoning_content is None
 
     def test_stream_chat_completion_with_reasoning(self, setup_backend, api_client):
         """Test streaming with enable_thinking=True, reasoning_content should not be empty."""
