@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for field_transforms.py — pure dict transformations."""
 
+import pytest
+
 from smg_grpc_servicer.vllm.field_transforms import (
     FIELD_TRANSFORMS,
     _ensure_message_content,
@@ -49,14 +51,10 @@ class TestFlattenCompletionPrompt:
         assert flatten_completion_prompt(None) is None
 
     def test_empty_dict_raises_value_error(self):
-        import pytest
-
         with pytest.raises(ValueError, match="no supported oneof field set"):
             flatten_completion_prompt({})
 
     def test_unknown_keys_raises_value_error(self):
-        import pytest
-
         with pytest.raises(ValueError, match="no supported oneof field set"):
             flatten_completion_prompt({"unknown": "value"})
 
