@@ -81,7 +81,7 @@ impl GossipService {
                 .all()
                 .into_iter()
                 .map(|(k, v)| {
-                    let serialized = serde_json::to_vec(&v).unwrap_or_else(|e| {
+                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
                         log::error!("Failed to serialize membership state: {}", e);
                         vec![]
                     });
@@ -93,7 +93,7 @@ impl GossipService {
                 .all()
                 .into_iter()
                 .map(|(k, v)| {
-                    let serialized = serde_json::to_vec(&v).unwrap_or_else(|e| {
+                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
                         log::error!("Failed to serialize app state: {}", e);
                         vec![]
                     });
@@ -105,7 +105,7 @@ impl GossipService {
                 .all()
                 .into_iter()
                 .map(|(k, v)| {
-                    let serialized = serde_json::to_vec(&v).unwrap_or_else(|e| {
+                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
                         log::error!("Failed to serialize worker state: {}", e);
                         vec![]
                     });
@@ -117,7 +117,7 @@ impl GossipService {
                 .all()
                 .into_iter()
                 .map(|(k, v)| {
-                    let serialized = serde_json::to_vec(&v).unwrap_or_else(|e| {
+                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
                         log::error!("Failed to serialize policy state: {}", e);
                         vec![]
                     });
@@ -134,7 +134,7 @@ impl GossipService {
                         if stores.rate_limit.is_owner(&key) {
                             stores.rate_limit.get_counter(&key).map(|counter_value| {
                                 let serialized =
-                                    serde_json::to_vec(&counter_value).unwrap_or_else(|e| {
+                                    bincode::serialize(&counter_value).unwrap_or_else(|e| {
                                         log::error!(
                                             "Failed to serialize rate limit counter: {}",
                                             e
