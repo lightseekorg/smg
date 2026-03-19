@@ -51,7 +51,6 @@ jobs:
       E2E_RUNTIME: ${{ inputs.engine }}
       E2E_GPU_TIER: ${{ inputs.gpu_tier }}
       HF_HOME: /models
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -111,7 +110,7 @@ jobs:
       # Run tests
       - name: Run E2E tests
         env:
-          SHOW_WORKER_LOGS: "0"
+          SHOW_WORKER_LOGS: "1"
           SHOW_ROUTER_LOGS: "1"
           BRAVE_MCP_HOST: ${{ inputs.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
