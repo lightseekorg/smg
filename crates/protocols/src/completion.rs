@@ -45,7 +45,7 @@ pub struct CompletionRequest {
     pub logprobs: Option<u32>,
 
     /// The maximum number of tokens to generate
-    #[validate(range(min = 1))]
+    #[validate(range(min = 0))]
     pub max_tokens: Option<u32>,
 
     /// How many completions to generate for each prompt
@@ -202,9 +202,9 @@ fn validate_completion_cross_parameters(
     }
 
     if let (Some(best_of), Some(n)) = (req.best_of, req.n) {
-        if best_of < n {
+        if best_of <= n {
             let mut error = validator::ValidationError::new("best_of_less_than_n");
-            error.message = Some("best_of must be greater than or equal to n".into());
+            error.message = Some("best_of must be greater than n".into());
             return Err(error);
         }
     }
