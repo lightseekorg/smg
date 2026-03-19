@@ -13,9 +13,6 @@ on:
         description: 'Runtime: sglang, vllm, or all (default: all)'
         required: false
         default: 'all'
-  pull_request:
-    paths:
-      - 'e2e_test/benchmarks/**'
 
 concurrency:
   group: nightly-benchmark-${{ github.event_name }}
@@ -112,7 +109,7 @@ jobs:
   single-worker:
     name: "${{ matrix.model.id }} / single-${{ matrix.variant.id }}"
     needs: build-wheel
-    if: false
+    if: ${{ !cancelled() }}
     runs-on: 4-gpu-h100
     timeout-minutes: 1440
     strategy:
@@ -225,7 +222,7 @@ jobs:
   multi-worker:
     name: "${{ matrix.model.id }} / multi-${{ matrix.variant.id }}"
     needs: build-wheel
-    if: false
+    if: ${{ !cancelled() }}
     runs-on: 4-gpu-h100
     timeout-minutes: 1440
     strategy:
