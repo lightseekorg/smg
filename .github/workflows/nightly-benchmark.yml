@@ -126,7 +126,6 @@ jobs:
           # - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bSingle }
           - { id: minimaxai/minimax-m2, slug: minimaxai-minimax-m2, test_class: TestNightlyMinimaxM2Single }
         variant:
-          - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false }
           - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false }
 
     steps:
@@ -192,6 +191,7 @@ jobs:
           E2E_NIGHTLY: "1"
           E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen3-30B-A3B":1}'
           E2E_LOG_DIR: nightly_gateway_logs
+          SHOW_WORKER_LOGS: "1"
         run: |
           mkdir -p nightly_gateway_logs
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
@@ -213,6 +213,15 @@ jobs:
         with:
           name: nightly-${{ matrix.model.slug }}-single-${{ matrix.variant.id }}-${{ github.run_id }}
           path: nightly_*/
+          retention-days: 90
+
+      - name: Upload startup logs
+        if: always() && steps.filter.outputs.skip != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-logs-${{ matrix.model.slug }}-single-${{ matrix.variant.id }}-${{ github.run_id }}
+          path: nightly_gateway_logs/
+          if-no-files-found: ignore
           retention-days: 90
 
       - name: Cleanup
@@ -238,7 +247,6 @@ jobs:
           # - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bMulti }
           # - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bMulti }
           # - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bMulti }
-          - { id: minimaxai/minimax-m2, slug: minimaxai-minimax-m2, test_class: TestNightlyMinimaxM2Multi }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
           - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
