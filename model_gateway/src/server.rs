@@ -29,7 +29,10 @@ use openai_protocol::{
     },
     rerank::{RerankRequest, V1RerankReqInput},
     responses::{ResponsesGetParams, ResponsesRequest},
-    tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
+    tokenize::{
+        AddTokenizerRequest, DetokenizeRequest, RenderChatRequest, RenderCompletionRequest,
+        TokenizeRequest,
+    },
     validated::ValidatedJson,
     worker::{WorkerSpec, WorkerUpdateRequest},
 };
@@ -585,6 +588,20 @@ async fn v1_detokenize(
     tokenize::detokenize(&state.context.tokenizer_registry, request).await
 }
 
+async fn v1_chat_completions_render(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RenderChatRequest>,
+) -> Response {
+    tokenize::render_chat(&state.context.tokenizer_registry, request).await
+}
+
+async fn v1_completions_render(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RenderCompletionRequest>,
+) -> Response {
+    tokenize::render_completion(&state.context.tokenizer_registry, request).await
+}
+
 async fn v1_tokenizers_add(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AddTokenizerRequest>,
@@ -693,9 +710,14 @@ pub fn build_app(
             "/v1/conversations/{conversation_id}/items/{item_id}",
             get(v1_conversations_get_item).delete(v1_conversations_delete_item),
         )
-        // Tokenize / Detokenize endpoints
+        // Tokenize / Detokenize / Render endpoints
         .route("/v1/tokenize", post(v1_tokenize))
         .route("/v1/detokenize", post(v1_detokenize))
+        .route(
+            "/v1/chat/completions/render",
+            post(v1_chat_completions_render),
+        )
+        .route("/v1/completions/render", post(v1_completions_render))
         // Realtime REST endpoints (same middleware as other protected routes)
         .route("/v1/realtime/sessions", post(v1_realtime_session))
         .route(

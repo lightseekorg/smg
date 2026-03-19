@@ -11,16 +11,24 @@ use axum::{
     Json,
 };
 use llm_tokenizer::{registry::TokenizerEntry, traits::Tokenizer, TokenizerRegistry};
-use openai_protocol::tokenize::{
-    AddTokenizerRequest, AddTokenizerResponse, CountResult, DetokenizeRequest, DetokenizeResponse,
-    ListTokenizersResponse, RemoveTokenizerResponse, TextResult, TokenizeRequest, TokenizeResponse,
-    TokenizerInfo, TokensResult,
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    tokenize::{
+        AddTokenizerRequest, AddTokenizerResponse, CountResult, DetokenizeRequest,
+        DetokenizeResponse, ListTokenizersResponse, RemoveTokenizerResponse, RenderChatRequest,
+        RenderCompletionRequest, RenderResponse, TextResult, TokenizeRequest, TokenizeResponse,
+        TokenizerInfo, TokensResult,
+    },
 };
 use tracing::{debug, error, warn};
 
 use crate::{
     app_context::AppContext,
     core::{steps::TokenizerConfigRequest, Job, UNKNOWN_MODEL_ID},
+    routers::grpc::{
+        harmony::{builder::HarmonyBuilder, detector::HarmonyDetector},
+        utils::process_chat_messages,
+    },
 };
 
 /// Helper to create error responses
@@ -180,6 +188,147 @@ pub async fn detokenize(registry: &Arc<TokenizerRegistry>, request: DetokenizeRe
     };
 
     Json(DetokenizeResponse { text }).into_response()
+}
+
+// ============================================================================
+// Render Handlers (chat template + tokenization, no generation)
+// ============================================================================
+
+/// Handle POST /v1/chat/completions/render
+///
+/// Applies the chat template to messages and tokenizes the result.
+/// Supports both HuggingFace/tiktoken models and Harmony (gpt-oss) models.
+pub async fn render_chat(
+    registry: &Arc<TokenizerRegistry>,
+    request: RenderChatRequest,
+) -> Response {
+    debug!("Render chat request for model: {}", request.model);
+
+    // Check if this is a Harmony (gpt-oss) model
+    if HarmonyDetector::is_harmony_model(&request.model) {
+        return render_chat_harmony(&request);
+    }
+
+    // HuggingFace / tiktoken path
+    let tokenizer = match get_tokenizer(registry, &request.model) {
+        Ok(t) => t,
+        Err(e) => {
+            return error_response(StatusCode::BAD_REQUEST, &e, "tokenizer_not_found");
+        }
+    };
+
+    // Build a ChatCompletionRequest from the render request
+    let chat_request = ChatCompletionRequest {
+        model: request.model.clone(),
+        messages: request.messages,
+        tools: request.tools,
+        tool_choice: request.tool_choice,
+        continue_final_message: request.continue_final_message,
+        chat_template_kwargs: request.chat_template_kwargs,
+        ..Default::default()
+    };
+
+    // Apply chat template and get formatted text
+    let processed = match process_chat_messages(&chat_request, tokenizer.as_ref()) {
+        Ok(p) => p,
+        Err(e) => {
+            error!("Chat template processing failed: {}", e);
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Chat template processing failed: {e}"),
+                "template_error",
+            );
+        }
+    };
+
+    // Tokenize the formatted text
+    let encoding = match tokenizer.encode(&processed.text, false) {
+        Ok(enc) => enc,
+        Err(e) => {
+            error!("Tokenization failed: {}", e);
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Tokenization failed: {e}"),
+                "tokenization_error",
+            );
+        }
+    };
+
+    let token_ids: Vec<u32> = encoding.token_ids().to_vec();
+    let count = token_ids.len();
+
+    Json(RenderResponse { token_ids, count }).into_response()
+}
+
+/// Harmony (gpt-oss) chat rendering path
+fn render_chat_harmony(request: &RenderChatRequest) -> Response {
+    let chat_request = ChatCompletionRequest {
+        model: request.model.clone(),
+        messages: request.messages.clone(),
+        tools: request.tools.clone(),
+        tool_choice: request.tool_choice.clone(),
+        ..Default::default()
+    };
+
+    let builder = HarmonyBuilder::new();
+    match builder.build_from_chat(&chat_request) {
+        Ok(output) => {
+            let count = output.input_ids.len();
+            Json(RenderResponse {
+                token_ids: output.input_ids,
+                count,
+            })
+            .into_response()
+        }
+        Err(e) => {
+            error!("Harmony encoding failed: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Harmony encoding failed: {e}"),
+                "harmony_error",
+            )
+        }
+    }
+}
+
+/// Handle POST /v1/completions/render
+///
+/// Tokenizes the prompt text with optional special tokens.
+pub async fn render_completion(
+    registry: &Arc<TokenizerRegistry>,
+    request: RenderCompletionRequest,
+) -> Response {
+    debug!("Render completion request for model: {}", request.model);
+
+    let tokenizer = match get_tokenizer(registry, &request.model) {
+        Ok(t) => t,
+        Err(e) => {
+            return error_response(StatusCode::BAD_REQUEST, &e, "tokenizer_not_found");
+        }
+    };
+
+    let texts = request.prompt.as_strings();
+
+    // For single prompt, return flat response; for batch, return first
+    // (batch support can be extended later if needed)
+    let text = texts.first().copied().unwrap_or("");
+
+    let encoding = match tokenizer.encode(text, request.add_special_tokens) {
+        Ok(enc) => enc,
+        Err(e) => {
+            error!("Tokenization failed: {}", e);
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Tokenization failed: {e}"),
+                "tokenization_error",
+            );
+        }
+    };
+
+    let token_ids: Vec<u32> = encoding.token_ids().to_vec();
+    let count = token_ids.len();
+
+    Json(RenderResponse { token_ids, count }).into_response()
 }
 
 // ============================================================================

@@ -9,5 +9,5 @@ mod handlers;
 
 pub use handlers::{
     add_tokenizer, detokenize, get_tokenizer_info, get_tokenizer_status, list_tokenizers,
-    remove_tokenizer, tokenize,
+    remove_tokenizer, render_chat, render_completion, tokenize,
 };
