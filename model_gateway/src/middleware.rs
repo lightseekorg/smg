@@ -33,6 +33,7 @@ use crate::{
     observability::{
         inflight_tracker::InFlightRequestTracker,
         metrics::{method_to_static_str, metrics_labels, Metrics},
+        otel_trace::extract_trace_context_http,
     },
     routers::error::extract_error_code_from_response,
     server::AppState,
@@ -275,8 +276,7 @@ impl<B> MakeSpan<B> for RequestSpan {
     fn make_span(&mut self, request: &Request<B>) -> Span {
         // Extract incoming W3C trace context (traceparent/tracestate) so that
         // server-side spans become children of the caller's distributed trace.
-        let parent_cx =
-            crate::observability::otel_trace::extract_trace_context_http(request.headers());
+        let parent_cx = extract_trace_context_http(request.headers());
 
         // Don't try to extract request ID here - it won't be available yet
         // The RequestIdLayer runs after TraceLayer creates the span

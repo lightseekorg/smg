@@ -247,9 +247,7 @@ pub fn extract_trace_context_http(headers: &HeaderMap) -> opentelemetry::Context
         }
     }
 
-    global::get_text_map_propagator(|propagator| {
-        propagator.extract(&HeaderExtractor(headers))
-    })
+    global::get_text_map_propagator(|propagator| propagator.extract(&HeaderExtractor(headers)))
 }
 
 /// Inject W3C trace context headers into an HTTP request.
