@@ -22,6 +22,7 @@ use smg_mesh::OptionalMeshSyncManager;
 use uuid::Uuid;
 
 use crate::{
+    config::types::RetryConfig,
     core::{
         circuit_breaker::CircuitState,
         worker::{HealthChecker, RuntimeType, WorkerType},
@@ -212,6 +213,14 @@ pub struct WorkerRegistry {
     /// When None, the registry works independently without mesh synchronization
     /// Uses RwLock for thread-safe access when setting mesh_sync after initialization
     mesh_sync: Arc<RwLock<OptionalMeshSyncManager>>,
+
+    /// Per-model retry config (last write wins).
+    /// Updated when a worker with non-empty retry overrides registers.
+    /// Cleaned up when the last worker for a model is removed.
+    model_retry_configs: Arc<DashMap<String, RetryConfig>>,
+
+    /// Per-model retry enabled flag (last write wins).
+    model_retry_enabled: Arc<DashMap<String, bool>>,
 }
 
 impl WorkerRegistry {
@@ -226,6 +235,8 @@ impl WorkerRegistry {
             url_to_id: Arc::new(DashMap::new()),
             worker_mutation_locks: Arc::new(DashMap::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
+            model_retry_configs: Arc::new(DashMap::new()),
+            model_retry_enabled: Arc::new(DashMap::new()),
         }
     }
 
@@ -241,6 +252,8 @@ impl WorkerRegistry {
             url_to_id: self.url_to_id.clone(),
             worker_mutation_locks: self.worker_mutation_locks.clone(),
             mesh_sync: self.mesh_sync.clone(),
+            model_retry_configs: self.model_retry_configs.clone(),
+            model_retry_enabled: self.model_retry_enabled.clone(),
         }
     }
 
@@ -264,6 +277,30 @@ impl WorkerRegistry {
     pub fn set_mesh_sync(&self, mesh_sync: OptionalMeshSyncManager) {
         let mut guard = self.mesh_sync.write();
         *guard = mesh_sync;
+    }
+
+    /// Get the retry config for a model, if a worker group override exists.
+    pub fn get_retry_config(&self, model_id: &str) -> Option<RetryConfig> {
+        self.model_retry_configs
+            .get(model_id)
+            .map(|entry| entry.value().clone())
+    }
+
+    /// Check if retries are enabled for a model group.
+    /// Returns `None` if no worker has set a group-level override.
+    pub fn get_retry_enabled(&self, model_id: &str) -> Option<bool> {
+        self.model_retry_enabled
+            .get(model_id)
+            .map(|entry| *entry.value())
+    }
+
+    /// Update the retry config for a model group (last write wins).
+    /// Called during worker registration when the worker has non-empty retry overrides.
+    pub fn set_model_retry_config(&self, model_id: &str, config: RetryConfig, enabled: bool) {
+        self.model_retry_configs
+            .insert(model_id.to_string(), config);
+        self.model_retry_enabled
+            .insert(model_id.to_string(), enabled);
     }
 
     fn worker_model_ids(worker: &Arc<dyn Worker>) -> Vec<String> {
@@ -318,6 +355,9 @@ impl WorkerRegistry {
         if should_remove_entry {
             self.model_index
                 .remove_if(model_id, |_, workers| workers.is_empty());
+            // Clean up per-model retry config when last worker is removed
+            self.model_retry_configs.remove(model_id);
+            self.model_retry_enabled.remove(model_id);
         }
 
         self.rebuild_hash_ring(model_id);
@@ -1350,5 +1390,78 @@ mod tests {
         assert!(registry.register(first).is_some());
         assert!(registry.register(second).is_none());
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn test_model_retry_config_last_write_wins() {
+        let registry = WorkerRegistry::new();
+
+        // No config initially
+        assert!(registry.get_retry_config("llama-3").is_none());
+        assert!(registry.get_retry_enabled("llama-3").is_none());
+
+        // Set config for a model
+        let config1 = RetryConfig {
+            max_retries: 3,
+            ..RetryConfig::default()
+        };
+        registry.set_model_retry_config("llama-3", config1, true);
+
+        let stored = registry.get_retry_config("llama-3").unwrap();
+        assert_eq!(stored.max_retries, 3);
+        assert_eq!(registry.get_retry_enabled("llama-3"), Some(true));
+
+        // Last write wins — overwrite with different config
+        let config2 = RetryConfig {
+            max_retries: 10,
+            initial_backoff_ms: 200,
+            ..RetryConfig::default()
+        };
+        registry.set_model_retry_config("llama-3", config2, false);
+
+        let stored = registry.get_retry_config("llama-3").unwrap();
+        assert_eq!(stored.max_retries, 10);
+        assert_eq!(stored.initial_backoff_ms, 200);
+        assert_eq!(registry.get_retry_enabled("llama-3"), Some(false));
+    }
+
+    #[test]
+    fn test_model_retry_config_cleanup_on_last_worker_removal() {
+        let registry = WorkerRegistry::new();
+
+        let worker1 = Arc::new(
+            BasicWorkerBuilder::new("http://worker1:8080")
+                .model(ModelCard::new("llama-3"))
+                .build(),
+        ) as Arc<dyn Worker>;
+
+        let worker2 = Arc::new(
+            BasicWorkerBuilder::new("http://worker2:8080")
+                .model(ModelCard::new("llama-3"))
+                .build(),
+        ) as Arc<dyn Worker>;
+
+        let id1 = registry.register(worker1).unwrap();
+        let id2 = registry.register(worker2).unwrap();
+
+        // Set retry config for the model
+        registry.set_model_retry_config(
+            "llama-3",
+            RetryConfig {
+                max_retries: 5,
+                ..RetryConfig::default()
+            },
+            true,
+        );
+        assert!(registry.get_retry_config("llama-3").is_some());
+
+        // Remove first worker — config should still exist
+        registry.remove(&id1);
+        assert!(registry.get_retry_config("llama-3").is_some());
+
+        // Remove last worker — config should be cleaned up
+        registry.remove(&id2);
+        assert!(registry.get_retry_config("llama-3").is_none());
+        assert!(registry.get_retry_enabled("llama-3").is_none());
     }
 }
