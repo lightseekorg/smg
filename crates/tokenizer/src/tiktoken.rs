@@ -121,7 +121,7 @@ fn parse_special_tokens(config: &serde_json::Value) -> SpecialTokens {
         "mask_token",
         "additional_special_tokens",
     ];
-    let extra_tokens: std::collections::HashMap<String, String> = config
+    let extra_tokens: HashMap<String, String> = config
         .as_object()
         .map(|obj| {
             obj.iter()

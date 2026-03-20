@@ -202,10 +202,7 @@ impl HuggingFaceTokenizer {
     }
 
     /// Extract extra *_token keys from tokenizer_config.json not in the known set.
-    fn extract_extra_tokens(
-        tokenizer_path: &str,
-        known: &[&str],
-    ) -> std::collections::HashMap<String, String> {
+    fn extract_extra_tokens(tokenizer_path: &str, known: &[&str]) -> HashMap<String, String> {
         let get_str = |v: &serde_json::Value| -> Option<String> {
             v.as_str()
                 .map(String::from)
