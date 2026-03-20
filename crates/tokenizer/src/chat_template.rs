@@ -489,41 +489,49 @@ fn render_chat_template(
         .documents
         .map_or(Value::UNDEFINED, Value::from_serialize);
 
-    // Build special token values — use UNDEFINED for missing tokens so templates
+    // Build special token values — serialize SpecialTokens and inject each field
+    // into the template context. Use UNDEFINED for missing tokens so templates
     // can check `{% if bos_token is defined %}` correctly.
-    let (bos_token, eos_token, unk_token, pad_token) = match params.special_tokens {
-        Some(st) => (
-            st.bos_token
-                .as_deref()
-                .map_or(Value::UNDEFINED, Value::from),
-            st.eos_token
-                .as_deref()
-                .map_or(Value::UNDEFINED, Value::from),
-            st.unk_token
-                .as_deref()
-                .map_or(Value::UNDEFINED, Value::from),
-            st.pad_token
-                .as_deref()
-                .map_or(Value::UNDEFINED, Value::from),
-        ),
-        None => (
-            Value::UNDEFINED,
-            Value::UNDEFINED,
-            Value::UNDEFINED,
-            Value::UNDEFINED,
-        ),
+    let special_token_values: Vec<(String, Value)> = if let Some(st) = params.special_tokens {
+        serde_json::to_value(st)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .map(|map| {
+                map.into_iter()
+                    .map(|(k, v)| {
+                        let val = match &v {
+                            serde_json::Value::String(s) => Value::from(s.as_str()),
+                            serde_json::Value::Null => Value::UNDEFINED,
+                            _ => Value::UNDEFINED,
+                        };
+                        (k, val)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
     };
 
-    let base_context = context! {
+    let mut base_context = context! {
         messages => &minijinja_messages,
         add_generation_prompt => params.add_generation_prompt,
         tools => tools_value,
         documents => documents_value,
-        bos_token => bos_token,
-        eos_token => eos_token,
-        unk_token => unk_token,
-        pad_token => pad_token,
     };
+
+    // Merge special tokens into context
+    if !special_token_values.is_empty() {
+        let token_ctx = Value::from(
+            special_token_values
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        );
+        base_context = context! {
+            ..base_context,
+            ..token_ctx,
+        };
+    }
 
     // Merge with template_kwargs if provided
     let ctx = if let Some(kwargs) = params.template_kwargs {

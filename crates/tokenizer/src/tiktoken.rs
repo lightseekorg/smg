@@ -110,6 +110,33 @@ fn parse_special_tokens(config: &serde_json::Value) -> SpecialTokens {
         })
         .unwrap_or_default();
 
+    // Collect extra *_token keys not covered by the named fields
+    const KNOWN_TOKENS: &[&str] = &[
+        "bos_token",
+        "eos_token",
+        "unk_token",
+        "sep_token",
+        "pad_token",
+        "cls_token",
+        "mask_token",
+        "additional_special_tokens",
+    ];
+    let extra_tokens: std::collections::HashMap<String, String> = config
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter(|(k, _)| k.ends_with("_token") && !KNOWN_TOKENS.contains(&k.as_str()))
+                .filter_map(|(k, v)| {
+                    let val = v
+                        .as_str()
+                        .map(String::from)
+                        .or_else(|| v.get("content").and_then(|c| c.as_str()).map(String::from));
+                    val.map(|s| (k.clone(), s))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     SpecialTokens {
         bos_token: get_str("bos_token"),
         eos_token: get_str("eos_token"),
@@ -119,6 +146,7 @@ fn parse_special_tokens(config: &serde_json::Value) -> SpecialTokens {
         cls_token: get_str("cls_token"),
         mask_token: get_str("mask_token"),
         additional_special_tokens: additional,
+        extra_tokens,
     }
 }
 
@@ -308,27 +336,20 @@ impl TiktokenTokenizer {
             TiktokenModel::Cl100kBase => SpecialTokens {
                 bos_token: Some("<|endoftext|>".to_string()),
                 eos_token: Some("<|endoftext|>".to_string()),
-                unk_token: None,
-                sep_token: None,
                 pad_token: Some("<|endoftext|>".to_string()),
-                cls_token: None,
-                mask_token: None,
                 additional_special_tokens: vec![
                     "<|fim_prefix|>".to_string(),
                     "<|fim_middle|>".to_string(),
                     "<|fim_suffix|>".to_string(),
                     "<|endofprompt|>".to_string(),
                 ],
+                ..Default::default()
             },
             _ => SpecialTokens {
                 bos_token: Some("<|endoftext|>".to_string()),
                 eos_token: Some("<|endoftext|>".to_string()),
-                unk_token: None,
-                sep_token: None,
                 pad_token: Some("<|endoftext|>".to_string()),
-                cls_token: None,
-                mask_token: None,
-                additional_special_tokens: vec![],
+                ..Default::default()
             },
         }
     }
