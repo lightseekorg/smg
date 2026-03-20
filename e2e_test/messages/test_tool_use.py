@@ -11,7 +11,6 @@ import json
 import logging
 
 import pytest
-from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +61,11 @@ CALCULATE_TOOL = {
 class TestToolUseBasic:
     """Tool use tests against the Anthropic Messages API."""
 
-    def test_single_tool_call(self, setup_backend, smg):
+    def test_single_tool_call(self, setup_backend, api_client):
         """Test that the model calls a single tool when appropriate."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
-        response = client.messages.create(
+        response = api_client.messages.create(
             model=model,
             max_tokens=200,
             tools=[GET_WEATHER_TOOL],
@@ -87,27 +86,12 @@ class TestToolUseBasic:
         assert isinstance(tool_use.input, dict)
         assert "location" in tool_use.input
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.messages.create(
-                model=model,
-                max_tokens=200,
-                tools=[GET_WEATHER_TOOL],
-                messages=[
-                    {"role": "user", "content": "What is the weather in San Francisco?"},
-                ],
-            )
-            assert smg_resp.stop_reason == "tool_use"
-            smg_tool_blocks = [b for b in smg_resp.content if b.type == "tool_use"]
-            assert len(smg_tool_blocks) > 0, "SmgClient should return tool_use block"
-            assert smg_tool_blocks[0].name == "get_weather"
-
-    def test_tool_call_and_result_round_trip(self, setup_backend, smg):
+    def test_tool_call_and_result_round_trip(self, setup_backend, api_client):
         """Test full round-trip: tool call -> tool result -> final text response."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         # First request: model should request a tool call
-        response1 = client.messages.create(
+        response1 = api_client.messages.create(
             model=model,
             max_tokens=200,
             tools=[GET_WEATHER_TOOL],
@@ -122,7 +106,7 @@ class TestToolUseBasic:
         tool_use = tool_use_blocks[0]
 
         # Second request: provide tool result, expect final text
-        response2 = client.messages.create(
+        response2 = api_client.messages.create(
             model=model,
             max_tokens=200,
             tools=[GET_WEATHER_TOOL],
@@ -149,49 +133,11 @@ class TestToolUseBasic:
         assert len(text_blocks) > 0, "Final response should contain text"
         assert len(text_blocks[0].text) > 0
 
-        # SmgClient comparison - first call
-        with smg_compare():
-            smg_resp1 = smg.messages.create(
-                model=model,
-                max_tokens=200,
-                tools=[GET_WEATHER_TOOL],
-                messages=[
-                    {"role": "user", "content": "What is the weather in Tokyo?"},
-                ],
-            )
-            assert smg_resp1.stop_reason == "tool_use"
-            smg_tool = [b for b in smg_resp1.content if b.type == "tool_use"][0]
-            # SmgClient round-trip: pass content directly (auto-serialized)
-            smg_resp2 = smg.messages.create(
-                model=model,
-                max_tokens=200,
-                tools=[GET_WEATHER_TOOL],
-                messages=[
-                    {"role": "user", "content": "What is the weather in Tokyo?"},
-                    {"role": "assistant", "content": smg_resp1.content},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": smg_tool.id,
-                                "content": json.dumps(
-                                    {"temperature": "22°C", "condition": "sunny"}
-                                ),
-                            }
-                        ],
-                    },
-                ],
-            )
-            assert smg_resp2.stop_reason == "end_turn"
-            smg_text_blocks = [b for b in smg_resp2.content if b.type == "text"]
-            assert len(smg_text_blocks) > 0
-
-    def test_tool_use_streaming(self, setup_backend, smg):
+    def test_tool_use_streaming(self, setup_backend, api_client):
         """Test streaming with tool use returns input_json delta events."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
-        with client.messages.stream(
+        with api_client.messages.stream(
             model=model,
             max_tokens=200,
             tools=[GET_WEATHER_TOOL],
@@ -216,35 +162,11 @@ class TestToolUseBasic:
             parsed = json.loads(full_json_str)
             assert isinstance(parsed, dict)
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            smg_event_types = set()
-            smg_json_deltas = []
-            with smg.messages.stream(
-                model=model,
-                max_tokens=200,
-                tools=[GET_WEATHER_TOOL],
-                messages=[
-                    {"role": "user", "content": "What is the weather in London?"},
-                ],
-            ) as stream:
-                for event in stream:
-                    smg_event_types.add(event.type)
-                    if event.type == "content_block_delta":
-                        if event.delta.type == "input_json_delta":
-                            smg_json_deltas.append(event.delta.partial_json)
-            assert "content_block_start" in smg_event_types
-            assert "content_block_delta" in smg_event_types
-            if smg_json_deltas:
-                full_json = "".join(smg_json_deltas)
-                parsed = json.loads(full_json)
-                assert isinstance(parsed, dict)
-
-    def test_multiple_tools_available(self, setup_backend, smg):
+    def test_multiple_tools_available(self, setup_backend, api_client):
         """Test that model selects the correct tool when multiple are available."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
-        response = client.messages.create(
+        response = api_client.messages.create(
             model=model,
             max_tokens=200,
             tools=[GET_WEATHER_TOOL, CALCULATE_TOOL],
@@ -259,18 +181,3 @@ class TestToolUseBasic:
         tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
         assert len(tool_use_blocks) > 0
         assert tool_use_blocks[0].name == "calculate"
-
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.messages.create(
-                model=model,
-                max_tokens=200,
-                tools=[GET_WEATHER_TOOL, CALCULATE_TOOL],
-                messages=[
-                    {"role": "user", "content": "What is 15 * 23?"},
-                ],
-            )
-            assert smg_resp.stop_reason == "tool_use"
-            smg_tool_blocks = [b for b in smg_resp.content if b.type == "tool_use"]
-            assert len(smg_tool_blocks) > 0
-            assert smg_tool_blocks[0].name == "calculate"

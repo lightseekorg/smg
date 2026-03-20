@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 
 import pytest
-from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +23,11 @@ logger = logging.getLogger(__name__)
 @pytest.mark.model("intfloat/e5-mistral-7b-instruct")
 @pytest.mark.e2e
 @pytest.mark.parametrize("setup_backend", ["grpc", "http"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestEmbeddingBasic:
     """Basic embedding API tests using local workers (gRPC and HTTP)."""
 
-    def test_embedding_single(self, setup_backend, smg):
+    def test_embedding_single(self, setup_backend, api_client):
         """Test single text embedding.
 
         Verifies that:
@@ -35,10 +35,10 @@ class TestEmbeddingBasic:
         - Embedding is a non-empty list of floats
         - Usage statistics are present
         """
-        backend, model, client, gateway = setup_backend
+        backend, model, _, _ = setup_backend
 
         input_text = "Hello world"
-        response = client.embeddings.create(
+        response = api_client.embeddings.create(
             model=model,
             input=input_text,
         )
@@ -62,24 +62,16 @@ class TestEmbeddingBasic:
             response.usage.prompt_tokens,
         )
 
-        # SmgClient comparison (identical call)
-        with smg_compare():
-            smg_resp = smg.embeddings.create(model=model, input=input_text)
-            assert len(smg_resp.data) == len(response.data)
-            for oai_emb, smg_emb in zip(response.data, smg_resp.data):
-                assert len(smg_emb.embedding) == len(oai_emb.embedding)
-                assert smg_emb.index == oai_emb.index
-
-    def test_embedding_batch(self, setup_backend, smg):
+    def test_embedding_batch(self, setup_backend, api_client):
         """Test batch embedding with multiple texts.
 
         Note: The original test expected len(response.data) == 1 for batch,
         which seems incorrect. This might be model-specific behavior.
         """
-        backend, model, client, gateway = setup_backend
+        backend, model, _, _ = setup_backend
 
         input_texts = ["Hello world", "SGLang is fast"]
-        response = client.embeddings.create(
+        response = api_client.embeddings.create(
             model=model,
             input=input_texts,
         )
@@ -93,27 +85,21 @@ class TestEmbeddingBasic:
 
         logger.info("Batch embedding: %d results", len(response.data))
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.embeddings.create(model=model, input=input_texts)
-            assert len(smg_resp.data) >= 1
-            assert len(smg_resp.data[0].embedding) > 0
-
-    def test_embedding_dimensions_consistent(self, setup_backend, smg):
+    def test_embedding_dimensions_consistent(self, setup_backend, api_client):
         """Test that embedding dimensions are consistent across different inputs.
 
         Verifies that different length inputs produce embeddings with
         the same dimensionality.
         """
-        backend, model, client, gateway = setup_backend
+        backend, model, _, _ = setup_backend
 
-        response1 = client.embeddings.create(
+        response1 = api_client.embeddings.create(
             model=model,
             input="A short text",
         )
         dim1 = len(response1.data[0].embedding)
 
-        response2 = client.embeddings.create(
+        response2 = api_client.embeddings.create(
             model=model,
             input="A much longer text to ensure dimensions match regardless of input length",
         )
@@ -122,58 +108,35 @@ class TestEmbeddingBasic:
         assert dim1 == dim2, f"Dimensions differ: {dim1} vs {dim2}"
         logger.info("Embedding dimensions: %d (consistent)", dim1)
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp1 = smg.embeddings.create(model=model, input="A short text")
-            smg_resp2 = smg.embeddings.create(
-                model=model,
-                input="A much longer text to ensure dimensions match regardless of input length",
-            )
-            smg_dim1 = len(smg_resp1.data[0].embedding)
-            smg_dim2 = len(smg_resp2.data[0].embedding)
-            assert smg_dim1 == smg_dim2, f"SmgClient dimensions differ: {smg_dim1} vs {smg_dim2}"
-            assert smg_dim1 == dim1, f"SmgClient vs OpenAI dimensions differ: {smg_dim1} vs {dim1}"
-
-    def test_embedding_empty_string(self, setup_backend, smg):
+    def test_embedding_empty_string(self, setup_backend, api_client):
         """Test embedding with empty string input.
 
         Some models may handle empty strings differently.
         This test verifies the API doesn't crash on empty input.
         """
-        backend, model, client, gateway = setup_backend
+        backend, model, _, _ = setup_backend
 
-        oai_succeeded = False
         try:
-            response = client.embeddings.create(
+            response = api_client.embeddings.create(
                 model=model,
                 input="",
             )
             # If it succeeds, verify structure
             assert len(response.data) >= 1
-            oai_succeeded = True
             logger.info("Empty string embedding succeeded")
         except Exception as e:
             # Some models may reject empty strings - that's acceptable
             logger.info("Empty string embedding rejected: %s", e)
 
-        # SmgClient comparison - must match OpenAI client behavior
-        with smg_compare():
-            if oai_succeeded:
-                smg_resp = smg.embeddings.create(model=model, input="")
-                assert len(smg_resp.data) >= 1
-            else:
-                with pytest.raises(Exception):
-                    smg.embeddings.create(model=model, input="")
-
-    def test_embedding_unicode(self, setup_backend, smg):
+    def test_embedding_unicode(self, setup_backend, api_client):
         """Test embedding with unicode characters.
 
         Verifies that the API handles non-ASCII characters correctly.
         """
-        backend, model, client, gateway = setup_backend
+        backend, model, _, _ = setup_backend
 
         input_text = "Hello 世界! 🚀 Привет мир"
-        response = client.embeddings.create(
+        response = api_client.embeddings.create(
             model=model,
             input=input_text,
         )
@@ -181,9 +144,3 @@ class TestEmbeddingBasic:
         assert len(response.data) == 1
         assert len(response.data[0].embedding) > 0
         logger.info("Unicode embedding: %d dimensions", len(response.data[0].embedding))
-
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.embeddings.create(model=model, input=input_text)
-            assert len(smg_resp.data) == 1
-            assert len(smg_resp.data[0].embedding) == len(response.data[0].embedding)

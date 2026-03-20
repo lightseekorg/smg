@@ -17,7 +17,6 @@ use crate::core::{
         worker::util::{do_grpc_health_check, grpc_base_url, http_base_url},
         workflow_data::{WorkerKind, WorkerWorkflowData},
     },
-    worker::RuntimeType,
     ConnectionMode,
 };
 
@@ -254,9 +253,9 @@ impl StepExecutor<WorkerWorkflowData> for DetectBackendStep {
             .timeout_secs
             .unwrap_or(app_context.router_config.health_check.timeout_secs);
 
-        // If runtime_type is explicitly configured (non-default), use it and skip detection
+        // If runtime_type is explicitly configured, use it and skip detection
         let config_runtime = config.runtime_type;
-        if config_runtime != RuntimeType::default() {
+        if config_runtime.is_specified() {
             debug!(
                 "Using explicitly configured runtime type: {} for {}",
                 config_runtime, config.url

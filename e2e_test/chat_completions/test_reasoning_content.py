@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 
 import pytest
-from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +26,15 @@ logger = logging.getLogger(__name__)
     extra_args=["--reasoning-parser", "deepseek_r1", "--history-backend", "memory"]
 )
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestReasoningContentAPI:
     """Tests for reasoning content API with DeepSeek R1 reasoning parser."""
 
-    def test_streaming_separate_reasoning_false(self, setup_backend, smg):
+    def test_streaming_separate_reasoning_false(self, setup_backend, api_client):
         """Test streaming with separate_reasoning=False, reasoning_content should be empty."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=[
                 {
@@ -58,30 +58,11 @@ class TestReasoningContentAPI:
         assert len(reasoning_content) == 0
         assert len(content) > 0
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            smg_reasoning = ""
-            smg_content = ""
-            with smg.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": "What is 1+3?"}],
-                max_tokens=100,
-                stream=True,
-                extra_body={"separate_reasoning": False},
-            ) as stream:
-                for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        smg_content += chunk.choices[0].delta.content
-                    elif chunk.choices[0].delta.reasoning_content:
-                        smg_reasoning += chunk.choices[0].delta.reasoning_content
-            assert len(smg_reasoning) == 0, "SmgClient: reasoning_content should be empty"
-            assert len(smg_content) > 0, "SmgClient: content should not be empty"
-
-    def test_streaming_separate_reasoning_true(self, setup_backend, smg):
+    def test_streaming_separate_reasoning_true(self, setup_backend, api_client):
         """Test streaming with separate_reasoning=True, reasoning_content should not be empty."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=[
                 {
@@ -105,30 +86,13 @@ class TestReasoningContentAPI:
         assert len(reasoning_content) > 0
         assert len(content) > 0
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            smg_reasoning = ""
-            smg_content = ""
-            with smg.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": "What is 1+3?"}],
-                max_tokens=100,
-                stream=True,
-                extra_body={"separate_reasoning": True},
-            ) as stream:
-                for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        smg_content += chunk.choices[0].delta.content
-                    elif chunk.choices[0].delta.reasoning_content:
-                        smg_reasoning += chunk.choices[0].delta.reasoning_content
-            assert len(smg_reasoning) > 0, "SmgClient: reasoning_content should not be empty"
-            assert len(smg_content) > 0, "SmgClient: content should not be empty"
-
-    def test_streaming_separate_reasoning_true_stream_reasoning_false(self, setup_backend, smg):
+    def test_streaming_separate_reasoning_true_stream_reasoning_false(
+        self, setup_backend, api_client
+    ):
         """Test streaming with separate_reasoning=True and stream_reasoning=False."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=[
                 {
@@ -162,30 +126,11 @@ class TestReasoningContentAPI:
         assert len(reasoning_content) > 0
         assert len(content) > 0
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            smg_reasoning = ""
-            smg_content = ""
-            with smg.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": "What is 1+3?"}],
-                max_tokens=100,
-                stream=True,
-                extra_body={"separate_reasoning": True, "stream_reasoning": False},
-            ) as stream:
-                for chunk in stream:
-                    if chunk.choices[0].delta.reasoning_content:
-                        smg_reasoning = chunk.choices[0].delta.reasoning_content
-                    if chunk.choices[0].delta.content:
-                        smg_content += chunk.choices[0].delta.content
-            assert len(smg_reasoning) > 0, "SmgClient: reasoning_content should not be empty"
-            assert len(smg_content) > 0, "SmgClient: content should not be empty"
-
-    def test_nonstreaming_separate_reasoning_false(self, setup_backend, smg):
+    def test_nonstreaming_separate_reasoning_false(self, setup_backend, api_client):
         """Test non-streaming with separate_reasoning=False, reasoning_content should be empty."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=[
                 {
@@ -203,27 +148,11 @@ class TestReasoningContentAPI:
         )
         assert len(response.choices[0].message.content) > 0
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": "What is 1+3?"}],
-                max_tokens=100,
-                extra_body={"separate_reasoning": False},
-            )
-            assert (
-                not smg_resp.choices[0].message.reasoning_content
-                or len(smg_resp.choices[0].message.reasoning_content) == 0
-            ), "SmgClient: reasoning_content should be empty"
-            assert len(smg_resp.choices[0].message.content) > 0, (
-                "SmgClient: content should not be empty"
-            )
-
-    def test_nonstreaming_separate_reasoning_true(self, setup_backend, smg):
+    def test_nonstreaming_separate_reasoning_true(self, setup_backend, api_client):
         """Test non-streaming with separate_reasoning=True, reasoning_content should not be empty."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=[
                 {
@@ -237,18 +166,3 @@ class TestReasoningContentAPI:
 
         assert len(response.choices[0].message.reasoning_content) > 0
         assert len(response.choices[0].message.content) > 0
-
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": "What is 1+3?"}],
-                max_tokens=100,
-                extra_body={"separate_reasoning": True},
-            )
-            assert len(smg_resp.choices[0].message.reasoning_content) > 0, (
-                "SmgClient: reasoning_content should not be empty"
-            )
-            assert len(smg_resp.choices[0].message.content) > 0, (
-                "SmgClient: content should not be empty"
-            )

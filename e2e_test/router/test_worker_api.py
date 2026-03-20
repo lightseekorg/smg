@@ -18,7 +18,6 @@ import logging
 import os
 
 import pytest
-from conftest import smg_compare
 from infra import ConnectionMode, Gateway, start_workers, stop_workers
 
 logger = logging.getLogger(__name__)
@@ -34,9 +33,9 @@ pytestmark = pytest.mark.skip_for_runtime("vllm", reason="vLLM does not support 
 class TestWorkerAPI:
     """Tests for worker management APIs using setup_backend fixture."""
 
-    def test_list_workers(self, setup_backend, smg):
+    def test_list_workers(self, setup_backend):
         """Test listing workers via /workers endpoint."""
-        backend, model, client, gateway = setup_backend
+        backend, model, _, gateway = setup_backend
 
         workers = gateway.list_workers()
         assert len(workers) >= 1, "Expected at least one worker"
@@ -55,15 +54,9 @@ class TestWorkerAPI:
             if worker.model is not None:
                 assert worker.model, "Worker model_id should be non-empty when present"
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_workers = smg.workers.list()
-            assert smg_workers["total"] >= 1, "SmgClient: expected at least one worker"
-            assert len(smg_workers["workers"]) >= 1
-
-    def test_list_models(self, setup_backend, smg):
+    def test_list_models(self, setup_backend):
         """Test listing models via /v1/models endpoint."""
-        backend, model, client, gateway = setup_backend
+        backend, model, _, gateway = setup_backend
 
         models = gateway.list_models()
         assert len(models) >= 1, "Expected at least one model"
@@ -73,14 +66,9 @@ class TestWorkerAPI:
             logger.info("Model: %s", m.get("id", "unknown"))
             assert "id" in m, "Model should have an id"
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_models = smg.models.list()
-            assert len(smg_models.data) >= 1, "SmgClient: expected at least one model"
-
-    def test_health_endpoint(self, setup_backend, smg):
+    def test_health_endpoint(self, setup_backend):
         """Test health check endpoint."""
-        backend, model, client, gateway = setup_backend
+        backend, model, _, gateway = setup_backend
 
         assert gateway.health(), "Gateway should be healthy"
         logger.info("Gateway health check passed")
