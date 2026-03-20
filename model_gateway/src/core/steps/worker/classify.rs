@@ -29,7 +29,7 @@ const LOCAL_OWNED_BY: &[&str] = &["sglang", "vllm", "trtllm"];
 
 /// Fetch `/v1/models` and check the `owned_by` field of the first model.
 /// Returns `Some("sglang")`, `Some("vllm")`, etc. if recognized as a local
-/// backend, or `None` if the response is missing, unparseable, or the
+/// backend, or `None` if the response is missing, not parsable, or the
 /// `owned_by` value does not match a known local backend.
 async fn probe_models_owned_by(
     url: &str,
