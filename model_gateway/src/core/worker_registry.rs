@@ -354,9 +354,6 @@ impl WorkerRegistry {
         if should_remove_entry {
             self.model_index
                 .remove_if(model_id, |_, workers| workers.is_empty());
-            // Clean up per-model retry config when last worker is removed
-            self.model_retry_configs.remove(model_id);
-            self.model_retry_enabled.remove(model_id);
         }
 
         self.rebuild_hash_ring(model_id);
@@ -453,6 +450,16 @@ impl WorkerRegistry {
 
             for model_id in Self::worker_model_ids(&worker) {
                 self.remove_worker_from_model_index(&model_id, worker.url());
+                // Clean up per-model retry config when no workers remain for this model
+                if self.model_index.get(&model_id).is_none()
+                    || self
+                        .model_index
+                        .get(&model_id)
+                        .is_some_and(|w| w.is_empty())
+                {
+                    self.model_retry_configs.remove(&model_id);
+                    self.model_retry_enabled.remove(&model_id);
+                }
             }
 
             // Remove from type index
