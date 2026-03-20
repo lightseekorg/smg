@@ -64,10 +64,21 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for RegisterWorke
 
             if has_retry_overrides {
                 let resolved = worker.resilience();
-                for model_id in worker.models().iter().map(|m| m.id.as_str()) {
+                let retry_config = resolved.retry.clone();
+                // Use the same model ID resolution as WorkerRegistry::worker_model_ids:
+                // worker.models() if non-empty, else fallback to worker.model_id().
+                let model_ids: Vec<String> = {
+                    let models = worker.models();
+                    if models.is_empty() {
+                        vec![worker.model_id().to_string()]
+                    } else {
+                        models.into_iter().map(|m| m.id).collect()
+                    }
+                };
+                for model_id in &model_ids {
                     app_context.worker_registry.set_model_retry_config(
                         model_id,
-                        resolved.retry.clone(),
+                        retry_config.clone(),
                         resolved.retry_enabled,
                     );
                 }
