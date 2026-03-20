@@ -148,6 +148,8 @@ message RenderCompletionRequest {
   optional int32 prompt_logprobs = 5;
   optional bool add_special_tokens = 6;
   optional string cache_salt = 7;
+  optional int32 max_tokens = 8;
+  optional int32 truncate_prompt_tokens = 9;
 }
 
 message RenderCompletionResponse {
