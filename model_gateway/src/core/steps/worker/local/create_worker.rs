@@ -79,6 +79,19 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
             None => config.runtime_type,
         };
 
+        // If runtime is still Unspecified after detection, fall back to Sglang
+        // (the most common local backend). This preserves the old default behavior
+        // where Sglang was the default RuntimeType.
+        let runtime_type = if runtime_type.is_specified() {
+            runtime_type
+        } else {
+            debug!(
+                "Runtime type unresolved for {} after detection; defaulting to sglang",
+                config.url
+            );
+            RuntimeType::Sglang
+        };
+
         // Normalize URL
         let url = normalize_url(&config.url, *connection_mode);
 

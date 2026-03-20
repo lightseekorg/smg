@@ -119,6 +119,14 @@ impl MeshController {
             };
             cnt += 1;
 
+            // Periodic GC: clean up tombstoned CRDT metadata every 60 rounds (~60s)
+            if cnt.is_multiple_of(60) {
+                let removed = self.stores.gc_tombstones();
+                if removed > 0 {
+                    log::info!("GC: removed {removed} tombstoned CRDT metadata entries");
+                }
+            }
+
             tokio::select! {
 
                 _ = signal.changed() => {

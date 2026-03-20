@@ -209,6 +209,11 @@ impl<T: CrdtValue> CrdtStore<T> {
             })
             .collect()
     }
+
+    /// Remove tombstoned keys from CRDT metadata maps.
+    fn gc_tombstones(&self) -> usize {
+        self.inner.gc_tombstones()
+    }
 }
 
 impl<T: CrdtValue> Default for CrdtStore<T> {
@@ -419,6 +424,11 @@ macro_rules! define_state_store {
 
             pub fn all(&self) -> BTreeMap<String, $value_type> {
                 self.inner.all()
+            }
+
+            /// Remove tombstoned keys from CRDT metadata to bound memory growth.
+            pub fn gc_tombstones(&self) -> usize {
+                self.inner.gc_tombstones()
             }
         }
 
@@ -725,6 +735,15 @@ impl StateStores {
             policy: PolicyStore::new(),
             rate_limit: RateLimitStore::new(self_name),
         }
+    }
+
+    /// Run garbage collection across all stores, removing tombstoned CRDT
+    /// metadata entries. Returns the total number of entries removed.
+    pub fn gc_tombstones(&self) -> usize {
+        self.membership.gc_tombstones()
+            + self.app.gc_tombstones()
+            + self.worker.gc_tombstones()
+            + self.policy.gc_tombstones()
     }
 }
 
