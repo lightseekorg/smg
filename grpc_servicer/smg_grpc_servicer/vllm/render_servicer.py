@@ -13,6 +13,7 @@ import grpc
 from smg_grpc_proto import (
     vllm_engine_pb2,  # type: ignore[import-untyped]
     vllm_render_pb2,  # type: ignore[import-untyped]
+    vllm_render_pb2_grpc,  # type: ignore[import-untyped]
 )
 from starlette.datastructures import State
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -39,7 +40,7 @@ def _http_to_grpc_status(http_code: int) -> grpc.StatusCode:
     return _HTTP_TO_GRPC.get(http_code, grpc.StatusCode.INTERNAL)
 
 
-class RenderGrpcServicer:
+class RenderGrpcServicer(vllm_render_pb2_grpc.VllmRenderServicer):
     """gRPC servicer for GPU-less render serving.
 
     Implements the VllmRender service with management RPCs
