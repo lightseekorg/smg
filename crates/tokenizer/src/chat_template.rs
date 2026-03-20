@@ -739,8 +739,7 @@ mod tests {
             "{{ bos_token }}{% for message in messages %}{{ message.content }}{% endfor %}{{ eos_token }}";
         let state = ChatTemplateState::new(Some(template.to_string())).unwrap();
 
-        let messages =
-            vec![serde_json::json!({"role": "user", "content": "hello"})];
+        let messages = vec![serde_json::json!({"role": "user", "content": "hello"})];
 
         let special_tokens = crate::traits::SpecialTokens {
             bos_token: Some("<s>".to_string()),
@@ -779,7 +778,8 @@ mod tests {
     #[test]
     fn test_special_tokens_partial() {
         // Only bos_token set, eos_token is None
-        let template = "{{ bos_token }}hello{% if eos_token is defined %}{{ eos_token }}{% endif %}";
+        let template =
+            "{{ bos_token }}hello{% if eos_token is defined %}{{ eos_token }}{% endif %}";
         let state = ChatTemplateState::new(Some(template.to_string())).unwrap();
 
         let messages: Vec<serde_json::Value> = vec![];
