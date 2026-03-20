@@ -396,7 +396,9 @@ class TestIGWMixedWorkerClassification:
                     for w in workers:
                         logger.info(
                             "Worker: id=%s url=%s status=%s",
-                            w.id, w.url, w.status,
+                            w.id,
+                            w.url,
+                            w.status,
                         )
                     pytest.fail(
                         f"Timed out waiting for 4 healthy local workers "
@@ -420,9 +422,7 @@ class TestIGWMixedWorkerClassification:
                     url = w.get("url", "")
                     rt = w.get("runtime_type", "")
                     if "api.openai.com" in url or "api.x.ai" in url:
-                        assert rt == "external", (
-                            f"Cloud worker {url} should be external, got {rt}"
-                        )
+                        assert rt == "external", f"Cloud worker {url} should be external, got {rt}"
                     else:
                         assert rt in ("sglang", "vllm", "trtllm"), (
                             f"Local worker {url} should have local runtime, got {rt}"
