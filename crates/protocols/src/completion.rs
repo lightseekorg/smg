@@ -147,23 +147,11 @@ impl Normalizable for CompletionRequest {}
 
 fn validate_completion_prompt(prompt: &StringOrArray) -> Result<(), validator::ValidationError> {
     match prompt {
-        StringOrArray::String(s) => {
-            if s.is_empty() {
-                let mut error = validator::ValidationError::new("prompt_empty");
-                error.message = Some("prompt cannot be empty".into());
-                return Err(error);
-            }
-        }
+        StringOrArray::String(_) => {}
         StringOrArray::Array(arr) => {
             if arr.is_empty() {
                 let mut error = validator::ValidationError::new("prompt_empty");
                 error.message = Some("prompt array cannot be empty".into());
-                return Err(error);
-            }
-
-            if arr.iter().any(|prompt| prompt.is_empty()) {
-                let mut error = validator::ValidationError::new("prompt_item_empty");
-                error.message = Some("prompt array items cannot be empty".into());
                 return Err(error);
             }
         }
@@ -207,6 +195,12 @@ fn validate_completion_cross_parameters(
             error.message = Some("best_of must be greater than n".into());
             return Err(error);
         }
+    }
+
+    if req.stream && req.best_of.is_some() {
+        let mut error = validator::ValidationError::new("best_of_not_supported_with_stream");
+        error.message = Some("best_of is not supported when stream is enabled".into());
+        return Err(error);
     }
 
     Ok(())
