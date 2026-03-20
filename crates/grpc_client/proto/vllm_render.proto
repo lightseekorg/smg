@@ -106,6 +106,10 @@ message RenderChatRequest {
   optional string chat_template = 5;
   optional bool add_generation_prompt = 6;
   optional bool continue_final_message = 7;
+  optional int32 max_tokens = 8;
+  optional int32 max_completion_tokens = 9;
+  optional int32 truncate_prompt_tokens = 10;
+  optional bool add_special_tokens = 11;
 }
 
 message RenderChatResponse {
