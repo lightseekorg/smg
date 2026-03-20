@@ -19,7 +19,6 @@ import time
 import openai
 import pytest
 import yaml
-from conftest import smg_compare
 from infra import BRAVE_MCP_HOST, BRAVE_MCP_PORT, BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
@@ -179,13 +178,13 @@ class TestBuiltinVsMcpComparison:
     These tests verify baseline MCP behavior without requiring builtin routing config.
     """
 
-    def test_mcp_tool_produces_mcp_call(self, setup_backend, smg):
+    def test_mcp_tool_produces_mcp_call(self, setup_backend, api_client):
         """Verify that direct MCP tool produces mcp_call output."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
-        resp = client.responses.create(
+        resp = api_client.responses.create(
             model=model,
             input=(
                 "Search the web for Python programming language. "
@@ -206,17 +205,6 @@ class TestBuiltinVsMcpComparison:
             f"Direct MCP tool should produce mcp_call, got: {output_types}"
         )
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.responses.create(
-                model=model,
-                input="Search the web for Python programming language.",
-                tools=[BRAVE_MCP_TOOL],
-            )
-            assert smg_resp.error is None, f"SmgClient error: {smg_resp.error}"
-            assert smg_resp.id is not None
-            assert smg_resp.status in ("completed", "incomplete")
-
 
 @pytest.mark.vendor("openai")
 @pytest.mark.gpu(0)
@@ -228,13 +216,13 @@ class TestBuiltinToolsCloudBackend:
     Full routing tests require MCP config with builtin_type configured.
     """
 
-    def test_web_search_preview_accepted(self, setup_backend, smg):
+    def test_web_search_preview_accepted(self, setup_backend, api_client):
         """Test that web_search_preview tool type is accepted."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
-        resp = client.responses.create(
+        resp = api_client.responses.create(
             model=model,
             input=WEB_SEARCH_PROMPT,
             tools=[WEB_SEARCH_PREVIEW_TOOL],
@@ -244,20 +232,9 @@ class TestBuiltinToolsCloudBackend:
         assert resp.id is not None
         assert resp.status in ("completed", "incomplete")
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.responses.create(
-                model=model,
-                input=WEB_SEARCH_PROMPT,
-                tools=[WEB_SEARCH_PREVIEW_TOOL],
-            )
-            assert smg_resp.error is None
-            assert smg_resp.id is not None
-            assert smg_resp.status in ("completed", "incomplete")
-
-    def test_mixed_builtin_and_function_tools(self, setup_backend, smg):
+    def test_mixed_builtin_and_function_tools(self, setup_backend, api_client):
         """Test mixing web_search_preview with function tools."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -272,7 +249,7 @@ class TestBuiltinToolsCloudBackend:
             },
         }
 
-        resp = client.responses.create(
+        resp = api_client.responses.create(
             model=model,
             input="What's the weather in Seattle?",
             tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
@@ -281,16 +258,6 @@ class TestBuiltinToolsCloudBackend:
 
         assert resp.error is None
         assert resp.id is not None
-
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.responses.create(
-                model=model,
-                input="What's the weather in Seattle?",
-                tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
-            )
-            assert smg_resp.error is None
-            assert smg_resp.id is not None
 
 
 @pytest.mark.engine("sglang")
@@ -305,13 +272,13 @@ class TestBuiltinToolsLocalBackend:
     These tests verify built-in tool handling with local models.
     """
 
-    def test_web_search_preview_accepted(self, setup_backend, smg):
+    def test_web_search_preview_accepted(self, setup_backend, api_client):
         """Test that web_search_preview tool type is accepted by local backend."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(1)
 
-        resp = client.responses.create(
+        resp = api_client.responses.create(
             model=model,
             input=WEB_SEARCH_PROMPT,
             tools=[WEB_SEARCH_PREVIEW_TOOL],
@@ -320,20 +287,9 @@ class TestBuiltinToolsLocalBackend:
 
         assert resp.id is not None
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.responses.create(
-                model=model,
-                input=WEB_SEARCH_PROMPT,
-                tools=[WEB_SEARCH_PREVIEW_TOOL],
-            )
-            assert smg_resp.error is None
-            assert smg_resp.id is not None
-            assert smg_resp.status in ("completed", "incomplete")
-
-    def test_mixed_builtin_and_function_tools(self, setup_backend, smg):
+    def test_mixed_builtin_and_function_tools(self, setup_backend, api_client):
         """Test mixing web_search_preview with function tools on local backend."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(1)
 
@@ -348,7 +304,7 @@ class TestBuiltinToolsLocalBackend:
             },
         }
 
-        resp = client.responses.create(
+        resp = api_client.responses.create(
             model=model,
             input="What's the weather in Seattle?",
             tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
@@ -356,16 +312,6 @@ class TestBuiltinToolsLocalBackend:
         )
 
         assert resp.id is not None
-
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.responses.create(
-                model=model,
-                input="What's the weather in Seattle?",
-                tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
-            )
-            assert smg_resp.error is None
-            assert smg_resp.id is not None
 
 
 # =============================================================================
@@ -475,17 +421,17 @@ class TestMcpWebSearchStreamingEvents:
         """Ensure Brave server is available for these tests."""
         pass
 
-    def test_mcp_web_search_streaming_events(self, setup_backend):
+    def test_mcp_web_search_streaming_events(self, setup_backend, api_client):
         """Test that MCP web search produces proper streaming events.
 
         This verifies the baseline MCP streaming behavior that built-in
         tools should eventually match (with different event types).
         """
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
-        resp = client.responses.create(
+        resp = api_client.responses.create(
             model=model,
             input=(
                 "Search the web for Python programming language. "
@@ -538,9 +484,6 @@ class TestMcpWebSearchStreamingEvents:
             assert mcp_call.server_label == "brave"
             assert mcp_call.name is not None
             assert mcp_call.output is not None
-
-        # SmgClient streaming comparison — no smg fixture in this test,
-        # covered by test_tools_call.py MCP streaming tests
 
 
 @pytest.mark.vendor("openai")

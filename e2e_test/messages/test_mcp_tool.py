@@ -15,7 +15,6 @@ import logging
 from dataclasses import dataclass
 
 import pytest
-from conftest import smg_compare
 from infra import BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
@@ -192,12 +191,12 @@ def assert_streaming_mcp_response(
 class TestMcpTool:
     """MCP tool use tests with SMG orchestration (X-SMG-MCP: enabled)."""
 
-    def test_mcp_non_streaming(self, setup_backend, smg):
+    def test_mcp_non_streaming(self, setup_backend, api_client):
         """Test MCP tool execution in non-streaming mode."""
         cfg = SMG_HANDLED
-        _, model, client, _ = setup_backend
+        _, model, _, _ = setup_backend
 
-        response = client.messages.create(
+        response = api_client.messages.create(
             model=model,
             max_tokens=1024,
             messages=[{"role": "user", "content": cfg.prompt}],
@@ -207,25 +206,12 @@ class TestMcpTool:
 
         assert_non_streaming_mcp_response(response, model, cfg.server_name)
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.messages.create(
-                model=model,
-                max_tokens=1024,
-                messages=[{"role": "user", "content": cfg.prompt}],
-                extra_headers=cfg.headers,
-                extra_body=_extra_body(cfg),
-            )
-            assert smg_resp.id is not None
-            assert smg_resp.role == "assistant"
-            assert len(smg_resp.content) > 0
-
-    def test_mcp_streaming(self, setup_backend, smg):
+    def test_mcp_streaming(self, setup_backend, api_client):
         """Test MCP tool execution with SSE streaming."""
         cfg = SMG_HANDLED
-        _, model, client, _ = setup_backend
+        _, model, _, _ = setup_backend
 
-        with client.messages.stream(
+        with api_client.messages.stream(
             model=model,
             max_tokens=1024,
             messages=[{"role": "user", "content": cfg.prompt}],
@@ -235,19 +221,6 @@ class TestMcpTool:
             results = collect_streaming_events(stream)
 
         assert_streaming_mcp_response(*results)
-
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.messages.stream(
-                model=model,
-                max_tokens=1024,
-                messages=[{"role": "user", "content": cfg.prompt}],
-                extra_headers=cfg.headers,
-                extra_body=_extra_body(cfg),
-            ) as smg_stream:
-                smg_results = collect_streaming_events(smg_stream)
-
-            assert_streaming_mcp_response(*smg_results)
 
 
 # =============================================================================
@@ -266,12 +239,12 @@ class TestMcpToolPassthrough:
     Requires external https://dmcp-server.deno.dev/sse to be reachable.
     """
 
-    def test_mcp_passthrough_non_streaming(self, setup_backend, smg):
+    def test_mcp_passthrough_non_streaming(self, setup_backend, api_client):
         """Test MCP passthrough in non-streaming mode."""
         cfg = PASSTHROUGH
-        _, model, client, _ = setup_backend
+        _, model, _, _ = setup_backend
 
-        response = client.messages.create(
+        response = api_client.messages.create(
             model=model,
             max_tokens=1024,
             messages=[{"role": "user", "content": cfg.prompt}],
@@ -281,25 +254,12 @@ class TestMcpToolPassthrough:
 
         assert_non_streaming_mcp_response(response, model, cfg.server_name)
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.messages.create(
-                model=model,
-                max_tokens=1024,
-                messages=[{"role": "user", "content": cfg.prompt}],
-                extra_headers=cfg.headers,
-                extra_body=_extra_body(cfg),
-            )
-            assert smg_resp.id is not None
-            assert smg_resp.role == "assistant"
-            assert len(smg_resp.content) > 0
-
-    def test_mcp_passthrough_streaming(self, setup_backend, smg):
+    def test_mcp_passthrough_streaming(self, setup_backend, api_client):
         """Test MCP passthrough with SSE streaming."""
         cfg = PASSTHROUGH
-        _, model, client, _ = setup_backend
+        _, model, _, _ = setup_backend
 
-        with client.messages.stream(
+        with api_client.messages.stream(
             model=model,
             max_tokens=1024,
             messages=[{"role": "user", "content": cfg.prompt}],
@@ -309,16 +269,3 @@ class TestMcpToolPassthrough:
             results = collect_streaming_events(stream)
 
         assert_streaming_mcp_response(*results)
-
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.messages.stream(
-                model=model,
-                max_tokens=1024,
-                messages=[{"role": "user", "content": cfg.prompt}],
-                extra_headers=cfg.headers,
-                extra_body=_extra_body(cfg),
-            ) as smg_stream:
-                smg_results = collect_streaming_events(smg_stream)
-
-            assert_streaming_mcp_response(*smg_results)

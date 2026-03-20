@@ -11,7 +11,6 @@ import json
 import logging
 
 import pytest
-from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +26,9 @@ logger = logging.getLogger(__name__)
 class TestStructuredOutputCloud:
     """Structured output tests against cloud APIs."""
 
-    def test_structured_output_json_schema(self, setup_backend, smg):
+    def test_structured_output_json_schema(self, setup_backend, api_client):
         """Test structured output with json_schema format."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         params = {
             "model": model,
@@ -69,7 +68,7 @@ class TestStructuredOutputCloud:
             },
         }
 
-        create_resp = client.responses.create(**params)
+        create_resp = api_client.responses.create(**params)
         assert create_resp.error is None
         assert create_resp.id is not None
         assert create_resp.output is not None
@@ -111,13 +110,6 @@ class TestStructuredOutputCloud:
             assert "explanation" in step
             assert "output" in step
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.responses.create(**params)
-            assert smg_resp.error is None
-            assert smg_resp.id is not None
-            assert smg_resp.status == "completed"
-
 
 # =============================================================================
 # Local Backend Tests (gRPC with Harmony model - complex schema)
@@ -130,12 +122,13 @@ class TestStructuredOutputCloud:
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestStructuredOutputHarmony:
     """Structured output tests against local gRPC backend with Harmony model."""
 
-    def test_structured_output_json_schema(self, setup_backend, smg):
+    def test_structured_output_json_schema(self, setup_backend, api_client):
         """Test structured output with json_schema format."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         params = {
             "model": model,
@@ -175,7 +168,7 @@ class TestStructuredOutputHarmony:
             },
         }
 
-        create_resp = client.responses.create(**params)
+        create_resp = api_client.responses.create(**params)
         assert create_resp.error is None
         assert create_resp.id is not None
         assert create_resp.output is not None
@@ -217,13 +210,6 @@ class TestStructuredOutputHarmony:
             assert "explanation" in step
             assert "output" in step
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.responses.create(**params)
-            assert smg_resp.error is None
-            assert smg_resp.id is not None
-            assert smg_resp.status == "completed"
-
 
 # =============================================================================
 # Local Backend Tests (gRPC with Qwen model - simple schema)
@@ -236,14 +222,15 @@ class TestStructuredOutputHarmony:
 @pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestSimpleSchemaStructuredOutput:
     """Structured output tests with simpler schema for models that don't
     handle complex schemas well.
     """
 
-    def test_structured_output_json_schema(self, setup_backend, smg):
+    def test_structured_output_json_schema(self, setup_backend, api_client):
         """Test structured output with simple json_schema format."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         params = {
             "model": model,
@@ -273,7 +260,7 @@ class TestSimpleSchemaStructuredOutput:
             },
         }
 
-        create_resp = client.responses.create(**params)
+        create_resp = api_client.responses.create(**params)
         assert create_resp.error is None
         assert create_resp.id is not None
         assert create_resp.output is not None
@@ -307,10 +294,3 @@ class TestSimpleSchemaStructuredOutput:
         assert "answer" in output_json
         assert isinstance(output_json["answer"], str)
         assert output_json["answer"], "Answer is empty"
-
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.responses.create(**params)
-            assert smg_resp.error is None
-            assert smg_resp.id is not None
-            assert smg_resp.status == "completed"

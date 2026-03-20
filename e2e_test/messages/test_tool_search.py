@@ -16,7 +16,6 @@ from urllib.parse import urlparse
 
 import pytest
 import requests
-from conftest import smg_compare
 from infra import BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
@@ -92,13 +91,13 @@ def make_mcp_toolset(
 class TestToolSearchPassthrough:
     """Tool search passthrough tests — request forwarded to Anthropic as-is."""
 
-    def test_tool_search_with_deferred_tools_non_streaming(self, setup_backend, smg):
+    def test_tool_search_with_deferred_tools_non_streaming(self, setup_backend, api_client):
         """Send tool_search_tool + deferred custom tools.
 
         Verifies the response can contain server_tool_use (tool search invocation)
         and that the model can discover and reference deferred tools.
         """
-        _, model, client, _ = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [
             make_tool_search_tool(),
@@ -128,7 +127,7 @@ class TestToolSearchPassthrough:
             ),
         ]
 
-        response = client.messages.create(
+        response = api_client.messages.create(
             model=model,
             max_tokens=1024,
             messages=[{"role": "user", "content": "What's the weather like in Tokyo?"}],
@@ -173,26 +172,9 @@ class TestToolSearchPassthrough:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.messages.create(
-                model=model,
-                max_tokens=1024,
-                messages=[{"role": "user", "content": "What's the weather like in Tokyo?"}],
-                extra_body={"tools": tools},
-            )
-            assert smg_resp.id is not None
-            assert smg_resp.role == "assistant"
-            assert len(smg_resp.content) > 0
-            smg_block_types = [getattr(b, "type", None) for b in smg_resp.content]
-            assert "server_tool_use" in smg_block_types
-            assert "tool_search_tool_result" in smg_block_types
-            assert "tool_use" in smg_block_types
-            assert smg_resp.stop_reason == "tool_use"
-
-    def test_tool_search_with_deferred_tools_streaming(self, setup_backend):
+    def test_tool_search_with_deferred_tools_streaming(self, setup_backend, api_client):
         """Streaming variant of tool search passthrough."""
-        _, model, client, _ = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [
             make_tool_search_tool(),
@@ -216,7 +198,7 @@ class TestToolSearchPassthrough:
         block_types = []
         content_blocks = []
 
-        with client.messages.stream(
+        with api_client.messages.stream(
             model=model,
             max_tokens=1024,
             messages=[{"role": "user", "content": "What's the weather in Paris?"}],
@@ -268,9 +250,6 @@ class TestToolSearchPassthrough:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-        # SmgClient: streaming tool search comparison not validated here
-        # (non-streaming comparison above covers SmgClient parity)
-
 
 # =============================================================================
 # Test 2: SMG-handled MCP + tool search + defer_loading
@@ -307,13 +286,13 @@ class TestToolSearchWithMcp:
                 "Ensure the MCP server is running before running these tests."
             )
 
-    def test_mcp_tools_with_deferred_loading(self, setup_backend, smg):
+    def test_mcp_tools_with_deferred_loading(self, setup_backend, api_client):
         """Send tool_search_tool + mcp_toolset with defer_loading: true.
 
         Verifies the full flow: SMG injects MCP tools with defer_loading,
         Anthropic discovers them via tool search, SMG executes via MCP.
         """
-        _, model, client, _ = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [
             make_tool_search_tool(),
@@ -325,7 +304,7 @@ class TestToolSearchWithMcp:
             ),
         ]
 
-        response = client.messages.create(
+        response = api_client.messages.create(
             model=model,
             max_tokens=2048,
             messages=[
@@ -385,37 +364,9 @@ class TestToolSearchWithMcp:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.messages.create(
-                model=model,
-                max_tokens=2048,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": "Search the web for 'Anthropic Claude' and give me a brief summary",
-                    }
-                ],
-                extra_headers={"x-smg-mcp": "enabled"},
-                extra_body={
-                    "tools": tools,
-                    "mcp_servers": [
-                        {"type": "url", "name": MCP_SERVER_NAME, "url": MCP_SERVER_URL}
-                    ],
-                },
-            )
-            assert smg_resp.id is not None
-            assert len(smg_resp.content) > 0
-            smg_block_types = [getattr(b, "type", None) for b in smg_resp.content]
-            assert "server_tool_use" in smg_block_types
-            assert "tool_search_tool_result" in smg_block_types
-            assert "mcp_tool_use" in smg_block_types
-            assert "mcp_tool_result" in smg_block_types
-            assert smg_resp.stop_reason == "end_turn"
-
-    def test_mcp_tools_with_deferred_loading_streaming(self, setup_backend):
+    def test_mcp_tools_with_deferred_loading_streaming(self, setup_backend, api_client):
         """Streaming variant: tool_search + deferred MCP tools via SMG."""
-        _, model, client, _ = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [
             make_tool_search_tool(),
@@ -431,7 +382,7 @@ class TestToolSearchWithMcp:
         block_types = []
         content_blocks = []
 
-        with client.messages.stream(
+        with api_client.messages.stream(
             model=model,
             max_tokens=2048,
             messages=[
@@ -468,8 +419,8 @@ class TestToolSearchWithMcp:
         assert "message_delta" in event_types
         assert "message_stop" in event_types
 
-        # Tool search flow: server_tool_use → tool_search_tool_result →
-        # mcp_tool_use → mcp_tool_result → text
+        # Tool search flow: server_tool_use -> tool_search_tool_result ->
+        # mcp_tool_use -> mcp_tool_result -> text
         assert "server_tool_use" in block_types, (
             f"Expected server_tool_use block for tool search, got: {block_types}"
         )
@@ -497,6 +448,3 @@ class TestToolSearchWithMcp:
         # relaxed from >= 2 to prevent flakiness)
         text_blocks = [b for b in content_blocks if b.type == "text"]
         assert len(text_blocks) >= 1, f"Expected at least 1 text block, got: {len(text_blocks)}"
-
-        # SmgClient: streaming MCP + tool search comparison not validated here
-        # (non-streaming comparison above covers SmgClient parity)

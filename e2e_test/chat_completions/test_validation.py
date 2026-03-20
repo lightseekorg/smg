@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import openai
 import pytest
-from conftest import smg_compare
+import smg_client
 
 logger = logging.getLogger(__name__)
 
@@ -42,22 +42,23 @@ def get_tokenizer(model_path: str):
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestIgnoreEOS:
     """Tests for ignore_eos feature."""
 
-    def test_ignore_eos(self, setup_backend, smg):
+    def test_ignore_eos(self, setup_backend, api_client):
         """Test that ignore_eos=True allows generation to continue beyond EOS token.
 
         When ignore_eos=True, the model should generate until max_tokens is reached,
         even if it encounters an EOS token.
         """
-        _, model, client, _ = setup_backend
+        _, model, _, _ = setup_backend
 
         tokenizer = get_tokenizer(model)
         max_tokens = 200
 
         # Request without ignore_eos (default behavior - stops at EOS)
-        response_default = client.chat.completions.create(
+        response_default = api_client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
@@ -69,7 +70,7 @@ class TestIgnoreEOS:
         )
 
         # Request with ignore_eos=True (continues past EOS until max_tokens)
-        response_ignore_eos = client.chat.completions.create(
+        response_ignore_eos = api_client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
@@ -96,39 +97,6 @@ class TestIgnoreEOS:
             f"got {response_ignore_eos.choices[0].finish_reason}"
         )
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp_default = smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Count from 1 to 20."},
-                ],
-                temperature=0,
-                max_tokens=max_tokens,
-                extra_body={"ignore_eos": False},
-            )
-            smg_resp_ignore = smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Count from 1 to 20."},
-                ],
-                temperature=0,
-                max_tokens=max_tokens,
-                extra_body={"ignore_eos": True},
-            )
-            smg_default_tokens = len(tokenizer.encode(smg_resp_default.choices[0].message.content))
-            smg_ignore_tokens = len(tokenizer.encode(smg_resp_ignore.choices[0].message.content))
-            assert smg_ignore_tokens > smg_default_tokens or smg_ignore_tokens >= max_tokens, (
-                f"SmgClient: ignore_eos did not generate more tokens: "
-                f"{smg_ignore_tokens} vs {smg_default_tokens}"
-            )
-            assert smg_resp_ignore.choices[0].finish_reason == "length", (
-                f"SmgClient: Expected finish_reason='length', "
-                f"got {smg_resp_ignore.choices[0].finish_reason}"
-            )
-
 
 # =============================================================================
 # Large Max New Tokens Tests (Llama 8B)
@@ -145,21 +113,22 @@ class TestIgnoreEOS:
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestLargeMaxNewTokens:
     """Tests for handling large max_new_tokens with concurrent requests."""
 
-    def test_concurrent_chat_completions(self, setup_backend, smg):
+    def test_concurrent_chat_completions(self, setup_backend, api_client):
         """Test that multiple concurrent requests with large token generation complete.
 
         This test sends multiple requests that ask for long outputs concurrently
         to verify the server can handle concurrent long-running requests.
         """
-        _, model, client, _ = setup_backend
+        _, model, _, _ = setup_backend
 
         num_requests = 4
 
         def run_chat_completion():
-            response = client.chat.completions.create(
+            response = api_client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": "You are a helpful AI assistant"},
@@ -194,22 +163,6 @@ class TestLargeMaxNewTokens:
                 f"Request {i} had unexpected finish_reason: {response.choices[0].finish_reason}"
             )
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful AI assistant"},
-                    {"role": "user", "content": "Please repeat the word 'hello' for 100 times."},
-                ],
-                temperature=0,
-                max_tokens=256,
-            )
-            assert smg_resp.choices[0].message.content, "SmgClient: returned empty content"
-            assert smg_resp.choices[0].finish_reason in ("stop", "length"), (
-                f"SmgClient: unexpected finish_reason: {smg_resp.choices[0].finish_reason}"
-            )
-
 
 # =============================================================================
 # Harmony Validation Tests (GPT-OSS)
@@ -221,15 +174,16 @@ class TestLargeMaxNewTokens:
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestHarmonyValidation:
     """Validation tests for Harmony models (GPT-OSS)."""
 
-    def test_ignore_eos_rejected(self, setup_backend, smg):
+    def test_ignore_eos_rejected(self, setup_backend, api_client):
         """Test that ignore_eos is rejected for Harmony models with HTTP 400."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
-        with pytest.raises(openai.BadRequestError) as exc_info:
-            client.chat.completions.create(
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)) as exc_info:
+            api_client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "user", "content": "Hello"},
@@ -239,12 +193,12 @@ class TestHarmonyValidation:
         assert exc_info.value.status_code == 400
         assert exc_info.value.code == "ignore_eos_not_supported"
 
-    def test_tool_choice_with_response_format_rejected(self, setup_backend, smg):
+    def test_tool_choice_with_response_format_rejected(self, setup_backend, api_client):
         """Test that tool_choice + response_format is rejected with HTTP 400."""
-        _, model, client, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
-        with pytest.raises(openai.BadRequestError) as exc_info:
-            client.chat.completions.create(
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)) as exc_info:
+            api_client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "user", "content": "List 2 fruits."},
