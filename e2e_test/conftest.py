@@ -107,6 +107,7 @@ from fixtures import (
     pytest_collection_modifyitems,
     pytest_configure,
     pytest_runtest_setup,
+    pytest_sessionfinish,
     setup_backend,
 )
 from smg_client import SmgClient
@@ -152,6 +153,7 @@ __all__ = [
     "pytest_runtest_setup",
     "pytest_collection_modifyitems",
     "pytest_configure",
+    "pytest_sessionfinish",
     # Fixtures
     "setup_backend",
     "backend_router",
