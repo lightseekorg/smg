@@ -488,7 +488,7 @@ impl MeshController {
                                             match store_type {
                                                 LocalStoreType::App => {
                                                     // Deserialize and apply app state
-                                                    if let Ok(app_state) = serde_json::from_slice::<
+                                                    if let Ok(app_state) = bincode::deserialize::<
                                                         super::stores::AppState,
                                                     >(
                                                         &state_update.value
@@ -507,7 +507,7 @@ impl MeshController {
                                                 }
                                                 LocalStoreType::Membership => {
                                                     // Deserialize and apply membership state
-                                                    if let Ok(membership_state) = serde_json::from_slice::<
+                                                    if let Ok(membership_state) = bincode::deserialize::<
                                                         super::stores::MembershipState,
                                                     >(
                                                         &state_update.value
@@ -522,7 +522,7 @@ impl MeshController {
                                                 }
                                                 LocalStoreType::Worker => {
                                                     // Deserialize and apply worker state
-                                                    if let Ok(worker_state) = serde_json::from_slice::<
+                                                    if let Ok(worker_state) = bincode::deserialize::<
                                                         super::stores::WorkerState,
                                                     >(
                                                         &state_update.value
@@ -536,7 +536,7 @@ impl MeshController {
                                                 }
                                                 LocalStoreType::Policy => {
                                                     // Deserialize and apply policy state
-                                                    if let Ok(policy_state) = serde_json::from_slice::<
+                                                    if let Ok(policy_state) = bincode::deserialize::<
                                                         super::stores::PolicyState,
                                                     >(
                                                         &state_update.value
@@ -551,14 +551,14 @@ impl MeshController {
                                                 LocalStoreType::RateLimit => {
                                                     // Backward-compatible rate-limit decoding:
                                                     // old payloads may send OperationLog, newer ones send raw i64.
-                                                    if let Ok(log) = serde_json::from_slice::<
+                                                    if let Ok(log) = bincode::deserialize::<
                                                         super::crdt_kv::OperationLog,
                                                     >(&state_update.value)
                                                     {
                                                         sync_manager
                                                             .apply_remote_rate_limit_counter(&log);
                                                     } else if let Ok(counter_value) =
-                                                        serde_json::from_slice::<i64>(
+                                                        bincode::deserialize::<i64>(
                                                             &state_update.value,
                                                         )
                                                     {

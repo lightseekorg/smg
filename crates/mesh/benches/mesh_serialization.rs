@@ -133,6 +133,7 @@ fn bench_tree_state_serialization(c: &mut Criterion) {
     for (ops, tokens, label) in TEST_CONFIGS {
         let state = make_tree_state("test-model", ops, tokens);
         let json_size = serde_json::to_vec(&state).unwrap().len();
+        let bincode_size = bincode::serialize(&state).unwrap().len();
 
         group.bench_with_input(BenchmarkId::new("json", label), &state, |b, state| {
             b.iter(|| {
@@ -141,17 +142,21 @@ fn bench_tree_state_serialization(c: &mut Criterion) {
             });
         });
 
+        group.bench_with_input(BenchmarkId::new("bincode", label), &state, |b, state| {
+            b.iter(|| {
+                let bytes = bincode::serialize(black_box(state)).unwrap();
+                black_box(bytes);
+            });
+        });
+
         add_result(
             "serialize",
             format!(
-                "{:>18} | {:>10} | {:>10} | {:>8}",
+                "{:>18} | JSON {:>10} | bincode {:>10} | {:>5.1}x smaller | {:>8}",
                 label,
                 format_size(json_size),
-                if json_size > MAX_MESSAGE_SIZE {
-                    "EXCEEDS"
-                } else {
-                    "OK"
-                },
+                format_size(bincode_size),
+                json_size as f64 / bincode_size as f64,
                 format!("{ops}×{tokens}"),
             ),
         );
@@ -170,6 +175,7 @@ fn bench_tree_state_deserialization(c: &mut Criterion) {
     for (ops, tokens, label) in TEST_CONFIGS {
         let state = make_tree_state("test-model", ops, tokens);
         let json_bytes = serde_json::to_vec(&state).unwrap();
+        let bincode_bytes = bincode::serialize(&state).unwrap();
 
         group.bench_with_input(BenchmarkId::new("json", label), &json_bytes, |b, bytes| {
             b.iter(|| {
@@ -177,6 +183,17 @@ fn bench_tree_state_deserialization(c: &mut Criterion) {
                 black_box(state);
             });
         });
+
+        group.bench_with_input(
+            BenchmarkId::new("bincode", label),
+            &bincode_bytes,
+            |b, bytes| {
+                b.iter(|| {
+                    let state: TreeState = bincode::deserialize(black_box(bytes)).unwrap();
+                    black_box(state);
+                });
+            },
+        );
     }
 
     group.finish();
@@ -192,6 +209,7 @@ fn bench_policy_state_full_path(c: &mut Criterion) {
     for (ops, tokens, label) in [(256, 500, "256ops_500tok"), (1024, 1000, "1024ops_1000tok")] {
         let tree_state = make_tree_state("test-model", ops, tokens);
 
+        // JSON → JSON (old behavior)
         group.bench_with_input(
             BenchmarkId::new("json_json", label),
             &tree_state,
@@ -210,26 +228,54 @@ fn bench_policy_state_full_path(c: &mut Criterion) {
             },
         );
 
-        let inner = serde_json::to_vec(&tree_state).unwrap();
-        let inner_size = inner.len();
-        let ps = PolicyState {
+        // bincode → bincode (new behavior)
+        group.bench_with_input(
+            BenchmarkId::new("bincode_bincode", label),
+            &tree_state,
+            |b, ts| {
+                b.iter(|| {
+                    let inner = bincode::serialize(black_box(ts)).unwrap();
+                    let ps = PolicyState {
+                        model_id: "test-model".to_string(),
+                        policy_type: "tree_state".to_string(),
+                        config: inner,
+                        version: 1,
+                    };
+                    let outer = bincode::serialize(&ps).unwrap();
+                    black_box(outer);
+                });
+            },
+        );
+
+        // Size comparison
+        let json_inner = serde_json::to_vec(&tree_state).unwrap();
+        let json_ps = PolicyState {
             model_id: "test-model".to_string(),
             policy_type: "tree_state".to_string(),
-            config: inner,
+            config: json_inner,
             version: 1,
         };
-        let wire_size = serde_json::to_vec(&ps).unwrap().len();
+        let json_wire = serde_json::to_vec(&json_ps).unwrap().len();
+
+        let bin_inner = bincode::serialize(&tree_state).unwrap();
+        let bin_ps = PolicyState {
+            model_id: "test-model".to_string(),
+            policy_type: "tree_state".to_string(),
+            config: bin_inner,
+            version: 1,
+        };
+        let bin_wire = bincode::serialize(&bin_ps).unwrap().len();
 
         add_result(
             "wire_path",
             format!(
-                "{:>18} | {:>10} → {:>10} | {:>5.1}x blowup | {}",
+                "{:>18} | JSON {:>10} | bincode {:>10} | {:>5.1}x smaller | {}",
                 label,
-                format_size(inner_size),
-                format_size(wire_size),
-                wire_size as f64 / inner_size as f64,
-                if wire_size > MAX_MESSAGE_SIZE {
-                    "⚠ EXCEEDS 10MB LIMIT"
+                format_size(json_wire),
+                format_size(bin_wire),
+                json_wire as f64 / bin_wire as f64,
+                if json_wire > MAX_MESSAGE_SIZE {
+                    "⚠ JSON EXCEEDS 10MB"
                 } else {
                     "OK"
                 },

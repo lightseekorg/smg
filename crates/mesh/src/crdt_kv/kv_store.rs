@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use dashmap::{mapref::entry::Entry, DashMap};
 
@@ -6,10 +9,16 @@ use dashmap::{mapref::entry::Entry, DashMap};
 // High-Performance In-Memory KV Storage - Concurrent-Safe Implementation Based on DashMap
 // ============================================================================
 
-/// Basic KV storage, using DashMap for thread-safe high-performance access
+/// Basic KV storage, using DashMap for thread-safe high-performance access.
+///
+/// Includes a generation counter that increments on every mutation. This allows
+/// the incremental update collector to skip expensive full-store scans when
+/// nothing has changed.
 #[derive(Debug, Clone)]
 pub struct KvStore {
     store: Arc<DashMap<String, Vec<u8>>>,
+    /// Monotonically increasing counter, bumped on every insert/remove/upsert.
+    generation: Arc<AtomicU64>,
 }
 
 impl KvStore {
@@ -17,11 +26,18 @@ impl KvStore {
     pub fn new() -> Self {
         Self {
             store: Arc::new(DashMap::new()),
+            generation: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Current generation (mutation counter).
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     /// Insert or update key-value pair
     pub fn insert(&self, key: String, value: Vec<u8>) -> Option<Vec<u8>> {
+        self.generation.fetch_add(1, Ordering::Release);
         self.store.insert(key, value)
     }
 
@@ -30,6 +46,7 @@ impl KvStore {
     where
         F: FnOnce(Option<&[u8]>) -> Vec<u8>,
     {
+        self.generation.fetch_add(1, Ordering::Release);
         match self.store.entry(key) {
             Entry::Occupied(mut entry) => {
                 let new_value = updater(Some(entry.get().as_slice()));
@@ -51,6 +68,7 @@ impl KvStore {
 
     /// Remove key
     pub fn remove(&self, key: &str) -> Option<Vec<u8>> {
+        self.generation.fetch_add(1, Ordering::Release);
         self.store.remove(key).map(|(_, v)| v)
     }
 
