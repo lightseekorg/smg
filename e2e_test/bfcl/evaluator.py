@@ -36,7 +36,7 @@ def get_run_dir() -> Path:
 def _call_matches(actual: dict[str, Any], gt_entry: dict[str, Any]) -> bool:
     """Check whether a single actual tool call satisfies a ground truth entry."""
     expected_name = next(iter(gt_entry.keys()), None)
-    if actual.get("name") != expected_name:
+    if expected_name is None or actual.get("name") != expected_name:
         return False
     expected_args = gt_entry.get(expected_name, {})
     if not isinstance(expected_args, dict):
@@ -84,9 +84,9 @@ def _match_tool_calls(
         _assign(actual_idx, set())
 
     gt_for_actual: list[int | None] = [None] * len(actual_tool_calls)
-    for gt_idx, actual_idx in enumerate(actual_for_gt):
-        if actual_idx is not None:
-            gt_for_actual[actual_idx] = gt_idx
+    for gt_idx, matched_actual_idx in enumerate(actual_for_gt):
+        if matched_actual_idx is not None:
+            gt_for_actual[matched_actual_idx] = gt_idx
     return gt_for_actual
 
 
