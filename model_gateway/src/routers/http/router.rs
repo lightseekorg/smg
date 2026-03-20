@@ -808,8 +808,8 @@ mod tests {
         let worker2 = BasicWorkerBuilder::new("http://worker2:8080")
             .worker_type(WorkerType::Regular)
             .build();
-        worker_registry.register(Arc::new(worker1));
-        worker_registry.register(Arc::new(worker2));
+        worker_registry.register_or_replace(Arc::new(worker1));
+        worker_registry.register_or_replace(Arc::new(worker2));
 
         Router {
             worker_registry,
