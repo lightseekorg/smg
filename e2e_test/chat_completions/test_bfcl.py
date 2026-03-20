@@ -317,6 +317,7 @@ class TestBFCLQwen:
 # ============================================================================
 
 
+@pytest.mark.e2e
 @pytest.mark.skipif(
     not os.environ.get("BFCL_BASE_URL"),
     reason="Set BFCL_BASE_URL to run standalone BFCL tests",
