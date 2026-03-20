@@ -138,54 +138,19 @@ impl PipelineStage for HarmonyResponseProcessingStage {
                 ctx.state.response.responses_iteration_result = Some(iteration_result);
                 Ok(None)
             }
-            RequestType::Generate(_) => {
+            request_type @ (RequestType::Generate(_)
+            | RequestType::Completion(_)
+            | RequestType::Embedding(_)
+            | RequestType::Classify(_)
+            | RequestType::Messages(_)) => {
                 error!(
                     function = "HarmonyResponseProcessingStage::execute",
-                    "Generate request type not supported in Harmony pipeline"
+                    request_type = %request_type,
+                    "{request_type} request type not supported in Harmony pipeline"
                 );
                 Err(error::internal_error(
-                    "harmony_generate_not_supported",
-                    "Generate requests not supported in Harmony pipeline",
-                ))
-            }
-            RequestType::Completion(_) => {
-                error!(
-                    function = "HarmonyResponseProcessingStage::execute",
-                    "Completion request type not supported in Harmony pipeline"
-                );
-                Err(error::internal_error(
-                    "harmony_completion_not_supported",
-                    "Completion requests not supported in Harmony pipeline",
-                ))
-            }
-            RequestType::Embedding(_) => {
-                error!(
-                    function = "HarmonyResponseProcessingStage::execute",
-                    "Embedding request type not supported in Harmony pipeline"
-                );
-                Err(error::internal_error(
-                    "harmony_embedding_not_supported",
-                    "Embedding requests not supported in Harmony pipeline",
-                ))
-            }
-            RequestType::Classify(_) => {
-                error!(
-                    function = "HarmonyResponseProcessingStage::execute",
-                    "Classify request type not supported in Harmony pipeline"
-                );
-                Err(error::internal_error(
-                    "harmony_classify_not_supported",
-                    "Classify requests not supported in Harmony pipeline",
-                ))
-            }
-            RequestType::Messages(_) => {
-                error!(
-                    function = "HarmonyResponseProcessingStage::execute",
-                    "Messages request type not supported in Harmony pipeline"
-                );
-                Err(error::internal_error(
-                    "harmony_messages_not_supported",
-                    "Messages requests not supported in Harmony pipeline",
+                    "harmony_request_type_not_supported",
+                    format!("{request_type} requests not supported in Harmony pipeline"),
                 ))
             }
         }

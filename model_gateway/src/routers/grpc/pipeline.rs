@@ -646,14 +646,17 @@ impl RequestPipeline {
                 );
                 axum::Json(response).into_response()
             }
-            Some(FinalResponse::Chat(_))
-            | Some(FinalResponse::Generate(_))
-            | Some(FinalResponse::Embedding(_))
-            | Some(FinalResponse::Classify(_))
-            | Some(FinalResponse::Messages(_)) => {
+            Some(
+                response_type @ (FinalResponse::Chat(_)
+                | FinalResponse::Generate(_)
+                | FinalResponse::Embedding(_)
+                | FinalResponse::Classify(_)
+                | FinalResponse::Messages(_)),
+            ) => {
                 error!(
                     function = "execute_completion",
-                    "Wrong response type: expected Completion"
+                    response_type = %response_type,
+                    "Wrong response type: expected Completion, got {response_type}"
                 );
                 Metrics::record_router_error(
                     metrics_labels::ROUTER_GRPC,
