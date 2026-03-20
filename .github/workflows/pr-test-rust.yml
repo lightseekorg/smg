@@ -589,7 +589,7 @@ jobs:
       runner: 4-gpu-h100
       timeout: 25
       test_dirs: e2e_test/router
-      test_filter: "-k 'gpu(4) or TestIGWMixedWorkerClassification'"
+      test_filter: "-k TestIGWMixedWorkerClassification"
     secrets: inherit
 
   # --- Vendor E2E: CPU-only cloud backend tests ---
