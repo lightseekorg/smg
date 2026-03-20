@@ -340,7 +340,6 @@ convenient hands-free control to your smart devices.
 @pytest.mark.gpu(2)
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
-@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestChatCompletionGptOss(TestChatCompletion):
     """Tests for chat completions API with Harmony model (GPT-OSS).
 
