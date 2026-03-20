@@ -488,9 +488,11 @@ impl Gossip for GossipService {
         let mut sequence: u64 = 0;
         let _convergence_tracker = ConvergenceTracker::new();
 
-        // Track snapshot reception state: (store_type, total_chunks) -> received_chunks
+        // Track snapshot reception state: store_type -> (received_chunks, expected_total)
+        // Keyed by store_type only — a new snapshot request for the same store
+        // replaces any incomplete previous attempt (prevents stale chunk mixing).
         use std::collections::HashMap;
-        let mut snapshot_state: HashMap<(LocalStoreType, u64), Vec<SnapshotChunk>> = HashMap::new();
+        let mut snapshot_state: HashMap<LocalStoreType, (Vec<SnapshotChunk>, u64)> = HashMap::new();
 
         #[expect(
             clippy::disallowed_methods,
@@ -897,25 +899,48 @@ impl Gossip for GossipService {
                                         chunk.entries.iter().map(|e| e.value.len()).sum();
                                     record_snapshot_bytes(store_name, "received", chunk_bytes);
 
-                                    // Store chunk for later application
-                                    let chunk_key = (store_type, chunk.total_chunks);
-                                    snapshot_state
-                                        .entry(chunk_key)
-                                        .or_default()
-                                        .push(chunk.clone());
+                                    // Store chunk. Reset on chunk_index == 0 (start of a
+                                    // new snapshot transfer) to prevent stale chunks from a
+                                    // previous attempt mixing with new ones — even if
+                                    // total_chunks is the same.
+                                    let (chunks, expected) = snapshot_state
+                                        .entry(store_type)
+                                        .or_insert_with(|| (Vec::new(), chunk.total_chunks));
+                                    if chunk.chunk_index == 0 && !chunks.is_empty() {
+                                        log::info!(
+                                            "New snapshot transfer for {:?}, discarding {} partial chunks",
+                                            store_type, chunks.len()
+                                        );
+                                        chunks.clear();
+                                    }
+                                    *expected = chunk.total_chunks;
+                                    chunks.push(chunk.clone());
 
-                                    // Check if we've received all chunks
-                                    if let Some(received_chunks) = snapshot_state.get(&chunk_key) {
-                                        if received_chunks.len() as u64 == chunk.total_chunks {
-                                            // All chunks received, apply snapshot
+                                    // Check if we've received all chunks with valid indices
+                                    if let Some((received_chunks, total)) =
+                                        snapshot_state.get(&store_type)
+                                    {
+                                        if received_chunks.len() as u64 == *total {
+                                            // Verify all indices 0..total are present (no duplicates/gaps)
+                                            let mut sorted_chunks = received_chunks.to_vec();
+                                            sorted_chunks.sort_by_key(|c| c.chunk_index);
+                                            let indices_valid = sorted_chunks
+                                                .iter()
+                                                .enumerate()
+                                                .all(|(i, c)| c.chunk_index == i as u64);
+                                            if !indices_valid {
+                                                log::warn!(
+                                                    "Snapshot for {:?} has {} chunks but indices are not contiguous 0..{}, discarding",
+                                                    store_type, sorted_chunks.len(), total
+                                                );
+                                                snapshot_state.remove(&store_type);
+                                                continue;
+                                            }
+
                                             log::info!("All {} chunks received for store {:?}, applying snapshot",
-                                                chunk.total_chunks, store_type);
+                                                total, store_type);
 
                                             if let Some(ref stores) = stores {
-                                                // Sort chunks by index
-                                                let mut sorted_chunks = received_chunks.clone();
-                                                sorted_chunks.sort_by_key(|c| c.chunk_index);
-
                                                 // Apply all entries from chunks
                                                 for chunk in &sorted_chunks {
                                                     for entry in &chunk.entries {
@@ -1011,7 +1036,7 @@ impl Gossip for GossipService {
                                                 }
 
                                                 // Clear snapshot state
-                                                snapshot_state.remove(&chunk_key);
+                                                snapshot_state.remove(&store_type);
                                                 log::info!(
                                                     "Snapshot applied successfully for store {:?}",
                                                     store_type
