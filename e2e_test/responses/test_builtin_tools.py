@@ -180,7 +180,7 @@ class TestBuiltinVsMcpComparison:
 
     def test_mcp_tool_produces_mcp_call(self, setup_backend, api_client):
         """Verify that direct MCP tool produces mcp_call output."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -218,7 +218,7 @@ class TestBuiltinToolsCloudBackend:
 
     def test_web_search_preview_accepted(self, setup_backend, api_client):
         """Test that web_search_preview tool type is accepted."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -234,7 +234,7 @@ class TestBuiltinToolsCloudBackend:
 
     def test_mixed_builtin_and_function_tools(self, setup_backend, api_client):
         """Test mixing web_search_preview with function tools."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -274,7 +274,7 @@ class TestBuiltinToolsLocalBackend:
 
     def test_web_search_preview_accepted(self, setup_backend, api_client):
         """Test that web_search_preview tool type is accepted by local backend."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(1)
 
@@ -289,7 +289,7 @@ class TestBuiltinToolsLocalBackend:
 
     def test_mixed_builtin_and_function_tools(self, setup_backend, api_client):
         """Test mixing web_search_preview with function tools on local backend."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(1)
 

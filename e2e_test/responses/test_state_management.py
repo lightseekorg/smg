@@ -26,7 +26,7 @@ class _StateManagementCloudBase:
 
     def test_basic_response_creation(self, setup_backend, api_client):
         """Test basic response creation without state."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(model=model, input="What is 2+2?")
 
@@ -38,7 +38,7 @@ class _StateManagementCloudBase:
 
     def test_streaming_response(self, setup_backend, api_client):
         """Test streaming response."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(
             model=model, input="Count to 5", stream=True, max_output_tokens=50
@@ -52,7 +52,7 @@ class _StateManagementCloudBase:
 
     def test_previous_response_id_chaining(self, setup_backend, api_client):
         """Test chaining responses using previous_response_id."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         # First response
         resp1 = api_client.responses.create(
@@ -81,7 +81,7 @@ class _StateManagementCloudBase:
 
     def test_conversation_with_multiple_turns(self, setup_backend, api_client):
         """Test state management using conversation ID."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         # Create conversation
         conv_resp = api_client.conversations.create(metadata={"topic": "math"})
@@ -125,7 +125,7 @@ class _StateManagementCloudBase:
     @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")
     def test_previous_response_id_invalid(self, setup_backend, api_client):
         """Test using invalid previous_response_id."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
         with pytest.raises(openai.BadRequestError):
             api_client.responses.create(
                 model=model,
@@ -136,7 +136,7 @@ class _StateManagementCloudBase:
 
     def test_mutually_exclusive_parameters(self, setup_backend, api_client):
         """Test that previous_response_id and conversation are mutually exclusive."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         conversation_id = "conv_123"
         resp1 = api_client.responses.create(model=model, input="Test")
@@ -208,7 +208,7 @@ class TestStateManagementLocal:
     @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")
     def test_previous_response_id_invalid(self, setup_backend, api_client):
         """Test using invalid previous_response_id."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
         with pytest.raises(openai.BadRequestError):
             api_client.responses.create(
                 model=model,
@@ -219,7 +219,7 @@ class TestStateManagementLocal:
 
     def test_basic_response_creation(self, setup_backend, api_client):
         """Test basic response creation without state."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(model=model, input="What is 2+2?")
 
@@ -231,7 +231,7 @@ class TestStateManagementLocal:
 
     def test_streaming_response(self, setup_backend, api_client):
         """Test streaming response."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(
             model=model, input="Count to 5", stream=True, max_output_tokens=50
@@ -245,7 +245,7 @@ class TestStateManagementLocal:
 
     def test_previous_response_id_chaining(self, setup_backend, api_client):
         """Test chaining responses using previous_response_id."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         # First response
         resp1 = api_client.responses.create(
@@ -274,7 +274,7 @@ class TestStateManagementLocal:
 
     def test_mutually_exclusive_parameters(self, setup_backend, api_client):
         """Test that previous_response_id and conversation are mutually exclusive."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         conversation_id = "conv_123"
         resp1 = api_client.responses.create(model=model, input="Test")
@@ -305,7 +305,7 @@ class TestStateManagementHarmony:
     @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")
     def test_previous_response_id_invalid(self, setup_backend, api_client):
         """Test using invalid previous_response_id."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
         with pytest.raises(openai.BadRequestError):
             api_client.responses.create(
                 model=model,
@@ -316,7 +316,7 @@ class TestStateManagementHarmony:
 
     def test_basic_response_creation(self, setup_backend, api_client):
         """Test basic response creation without state."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(model=model, input="What is 2+2?")
 
@@ -328,7 +328,7 @@ class TestStateManagementHarmony:
 
     def test_streaming_response(self, setup_backend, api_client):
         """Test streaming response."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(
             model=model, input="Count to 5", stream=True, max_output_tokens=50
@@ -342,7 +342,7 @@ class TestStateManagementHarmony:
 
     def test_previous_response_id_chaining(self, setup_backend, api_client):
         """Test chaining responses using previous_response_id."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         # First response
         resp1 = api_client.responses.create(
@@ -371,7 +371,7 @@ class TestStateManagementHarmony:
 
     def test_mutually_exclusive_parameters(self, setup_backend, api_client):
         """Test that previous_response_id and conversation are mutually exclusive."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         conversation_id = "conv_123"
         resp1 = api_client.responses.create(model=model, input="Test")

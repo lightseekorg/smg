@@ -146,7 +146,7 @@ class TestToolCallingCloud:
 
     def test_basic_function_call(self, setup_backend, api_client):
         """Test basic function calling workflow."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [GET_HOROSCOPE_FUNCTION]
         system_prompt = (
@@ -221,7 +221,7 @@ class TestToolCallingCloud:
 
     def test_mcp_basic_tool_call(self, setup_backend, api_client):
         """Test basic MCP tool call (non-streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)  # Avoid rate limiting
 
@@ -269,7 +269,7 @@ class TestToolCallingCloud:
 
     def test_mcp_basic_tool_call_streaming(self, setup_backend, api_client):
         """Test basic MCP tool call (streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)  # Avoid rate limiting
 
@@ -351,7 +351,7 @@ class TestToolCallingCloud:
 
     def test_mcp_multi_server_tool_call(self, setup_backend, api_client):
         """Test MCP tool call with multiple MCP servers (non-streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)  # Avoid rate limiting
 
@@ -380,7 +380,7 @@ class TestToolCallingCloud:
 
     def test_mcp_multi_server_tool_call_streaming(self, setup_backend, api_client):
         """Test MCP tool call with multiple MCP servers (streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)  # Avoid rate limiting
 
@@ -423,7 +423,7 @@ class TestToolCallingCloud:
 
     def test_concurrent_mcp_different_servers(self, setup_backend, api_client):
         """Concurrent non-streaming requests with different MCP servers don't contaminate each other."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         def brave_request():
             return api_client.responses.create(
@@ -467,7 +467,7 @@ class TestToolCallingCloud:
 
     def test_concurrent_mcp_different_servers_streaming(self, setup_backend, api_client):
         """Concurrent streaming requests with different MCP servers don't contaminate each other."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         def brave_stream():
             return list(
@@ -535,7 +535,7 @@ class TestToolChoiceHarmony:
 
     def test_tool_choice_auto(self, setup_backend, api_client):
         """Test tool_choice="auto" allows model to decide whether to use tools."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [GET_WEATHER_FUNCTION]
 
@@ -560,7 +560,7 @@ class TestToolChoiceHarmony:
 
     def test_tool_choice_required(self, setup_backend, api_client):
         """Test tool_choice="required" forces the model to call at least one tool."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [CALCULATE_FUNCTION]
 
@@ -583,7 +583,7 @@ class TestToolChoiceHarmony:
 
     def test_tool_choice_specific_function(self, setup_backend, api_client):
         """Test tool_choice with specific function name forces that function to be called."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [SEARCH_WEB_FUNCTION, GET_WEATHER_FUNCTION]
 
@@ -607,7 +607,7 @@ class TestToolChoiceHarmony:
 
     def test_tool_choice_streaming(self, setup_backend, api_client):
         """Test tool_choice parameter works correctly with streaming."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [CALCULATE_FUNCTION]
 
@@ -634,7 +634,7 @@ class TestToolChoiceHarmony:
 
     def test_tool_choice_with_mcp_tools(self, setup_backend, api_client):
         """Test tool_choice parameter works with MCP tools."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [DEEPWIKI_MCP_TOOL]
 
@@ -658,7 +658,7 @@ class TestToolChoiceHarmony:
 
     def test_tool_choice_mixed_function_and_mcp(self, setup_backend, api_client):
         """Test tool_choice with mixed function and MCP tools."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [DEEPWIKI_MCP_TOOL, LOCAL_SEARCH_FUNCTION]
 
@@ -683,7 +683,7 @@ class TestToolChoiceHarmony:
 
     def test_basic_function_call(self, setup_backend, api_client):
         """Test basic function calling workflow."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [GET_HOROSCOPE_FUNCTION]
         system_prompt = (
@@ -716,7 +716,7 @@ class TestToolChoiceHarmony:
 
     def test_mcp_basic_tool_call(self, setup_backend, api_client):
         """Test basic MCP tool call (non-streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -747,7 +747,7 @@ class TestToolChoiceHarmony:
 
     def test_mcp_basic_tool_call_streaming(self, setup_backend, api_client):
         """Test basic MCP tool call (streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -770,7 +770,7 @@ class TestToolChoiceHarmony:
 
     def test_mixed_mcp_and_function_tools(self, setup_backend, api_client):
         """Test mixed MCP and function tools (non-streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(
             model=model,
@@ -798,7 +798,7 @@ class TestToolChoiceHarmony:
 
     def test_mixed_mcp_and_function_tools_streaming(self, setup_backend, api_client):
         """Test mixed MCP and function tools (streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(
             model=model,
@@ -825,7 +825,7 @@ class TestToolChoiceHarmony:
 
     def test_mcp_multi_server_tool_call(self, setup_backend, api_client):
         """Test MCP tool call with multiple MCP servers (non-streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -854,7 +854,7 @@ class TestToolChoiceHarmony:
 
     def test_mcp_multi_server_tool_call_streaming(self, setup_backend, api_client):
         """Test MCP tool call with multiple MCP servers (streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -912,7 +912,7 @@ class TestToolChoiceLocal:
 
     def test_tool_choice_auto(self, setup_backend, api_client):
         """Test tool_choice="auto" allows model to decide whether to use tools."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [GET_WEATHER_FUNCTION]
 
@@ -935,7 +935,7 @@ class TestToolChoiceLocal:
 
     def test_tool_choice_required(self, setup_backend, api_client):
         """Test tool_choice="required" forces the model to call at least one tool."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [CALCULATE_FUNCTION]
 
@@ -955,7 +955,7 @@ class TestToolChoiceLocal:
 
     def test_tool_choice_specific_function(self, setup_backend, api_client):
         """Test tool_choice with specific function name forces that function to be called."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [SEARCH_WEB_FUNCTION, GET_WEATHER_FUNCTION]
 
@@ -976,7 +976,7 @@ class TestToolChoiceLocal:
 
     def test_mcp_basic_tool_call(self, setup_backend, api_client):
         """Test basic MCP tool call (non-streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -1000,7 +1000,7 @@ class TestToolChoiceLocal:
 
     def test_mcp_basic_tool_call_streaming(self, setup_backend, api_client):
         """Test basic MCP tool call (streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -1021,7 +1021,7 @@ class TestToolChoiceLocal:
 
     def test_tool_choice_with_mcp_tools(self, setup_backend, api_client):
         """Test tool_choice parameter works with MCP tools."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [DEEPWIKI_MCP_TOOL]
 
@@ -1045,7 +1045,7 @@ class TestToolChoiceLocal:
 
     def test_tool_choice_mixed_function_and_mcp(self, setup_backend, api_client):
         """Test tool_choice with mixed function and MCP tools."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [DEEPWIKI_MCP_TOOL, LOCAL_SEARCH_FUNCTION]
 
@@ -1070,7 +1070,7 @@ class TestToolChoiceLocal:
 
     def test_mixed_mcp_and_function_tools(self, setup_backend, api_client):
         """Test mixed MCP and function tools (non-streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(
             model=model,
@@ -1098,7 +1098,7 @@ class TestToolChoiceLocal:
 
     def test_mixed_mcp_and_function_tools_streaming(self, setup_backend, api_client):
         """Test mixed MCP and function tools (streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(
             model=model,
@@ -1125,7 +1125,7 @@ class TestToolChoiceLocal:
 
     def test_mcp_multi_server_tool_call(self, setup_backend, api_client):
         """Test MCP tool call with multiple MCP servers (non-streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -1154,7 +1154,7 @@ class TestToolChoiceLocal:
 
     def test_mcp_multi_server_tool_call_streaming(self, setup_backend, api_client):
         """Test MCP tool call with multiple MCP servers (streaming)."""
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         time.sleep(2)
 

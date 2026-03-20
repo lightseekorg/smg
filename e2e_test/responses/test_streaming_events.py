@@ -36,7 +36,7 @@ class TestStreamingEventsLocal:
 
         Verifies that the first output item has output_index: 0.
         """
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(
             model=model,
@@ -121,7 +121,7 @@ class TestStreamingEventsHarmony:
 
         Verifies that the first output item has output_index: 0.
         """
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(
             model=model,
@@ -192,7 +192,7 @@ class TestStreamingEventsHarmony:
         Specifically tests that reasoning item has output_index: 0
         and message item has output_index: 1.
         """
-        _, model, _, gateway = setup_backend
+        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(
             model=model,
