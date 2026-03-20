@@ -12,7 +12,7 @@ use crate::{
     core::{
         steps::workflow_data::WorkerRegistrationData,
         worker::{ConnectionModeExt, WorkerTypeExt},
-        WorkerGroupKey,
+        WorkerGroupKey, WorkerRegistry,
     },
     observability::metrics::Metrics,
 };
@@ -65,19 +65,9 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for RegisterWorke
             if has_retry_overrides {
                 let resolved = worker.resilience();
                 let retry_config = resolved.retry.clone();
-                // Use the same model ID resolution as WorkerRegistry::worker_model_ids:
-                // worker.models() if non-empty, else fallback to worker.model_id().
-                let model_ids: Vec<String> = {
-                    let models = worker.models();
-                    if models.is_empty() {
-                        vec![worker.model_id().to_string()]
-                    } else {
-                        models.into_iter().map(|m| m.id).collect()
-                    }
-                };
-                for model_id in &model_ids {
+                for model_id in WorkerRegistry::worker_model_ids(worker) {
                     app_context.worker_registry.set_model_retry_config(
-                        model_id,
+                        &model_id,
                         retry_config.clone(),
                         resolved.retry_enabled,
                     );

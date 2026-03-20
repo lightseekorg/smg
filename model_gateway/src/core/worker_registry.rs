@@ -302,7 +302,7 @@ impl WorkerRegistry {
             .insert(model_id.to_string(), enabled);
     }
 
-    fn worker_model_ids(worker: &Arc<dyn Worker>) -> Vec<String> {
+    pub fn worker_model_ids(worker: &Arc<dyn Worker>) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut model_ids: Vec<String> = worker
             .models()
