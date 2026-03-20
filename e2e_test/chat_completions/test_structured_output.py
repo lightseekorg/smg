@@ -131,6 +131,7 @@ class _TestStructuredOutputBase:
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestStructuredOutputRegular(_TestStructuredOutputBase):
     """Structured output tests for regular models (Llama)."""
 
@@ -145,6 +146,7 @@ class TestStructuredOutputRegular(_TestStructuredOutputBase):
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestStructuredOutputHarmony(_TestStructuredOutputBase):
     """Structured output tests for Harmony models (GPT-OSS).
 

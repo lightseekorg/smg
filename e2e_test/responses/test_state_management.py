@@ -12,6 +12,7 @@ import logging
 
 import openai
 import pytest
+import smg_client
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ class _StateManagementCloudBase:
     def test_previous_response_id_invalid(self, setup_backend, api_client):
         """Test using invalid previous_response_id."""
         _, model, _, _ = setup_backend
-        with pytest.raises(openai.BadRequestError):
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
             api_client.responses.create(
                 model=model,
                 input="Test",
@@ -141,7 +142,7 @@ class _StateManagementCloudBase:
         conversation_id = "conv_123"
         resp1 = api_client.responses.create(model=model, input="Test")
 
-        with pytest.raises(openai.BadRequestError):
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
             api_client.responses.create(
                 model=model,
                 input="This should fail",
@@ -202,6 +203,7 @@ class TestStateManagementOracleCustom(_StateManagementCloudBase):
 @pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestStateManagementLocal:
     """State management tests against local gRPC backend."""
 
@@ -209,7 +211,7 @@ class TestStateManagementLocal:
     def test_previous_response_id_invalid(self, setup_backend, api_client):
         """Test using invalid previous_response_id."""
         _, model, _, _ = setup_backend
-        with pytest.raises(openai.BadRequestError):
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
             api_client.responses.create(
                 model=model,
                 input="Test",
@@ -279,7 +281,7 @@ class TestStateManagementLocal:
         conversation_id = "conv_123"
         resp1 = api_client.responses.create(model=model, input="Test")
 
-        with pytest.raises(openai.BadRequestError):
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
             api_client.responses.create(
                 model=model,
                 input="This should fail",
@@ -299,6 +301,7 @@ class TestStateManagementLocal:
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestStateManagementHarmony:
     """State management tests against local gRPC backend with Harmony model."""
 
@@ -306,7 +309,7 @@ class TestStateManagementHarmony:
     def test_previous_response_id_invalid(self, setup_backend, api_client):
         """Test using invalid previous_response_id."""
         _, model, _, _ = setup_backend
-        with pytest.raises(openai.BadRequestError):
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
             api_client.responses.create(
                 model=model,
                 input="Test",
@@ -376,7 +379,7 @@ class TestStateManagementHarmony:
         conversation_id = "conv_123"
         resp1 = api_client.responses.create(model=model, input="Test")
 
-        with pytest.raises(openai.BadRequestError):
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
             api_client.responses.create(
                 model=model,
                 input="This should fail",

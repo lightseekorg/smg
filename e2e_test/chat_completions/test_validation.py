@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import openai
 import pytest
+import smg_client
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ def get_tokenizer(model_path: str):
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestIgnoreEOS:
     """Tests for ignore_eos feature."""
 
@@ -111,6 +113,7 @@ class TestIgnoreEOS:
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestLargeMaxNewTokens:
     """Tests for handling large max_new_tokens with concurrent requests."""
 
@@ -171,6 +174,7 @@ class TestLargeMaxNewTokens:
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestHarmonyValidation:
     """Validation tests for Harmony models (GPT-OSS)."""
 
@@ -178,7 +182,7 @@ class TestHarmonyValidation:
         """Test that ignore_eos is rejected for Harmony models with HTTP 400."""
         _, model, _, _ = setup_backend
 
-        with pytest.raises(openai.BadRequestError) as exc_info:
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)) as exc_info:
             api_client.chat.completions.create(
                 model=model,
                 messages=[
@@ -193,7 +197,7 @@ class TestHarmonyValidation:
         """Test that tool_choice + response_format is rejected with HTTP 400."""
         _, model, _, _ = setup_backend
 
-        with pytest.raises(openai.BadRequestError) as exc_info:
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)) as exc_info:
             api_client.chat.completions.create(
                 model=model,
                 messages=[

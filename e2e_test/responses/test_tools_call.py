@@ -530,6 +530,7 @@ class TestToolCallingCloud:
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestToolChoiceHarmony:
     """Tool choice tests against local gRPC backend with Harmony model."""
 
@@ -907,6 +908,7 @@ class TestToolChoiceHarmony:
 @pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestToolChoiceLocal:
     """Tool choice tests against local gRPC backend with Qwen model."""
 

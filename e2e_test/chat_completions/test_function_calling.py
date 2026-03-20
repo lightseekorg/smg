@@ -13,6 +13,7 @@ import logging
 
 import openai
 import pytest
+import smg_client
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,7 @@ PYTHONIC_MESSAGES = [
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestOpenAIServerFunctionCalling:
     """Tests for OpenAI-compatible function calling with Llama tool parser."""
 
@@ -723,6 +725,7 @@ class TestOpenAIServerFunctionCalling:
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "pythonic", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestOpenAIPythonicFunctionCalling:
     """Tests for pythonic function calling format."""
 
@@ -1372,7 +1375,7 @@ class _TestToolChoiceBase:
         tool_choice = {"type": "function", "function": {"name": "nonexistent_function"}}
 
         # Expect a 400 BadRequestError to be raised for invalid tool_choice
-        with pytest.raises(openai.BadRequestError) as exc_info:
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)) as exc_info:
             api_client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -1418,7 +1421,7 @@ class _TestToolChoiceBase:
         ]
 
         # Should raise BadRequestError due to missing required 'name' field
-        with pytest.raises(openai.BadRequestError) as exc_info:
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)) as exc_info:
             api_client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -1490,7 +1493,7 @@ class _TestToolChoiceBase:
         ]
 
         # Should raise BadRequestError due to conflicting $defs
-        with pytest.raises(openai.BadRequestError) as exc_info:
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)) as exc_info:
             api_client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -1517,6 +1520,7 @@ class _TestToolChoiceBase:
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestToolChoiceLlama(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Llama model."""
 
@@ -1537,6 +1541,7 @@ class TestToolChoiceLlama(_TestToolChoiceBase):
 @pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestToolChoiceQwen(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Qwen model."""
 
@@ -1554,6 +1559,7 @@ class TestToolChoiceQwen(_TestToolChoiceBase):
 @pytest.mark.model("mistralai/Mistral-7B-Instruct-v0.3")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "mistral", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestToolChoiceMistral(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Mistral model."""
 

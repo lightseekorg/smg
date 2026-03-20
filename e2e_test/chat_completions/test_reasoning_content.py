@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
     extra_args=["--reasoning-parser", "deepseek_r1", "--history-backend", "memory"]
 )
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestReasoningContentAPI:
     """Tests for reasoning content API with DeepSeek R1 reasoning parser."""
 

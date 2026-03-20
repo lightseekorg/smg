@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 @pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestStreamingEventsLocal:
     """Streaming event tests against local gRPC backend."""
 
@@ -113,6 +114,7 @@ class TestStreamingEventsLocal:
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestStreamingEventsHarmony:
     """Streaming event tests against local gRPC backend with Harmony model."""
 
