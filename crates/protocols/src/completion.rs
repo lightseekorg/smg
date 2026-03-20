@@ -84,7 +84,9 @@ pub struct CompletionRequest {
     /// A unique identifier representing your end-user
     pub user: Option<String>,
 
-    // Engine-specific sampling parameters
+    // =============================================================================
+    // Engine-Specific Sampling Parameters
+    // =============================================================================
     /// Top-k sampling parameter (-1 to disable)
     #[validate(custom(function = "validate_top_k_value"))]
     pub top_k: Option<i32>,

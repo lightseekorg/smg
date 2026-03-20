@@ -149,7 +149,7 @@ impl PipelineStage for HarmonyResponseProcessingStage {
                     "{request_type} request type not supported in Harmony pipeline"
                 );
                 Err(error::internal_error(
-                    "harmony_request_type_not_supported",
+                    "not_supported_in_harmony",
                     format!("{request_type} requests not supported in Harmony pipeline"),
                 ))
             }

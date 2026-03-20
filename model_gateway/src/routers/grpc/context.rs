@@ -666,7 +666,7 @@ pub(crate) enum ExecutionResult {
 #[derive(Debug)]
 #[expect(
     dead_code,
-    reason = "Completion final response is introduced in the plumbing PR before later stacked PRs produce it"
+    reason = "Completion responses are typed in the pipeline before a later stage constructs them"
 )]
 pub(crate) enum FinalResponse {
     Chat(ChatCompletionResponse),

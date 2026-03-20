@@ -73,7 +73,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                     "{request_type} request type not supported for Harmony models"
                 );
                 return Err(error::bad_request(
-                    "harmony_request_type_not_supported",
+                    "not_supported_in_harmony",
                     format!("{request_type} requests are not supported with Harmony models"),
                 ));
             }
