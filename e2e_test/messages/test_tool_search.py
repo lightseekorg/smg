@@ -172,9 +172,9 @@ class TestToolSearchPassthrough:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-    def test_tool_search_with_deferred_tools_streaming(self, setup_backend):
+    def test_tool_search_with_deferred_tools_streaming(self, setup_backend, api_client):
         """Streaming variant of tool search passthrough."""
-        _, model, client, _ = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [
             make_tool_search_tool(),
@@ -198,7 +198,7 @@ class TestToolSearchPassthrough:
         block_types = []
         content_blocks = []
 
-        with client.messages.stream(
+        with api_client.messages.stream(
             model=model,
             max_tokens=1024,
             messages=[{"role": "user", "content": "What's the weather in Paris?"}],
@@ -364,9 +364,9 @@ class TestToolSearchWithMcp:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-    def test_mcp_tools_with_deferred_loading_streaming(self, setup_backend):
+    def test_mcp_tools_with_deferred_loading_streaming(self, setup_backend, api_client):
         """Streaming variant: tool_search + deferred MCP tools via SMG."""
-        _, model, client, _ = setup_backend
+        _, model, _, _ = setup_backend
 
         tools = [
             make_tool_search_tool(),
@@ -382,7 +382,7 @@ class TestToolSearchWithMcp:
         block_types = []
         content_blocks = []
 
-        with client.messages.stream(
+        with api_client.messages.stream(
             model=model,
             max_tokens=2048,
             messages=[
