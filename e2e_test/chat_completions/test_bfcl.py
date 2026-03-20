@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ from bfcl.session_state import append_result, get_or_create_run_dir
 logger = logging.getLogger(__name__)
 
 BFCL_LIMIT = int(os.environ.get("BFCL_LIMIT", "0")) or None
+BFCL_CATEGORIES = ("simple", "multiple", "parallel", "parallel_multiple", "irrelevance")
 
 
 # ---------------------------------------------------------------------------
@@ -57,9 +59,13 @@ BFCL_LIMIT = int(os.environ.get("BFCL_LIMIT", "0")) or None
 
 def _extract_tool_calls(response: Any) -> list[dict[str, Any]]:
     """Pull structured tool calls out of an OpenAI ChatCompletion response."""
-    if not response.choices:
+    choices = getattr(response, "choices", None) or []
+    if not choices:
         return []
-    tool_calls = response.choices[0].message.tool_calls or []
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        return []
+    tool_calls = getattr(message, "tool_calls", None) or []
     result = []
     for tc in tool_calls:
         try:
@@ -88,26 +94,45 @@ def _load(category: str) -> list[dict]:
 
 # Safe without a lock: pytest_generate_tests runs during collection,
 # which is single-threaded even under pytest-parallel (--tests-per-worker N).
-_cases_cache: list[dict] | None = None
+_cases_cache: dict[str, list[dict]] = {}
+
+
+def _selected_categories(keyword: str | None) -> list[str]:
+    """Infer which BFCL categories need loading from the pytest -k filter."""
+    if not keyword:
+        return list(BFCL_CATEGORIES)
+
+    matched = []
+    for category in BFCL_CATEGORIES:
+        patterns = {
+            category,
+            f"{category}_",
+            category.replace("_", "-"),
+            category.replace("_", " "),
+        }
+        if any(re.search(rf"(?<!\w){re.escape(pattern)}", keyword) for pattern in patterns):
+            matched.append(category)
+
+    return matched or list(BFCL_CATEGORIES)
+
+
+def _get_cases_for_category(category: str) -> list[dict]:
+    """Load and cache BFCL cases only for categories needed by this run."""
+    if category not in _cases_cache:
+        _cases_cache[category] = _load(category)
+    return _cases_cache[category]
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     """Parametrize 'case' lazily — data is loaded only when BFCL tests are collected."""
-    global _cases_cache
     if "case" not in metafunc.fixturenames:
         return
-    if _cases_cache is None:
-        _cases_cache = (
-            _load("simple")
-            + _load("multiple")
-            + _load("parallel")
-            + _load("parallel_multiple")
-            + _load("irrelevance")
-        )
-    if not _cases_cache:
+    categories = _selected_categories(getattr(metafunc.config.option, "keyword", None))
+    cases = [case for category in categories for case in _get_cases_for_category(category)]
+    if not cases:
         metafunc.parametrize("case", [], ids=[])
         return
-    metafunc.parametrize("case", _cases_cache, ids=[c["id"] for c in _cases_cache])
+    metafunc.parametrize("case", cases, ids=[c["id"] for c in cases])
 
 
 # ---------------------------------------------------------------------------

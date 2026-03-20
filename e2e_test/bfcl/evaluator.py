@@ -39,8 +39,15 @@ def _call_matches(actual: dict[str, Any], gt_entry: dict[str, Any]) -> bool:
     if actual.get("name") != expected_name:
         return False
     expected_args = gt_entry.get(expected_name, {})
+    if not isinstance(expected_args, dict):
+        return False
+    actual_args = actual.get("arguments")
+    if not isinstance(actual_args, dict):
+        return False
+    if set(actual_args) != set(expected_args):
+        return False
     for param_name, possible_values in expected_args.items():
-        actual_val = actual.get("arguments", {}).get(param_name)
+        actual_val = actual_args.get(param_name)
         if not isinstance(possible_values, list):
             possible_values = [possible_values]
         if not any(_values_match(actual_val, pv) for pv in possible_values):
@@ -148,8 +155,11 @@ def save_test_log(
     cat_dir.mkdir(parents=True, exist_ok=True)
 
     safe_id = test_id.replace("/", "_").replace(" ", "_")
+    safe_model = model.replace("/", "_").replace(" ", "_")
+    safe_backend = backend.replace("/", "_").replace(" ", "_")
+    safe_parser = parser.replace("/", "_").replace(" ", "_")
     status = "PASS" if passed else "FAIL"
-    filename = f"{safe_id}_{status}.json"
+    filename = f"{safe_id}_{safe_model}_{safe_backend}_{safe_parser}_{status}.json"
 
     log_entry = {
         "test_id": test_id,

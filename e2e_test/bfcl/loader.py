@@ -94,6 +94,11 @@ def load_bfcl_category(
 
     results: list[dict[str, Any]] = []
     for test_id, entry in questions_by_id.items():
+        if answer_filename and test_id not in answers_by_id:
+            raise MissingBFCLAnswerFileError(
+                f"BFCL ground truth missing for category={category!r}, "
+                f"id={test_id!r} in {answer_filename}"
+            )
         raw_question = entry.get("question", [])
         messages = (
             raw_question[0] if raw_question and isinstance(raw_question[0], list) else raw_question
