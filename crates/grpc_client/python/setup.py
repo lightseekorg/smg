@@ -93,9 +93,25 @@ class DevelopWithProto(develop):
         super().run()
 
 
+try:
+    from setuptools.command.editable_wheel import editable_wheel as _EditableWheelBase
+
+    class EditableWheelWithProto(_EditableWheelBase):
+        """PEP 660 editable install hook (used by uv and pip >= 21.3)."""
+
+        def run(self):
+            compile_grpc_protos()
+            super().run()
+
+    _editable_wheel_cmd: dict = {"editable_wheel": EditableWheelWithProto}
+except ImportError:
+    _editable_wheel_cmd = {}
+
+
 setup(
     cmdclass={
         "build_py": BuildPyWithProto,
         "develop": DevelopWithProto,
+        **_editable_wheel_cmd,
     }
 )
