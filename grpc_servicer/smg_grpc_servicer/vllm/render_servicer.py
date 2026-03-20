@@ -52,7 +52,9 @@ class RenderGrpcServicer:
         self.start_time = start_time
 
     async def HealthCheck(self, request, context):
-        return vllm_engine_pb2.HealthCheckResponse(healthy=True, message="Healthy")
+        healthy = self.state.openai_serving_render is not None
+        msg = "Healthy" if healthy else "Render service not initialized"
+        return vllm_engine_pb2.HealthCheckResponse(healthy=healthy, message=msg)
 
     async def GetModelInfo(self, request, context):
         model_config = self.state.vllm_config.model_config
