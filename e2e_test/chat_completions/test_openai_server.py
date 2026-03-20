@@ -111,6 +111,7 @@ class TestChatCompletion:
             if index not in is_firsts:
                 is_firsts[index] = True
                 assert delta.role == "assistant"
+                continue
 
             if response.choices[0].finish_reason:
                 is_finished[index] = True
