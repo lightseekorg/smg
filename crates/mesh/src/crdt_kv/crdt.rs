@@ -317,6 +317,47 @@ impl CrdtOrMap {
         self.replica_id
     }
 
+    /// Remove tombstoned keys from the metadata and key_locks maps.
+    /// Keys that are not in the live store and whose latest metadata entry
+    /// is a tombstone are cleaned up to prevent unbounded memory growth.
+    /// Returns the number of entries removed.
+    pub fn gc_tombstones(&self) -> usize {
+        let mut removed = 0;
+        let keys_to_check: Vec<String> = self
+            .metadata
+            .iter()
+            .filter(|entry| !self.store.contains_key(entry.key()))
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in keys_to_check {
+            if !self.key_is_tombstoned_or_unknown(&key) {
+                continue;
+            }
+            // Only remove key_locks if no other task holds the lock.
+            // Uses the same safety pattern as try_cleanup_key_lock:
+            // check strong_count and try_lock before removing.
+            self.key_locks.remove_if(&key, |_, lock| {
+                Arc::strong_count(lock) <= 2 && lock.try_lock().is_some()
+            });
+            // Atomically remove metadata only if the key is still not in the
+            // live store AND still tombstoned. The remove_if closure runs
+            // under the DashMap shard lock, preventing a concurrent insert
+            // from racing between check and remove.
+            let was_removed = self.metadata.remove_if(&key, |_, versions| {
+                !self.store.contains_key(&key)
+                    && versions
+                        .iter()
+                        .max_by_key(|v| v.version_key())
+                        .is_none_or(|winner| winner.is_tombstone)
+            });
+            if was_removed.is_some() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Get the operation log
     pub fn get_operation_log(&self) -> OperationLog {
         self.operation_log.read().clone()
