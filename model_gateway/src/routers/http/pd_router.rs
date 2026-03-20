@@ -1425,9 +1425,15 @@ mod tests {
         let decode_worker =
             create_test_worker("http://decode".to_string(), WorkerType::Decode, true);
 
-        router.worker_registry.register(Arc::from(unhealthy_worker));
-        router.worker_registry.register(Arc::from(healthy_worker));
-        router.worker_registry.register(Arc::from(decode_worker));
+        router
+            .worker_registry
+            .register_or_replace(Arc::from(unhealthy_worker));
+        router
+            .worker_registry
+            .register_or_replace(Arc::from(healthy_worker));
+        router
+            .worker_registry
+            .register_or_replace(Arc::from(decode_worker));
 
         let result = router.select_pd_pair(None, None, None).await;
 
@@ -1486,8 +1492,12 @@ mod tests {
         let decode_worker =
             create_test_worker("http://decode".to_string(), WorkerType::Decode, true);
 
-        router.worker_registry.register(Arc::from(prefill_worker));
-        router.worker_registry.register(Arc::from(decode_worker));
+        router
+            .worker_registry
+            .register_or_replace(Arc::from(prefill_worker));
+        router
+            .worker_registry
+            .register_or_replace(Arc::from(decode_worker));
 
         let prefill_workers = router.worker_registry.get_prefill_workers();
         let decode_workers = router.worker_registry.get_decode_workers();
