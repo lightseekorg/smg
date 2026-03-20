@@ -61,6 +61,48 @@ pub(crate) struct RequestPipeline {
 }
 
 impl RequestPipeline {
+    fn wrong_response_type(
+        &self,
+        function: &'static str,
+        expected: &'static str,
+        response_type: &FinalResponse,
+        model: &str,
+        endpoint: &'static str,
+    ) -> Response {
+        error!(
+            function = function,
+            response_type = %response_type,
+            "Wrong response type: expected {expected}, got {response_type}"
+        );
+        Metrics::record_router_error(
+            metrics_labels::ROUTER_GRPC,
+            self.backend_type,
+            metrics_labels::CONNECTION_GRPC,
+            model,
+            endpoint,
+            metrics_labels::ERROR_INTERNAL,
+        );
+        error::internal_error("wrong_response_type", "Internal error: wrong response type")
+    }
+
+    fn no_response_produced(
+        &self,
+        function: &'static str,
+        model: &str,
+        endpoint: &'static str,
+    ) -> Response {
+        error!(function = function, "No response produced by pipeline");
+        Metrics::record_router_error(
+            metrics_labels::ROUTER_GRPC,
+            self.backend_type,
+            metrics_labels::CONNECTION_GRPC,
+            model,
+            endpoint,
+            metrics_labels::ERROR_INTERNAL,
+        );
+        error::internal_error("no_response_produced", "No response produced")
+    }
+
     /// Create a regular (single-worker) pipeline
     pub fn new_regular(
         worker_registry: Arc<WorkerRegistry>,
@@ -430,44 +472,27 @@ impl RequestPipeline {
                 );
                 axum::Json(response).into_response()
             }
-            Some(FinalResponse::Generate(_))
-            | Some(FinalResponse::Completion(_))
-            | Some(FinalResponse::Embedding(_))
-            | Some(FinalResponse::Classify(_))
-            | Some(FinalResponse::Messages(_)) => {
-                error!(
-                    function = "execute_chat",
-                    "Wrong response type: expected Chat, got Generate/Completion/Embedding/Classify/Messages"
-                );
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_GRPC,
-                    self.backend_type,
-                    metrics_labels::CONNECTION_GRPC,
-                    &request_for_metrics.model,
-                    metrics_labels::ENDPOINT_CHAT,
-                    metrics_labels::ERROR_INTERNAL,
-                );
-                error::internal_error("wrong_response_type", "Internal error: wrong response type")
-            }
-            None => {
-                error!(
-                    function = "execute_chat",
-                    "No response produced by pipeline"
-                );
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_GRPC,
-                    self.backend_type,
-                    metrics_labels::CONNECTION_GRPC,
-                    &request_for_metrics.model,
-                    metrics_labels::ENDPOINT_CHAT,
-                    metrics_labels::ERROR_INTERNAL,
-                );
-                error::internal_error("no_response_produced", "No response produced")
-            }
+            Some(
+                response_type @ (FinalResponse::Generate(_)
+                | FinalResponse::Completion(_)
+                | FinalResponse::Embedding(_)
+                | FinalResponse::Classify(_)
+                | FinalResponse::Messages(_)),
+            ) => self.wrong_response_type(
+                "execute_chat",
+                "Chat",
+                &response_type,
+                &request_for_metrics.model,
+                metrics_labels::ENDPOINT_CHAT,
+            ),
+            None => self.no_response_produced(
+                "execute_chat",
+                &request_for_metrics.model,
+                metrics_labels::ENDPOINT_CHAT,
+            ),
         }
     }
 
-    /// Execute the complete pipeline for a generate request
     /// Execute the complete pipeline for a generate request
     pub async fn execute_generate(
         &self,
@@ -536,40 +561,24 @@ impl RequestPipeline {
                 );
                 axum::Json(response).into_response()
             }
-            Some(FinalResponse::Chat(_))
-            | Some(FinalResponse::Completion(_))
-            | Some(FinalResponse::Embedding(_))
-            | Some(FinalResponse::Classify(_))
-            | Some(FinalResponse::Messages(_)) => {
-                error!(
-                    function = "execute_generate",
-                    "Wrong response type: expected Generate, got Chat/Completion/Embedding/Classify/Messages"
-                );
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_GRPC,
-                    self.backend_type,
-                    metrics_labels::CONNECTION_GRPC,
-                    model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
-                    metrics_labels::ENDPOINT_GENERATE,
-                    metrics_labels::ERROR_INTERNAL,
-                );
-                error::internal_error("wrong_response_type", "Internal error: wrong response type")
-            }
-            None => {
-                error!(
-                    function = "execute_generate",
-                    "No response produced by pipeline"
-                );
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_GRPC,
-                    self.backend_type,
-                    metrics_labels::CONNECTION_GRPC,
-                    model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
-                    metrics_labels::ENDPOINT_GENERATE,
-                    metrics_labels::ERROR_INTERNAL,
-                );
-                error::internal_error("no_response_produced", "No response produced")
-            }
+            Some(
+                response_type @ (FinalResponse::Chat(_)
+                | FinalResponse::Completion(_)
+                | FinalResponse::Embedding(_)
+                | FinalResponse::Classify(_)
+                | FinalResponse::Messages(_)),
+            ) => self.wrong_response_type(
+                "execute_generate",
+                "Generate",
+                &response_type,
+                model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                metrics_labels::ENDPOINT_GENERATE,
+            ),
+            None => self.no_response_produced(
+                "execute_generate",
+                model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                metrics_labels::ENDPOINT_GENERATE,
+            ),
         }
     }
 
@@ -652,37 +661,18 @@ impl RequestPipeline {
                 | FinalResponse::Embedding(_)
                 | FinalResponse::Classify(_)
                 | FinalResponse::Messages(_)),
-            ) => {
-                error!(
-                    function = "execute_completion",
-                    response_type = %response_type,
-                    "Wrong response type: expected Completion, got {response_type}"
-                );
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_GRPC,
-                    self.backend_type,
-                    metrics_labels::CONNECTION_GRPC,
-                    &model,
-                    metrics_labels::ENDPOINT_COMPLETIONS,
-                    metrics_labels::ERROR_INTERNAL,
-                );
-                error::internal_error("wrong_response_type", "Internal error: wrong response type")
-            }
-            None => {
-                error!(
-                    function = "execute_completion",
-                    "No response produced by pipeline"
-                );
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_GRPC,
-                    self.backend_type,
-                    metrics_labels::CONNECTION_GRPC,
-                    &model,
-                    metrics_labels::ENDPOINT_COMPLETIONS,
-                    metrics_labels::ERROR_INTERNAL,
-                );
-                error::internal_error("no_response_produced", "No response produced")
-            }
+            ) => self.wrong_response_type(
+                "execute_completion",
+                "Completion",
+                &response_type,
+                &model,
+                metrics_labels::ENDPOINT_COMPLETIONS,
+            ),
+            None => self.no_response_produced(
+                "execute_completion",
+                &model,
+                metrics_labels::ENDPOINT_COMPLETIONS,
+            ),
         }
     }
 
@@ -955,40 +945,24 @@ impl RequestPipeline {
                 );
                 axum::Json(response).into_response()
             }
-            Some(FinalResponse::Chat(_))
-            | Some(FinalResponse::Generate(_))
-            | Some(FinalResponse::Completion(_))
-            | Some(FinalResponse::Embedding(_))
-            | Some(FinalResponse::Classify(_)) => {
-                error!(
-                    function = "execute_messages",
-                    "Wrong response type: expected Messages"
-                );
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_GRPC,
-                    self.backend_type,
-                    metrics_labels::CONNECTION_GRPC,
-                    &request.model,
-                    metrics_labels::ENDPOINT_MESSAGES,
-                    metrics_labels::ERROR_INTERNAL,
-                );
-                error::internal_error("wrong_response_type", "Internal error: wrong response type")
-            }
-            None => {
-                error!(
-                    function = "execute_messages",
-                    "No response produced by pipeline"
-                );
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_GRPC,
-                    self.backend_type,
-                    metrics_labels::CONNECTION_GRPC,
-                    &request.model,
-                    metrics_labels::ENDPOINT_MESSAGES,
-                    metrics_labels::ERROR_INTERNAL,
-                );
-                error::internal_error("no_response_produced", "No response produced")
-            }
+            Some(
+                response_type @ (FinalResponse::Chat(_)
+                | FinalResponse::Generate(_)
+                | FinalResponse::Completion(_)
+                | FinalResponse::Embedding(_)
+                | FinalResponse::Classify(_)),
+            ) => self.wrong_response_type(
+                "execute_messages",
+                "Messages",
+                &response_type,
+                &request.model,
+                metrics_labels::ENDPOINT_MESSAGES,
+            ),
+            None => self.no_response_produced(
+                "execute_messages",
+                &request.model,
+                metrics_labels::ENDPOINT_MESSAGES,
+            ),
         }
     }
 
