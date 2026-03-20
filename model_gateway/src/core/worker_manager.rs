@@ -29,6 +29,7 @@ use crate::{
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT: usize = 32;
+const GRPC_METRICS_PORT_OFFSET: u16 = 10_000;
 
 /// Result of a fan-out request to a single worker
 struct WorkerResponse {
@@ -88,25 +89,54 @@ async fn fan_out_with(
         .await
 }
 
+fn strip_dp_rank_suffix(url: &str) -> &str {
+    if let Some(at_pos) = url.rfind('@') {
+        let suffix = &url[at_pos + 1..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            return &url[..at_pos];
+        }
+    }
+    url
+}
+
+fn parse_worker_host_port(url: &str) -> Option<(String, u16)> {
+    let parsed = url::Url::parse(strip_dp_rank_suffix(url)).ok()?;
+    let host = match parsed.host()? {
+        url::Host::Ipv6(addr) => format!("[{addr}]"),
+        other => other.to_string(),
+    };
+    let port = parsed.port()?;
+    Some((host, port))
+}
+
+fn derive_grpc_metrics_port(grpc_port: u16) -> Option<u16> {
+    grpc_port
+        .checked_add(GRPC_METRICS_PORT_OFFSET)
+        .or_else(|| grpc_port.checked_sub(GRPC_METRICS_PORT_OFFSET))
+}
+
 /// Build the HTTP URL for fetching Prometheus metrics from a worker.
 ///
 /// For HTTP workers, uses the worker URL directly (e.g. `http://host:8000/metrics`).
-/// For gRPC workers, the gRPC servicer runs a metrics HTTP sidecar on `grpc_port + 1`,
-/// so we convert `grpc://host:port` to `http://host:(port+1)/metrics`.
+/// For gRPC workers, derives metrics port from worker gRPC port with a deterministic
+/// large offset and wrap rule:
+/// - prefer `grpc_port + GRPC_METRICS_PORT_OFFSET`
+/// - if overflow, use `grpc_port - GRPC_METRICS_PORT_OFFSET`
 fn metrics_url(worker: &Arc<dyn Worker>, endpoint: &str) -> String {
     let url = worker.url();
     match worker.connection_mode() {
         ConnectionMode::Http => format!("{url}/{endpoint}"),
         ConnectionMode::Grpc => {
-            let stripped = url
+            if let Some((host, port)) = parse_worker_host_port(url) {
+                if let Some(metrics_port) = derive_grpc_metrics_port(port) {
+                    return format!("http://{host}:{metrics_port}/{endpoint}");
+                }
+            }
+
+            let stripped = strip_dp_rank_suffix(url)
                 .trim_start_matches("grpc://")
                 .trim_start_matches("http://")
                 .trim_start_matches("https://");
-            if let Some((host, port_str)) = stripped.rsplit_once(':') {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    return format!("http://{}:{}/{}", host, port + 1, endpoint);
-                }
-            }
             format!("http://{stripped}/{endpoint}")
         }
     }
