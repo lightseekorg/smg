@@ -26,9 +26,8 @@ logger = logging.getLogger(__name__)
 class TestStructuredOutputCloud:
     """Structured output tests against cloud APIs."""
 
-    def test_structured_output_json_schema(self, setup_backend, api_client):
+    def test_structured_output_json_schema(self, model, api_client):
         """Test structured output with json_schema format."""
-        _, model, _, _ = setup_backend
 
         params = {
             "model": model,
@@ -126,9 +125,8 @@ class TestStructuredOutputCloud:
 class TestStructuredOutputHarmony:
     """Structured output tests against local gRPC backend with Harmony model."""
 
-    def test_structured_output_json_schema(self, setup_backend, api_client):
+    def test_structured_output_json_schema(self, model, api_client):
         """Test structured output with json_schema format."""
-        _, model, _, _ = setup_backend
 
         params = {
             "model": model,
@@ -228,9 +226,8 @@ class TestSimpleSchemaStructuredOutput:
     handle complex schemas well.
     """
 
-    def test_structured_output_json_schema(self, setup_backend, api_client):
+    def test_structured_output_json_schema(self, model, api_client):
         """Test structured output with simple json_schema format."""
-        _, model, _, _ = setup_backend
 
         params = {
             "model": model,

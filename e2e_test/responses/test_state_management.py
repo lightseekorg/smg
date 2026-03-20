@@ -25,10 +25,8 @@ logger = logging.getLogger(__name__)
 class _StateManagementCloudBase:
     """Base test methods for state management against cloud APIs."""
 
-    def test_basic_response_creation(self, setup_backend, api_client):
+    def test_basic_response_creation(self, model, api_client):
         """Test basic response creation without state."""
-        _, model, _, _ = setup_backend
-
         resp = api_client.responses.create(model=model, input="What is 2+2?")
 
         assert resp.id is not None
@@ -37,10 +35,8 @@ class _StateManagementCloudBase:
         assert len(resp.output_text) > 0
         assert resp.usage is not None
 
-    def test_streaming_response(self, setup_backend, api_client):
+    def test_streaming_response(self, model, api_client):
         """Test streaming response."""
-        _, model, _, _ = setup_backend
-
         resp = api_client.responses.create(
             model=model, input="Count to 5", stream=True, max_output_tokens=50
         )
@@ -51,10 +47,8 @@ class _StateManagementCloudBase:
 
         assert any(e.type in ["response.completed", "response.in_progress"] for e in events)
 
-    def test_previous_response_id_chaining(self, setup_backend, api_client):
+    def test_previous_response_id_chaining(self, model, api_client):
         """Test chaining responses using previous_response_id."""
-        _, model, _, _ = setup_backend
-
         # First response
         resp1 = api_client.responses.create(
             model=model, input="My name is Alice and my friend is Bob. Remember it."
@@ -80,9 +74,8 @@ class _StateManagementCloudBase:
         assert resp3.status == "completed"
         assert "Bob" in resp3.output_text
 
-    def test_conversation_with_multiple_turns(self, setup_backend, api_client):
+    def test_conversation_with_multiple_turns(self, model, api_client):
         """Test state management using conversation ID."""
-        _, model, _, _ = setup_backend
 
         # Create conversation
         conv_resp = api_client.conversations.create(metadata={"topic": "math"})
@@ -124,9 +117,8 @@ class _StateManagementCloudBase:
         # SmgClient: conversations API not supported, skipping comparison
 
     @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")
-    def test_previous_response_id_invalid(self, setup_backend, api_client):
+    def test_previous_response_id_invalid(self, model, api_client):
         """Test using invalid previous_response_id."""
-        _, model, _, _ = setup_backend
         with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
             api_client.responses.create(
                 model=model,
@@ -135,10 +127,8 @@ class _StateManagementCloudBase:
                 max_output_tokens=50,
             )
 
-    def test_mutually_exclusive_parameters(self, setup_backend, api_client):
+    def test_mutually_exclusive_parameters(self, model, api_client):
         """Test that previous_response_id and conversation are mutually exclusive."""
-        _, model, _, _ = setup_backend
-
         conversation_id = "conv_123"
         resp1 = api_client.responses.create(model=model, input="Test")
 
@@ -208,9 +198,8 @@ class TestStateManagementLocal:
     """State management tests against local gRPC backend."""
 
     @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")
-    def test_previous_response_id_invalid(self, setup_backend, api_client):
+    def test_previous_response_id_invalid(self, model, api_client):
         """Test using invalid previous_response_id."""
-        _, model, _, _ = setup_backend
         with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
             api_client.responses.create(
                 model=model,
@@ -219,10 +208,8 @@ class TestStateManagementLocal:
                 max_output_tokens=50,
             )
 
-    def test_basic_response_creation(self, setup_backend, api_client):
+    def test_basic_response_creation(self, model, api_client):
         """Test basic response creation without state."""
-        _, model, _, _ = setup_backend
-
         resp = api_client.responses.create(model=model, input="What is 2+2?")
 
         assert resp.id is not None
@@ -231,10 +218,8 @@ class TestStateManagementLocal:
         assert len(resp.output_text) > 0
         assert resp.usage is not None
 
-    def test_streaming_response(self, setup_backend, api_client):
+    def test_streaming_response(self, model, api_client):
         """Test streaming response."""
-        _, model, _, _ = setup_backend
-
         resp = api_client.responses.create(
             model=model, input="Count to 5", stream=True, max_output_tokens=50
         )
@@ -245,10 +230,8 @@ class TestStateManagementLocal:
 
         assert any(e.type in ["response.completed", "response.in_progress"] for e in events)
 
-    def test_previous_response_id_chaining(self, setup_backend, api_client):
+    def test_previous_response_id_chaining(self, model, api_client):
         """Test chaining responses using previous_response_id."""
-        _, model, _, _ = setup_backend
-
         # First response
         resp1 = api_client.responses.create(
             model=model, input="My name is Alice and my friend is Bob. Remember it."
@@ -274,10 +257,8 @@ class TestStateManagementLocal:
         assert resp3.status == "completed"
         assert "Bob" in resp3.output_text
 
-    def test_mutually_exclusive_parameters(self, setup_backend, api_client):
+    def test_mutually_exclusive_parameters(self, model, api_client):
         """Test that previous_response_id and conversation are mutually exclusive."""
-        _, model, _, _ = setup_backend
-
         conversation_id = "conv_123"
         resp1 = api_client.responses.create(model=model, input="Test")
 
@@ -306,9 +287,8 @@ class TestStateManagementHarmony:
     """State management tests against local gRPC backend with Harmony model."""
 
     @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")
-    def test_previous_response_id_invalid(self, setup_backend, api_client):
+    def test_previous_response_id_invalid(self, model, api_client):
         """Test using invalid previous_response_id."""
-        _, model, _, _ = setup_backend
         with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
             api_client.responses.create(
                 model=model,
@@ -317,10 +297,8 @@ class TestStateManagementHarmony:
                 max_output_tokens=50,
             )
 
-    def test_basic_response_creation(self, setup_backend, api_client):
+    def test_basic_response_creation(self, model, api_client):
         """Test basic response creation without state."""
-        _, model, _, _ = setup_backend
-
         resp = api_client.responses.create(model=model, input="What is 2+2?")
 
         assert resp.id is not None
@@ -329,10 +307,8 @@ class TestStateManagementHarmony:
         assert len(resp.output_text) > 0
         assert resp.usage is not None
 
-    def test_streaming_response(self, setup_backend, api_client):
+    def test_streaming_response(self, model, api_client):
         """Test streaming response."""
-        _, model, _, _ = setup_backend
-
         resp = api_client.responses.create(
             model=model, input="Count to 5", stream=True, max_output_tokens=50
         )
@@ -343,10 +319,8 @@ class TestStateManagementHarmony:
 
         assert any(e.type in ["response.completed", "response.in_progress"] for e in events)
 
-    def test_previous_response_id_chaining(self, setup_backend, api_client):
+    def test_previous_response_id_chaining(self, model, api_client):
         """Test chaining responses using previous_response_id."""
-        _, model, _, _ = setup_backend
-
         # First response
         resp1 = api_client.responses.create(
             model=model, input="My name is Alice and my friend is Bob. Remember it."
@@ -372,10 +346,8 @@ class TestStateManagementHarmony:
         assert resp3.status == "completed"
         assert "Bob" in resp3.output_text
 
-    def test_mutually_exclusive_parameters(self, setup_backend, api_client):
+    def test_mutually_exclusive_parameters(self, model, api_client):
         """Test that previous_response_id and conversation are mutually exclusive."""
-        _, model, _, _ = setup_backend
-
         conversation_id = "conv_123"
         resp1 = api_client.responses.create(model=model, input="Test")
 

@@ -109,12 +109,11 @@ PYTHONIC_MESSAGES = [
 class TestOpenAIServerFunctionCalling:
     """Tests for OpenAI-compatible function calling with Llama tool parser."""
 
-    def test_function_calling_format(self, setup_backend, api_client):
+    def test_function_calling_format(self, model, api_client):
         """Test: Whether the function call format returned by the AI is correct.
 
         When returning a tool call, message.content should be None, and tool_calls should be a list.
         """
-        _, model, _, _ = setup_backend
 
         tools = [
             {
@@ -163,13 +162,12 @@ class TestOpenAIServerFunctionCalling:
         function_name = tool_calls[0].function.name
         assert function_name == "add", "Function name should be 'add'"
 
-    def test_function_calling_streaming_simple(self, setup_backend, api_client):
+    def test_function_calling_streaming_simple(self, model, api_client):
         """Test: Whether the function name can be correctly recognized in streaming mode.
 
         - Expect a function call to be found, and the function name to be correct.
         - Verify that streaming mode returns at least multiple chunks.
         """
-        _, model, _, _ = setup_backend
 
         tools = [
             {
@@ -239,14 +237,13 @@ class TestOpenAIServerFunctionCalling:
             "Final response of function calling should have finish_reason 'tool_calls'"
         )
 
-    def test_function_calling_streaming_args_parsing(self, setup_backend, api_client):
+    def test_function_calling_streaming_args_parsing(self, model, api_client):
         """Test: Whether the function call arguments returned in streaming mode can be correctly
         concatenated into valid JSON.
 
         - The user request requires multiple parameters.
         - AI may return the arguments in chunks that need to be concatenated.
         """
-        _, model, _, _ = setup_backend
 
         tools = [
             {
@@ -326,12 +323,11 @@ class TestOpenAIServerFunctionCalling:
     @pytest.mark.skip(
         reason="Skipping function call strict test as it is not supported by the router"
     )
-    def test_function_call_strict(self, setup_backend, api_client):
+    def test_function_call_strict(self, model, api_client):
         """Test: Whether the strict mode of function calling works as expected.
 
         - When strict mode is enabled, the AI should not return a function call if the function name is not recognized.
         """
-        _, model, _, _ = setup_backend
 
         tools = [
             {
@@ -378,12 +374,11 @@ class TestOpenAIServerFunctionCalling:
         assert str(args_obj["int_a"]) == "5", "Parameter int_a should be 5"
         assert str(args_obj["int_b"]) == "7", "Parameter int_b should be 7"
 
-    def test_function_call_required(self, setup_backend, api_client):
+    def test_function_call_required(self, model, api_client):
         """Test: Whether tool_choice: "required" works as expected.
 
         - When tool_choice == "required", the model should return one or more tool_calls.
         """
-        _, model, _, _ = setup_backend
 
         tools = [
             {
@@ -459,12 +454,11 @@ class TestOpenAIServerFunctionCalling:
             f"Parameter city should contain either 'Paris' or 'France', got: {city_value}"
         )
 
-    def test_function_call_specific(self, setup_backend, api_client):
+    def test_function_call_specific(self, model, api_client):
         """Test: Whether tool_choice: ToolChoice works as expected.
 
         - When tool_choice is a specific ToolChoice, the model should return one or more tool_calls.
         """
-        _, model, _, _ = setup_backend
 
         tools = [
             {
@@ -529,12 +523,11 @@ class TestOpenAIServerFunctionCalling:
         assert function_name == "get_weather", "Function name should be 'get_weather'"
         assert "city" in args_obj, "Function arguments should have 'city'"
 
-    def test_streaming_multiple_choices_finish_reason(self, setup_backend, api_client):
+    def test_streaming_multiple_choices_finish_reason(self, model, api_client):
         """Test: Verify that each choice gets its own finish_reason chunk in streaming mode with n > 1.
 
         This tests the fix for the bug where only the last index got a finish_reason chunk.
         """
-        _, model, _, _ = setup_backend
 
         tools = [
             {
@@ -602,13 +595,12 @@ class TestOpenAIServerFunctionCalling:
                 f"Expected finish_reason 'tool_calls' for index {index}, got {reasons[-1]}"
             )
 
-    def test_function_calling_streaming_no_tool_call(self, setup_backend, api_client):
+    def test_function_calling_streaming_no_tool_call(self, model, api_client):
         """Test: Whether the finish_reason is stop in streaming mode when no tool call is given.
 
         - Expect no function call to be found.
         - Verify that finish_reason is stop
         """
-        _, model, _, _ = setup_backend
 
         tools = [
             {
@@ -666,12 +658,11 @@ class TestOpenAIServerFunctionCalling:
             "Final response of no function calling should have finish_reason 'stop'"
         )
 
-    def test_streaming_multiple_choices_without_tools(self, setup_backend, api_client):
+    def test_streaming_multiple_choices_without_tools(self, model, api_client):
         """Test: Verify that each choice gets its own finish_reason chunk without tool calls.
 
         This tests the fix for regular content streaming with multiple choices.
         """
-        _, model, _, _ = setup_backend
 
         messages = [{"role": "user", "content": "Say hello in one word."}]
 
@@ -729,9 +720,8 @@ class TestOpenAIServerFunctionCalling:
 class TestOpenAIPythonicFunctionCalling:
     """Tests for pythonic function calling format."""
 
-    def test_pythonic_tool_call_prompt(self, setup_backend, api_client):
+    def test_pythonic_tool_call_prompt(self, model, api_client):
         """Test: Explicit prompt for pythonic tool call format without chat template."""
-        _, model, _, _ = setup_backend
 
         response = api_client.chat.completions.create(
             model=model,
@@ -748,9 +738,8 @@ class TestOpenAIPythonicFunctionCalling:
             f"Function name '{names}' should contain either 'get_weather' or 'get_tourist_attractions'"
         )
 
-    def test_pythonic_tool_call_streaming(self, setup_backend, api_client):
+    def test_pythonic_tool_call_streaming(self, model, api_client):
         """Test: Streaming pythonic tool call format; assert tool_call index is present."""
-        _, model, _, _ = setup_backend
 
         response_stream = api_client.chat.completions.create(
             model=model,
@@ -980,9 +969,8 @@ class _TestToolChoiceBase:
         """Check if the current test is marked as flaky for this class."""
         return test_name in self.FLAKY_TESTS
 
-    def test_tool_choice_auto_non_streaming(self, setup_backend, api_client):
+    def test_tool_choice_auto_non_streaming(self, model, api_client):
         """Test tool_choice='auto' in non-streaming mode."""
-        _, model, _, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
@@ -999,9 +987,8 @@ class _TestToolChoiceBase:
         assert response.choices[0].message is not None
         # With auto, tool calls are optional
 
-    def test_tool_choice_auto_streaming(self, setup_backend, api_client):
+    def test_tool_choice_auto_streaming(self, model, api_client):
         """Test tool_choice='auto' in streaming mode."""
-        _, model, _, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
@@ -1029,9 +1016,8 @@ class _TestToolChoiceBase:
         assert isinstance(content_chunks, list)
         assert isinstance(tool_call_chunks, list)
 
-    def test_tool_choice_required_non_streaming(self, setup_backend, api_client):
+    def test_tool_choice_required_non_streaming(self, model, api_client):
         """Test tool_choice='required' in non-streaming mode."""
-        _, model, _, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
@@ -1051,9 +1037,8 @@ class _TestToolChoiceBase:
         assert tool_calls is not None
         assert len(tool_calls) > 0
 
-    def test_tool_choice_required_streaming(self, setup_backend, api_client):
+    def test_tool_choice_required_streaming(self, model, api_client):
         """Test tool_choice='required' in streaming mode."""
-        _, model, _, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
@@ -1077,9 +1062,8 @@ class _TestToolChoiceBase:
         # With required, we should get tool call chunks
         assert len(tool_call_chunks) > 0
 
-    def test_tool_choice_specific_function_non_streaming(self, setup_backend, api_client):
+    def test_tool_choice_specific_function_non_streaming(self, model, api_client):
         """Test tool_choice with specific function in non-streaming mode."""
-        _, model, _, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
@@ -1103,9 +1087,8 @@ class _TestToolChoiceBase:
         for tool_call in tool_calls:
             assert tool_call.function.name == "get_weather"
 
-    def test_tool_choice_specific_function_streaming(self, setup_backend, api_client):
+    def test_tool_choice_specific_function_streaming(self, model, api_client):
         """Test tool_choice with specific function in streaming mode."""
-        _, model, _, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
@@ -1140,11 +1123,10 @@ class _TestToolChoiceBase:
 
         assert found_name == "get_weather"
 
-    def test_required_streaming_arguments_chunks_json(self, setup_backend, api_client):
+    def test_required_streaming_arguments_chunks_json(self, model, api_client):
         """In streaming required mode, complete tool call arguments should be valid JSON when
         all chunks are combined.
         """
-        _, model, _, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
@@ -1201,9 +1183,8 @@ class _TestToolChoiceBase:
                     f"Invalid JSON in complete tool call arguments: {tool_call['function']['arguments']}"
                 )
 
-    def test_complex_parameters_required_non_streaming(self, setup_backend, api_client):
+    def test_complex_parameters_required_non_streaming(self, model, api_client):
         """Validate complex nested parameter schemas in non-streaming required mode."""
-        _, model, _, _ = setup_backend
 
         complex_tools = [
             {
@@ -1281,9 +1262,8 @@ class _TestToolChoiceBase:
                     f"Invalid JSON in complex tool call arguments: {tool_call.function.arguments}"
                 )
 
-    def test_multi_tool_scenario_auto(self, setup_backend, api_client):
+    def test_multi_tool_scenario_auto(self, model, api_client):
         """Test multi-tool scenario with tool_choice='auto'."""
-        _, model, _, _ = setup_backend
 
         tools = get_travel_tools()
         messages = get_travel_messages()
@@ -1320,9 +1300,8 @@ class _TestToolChoiceBase:
                 f"Expected functions {expected_functions}, got {called_functions}"
             )
 
-    def test_multi_tool_scenario_required(self, setup_backend, api_client):
+    def test_multi_tool_scenario_required(self, model, api_client):
         """Test multi-tool scenario with tool_choice='required'."""
-        _, model, _, _ = setup_backend
 
         tools = get_travel_tools()
         messages = get_travel_messages()
@@ -1364,9 +1343,8 @@ class _TestToolChoiceBase:
                 f"Expected functions {expected_functions}, got {called_functions}"
             )
 
-    def test_error_handling_invalid_tool_choice(self, setup_backend, api_client):
+    def test_error_handling_invalid_tool_choice(self, model, api_client):
         """Test error handling for invalid tool_choice."""
-        _, model, _, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
@@ -1388,9 +1366,8 @@ class _TestToolChoiceBase:
         # Verify the error message contains the expected text
         assert "function 'nonexistent_function' not found in" in str(exc_info.value)
 
-    def test_invalid_tool_missing_name(self, setup_backend, api_client):
+    def test_invalid_tool_missing_name(self, model, api_client):
         """Test what happens when user doesn't provide a tool name in request."""
-        _, model, _, _ = setup_backend
 
         # Test with malformed JSON in tool parameters - missing required "name" field
         invalid_tools = [
@@ -1436,9 +1413,8 @@ class _TestToolChoiceBase:
         error_msg = str(exc_info.value).lower()
         assert "name" in error_msg
 
-    def test_conflicting_defs_required_tool_choice(self, setup_backend, api_client):
+    def test_conflicting_defs_required_tool_choice(self, model, api_client):
         """Test that conflicting $defs with required tool_choice returns 400 error."""
-        _, model, _, _ = setup_backend
 
         conflicting_tools = [
             {
@@ -1570,6 +1546,6 @@ class TestToolChoiceMistral(_TestToolChoiceBase):
     }
 
     @pytest.mark.skip(reason="Fails due to whitespace issue with Mistral - skipping")
-    def test_complex_parameters_required_non_streaming(self, setup_backend, api_client):
+    def test_complex_parameters_required_non_streaming(self, model, api_client):
         """Validate complex nested parameter schemas in non-streaming required mode."""
-        super().test_complex_parameters_required_non_streaming(setup_backend, api_client)
+        super().test_complex_parameters_required_non_streaming(model, api_client)

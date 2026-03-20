@@ -36,9 +36,8 @@ class TestChatCompletion:
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
-    def test_chat_completion(self, setup_backend, api_client, logprobs, parallel_sample_num):
+    def test_chat_completion(self, model, api_client, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
-        _, model, _, _ = setup_backend
         # Use temperature > 0 for n > 1 (greedy sampling rejects n > 1)
         temperature = 0.7 if parallel_sample_num > 1 else 0
         response = api_client.chat.completions.create(
@@ -72,9 +71,8 @@ class TestChatCompletion:
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
-    def test_chat_completion_stream(self, setup_backend, api_client, logprobs, parallel_sample_num):
+    def test_chat_completion_stream(self, model, api_client, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
-        _, model, _, _ = setup_backend
         temperature = 0.7 if parallel_sample_num > 1 else 0
         generator = api_client.chat.completions.create(
             model=model,
@@ -135,9 +133,8 @@ class TestChatCompletion:
         "trtllm",
         reason="TRT-LLM gRPC bug: uses 'guided_decoding_params' instead of 'guided_decoding'",
     )
-    def test_regex(self, setup_backend, api_client):
+    def test_regex(self, model, api_client):
         """Test structured output with regex constraint."""
-        _, model, _, _ = setup_backend
 
         regex = (
             r"""\{\n""" + r"""   "name": "[\w]+",\n""" + r"""   "population": [\d]+\n""" + r"""\}"""
@@ -162,9 +159,8 @@ class TestChatCompletion:
         assert isinstance(js_obj["name"], str)
         assert isinstance(js_obj["population"], int)
 
-    def test_penalty(self, setup_backend, api_client):
+    def test_penalty(self, model, api_client):
         """Test that frequency_penalty parameter is accepted and produces output."""
-        _, model, _, _ = setup_backend
 
         response = api_client.chat.completions.create(
             model=model,
@@ -178,9 +174,8 @@ class TestChatCompletion:
         assert isinstance(response.choices[0].message.content, str)
         assert response.usage.completion_tokens > 0
 
-    def test_response_prefill(self, setup_backend, api_client):
+    def test_response_prefill(self, model, api_client):
         """Test assistant message prefill with continue_final_message."""
-        _, model, _, _ = setup_backend
 
         response = api_client.chat.completions.create(
             model=model,
@@ -210,9 +205,8 @@ convenient hands-free control to your smart devices.
 
         assert response.choices[0].message.content.strip().startswith('"name": "SmartHome Mini",')
 
-    def test_streaming_token_count_matches_chunks(self, setup_backend, api_client):
+    def test_streaming_token_count_matches_chunks(self, model, api_client):
         """Test that streaming completion_tokens matches the number of content chunks."""
-        _, model, _, _ = setup_backend
 
         generator = api_client.chat.completions.create(
             model=model,
@@ -256,16 +250,14 @@ convenient hands-free control to your smart devices.
             f"content chunk count ({content_chunk_count})"
         )
 
-    def test_model_list(self, setup_backend, api_client):
+    def test_model_list(self, model, api_client):
         """Test listing available models."""
-        _, model, _, _ = setup_backend
 
         models = list(api_client.models.list().data)
         assert len(models) == 1
 
-    def test_stop_sequences(self, setup_backend, api_client):
+    def test_stop_sequences(self, model, api_client):
         """Test that stop sequences cause the model to stop generating."""
-        _, model, _, _ = setup_backend
 
         response = api_client.chat.completions.create(
             model=model,
@@ -287,9 +279,8 @@ convenient hands-free control to your smart devices.
                 f"Stop sequence ',' should be the suffix of output: {content}"
             )
 
-    def test_stop_sequences_stream(self, setup_backend, api_client):
+    def test_stop_sequences_stream(self, model, api_client):
         """Test that stop sequences work in streaming mode."""
-        _, model, _, _ = setup_backend
 
         chunks = list(
             api_client.chat.completions.create(
@@ -355,34 +346,32 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
-    def test_chat_completion(self, setup_backend, api_client, logprobs, parallel_sample_num):
+    def test_chat_completion(self, model, api_client, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
-        super().test_chat_completion(setup_backend, api_client, logprobs, parallel_sample_num)
+        super().test_chat_completion(model, api_client, logprobs, parallel_sample_num)
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
-    def test_chat_completion_stream(self, setup_backend, api_client, logprobs, parallel_sample_num):
+    def test_chat_completion_stream(self, model, api_client, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
-        super().test_chat_completion_stream(
-            setup_backend, api_client, logprobs, parallel_sample_num
-        )
+        super().test_chat_completion_stream(model, api_client, logprobs, parallel_sample_num)
 
-    def test_stop_sequences(self, setup_backend, api_client):
+    def test_stop_sequences(self, model, api_client):
         if is_trtllm():
             pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
-        super().test_stop_sequences(setup_backend, api_client)
+        super().test_stop_sequences(model, api_client)
 
-    def test_stop_sequences_stream(self, setup_backend, api_client):
+    def test_stop_sequences_stream(self, model, api_client):
         if is_trtllm():
             pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
         if is_sglang():
             self.STOP_SEQUENCE_TRIMMED = True
-        super().test_stop_sequences_stream(setup_backend, api_client)
+        super().test_stop_sequences_stream(model, api_client)
 
     @pytest.mark.skip(reason="gpt-oss models don't support regex constraints")
-    def test_regex(self, setup_backend, api_client):
+    def test_regex(self, model, api_client):
         pass
 
     @pytest.mark.skip(reason="gpt-oss Harmony pipeline doesn't implement continue_final_message")
-    def test_response_prefill(self, setup_backend, api_client):
+    def test_response_prefill(self, model, api_client):
         pass

@@ -31,9 +31,8 @@ API_KEY = "not-used"
 class TestEnableThinking:
     """Tests for enable_thinking feature with Qwen3 reasoning parser."""
 
-    def test_chat_completion_with_reasoning(self, setup_backend, api_client):
+    def test_chat_completion_with_reasoning(self, model, api_client):
         """Test non-streaming with enable_thinking=True, reasoning_content should not be empty."""
-        _, model, _, _ = setup_backend
 
         response = api_client.chat.completions.create(
             model=model,
@@ -48,9 +47,8 @@ class TestEnableThinking:
         assert len(response.choices) > 0
         assert response.choices[0].message.reasoning_content is not None
 
-    def test_chat_completion_without_reasoning(self, setup_backend, api_client):
+    def test_chat_completion_without_reasoning(self, model, api_client):
         """Test non-streaming with enable_thinking=False, reasoning_content should be empty."""
-        _, model, _, _ = setup_backend
 
         response = api_client.chat.completions.create(
             model=model,
@@ -66,9 +64,8 @@ class TestEnableThinking:
         # With enable_thinking=False, reasoning_content should be empty
         assert response.choices[0].message.reasoning_content is None
 
-    def test_stream_chat_completion_with_reasoning(self, setup_backend, api_client):
+    def test_stream_chat_completion_with_reasoning(self, model, api_client):
         """Test streaming with enable_thinking=True, reasoning_content should not be empty."""
-        _, model, _, _ = setup_backend
 
         has_reasoning = False
         has_content = False
@@ -92,9 +89,8 @@ class TestEnableThinking:
         assert has_reasoning, "The reasoning content is not included in the stream response"
         assert has_content, "The stream response does not contain normal content"
 
-    def test_stream_chat_completion_without_reasoning(self, setup_backend, api_client):
+    def test_stream_chat_completion_without_reasoning(self, model, api_client):
         """Test streaming with enable_thinking=False, reasoning_content should be empty."""
-        _, model, _, _ = setup_backend
 
         has_reasoning = False
         has_content = False

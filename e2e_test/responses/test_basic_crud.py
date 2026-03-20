@@ -66,9 +66,8 @@ def wait_for_background_task(
 class TestResponseCRUD:
     """Tests for Response API CRUD operations."""
 
-    def test_create_and_get_response(self, setup_backend, api_client):
+    def test_create_and_get_response(self, model, api_client):
         """Test creating response and retrieving it."""
-        _, model, _, _ = setup_backend
 
         # Create response
         create_resp = api_client.responses.create(model=model, input="Hello, world!")
@@ -89,9 +88,8 @@ class TestResponseCRUD:
         assert len(input_resp.data) > 0
 
     @pytest.mark.skip(reason="TODO: Add delete response feature")
-    def test_delete_response(self, setup_backend, api_client):
+    def test_delete_response(self, model, api_client):
         """Test deleting response."""
-        _, model, _, _ = setup_backend
 
         # Create response
         create_resp = api_client.responses.create(model=model, input="Test deletion")
@@ -110,9 +108,8 @@ class TestResponseCRUD:
             api_client.responses.retrieve(response_id=response_id)
 
     @pytest.mark.skip(reason="TODO: Add background response feature")
-    def test_background_response(self, setup_backend, api_client):
+    def test_background_response(self, model, api_client):
         """Test background response execution."""
-        _, model, _, _ = setup_backend
 
         # Create background response
         create_resp = api_client.responses.create(
@@ -144,9 +141,8 @@ class TestResponseCRUD:
 class TestResponseCRUDOracleStorage:
     """Tests for Response API CRUD operations with Oracle history backend."""
 
-    def test_create_and_get_response(self, setup_backend, api_client):
+    def test_create_and_get_response(self, model, api_client):
         """Test creating response and retrieving it."""
-        _, model, _, _ = setup_backend
 
         # Create response
         create_resp = api_client.responses.create(model=model, input="Hello, world!")
@@ -167,9 +163,8 @@ class TestResponseCRUDOracleStorage:
         assert len(input_resp.data) > 0
 
     @pytest.mark.skip(reason="TODO: Add delete response feature")
-    def test_delete_response(self, setup_backend, api_client):
+    def test_delete_response(self, model, api_client):
         """Test deleting response."""
-        _, model, _, _ = setup_backend
 
         # Create response
         create_resp = api_client.responses.create(model=model, input="Test deletion")
@@ -188,9 +183,8 @@ class TestResponseCRUDOracleStorage:
             api_client.responses.retrieve(response_id=response_id)
 
     @pytest.mark.skip(reason="TODO: Add background response feature")
-    def test_background_response(self, setup_backend, api_client):
+    def test_background_response(self, model, api_client):
         """Test background response execution."""
-        _, model, _, _ = setup_backend
 
         # Create background response
         create_resp = api_client.responses.create(

@@ -19,9 +19,8 @@ logger = logging.getLogger(__name__)
 class TestMessagesBasic:
     """Basic message creation tests against the Anthropic Messages API."""
 
-    def test_non_streaming_basic(self, setup_backend, api_client):
+    def test_non_streaming_basic(self, model, api_client):
         """Test basic non-streaming message creation."""
-        _, model, _, _ = setup_backend
 
         response = api_client.messages.create(
             model=model,
@@ -40,9 +39,8 @@ class TestMessagesBasic:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-    def test_non_streaming_with_system(self, setup_backend, api_client):
+    def test_non_streaming_with_system(self, model, api_client):
         """Test non-streaming message with system prompt."""
-        _, model, _, _ = setup_backend
 
         response = api_client.messages.create(
             model=model,
@@ -58,9 +56,8 @@ class TestMessagesBasic:
         # With the "one word" instruction, response should be short
         assert len(response.content[0].text.split()) <= 10
 
-    def test_non_streaming_multi_turn(self, setup_backend, api_client):
+    def test_non_streaming_multi_turn(self, model, api_client):
         """Test multi-turn conversation preserves context."""
-        _, model, _, _ = setup_backend
 
         response = api_client.messages.create(
             model=model,
@@ -78,9 +75,8 @@ class TestMessagesBasic:
         assert response.content[0].type == "text"
         assert "alice" in response.content[0].text.lower()
 
-    def test_streaming_basic(self, setup_backend, api_client):
+    def test_streaming_basic(self, model, api_client):
         """Test streaming message creation returns expected event types."""
-        _, model, _, _ = setup_backend
 
         expected_event_types = {
             "message_start",
@@ -103,9 +99,8 @@ class TestMessagesBasic:
         missing = expected_event_types - event_types
         assert not missing, f"Missing expected event types: {missing}"
 
-    def test_streaming_collects_full_message(self, setup_backend, api_client):
+    def test_streaming_collects_full_message(self, model, api_client):
         """Test that streaming deltas concatenate to a non-empty message."""
-        _, model, _, _ = setup_backend
 
         with api_client.messages.stream(
             model=model,

@@ -191,10 +191,9 @@ def assert_streaming_mcp_response(
 class TestMcpTool:
     """MCP tool use tests with SMG orchestration (X-SMG-MCP: enabled)."""
 
-    def test_mcp_non_streaming(self, setup_backend, api_client):
+    def test_mcp_non_streaming(self, model, api_client):
         """Test MCP tool execution in non-streaming mode."""
         cfg = SMG_HANDLED
-        _, model, _, _ = setup_backend
 
         response = api_client.messages.create(
             model=model,
@@ -206,10 +205,9 @@ class TestMcpTool:
 
         assert_non_streaming_mcp_response(response, model, cfg.server_name)
 
-    def test_mcp_streaming(self, setup_backend, api_client):
+    def test_mcp_streaming(self, model, api_client):
         """Test MCP tool execution with SSE streaming."""
         cfg = SMG_HANDLED
-        _, model, _, _ = setup_backend
 
         with api_client.messages.stream(
             model=model,
@@ -239,10 +237,9 @@ class TestMcpToolPassthrough:
     Requires external https://dmcp-server.deno.dev/sse to be reachable.
     """
 
-    def test_mcp_passthrough_non_streaming(self, setup_backend, api_client):
+    def test_mcp_passthrough_non_streaming(self, model, api_client):
         """Test MCP passthrough in non-streaming mode."""
         cfg = PASSTHROUGH
-        _, model, _, _ = setup_backend
 
         response = api_client.messages.create(
             model=model,
@@ -254,10 +251,9 @@ class TestMcpToolPassthrough:
 
         assert_non_streaming_mcp_response(response, model, cfg.server_name)
 
-    def test_mcp_passthrough_streaming(self, setup_backend, api_client):
+    def test_mcp_passthrough_streaming(self, model, api_client):
         """Test MCP passthrough with SSE streaming."""
         cfg = PASSTHROUGH
-        _, model, _, _ = setup_backend
 
         with api_client.messages.stream(
             model=model,

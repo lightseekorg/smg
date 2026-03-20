@@ -17,9 +17,8 @@ import pytest
 class _TestStructuredOutputBase:
     """Base class for structured output tests. Not collected by pytest."""
 
-    def test_response_format_json_schema(self, setup_backend, api_client):
+    def test_response_format_json_schema(self, model, api_client):
         """Test response_format with json_schema produces valid constrained JSON."""
-        _, model, _, _ = setup_backend
 
         schema = {
             "type": "object",
@@ -65,9 +64,8 @@ class _TestStructuredOutputBase:
         assert "<|constrain|>" not in content
         assert "<|message|>" not in content
 
-    def test_response_format_json_schema_stream(self, setup_backend, api_client):
+    def test_response_format_json_schema_stream(self, model, api_client):
         """Test response_format with json_schema in streaming mode."""
-        _, model, _, _ = setup_backend
 
         schema = {
             "type": "object",

@@ -30,9 +30,8 @@ logger = logging.getLogger(__name__)
 class TestReasoningContentAPI:
     """Tests for reasoning content API with DeepSeek R1 reasoning parser."""
 
-    def test_streaming_separate_reasoning_false(self, setup_backend, api_client):
+    def test_streaming_separate_reasoning_false(self, model, api_client):
         """Test streaming with separate_reasoning=False, reasoning_content should be empty."""
-        _, model, _, _ = setup_backend
 
         response = api_client.chat.completions.create(
             model=model,
@@ -58,9 +57,8 @@ class TestReasoningContentAPI:
         assert len(reasoning_content) == 0
         assert len(content) > 0
 
-    def test_streaming_separate_reasoning_true(self, setup_backend, api_client):
+    def test_streaming_separate_reasoning_true(self, model, api_client):
         """Test streaming with separate_reasoning=True, reasoning_content should not be empty."""
-        _, model, _, _ = setup_backend
 
         response = api_client.chat.completions.create(
             model=model,
@@ -86,11 +84,8 @@ class TestReasoningContentAPI:
         assert len(reasoning_content) > 0
         assert len(content) > 0
 
-    def test_streaming_separate_reasoning_true_stream_reasoning_false(
-        self, setup_backend, api_client
-    ):
+    def test_streaming_separate_reasoning_true_stream_reasoning_false(self, model, api_client):
         """Test streaming with separate_reasoning=True and stream_reasoning=False."""
-        _, model, _, _ = setup_backend
 
         response = api_client.chat.completions.create(
             model=model,
@@ -126,9 +121,8 @@ class TestReasoningContentAPI:
         assert len(reasoning_content) > 0
         assert len(content) > 0
 
-    def test_nonstreaming_separate_reasoning_false(self, setup_backend, api_client):
+    def test_nonstreaming_separate_reasoning_false(self, model, api_client):
         """Test non-streaming with separate_reasoning=False, reasoning_content should be empty."""
-        _, model, _, _ = setup_backend
 
         response = api_client.chat.completions.create(
             model=model,
@@ -148,9 +142,8 @@ class TestReasoningContentAPI:
         )
         assert len(response.choices[0].message.content) > 0
 
-    def test_nonstreaming_separate_reasoning_true(self, setup_backend, api_client):
+    def test_nonstreaming_separate_reasoning_true(self, model, api_client):
         """Test non-streaming with separate_reasoning=True, reasoning_content should not be empty."""
-        _, model, _, _ = setup_backend
 
         response = api_client.chat.completions.create(
             model=model,

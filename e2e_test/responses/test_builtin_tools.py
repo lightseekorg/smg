@@ -178,9 +178,8 @@ class TestBuiltinVsMcpComparison:
     These tests verify baseline MCP behavior without requiring builtin routing config.
     """
 
-    def test_mcp_tool_produces_mcp_call(self, setup_backend, api_client):
+    def test_mcp_tool_produces_mcp_call(self, model, api_client):
         """Verify that direct MCP tool produces mcp_call output."""
-        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -216,9 +215,8 @@ class TestBuiltinToolsCloudBackend:
     Full routing tests require MCP config with builtin_type configured.
     """
 
-    def test_web_search_preview_accepted(self, setup_backend, api_client):
+    def test_web_search_preview_accepted(self, model, api_client):
         """Test that web_search_preview tool type is accepted."""
-        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -232,9 +230,8 @@ class TestBuiltinToolsCloudBackend:
         assert resp.id is not None
         assert resp.status in ("completed", "incomplete")
 
-    def test_mixed_builtin_and_function_tools(self, setup_backend, api_client):
+    def test_mixed_builtin_and_function_tools(self, model, api_client):
         """Test mixing web_search_preview with function tools."""
-        _, model, _, _ = setup_backend
 
         time.sleep(2)
 
@@ -272,9 +269,8 @@ class TestBuiltinToolsLocalBackend:
     These tests verify built-in tool handling with local models.
     """
 
-    def test_web_search_preview_accepted(self, setup_backend, api_client):
+    def test_web_search_preview_accepted(self, model, api_client):
         """Test that web_search_preview tool type is accepted by local backend."""
-        _, model, _, _ = setup_backend
 
         time.sleep(1)
 
@@ -287,9 +283,8 @@ class TestBuiltinToolsLocalBackend:
 
         assert resp.id is not None
 
-    def test_mixed_builtin_and_function_tools(self, setup_backend, api_client):
+    def test_mixed_builtin_and_function_tools(self, model, api_client):
         """Test mixing web_search_preview with function tools on local backend."""
-        _, model, _, _ = setup_backend
 
         time.sleep(1)
 
@@ -421,13 +416,12 @@ class TestMcpWebSearchStreamingEvents:
         """Ensure Brave server is available for these tests."""
         pass
 
-    def test_mcp_web_search_streaming_events(self, setup_backend, api_client):
+    def test_mcp_web_search_streaming_events(self, model, api_client):
         """Test that MCP web search produces proper streaming events.
 
         This verifies the baseline MCP streaming behavior that built-in
         tools should eventually match (with different event types).
         """
-        _, model, _, _ = setup_backend
 
         time.sleep(2)
 

@@ -32,13 +32,11 @@ logger = logging.getLogger(__name__)
 class TestStreamingEventsLocal:
     """Streaming event tests against local gRPC backend."""
 
-    def test_output_item_event_emitted(self, setup_backend, api_client):
+    def test_output_item_event_emitted(self, model, api_client):
         """Test that output_index is zero-based in streaming responses.
 
         Verifies that the first output item has output_index: 0.
         """
-        _, model, _, _ = setup_backend
-
         resp = api_client.responses.create(
             model=model,
             input="Count from 1 to 3",
@@ -118,13 +116,11 @@ class TestStreamingEventsLocal:
 class TestStreamingEventsHarmony:
     """Streaming event tests against local gRPC backend with Harmony model."""
 
-    def test_output_item_event_emitted(self, setup_backend, api_client):
+    def test_output_item_event_emitted(self, model, api_client):
         """Test that output_index is zero-based in streaming responses.
 
         Verifies that the first output item has output_index: 0.
         """
-        _, model, _, _ = setup_backend
-
         resp = api_client.responses.create(
             model=model,
             input="Count from 1 to 3",
@@ -188,14 +184,12 @@ class TestStreamingEventsHarmony:
             "Number of output_item.added events should match output array length"
         )
 
-    def test_reasoning_content(self, setup_backend, api_client):
+    def test_reasoning_content(self, model, api_client):
         """Test that reasoning content has correct zero-based output_index.
 
         Specifically tests that reasoning item has output_index: 0
         and message item has output_index: 1.
         """
-        _, model, _, _ = setup_backend
-
         resp = api_client.responses.create(
             model=model,
             input="What is the capital of France? Think step by step.",

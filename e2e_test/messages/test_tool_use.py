@@ -61,9 +61,8 @@ CALCULATE_TOOL = {
 class TestToolUseBasic:
     """Tool use tests against the Anthropic Messages API."""
 
-    def test_single_tool_call(self, setup_backend, api_client):
+    def test_single_tool_call(self, model, api_client):
         """Test that the model calls a single tool when appropriate."""
-        _, model, _, _ = setup_backend
 
         response = api_client.messages.create(
             model=model,
@@ -86,9 +85,8 @@ class TestToolUseBasic:
         assert isinstance(tool_use.input, dict)
         assert "location" in tool_use.input
 
-    def test_tool_call_and_result_round_trip(self, setup_backend, api_client):
+    def test_tool_call_and_result_round_trip(self, model, api_client):
         """Test full round-trip: tool call -> tool result -> final text response."""
-        _, model, _, _ = setup_backend
 
         # First request: model should request a tool call
         response1 = api_client.messages.create(
@@ -133,9 +131,8 @@ class TestToolUseBasic:
         assert len(text_blocks) > 0, "Final response should contain text"
         assert len(text_blocks[0].text) > 0
 
-    def test_tool_use_streaming(self, setup_backend, api_client):
+    def test_tool_use_streaming(self, model, api_client):
         """Test streaming with tool use returns input_json delta events."""
-        _, model, _, _ = setup_backend
 
         with api_client.messages.stream(
             model=model,
@@ -162,9 +159,8 @@ class TestToolUseBasic:
             parsed = json.loads(full_json_str)
             assert isinstance(parsed, dict)
 
-    def test_multiple_tools_available(self, setup_backend, api_client):
+    def test_multiple_tools_available(self, model, api_client):
         """Test that model selects the correct tool when multiple are available."""
-        _, model, _, _ = setup_backend
 
         response = api_client.messages.create(
             model=model,

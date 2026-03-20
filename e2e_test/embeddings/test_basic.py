@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 class TestEmbeddingBasic:
     """Basic embedding API tests using local workers (gRPC and HTTP)."""
 
-    def test_embedding_single(self, setup_backend, api_client):
+    def test_embedding_single(self, model, api_client):
         """Test single text embedding.
 
         Verifies that:
@@ -35,7 +35,6 @@ class TestEmbeddingBasic:
         - Embedding is a non-empty list of floats
         - Usage statistics are present
         """
-        backend, model, _, _ = setup_backend
 
         input_text = "Hello world"
         response = api_client.embeddings.create(
@@ -62,13 +61,12 @@ class TestEmbeddingBasic:
             response.usage.prompt_tokens,
         )
 
-    def test_embedding_batch(self, setup_backend, api_client):
+    def test_embedding_batch(self, model, api_client):
         """Test batch embedding with multiple texts.
 
         Note: The original test expected len(response.data) == 1 for batch,
         which seems incorrect. This might be model-specific behavior.
         """
-        backend, model, _, _ = setup_backend
 
         input_texts = ["Hello world", "SGLang is fast"]
         response = api_client.embeddings.create(
@@ -85,13 +83,12 @@ class TestEmbeddingBasic:
 
         logger.info("Batch embedding: %d results", len(response.data))
 
-    def test_embedding_dimensions_consistent(self, setup_backend, api_client):
+    def test_embedding_dimensions_consistent(self, model, api_client):
         """Test that embedding dimensions are consistent across different inputs.
 
         Verifies that different length inputs produce embeddings with
         the same dimensionality.
         """
-        backend, model, _, _ = setup_backend
 
         response1 = api_client.embeddings.create(
             model=model,
@@ -108,13 +105,12 @@ class TestEmbeddingBasic:
         assert dim1 == dim2, f"Dimensions differ: {dim1} vs {dim2}"
         logger.info("Embedding dimensions: %d (consistent)", dim1)
 
-    def test_embedding_empty_string(self, setup_backend, api_client):
+    def test_embedding_empty_string(self, model, api_client):
         """Test embedding with empty string input.
 
         Some models may handle empty strings differently.
         This test verifies the API doesn't crash on empty input.
         """
-        backend, model, _, _ = setup_backend
 
         try:
             response = api_client.embeddings.create(
@@ -128,12 +124,11 @@ class TestEmbeddingBasic:
             # Some models may reject empty strings - that's acceptable
             logger.info("Empty string embedding rejected: %s", e)
 
-    def test_embedding_unicode(self, setup_backend, api_client):
+    def test_embedding_unicode(self, model, api_client):
         """Test embedding with unicode characters.
 
         Verifies that the API handles non-ASCII characters correctly.
         """
-        backend, model, _, _ = setup_backend
 
         input_text = "Hello 世界! 🚀 Привет мир"
         response = api_client.embeddings.create(

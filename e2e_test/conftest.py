@@ -21,6 +21,7 @@ Fixtures
 --------
 setup_backend: Class-scoped fixture that launches workers + gateway per test class.
     Returns (backend_name, model_path, client, gateway).
+model: Convenience fixture that returns just the model_path from setup_backend.
 """
 
 from __future__ import annotations
@@ -113,16 +114,10 @@ from smg_client import SmgClient
 
 
 @pytest.fixture
-def smg(setup_backend):
-    """DEPRECATED: Use ``api_client`` fixture instead.
-
-    To test with SmgClient, add to your test class:
-    ``@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)``
-    """
-    _, _, _, gateway = setup_backend
-    client = SmgClient(base_url=gateway.base_url, max_retries=0)
-    yield client
-    client.close()
+def model(setup_backend):
+    """Return the model path from setup_backend."""
+    _, model_path, _, _ = setup_backend
+    return model_path
 
 
 @pytest.fixture
@@ -155,6 +150,6 @@ __all__ = [
     # Fixtures
     "setup_backend",
     "backend_router",
-    "smg",
+    "model",
     "api_client",
 ]

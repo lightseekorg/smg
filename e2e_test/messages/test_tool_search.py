@@ -91,13 +91,12 @@ def make_mcp_toolset(
 class TestToolSearchPassthrough:
     """Tool search passthrough tests — request forwarded to Anthropic as-is."""
 
-    def test_tool_search_with_deferred_tools_non_streaming(self, setup_backend, api_client):
+    def test_tool_search_with_deferred_tools_non_streaming(self, model, api_client):
         """Send tool_search_tool + deferred custom tools.
 
         Verifies the response can contain server_tool_use (tool search invocation)
         and that the model can discover and reference deferred tools.
         """
-        _, model, _, _ = setup_backend
 
         tools = [
             make_tool_search_tool(),
@@ -172,9 +171,8 @@ class TestToolSearchPassthrough:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-    def test_tool_search_with_deferred_tools_streaming(self, setup_backend, api_client):
+    def test_tool_search_with_deferred_tools_streaming(self, model, api_client):
         """Streaming variant of tool search passthrough."""
-        _, model, _, _ = setup_backend
 
         tools = [
             make_tool_search_tool(),
@@ -286,13 +284,12 @@ class TestToolSearchWithMcp:
                 "Ensure the MCP server is running before running these tests."
             )
 
-    def test_mcp_tools_with_deferred_loading(self, setup_backend, api_client):
+    def test_mcp_tools_with_deferred_loading(self, model, api_client):
         """Send tool_search_tool + mcp_toolset with defer_loading: true.
 
         Verifies the full flow: SMG injects MCP tools with defer_loading,
         Anthropic discovers them via tool search, SMG executes via MCP.
         """
-        _, model, _, _ = setup_backend
 
         tools = [
             make_tool_search_tool(),
@@ -364,9 +361,8 @@ class TestToolSearchWithMcp:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-    def test_mcp_tools_with_deferred_loading_streaming(self, setup_backend, api_client):
+    def test_mcp_tools_with_deferred_loading_streaming(self, model, api_client):
         """Streaming variant: tool_search + deferred MCP tools via SMG."""
-        _, model, _, _ = setup_backend
 
         tools = [
             make_tool_search_tool(),

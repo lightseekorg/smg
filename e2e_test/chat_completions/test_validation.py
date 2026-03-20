@@ -46,13 +46,12 @@ def get_tokenizer(model_path: str):
 class TestIgnoreEOS:
     """Tests for ignore_eos feature."""
 
-    def test_ignore_eos(self, setup_backend, api_client):
+    def test_ignore_eos(self, model, api_client):
         """Test that ignore_eos=True allows generation to continue beyond EOS token.
 
         When ignore_eos=True, the model should generate until max_tokens is reached,
         even if it encounters an EOS token.
         """
-        _, model, _, _ = setup_backend
 
         tokenizer = get_tokenizer(model)
         max_tokens = 200
@@ -117,13 +116,12 @@ class TestIgnoreEOS:
 class TestLargeMaxNewTokens:
     """Tests for handling large max_new_tokens with concurrent requests."""
 
-    def test_concurrent_chat_completions(self, setup_backend, api_client):
+    def test_concurrent_chat_completions(self, model, api_client):
         """Test that multiple concurrent requests with large token generation complete.
 
         This test sends multiple requests that ask for long outputs concurrently
         to verify the server can handle concurrent long-running requests.
         """
-        _, model, _, _ = setup_backend
 
         num_requests = 4
 
@@ -178,9 +176,8 @@ class TestLargeMaxNewTokens:
 class TestHarmonyValidation:
     """Validation tests for Harmony models (GPT-OSS)."""
 
-    def test_ignore_eos_rejected(self, setup_backend, api_client):
+    def test_ignore_eos_rejected(self, model, api_client):
         """Test that ignore_eos is rejected for Harmony models with HTTP 400."""
-        _, model, _, _ = setup_backend
 
         with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)) as exc_info:
             api_client.chat.completions.create(
@@ -193,9 +190,8 @@ class TestHarmonyValidation:
         assert exc_info.value.status_code == 400
         assert exc_info.value.code == "ignore_eos_not_supported"
 
-    def test_tool_choice_with_response_format_rejected(self, setup_backend, api_client):
+    def test_tool_choice_with_response_format_rejected(self, model, api_client):
         """Test that tool_choice + response_format is rejected with HTTP 400."""
-        _, model, _, _ = setup_backend
 
         with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)) as exc_info:
             api_client.chat.completions.create(

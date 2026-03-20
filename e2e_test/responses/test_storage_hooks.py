@@ -28,9 +28,8 @@ PASSTHROUGH_HOOK_PATH = "crates/wasm/tests/fixtures/storage_hook_passthrough.was
 class TestResponsesWithStorageHook:
     """Verify WASM storage hooks work end-to-end with the Responses API."""
 
-    def test_create_and_get_response_with_hook(self, setup_backend, api_client):
+    def test_create_and_get_response_with_hook(self, model, api_client):
         """Responses API works normally when a WASM storage hook is active."""
-        _, model, _, _ = setup_backend
 
         # Create response -- hook runs before(StoreResponse) and after(StoreResponse)
         resp = api_client.responses.create(model=model, input="Hello with hooks!")
@@ -45,9 +44,8 @@ class TestResponsesWithStorageHook:
         assert get_resp.error is None
         assert get_resp.status == "completed"
 
-    def test_conversation_with_previous_response_with_hook(self, setup_backend, api_client):
+    def test_conversation_with_previous_response_with_hook(self, model, api_client):
         """Multi-turn conversation works with hooks active."""
-        _, model, _, _ = setup_backend
 
         # First turn
         resp1 = api_client.responses.create(model=model, input="What is 2+2?")
@@ -69,9 +67,8 @@ class TestResponsesWithStorageHook:
         get2 = api_client.responses.retrieve(response_id=resp2.id)
         assert get2.id == resp2.id
 
-    def test_input_items_list_with_hook(self, setup_backend, api_client):
+    def test_input_items_list_with_hook(self, model, api_client):
         """Input items listing works with hooks active."""
-        _, model, _, _ = setup_backend
 
         resp = api_client.responses.create(model=model, input="Hello!")
         assert resp.id is not None
