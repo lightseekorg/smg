@@ -85,14 +85,11 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Cleanup all thread-cached backends and write BFCL summary at session end.
+    """Write BFCL summary at session end.
 
-    This hook runs exactly once when the session ends, unlike session-scoped
-    autouse fixtures which fire per-test under pytest-parallel's thread model.
+    Backend teardown is handled directly by the current setup fixtures, so the
+    session hook only needs to emit the BFCL summary.
     """
-    from .setup_backend import cleanup_all_cached_backends
-
-    cleanup_all_cached_backends()
 
     from bfcl.session_state import write_summary_if_needed
 
