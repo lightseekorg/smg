@@ -191,8 +191,8 @@ async fn test_router_with_tracing() {
         .await
         .expect("Failed to submit worker init job");
 
-    // 8. wait for worker initialization
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // 8. wait for worker initialization (detection + registration can take several seconds)
+    tokio::time::sleep(Duration::from_millis(3000)).await;
     println!("Workers initialized");
 
     // 9. create router
