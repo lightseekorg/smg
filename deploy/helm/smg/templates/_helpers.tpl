@@ -117,7 +117,7 @@ Called from the router Deployment template.
 - {{ .Values.router.balanceAbsThreshold | quote }}
 - "--balance-rel-threshold"
 - {{ .Values.router.balanceRelThreshold | quote }}
-- "--eviction-interval-secs"
+- "--eviction-interval"
 - {{ .Values.router.evictionIntervalSecs | quote }}
 - "--max-tree-size"
 - {{ int .Values.router.maxTreeSize | quote }}
@@ -198,7 +198,7 @@ Called from the router Deployment template.
 - "--postgres-db-url"
 - {{ .Values.history.postgres.url | quote }}
 {{- end }}
-- "--postgres-pool-max"
+- "--postgres-pool-max-size"
 - {{ .Values.history.postgres.poolMax | quote }}
 {{- end }}
 {{- if eq .Values.history.backend "redis" }}
@@ -206,18 +206,18 @@ Called from the router Deployment template.
 - "--redis-url"
 - {{ .Values.history.redis.url | quote }}
 {{- end }}
-- "--redis-pool-max"
+- "--redis-pool-max-size"
 - {{ .Values.history.redis.poolMax | quote }}
 {{- end }}
 {{- if eq .Values.history.backend "oracle" }}
 {{- if .Values.history.oracle.dsn }}
-- "--oracle-connect-descriptor"
+- "--oracle-dsn"
 - {{ .Values.history.oracle.dsn | quote }}
 {{- end }}
 - "--oracle-pool-max"
 - {{ .Values.history.oracle.poolMax | quote }}
 {{- if .Values.history.oracle.user }}
-- "--oracle-username"
+- "--oracle-user"
 - {{ .Values.history.oracle.user | quote }}
 {{- end }}
 {{- if .Values.history.oracle.password }}
