@@ -1569,6 +1569,52 @@ class TestToolChoiceMistral(_TestToolChoiceBase):
         "test_multi_tool_scenario_required",
     }
 
+    def test_simple_tool_call_required(self, setup_backend, api_client):
+        """Test simple single-tool scenario with tool_choice='required'.
+
+        Regression test for #838: bos_token injection + guided decoding conflict.
+        With bos_token correctly injected, Mistral outputs [TOOL_CALLS] prefix which
+        conflicts with JSON schema guided decoding. This test uses a minimal prompt
+        (single tool, no system message) to reproduce the issue.
+        """
+        _, model, client, _ = setup_backend
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the current weather for a given location.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "The name of the city.",
+                            }
+                        },
+                        "required": ["location"],
+                    },
+                },
+            }
+        ]
+        messages = [{"role": "user", "content": "What is the weather in Seoul?"}]
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice="required",
+            max_tokens=200,
+            temperature=0.2,
+            stream=False,
+        )
+
+        tool_calls = response.choices[0].message.tool_calls
+        assert tool_calls is not None, "Expected tool calls but got None"
+        assert len(tool_calls) > 0, f"Expected at least 1 tool call, got {len(tool_calls)}"
+        assert tool_calls[0].function.name == "get_weather"
+
     @pytest.mark.skip(reason="Fails due to whitespace issue with Mistral - skipping")
     def test_complex_parameters_required_non_streaming(self, setup_backend, api_client):
         """Validate complex nested parameter schemas in non-streaming required mode."""
