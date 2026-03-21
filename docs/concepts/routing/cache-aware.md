@@ -291,7 +291,7 @@ The radix tree grows with unique prefixes. Configure based on your memory budget
 | `smg_worker_requests_active` | Active requests per worker | Imbalance >50% |
 | `smg_worker_selection_total` | Worker selection count | - |
 | `smg_router_request_duration_seconds` | End-to-end request latency | - |
-| `smg_router_ttft_seconds` | Time to first token | - |
+| `smg_router_ttft_seconds` | Time to first token (gRPC only) | - |
 
 ### Useful PromQL Queries
 
@@ -310,7 +310,7 @@ avg(smg_worker_requests_active)
 
 <div class="card" markdown>
 
-#### Time to First Token
+#### Time to First Token (gRPC only)
 
 ```promql
 rate(smg_router_ttft_seconds_sum[5m]) /

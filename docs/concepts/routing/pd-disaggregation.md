@@ -360,9 +360,9 @@ Decode is **memory-bandwidth-bound**:
 | Metric | Description |
 |--------|-------------|
 | `smg_worker_requests_active` | Active requests per worker (label: `worker`) |
-| `smg_worker_selection_total` | Worker selection count (label: `worker`) |
+| `smg_worker_selection_total` | Worker selection count (labels: `worker_type`, `connection_mode`, `model`, `policy`) |
 | `smg_router_request_duration_seconds` | End-to-end request duration |
-| `smg_router_ttft_seconds` | Time to first token |
+| `smg_router_ttft_seconds` | Time to first token (gRPC/vLLM only) |
 
 ### Key Performance Indicators
 
@@ -389,10 +389,11 @@ smg_worker_requests_active
 
 <div class="card" markdown>
 
-#### Time to First Token
+#### Time to First Token (gRPC/vLLM only)
 
 ```promql
 # Average TTFT
+# gRPC/vLLM streaming path only; not available for SGLang HTTP PD
 rate(smg_router_ttft_seconds_sum[5m]) /
 rate(smg_router_ttft_seconds_count[5m])
 ```
