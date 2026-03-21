@@ -419,7 +419,7 @@ spec:
 ```
 
 !!! tip "Engine images"
-    For all-in-one deployments where each pod runs both gateway and engine, use an engine image tag (e.g., `ghcr.io/lightseekorg/smg:v1.3.3-sglang-v0.5.9`). See [Getting Started](../../getting-started/index.md#install) for available tags.
+    For all-in-one deployments where each pod runs both gateway and engine, use an engine image tag (e.g., `ghcr.io/lightseekorg/smg:{smg_version}-{engine}-{engine_version}`). See [Getting Started](../../getting-started/index.md#install) for available tags.
 
 ### Headless Service
 

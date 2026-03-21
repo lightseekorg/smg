@@ -2,7 +2,7 @@ name: Release SMG+SGLang Docker Image
 
 run-name: >-
   SMG+SGLang |
-  ${{ github.event_name == 'push' && 'multi-version' || format('base={0}', inputs.base_image_ref || 'lmsysorg/sglang:v0.5.9') }} |
+  ${{ github.event_name == 'push' && '3-version matrix' || format('base={0}', inputs.base_image_ref || 'lmsysorg/sglang:v0.5.9') }} |
   engine=${{ inputs.sglang_commit || 'latest' }} |
   smg=${{ inputs.smg_commit || 'v1.3.3' }} |
   by @${{ github.actor }}

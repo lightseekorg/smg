@@ -45,13 +45,13 @@ Shepherd Model Gateway (SMG) routes and manages LLM traffic across workers. This
 
     ```bash
     # SGLang
-    docker pull ghcr.io/lightseekorg/smg:v1.3.3-sglang-v0.5.9
+    docker pull ghcr.io/lightseekorg/smg:1.3.3-sglang-v0.5.9
 
     # vLLM
-    docker pull ghcr.io/lightseekorg/smg:v1.3.3-vllm-v0.18.0
+    docker pull ghcr.io/lightseekorg/smg:1.3.3-vllm-v0.18.0
 
     # TensorRT-LLM
-    docker pull ghcr.io/lightseekorg/smg:v1.3.3-trtllm-1.3.0rc8
+    docker pull ghcr.io/lightseekorg/smg:1.3.3-trtllm-1.3.0rc8
     ```
 
     Tag format: `{smg_version}-{engine}-{engine_version}`. Browse all tags at [ghcr.io/lightseekorg/smg](https://github.com/lightseekorg/smg/pkgs/container/smg).
@@ -443,7 +443,7 @@ docker run -d --gpus all \
   --name smg \
   -p 30000:30000 \
   -v /path/to/models:/models \
-  ghcr.io/lightseekorg/smg:v1.3.3-sglang-v0.5.9 \
+  ghcr.io/lightseekorg/smg:1.3.3-sglang-v0.5.9 \
   serve \
   --backend sglang \
   --model-path /models/meta-llama/Llama-3.1-8B-Instruct \

@@ -2,7 +2,7 @@ name: Release SMG+vLLM Docker Image
 
 run-name: >-
   SMG+vLLM |
-  base=${{ inputs.base_image_ref || 'matrix' }} |
+  ${{ github.event_name == 'push' && '3-version matrix' || format('base={0}', inputs.base_image_ref || 'vllm/vllm-openai:v0.18.0') }} |
   engine=${{ inputs.vllm_commit || 'latest' }} |
   smg=${{ inputs.smg_commit || 'v1.3.3' }} |
   by @${{ github.actor }}
