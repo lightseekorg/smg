@@ -233,6 +233,7 @@ When a circuit is **open**:
 | Metric | Description |
 |--------|-------------|
 | `smg_worker_retries_total` | Total retry attempts by worker type and endpoint |
+| `smg_worker_retries_exhausted_total` | Requests that exhausted all retries by worker type and endpoint |
 | `smg_worker_retry_backoff_seconds` | Histogram of backoff delays |
 
 ### Useful PromQL Queries
