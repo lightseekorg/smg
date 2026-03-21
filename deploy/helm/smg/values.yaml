@@ -17,7 +17,7 @@ global:
 router:
   replicas: 1
 
-  # -- Routing policy: cache_aware, round_robin, power_of_two, manual, random, consistent_hashing, prefix_hash, bucket
+  # -- Routing policy: cache_aware, round_robin, power_of_two, manual, random, prefix_hash
   policy: cache_aware
 
   # -- Explicit worker URLs

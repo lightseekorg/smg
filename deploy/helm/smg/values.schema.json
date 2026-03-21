@@ -7,7 +7,7 @@
       "properties": {
         "policy": {
           "type": "string",
-          "enum": ["cache_aware", "round_robin", "power_of_two", "manual", "random", "consistent_hashing", "prefix_hash", "bucket"]
+          "enum": ["cache_aware", "round_robin", "power_of_two", "manual", "random", "prefix_hash"]
         },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "replicas": { "type": "integer", "minimum": 1 },
