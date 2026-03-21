@@ -222,10 +222,10 @@ The `query` field (URL query string) exists in the WASM interface spec but is no
 | Metric | Count |
 |--------|-------|
 | Total claims checked | 84 |
-| Accurate | 79 |
+| Accurate | 76 |
 | Inaccurate | 1 |
 | Outdated | 0 |
-| Uncertain | 4 |
+| Uncertain | 7 |
 | Undocumented | 3 |
 
 ### Findings Breakdown
@@ -233,9 +233,9 @@ The `query` field (URL query string) exists in the WASM interface spec but is no
 **INACCURATE (1)**:
 - `wasm-plugins.md`: WASM admin endpoint examples use port `3000` but the default gateway port is `30000`.
 
-**UNCERTAIN (4)**:
-- Tokenizer cache Prometheus metric names (40–45 above): The metric names listed in `concepts/performance/tokenizer-caching.md` could not be verified against the observability code in the time available. They are marked UNCERTAIN rather than changed.
-- WASM blocked directories list (82 above): Could not find the blocked directories in the reviewed files.
+**UNCERTAIN (7)**:
+- Tokenizer cache Prometheus metric names (40–45 above, 6 claims): The metric names listed in `concepts/performance/tokenizer-caching.md` could not be verified against the observability code in the time available. They are marked UNCERTAIN rather than changed.
+- WASM blocked directories list (82 above, 1 claim): Could not find the blocked directories in the reviewed files.
 
 **UNDOCUMENTED (3)**:
 - U1: `query` field in WASM request context (fixed — added to table).
