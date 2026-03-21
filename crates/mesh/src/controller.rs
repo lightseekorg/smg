@@ -77,7 +77,7 @@ impl MeshController {
         let mut retry_managers: HashMap<String, RetryManager> = HashMap::new();
 
         loop {
-            log::info!("Round {} Status:{:?}", cnt, read_state.read());
+            log::debug!("Round {} Status:{:?}", cnt, read_state.read());
 
             // Clean up finished sync_stream connections
             {
@@ -95,27 +95,34 @@ impl MeshController {
                 });
             }
 
-            // Get available peers from cluster state
-            let mut map = init_state.read().clone();
-            map.retain(|k, v| {
-                k.ne(&self.self_name.to_string())
-                    && v.status != NodeStatus::Down as i32
-                    && v.status != NodeStatus::Leaving as i32
-            });
+            // Select a random peer under the read lock — avoids cloning the entire state map.
+            let peer = {
+                let state = init_state.read();
+                let candidates: Vec<&NodeState> = state
+                    .values()
+                    .filter(|v| {
+                        v.name != self.self_name
+                            && v.status != NodeStatus::Down as i32
+                            && v.status != NodeStatus::Leaving as i32
+                    })
+                    .collect();
 
-            let peer = if cnt == 0 && map.is_empty() {
-                // Only use init_peer if cluster state is empty (no service discovery)
-                self.init_peer.map(|init_peer| NodeState {
-                    name: "init_peer".to_string(),
-                    address: init_peer.to_string(),
-                    status: NodeStatus::Suspected as i32,
-                    version: 1,
-                    metadata: HashMap::new(),
-                })
-            } else {
-                // Use nodes from cluster state (from service discovery or gossip)
-                let random_nodes = get_random_values_refs(&map, 1);
-                random_nodes.first().map(|&node| node.clone())
+                if cnt == 0 && candidates.is_empty() {
+                    // Only use init_peer if cluster state is empty (no service discovery)
+                    self.init_peer.map(|init_peer| NodeState {
+                        name: "init_peer".to_string(),
+                        address: init_peer.to_string(),
+                        status: NodeStatus::Suspected as i32,
+                        version: 1,
+                        metadata: HashMap::new(),
+                    })
+                } else if candidates.is_empty() {
+                    None
+                } else {
+                    use rand::Rng;
+                    let idx = rand::rng().random_range(0..candidates.len());
+                    Some(candidates[idx].clone())
+                }
             };
             cnt += 1;
 
