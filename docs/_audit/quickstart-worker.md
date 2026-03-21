@@ -111,7 +111,7 @@
 - **Code**:
   - `bindings/python/src/smg/serve.py:219-220` → TrtllmWorkerLauncher raises ValueError if connection_mode != "grpc"
   - `bindings/python/src/smg/serve.py:144-148` → VllmWorkerLauncher supports both "grpc" (vllm.entrypoints.grpc_server) and "http" (vllm.entrypoints.openai.api_server)
-- **Status**: INACCURATE — only TensorRT-LLM only supports gRPC. vLLM supports both grpc and http.
+- **Status**: INACCURATE — only TensorRT-LLM is restricted to gRPC. vLLM supports both grpc and http.
 
 ### smg serve — --data-parallel-size default
 - **Claim**: default `1`
@@ -274,7 +274,7 @@ Available tags: `latest` (stable), `v0.3.x` (specific version), `nightly` (devel
 | File | Line | Change |
 |------|------|--------|
 | `docs/getting-started/index.md` | 44 | Corrected Docker development tag from `main` to `nightly`, added registry note |
-| `docs/getting-started/index.md` | 108 | Corrected `--connection-mode` description: only TensorRT-LLM (not vLLM) only supports gRPC |
+| `docs/getting-started/index.md` | 108 | Corrected `--connection-mode` description: only TensorRT-LLM (not vLLM) is restricted to gRPC |
 
 ### Files Modified
 - `docs/getting-started/index.md` (2 changes)
