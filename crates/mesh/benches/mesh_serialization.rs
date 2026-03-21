@@ -90,21 +90,6 @@ fn make_tree_state(model_id: &str, num_ops: usize, tokens_per_op: usize) -> Tree
     state
 }
 
-/// Generate a TreeState with text-based operations (smaller payloads).
-fn make_text_tree_state(model_id: &str, num_ops: usize) -> TreeState {
-    let mut state = TreeState::new(model_id.to_string());
-    for i in 0..num_ops {
-        let op = TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Text(format!(
-                "You are a helpful assistant. User query #{i}: Tell me about topic {i}"
-            )),
-            tenant: format!("http://worker-{i}:8000"),
-        });
-        state.add_operation(op);
-    }
-    state
-}
-
 /// PolicyState mirrors the mesh store type to avoid depending on internal
 /// module structure. Keep in sync with `crates/mesh/src/stores.rs::PolicyState`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,17 +134,8 @@ fn bench_tree_state_serialization(c: &mut Criterion) {
             });
         });
 
-        add_result(
-            "serialize",
-            format!(
-                "{:>18} | JSON {:>10} | bincode {:>10} | {:>5.1}x smaller | {:>8}",
-                label,
-                format_size(json_size),
-                format_size(bincode_size),
-                json_size as f64 / bincode_size as f64,
-                format!("{ops}×{tokens}"),
-            ),
-        );
+        // Sizes reported in summary table
+        let _ = (json_size, bincode_size);
     }
 
     group.finish();
@@ -247,40 +223,7 @@ fn bench_policy_state_full_path(c: &mut Criterion) {
             },
         );
 
-        // Size comparison
-        let json_inner = serde_json::to_vec(&tree_state).unwrap();
-        let json_ps = PolicyState {
-            model_id: "test-model".to_string(),
-            policy_type: "tree_state".to_string(),
-            config: json_inner,
-            version: 1,
-        };
-        let json_wire = serde_json::to_vec(&json_ps).unwrap().len();
-
-        let bin_inner = bincode::serialize(&tree_state).unwrap();
-        let bin_ps = PolicyState {
-            model_id: "test-model".to_string(),
-            policy_type: "tree_state".to_string(),
-            config: bin_inner,
-            version: 1,
-        };
-        let bin_wire = bincode::serialize(&bin_ps).unwrap().len();
-
-        add_result(
-            "wire_path",
-            format!(
-                "{:>18} | JSON {:>10} | bincode {:>10} | {:>5.1}x smaller | {}",
-                label,
-                format_size(json_wire),
-                format_size(bin_wire),
-                json_wire as f64 / bin_wire as f64,
-                if json_wire > MAX_MESSAGE_SIZE {
-                    "⚠ JSON EXCEEDS 10MB"
-                } else {
-                    "OK"
-                },
-            ),
-        );
+        // Wire path sizes reported in summary table
     }
 
     group.finish();
@@ -336,20 +279,8 @@ fn bench_multi_model(c: &mut Criterion) {
             total_wire_size += serde_json::to_vec(&ps).unwrap().len();
         }
 
-        add_result(
-            "multi_model",
-            format!(
-                "{:>30} | {:>3} models | {:>10} total wire | {}",
-                label,
-                num_models,
-                format_size(total_wire_size),
-                if total_wire_size > MAX_MESSAGE_SIZE {
-                    "⚠ EXCEEDS 10MB LIMIT"
-                } else {
-                    "OK"
-                },
-            ),
-        );
+        // Multi-model sizes reported in summary table
+        let _ = total_wire_size;
     }
 
     group.finish();
@@ -360,59 +291,148 @@ fn bench_multi_model(c: &mut Criterion) {
 // ═══════════════════════════════════════════════════════════════════
 
 fn bench_summary(c: &mut Criterion) {
+    use std::time::Instant;
+
     let mut group = c.benchmark_group("benchmark_summary");
     group.sample_size(10);
 
-    // Compute all sizes for the summary
+    // ── Comprehensive comparison table with timing ──
     for (ops, tokens, label) in TEST_CONFIGS {
         let state = make_tree_state("test-model", ops, tokens);
-        let json_inner = serde_json::to_vec(&state).unwrap();
-        let ps = PolicyState {
+
+        // Size comparison
+        let json_bytes = serde_json::to_vec(&state).unwrap();
+        let bincode_bytes = bincode::serialize(&state).unwrap();
+
+        // Full wire path sizes
+        let json_ps = PolicyState {
             model_id: "test-model".to_string(),
             policy_type: "tree_state".to_string(),
-            config: json_inner.clone(),
+            config: json_bytes.clone(),
             version: 1,
         };
-        let json_wire = serde_json::to_vec(&ps).unwrap();
+        let json_wire_size = serde_json::to_vec(&json_ps).unwrap().len();
+
+        let bincode_ps = PolicyState {
+            model_id: "test-model".to_string(),
+            policy_type: "tree_state".to_string(),
+            config: bincode_bytes.clone(),
+            version: 1,
+        };
+        let bincode_wire_size = bincode::serialize(&bincode_ps).unwrap().len();
+
+        // Manual timing — scale iterations inversely with payload size
+        let iters = (100_000 / (ops * tokens).max(1)).clamp(5, 100);
+
+        let start = Instant::now();
+        for _ in 0..iters {
+            black_box(serde_json::to_vec(black_box(&state)).unwrap());
+        }
+        let json_ser_us = start.elapsed().as_micros() as f64 / iters as f64;
+
+        let start = Instant::now();
+        for _ in 0..iters {
+            black_box(bincode::serialize(black_box(&state)).unwrap());
+        }
+        let bin_ser_us = start.elapsed().as_micros() as f64 / iters as f64;
+
+        let start = Instant::now();
+        for _ in 0..iters {
+            let _: TreeState = black_box(serde_json::from_slice(black_box(&json_bytes))).unwrap();
+        }
+        let json_de_us = start.elapsed().as_micros() as f64 / iters as f64;
+
+        let start = Instant::now();
+        for _ in 0..iters {
+            let _: TreeState = black_box(bincode::deserialize(black_box(&bincode_bytes))).unwrap();
+        }
+        let bin_de_us = start.elapsed().as_micros() as f64 / iters as f64;
 
         add_result(
-            "size",
+            "comparison",
             format!(
-                "{:>18} | TreeState: {:>10} | PolicyState (wire): {:>10} | {:>5.1}x | {}",
+                "{:>18} | {:>10} {:>10} {:>5.1}x | {:>10} {:>10} {:>5.1}x | {:>10} {:>10} {:>5.1}x",
                 label,
-                format_size(json_inner.len()),
-                format_size(json_wire.len()),
-                json_wire.len() as f64 / json_inner.len() as f64,
-                if json_wire.len() > MAX_MESSAGE_SIZE {
-                    "⚠ EXCEEDS LIMIT"
-                } else {
-                    "OK"
-                },
+                format_size(json_bytes.len()),
+                format_size(bincode_bytes.len()),
+                json_bytes.len() as f64 / bincode_bytes.len() as f64,
+                format_time(json_ser_us),
+                format_time(bin_ser_us),
+                json_ser_us / bin_ser_us,
+                format_time(json_de_us),
+                format_time(bin_de_us),
+                json_de_us / bin_de_us,
             ),
         );
 
-        // No-op benchmark to register in Criterion output
-        group.bench_function(BenchmarkId::new("size_kb", label), |b| {
-            b.iter(|| black_box(json_inner.len()));
+        add_result(
+            "wire",
+            format!(
+                "{:>18} | JSON wire {:>10} | bincode wire {:>10} | {:>5.1}x smaller",
+                label,
+                format_size(json_wire_size),
+                format_size(bincode_wire_size),
+                json_wire_size as f64 / bincode_wire_size as f64,
+            ),
+        );
+
+        // No-op to register in Criterion
+        group.bench_function(BenchmarkId::new("summary", label), |b| {
+            b.iter(|| black_box(json_bytes.len()));
         });
     }
 
-    // Text-based comparison
-    let text_state = make_text_tree_state("test-model", 256);
-    let json_text = serde_json::to_vec(&text_state).unwrap();
-    add_result(
-        "size",
-        format!(
-            "{:>18} | TreeState: {:>10} | (text keys, no token blowup)",
-            "256ops_text",
-            format_size(json_text.len()),
-        ),
-    );
+    // Multi-model aggregate
+    for (num_models, ops, tokens, label) in MULTI_MODEL_CONFIGS {
+        let states: Vec<TreeState> = (0..num_models)
+            .map(|i| make_tree_state(&format!("model-{i}"), ops, tokens))
+            .collect();
+
+        let mut json_total = 0usize;
+        let mut bincode_total = 0usize;
+        for ts in &states {
+            let inner_json = serde_json::to_vec(ts).unwrap();
+            let ps = PolicyState {
+                model_id: ts.model_id.clone(),
+                policy_type: "tree_state".to_string(),
+                config: inner_json,
+                version: 1,
+            };
+            json_total += serde_json::to_vec(&ps).unwrap().len();
+
+            let inner_bin = bincode::serialize(ts).unwrap();
+            let bin_ps = PolicyState {
+                model_id: ts.model_id.clone(),
+                policy_type: "tree_state".to_string(),
+                config: inner_bin,
+                version: 1,
+            };
+            bincode_total += bincode::serialize(&bin_ps).unwrap().len();
+        }
+
+        add_result(
+            "multi",
+            format!(
+                "{:>30} | {:>3} models | JSON {:>10} | bincode {:>10} | {:>5.1}x",
+                label,
+                num_models,
+                format_size(json_total),
+                format_size(bincode_total),
+                json_total as f64 / bincode_total as f64,
+            ),
+        );
+    }
 
     group.finish();
-
-    // Print summary
     print_summary();
+}
+
+fn format_time(us: f64) -> String {
+    if us >= 1000.0 {
+        format!("{:.1}ms", us / 1000.0)
+    } else {
+        format!("{us:.0}µs")
+    }
 }
 
 fn print_summary() {
@@ -422,85 +442,75 @@ fn print_summary() {
 
     let results = RESULTS.lock().unwrap();
 
-    let mut serialize_results = Vec::new();
+    let mut comparison_results = Vec::new();
     let mut wire_results = Vec::new();
-    let mut size_results = Vec::new();
-    let mut multi_model_results = Vec::new();
+    let mut multi_results = Vec::new();
 
     for (key, value) in results.iter() {
         let category = key.split('_').skip(1).collect::<Vec<_>>().join("_");
         match category.as_str() {
-            "serialize" => serialize_results.push(value.clone()),
-            "wire_path" | "wire" => wire_results.push(value.clone()),
-            "size" => size_results.push(value.clone()),
-            "multi_model" | "multi" => multi_model_results.push(value.clone()),
+            "comparison" => comparison_results.push(value.clone()),
+            "wire" | "wire_path" => wire_results.push(value.clone()),
+            "multi" | "multi_model" => multi_results.push(value.clone()),
             _ => {}
         }
     }
 
     eprintln!();
-    eprintln!("{}", "═".repeat(90));
-    eprintln!("MESH SERIALIZATION BENCHMARK");
-    eprintln!("{}", "═".repeat(90));
+    eprintln!("{}", "═".repeat(120));
+    eprintln!("MESH SERIALIZATION BENCHMARK — JSON vs bincode");
+    eprintln!("{}", "═".repeat(120));
     eprintln!();
     eprintln!("Configuration:");
     eprintln!("  Sync interval:    {SYNC_INTERVAL_SECS} second(s)");
     let max_mb = MAX_MESSAGE_SIZE / (1024 * 1024);
     eprintln!("  Max message size: {max_mb}MB");
-    eprintln!("  Serialization:    serde_json (current)");
     eprintln!("  RNG seed:         42 (deterministic)");
     eprintln!();
 
-    if !serialize_results.is_empty() {
-        eprintln!("{}", "─".repeat(90));
-        eprintln!("TREESTATE SERIALIZATION (JSON)");
-        eprintln!("{}", "─".repeat(90));
+    if !comparison_results.is_empty() {
+        eprintln!("{}", "─".repeat(120));
         eprintln!(
-            "{:>18} | {:>10} | {:>10} | {:>8}",
-            "Config", "JSON Size", "Limit", "Ops"
+            "{:>18} | {:>10} {:>10} {:>5} | {:>10} {:>10} {:>5} | {:>10} {:>10} {:>5}",
+            "Config",
+            "JSON size",
+            "bin size",
+            "ratio",
+            "JSON ser",
+            "bin ser",
+            "ratio",
+            "JSON de",
+            "bin de",
+            "ratio",
         );
-        eprintln!("{}", "─".repeat(90));
-        for v in &serialize_results {
+        eprintln!("{}", "─".repeat(120));
+        for v in &comparison_results {
             eprintln!("{v}");
         }
         eprintln!();
     }
 
     if !wire_results.is_empty() {
-        eprintln!("{}", "─".repeat(90));
-        eprintln!("FULL WIRE PATH: TreeState → PolicyState.config → JSON wire");
-        eprintln!("{}", "─".repeat(90));
+        eprintln!("{}", "─".repeat(120));
+        eprintln!("FULL WIRE PATH (TreeState → PolicyState.config → wire bytes)");
+        eprintln!("{}", "─".repeat(120));
         for v in &wire_results {
             eprintln!("{v}");
         }
         eprintln!();
     }
 
-    if !size_results.is_empty() {
-        eprintln!("{}", "─".repeat(90));
-        eprintln!("SIZE SUMMARY (single model)");
-        eprintln!("{}", "─".repeat(90));
-        for v in &size_results {
+    if !multi_results.is_empty() {
+        eprintln!("{}", "─".repeat(120));
+        eprintln!("MULTI-MODEL AGGREGATE (total per sync cycle)");
+        eprintln!("{}", "─".repeat(120));
+        for v in &multi_results {
             eprintln!("{v}");
         }
         eprintln!();
     }
 
-    if !multi_model_results.is_empty() {
-        eprintln!("{}", "─".repeat(90));
-        eprintln!("MULTI-MODEL AGGREGATE (total PolicyStore wire per sync cycle)");
-        eprintln!("{}", "─".repeat(90));
-        for v in &multi_model_results {
-            eprintln!("{v}");
-        }
-        eprintln!();
-    }
-
-    eprintln!("{}", "═".repeat(90));
-    eprintln!("Key insight: PolicyState JSON is ~3x larger than TreeState JSON because");
-    eprintln!("Vec<u8> serializes as a JSON array of decimal integers [240, 159, ...]");
-    eprintln!("With 10 models × 4000-token prompts, total wire payload reaches ~500MB+.");
-    eprintln!("{}", "═".repeat(90));
+    eprintln!("{}", "═".repeat(120));
 }
 
 criterion_group!(
