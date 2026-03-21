@@ -166,6 +166,7 @@ Registers a new backend worker.
 ```json
 {
   "url": "http://gpu1:8000",
+  "models": [{ "id": "llama3-70b" }],
   "api_key": "worker-secret-key"
 }
 ```
