@@ -395,15 +395,18 @@ and table row:
 ```bash
   --grpc-workers grpc://worker1:50051
 ```
-**Before** (line 344):
+**After** (line 330):
 ```bash
-  --tool-call-parser llama \
+  --worker-urls grpc://worker1:50051
 ```
-(uses `--grpc-workers` implicitly in next example)
 **Before** (line 364):
 ```bash
   --grpc-workers grpc://worker:50051
 ```
-**After**: All three occurrences of `--grpc-workers` replaced with `--worker-urls`
+**After** (line 364):
+```bash
+  --worker-urls grpc://worker:50051
+```
+**After**: Both occurrences of `--grpc-workers` replaced with `--worker-urls` (2 changes total)
 **Reason**: No `--grpc-workers` CLI flag exists. The correct flag is `--worker-urls`.
 **Code reference**: `model_gateway/src/main.rs:147-148` — `worker_urls: Vec<String>` declared with `#[arg(long)]`
