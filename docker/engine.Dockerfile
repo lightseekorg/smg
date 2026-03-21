@@ -64,4 +64,9 @@ RUN case "${ENGINE}" in \
     esac \
     && if [ -n "${ENGINE_REPO}" ]; then \
          bash /tmp/scripts/install-${ENGINE}.sh /opt/engine-src; \
+       fi \
+    && if [ "${ENGINE}" = "vllm" ]; then \
+         pip install --no-cache-dir smg-grpc-proto "smg-grpc-servicer[vllm]"; \
        fi
+
+ENTRYPOINT ["smg"]
