@@ -74,7 +74,7 @@ Controls how requests are distributed across workers.
 |--------|------------|
 | Environment | - |
 | Default | `cache_aware` |
-| Values | `random`, `round_robin`, `cache_aware`, `power_of_two`, `prefix_hash`, `manual` |
+| Values | `random`, `round_robin`, `cache_aware`, `power_of_two`, `prefix_hash`, `consistent_hashing`, `bucket`, `manual` |
 
 **Policy Comparison**:
 
@@ -317,8 +317,8 @@ Note: Enabling service discovery automatically enables IGW mode.
 | Option | `--backend` |
 |--------|-------------|
 | Environment | - |
-| Default | `sglang` |
-| Values | `sglang`, `vllm`, `trtllm`, `openai`, `anthropic` |
+| Default | None (auto-detected) |
+| Values | `sglang`, `vllm`, `trtllm`, `openai`, `anthropic`, `gemini` |
 
 ### History Backend
 

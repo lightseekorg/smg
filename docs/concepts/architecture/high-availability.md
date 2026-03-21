@@ -485,12 +485,12 @@ smg --enable-mesh --service-discovery --router-selector app=smg tier=router
 
 | Metric | Description |
 |--------|-------------|
-| `smg_mesh_peers_total` | Number of connected peers |
-| `smg_mesh_peer_status` | Status of each peer (1=alive, 0=down) |
-| `smg_mesh_sync_operations_total` | State sync operations by type |
-| `smg_mesh_sync_latency_seconds` | State sync latency histogram |
-| `smg_mesh_leader_elections_total` | Leader election events |
-| `smg_mesh_gossip_messages_total` | Gossip messages sent/received |
+| `router_mesh_peer_connections` | Number of active peer connections |
+| `router_mesh_peer_reconnects_total` | Total number of peer reconnections |
+| `router_mesh_batches_total` | Total state update batches sent/received |
+| `router_mesh_bytes_total` | Total bytes transmitted in mesh |
+| `router_mesh_convergence_ms` | Time for state to converge across mesh (ms) |
+| `router_mesh_snapshot_trigger_total` | Total number of snapshot triggers |
 
 ### Alerting Rules
 
@@ -499,7 +499,7 @@ groups:
 - name: smg-mesh
   rules:
   - alert: SMGClusterDegraded
-    expr: smg_mesh_peers_total < 2
+    expr: router_mesh_peer_connections < 2
     for: 1m
     labels:
       severity: warning
@@ -507,7 +507,7 @@ groups:
       summary: "SMG cluster has fewer than 3 nodes"
 
   - alert: SMGNodeDown
-    expr: smg_mesh_peer_status == 0
+    expr: router_mesh_peer_connections == 0
     for: 30s
     labels:
       severity: critical
@@ -549,7 +549,7 @@ Keep mesh nodes in the same region (< 10ms RTT) for optimal state sync performan
 
 ### :material-monitor: Monitoring
 
-Monitor `smg_mesh_peers_total` and alert when cluster size drops below threshold.
+Monitor `router_mesh_peer_connections` and alert when cluster size drops below threshold.
 
 </div>
 
