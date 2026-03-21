@@ -85,7 +85,9 @@ Controls how requests are distributed across workers.
 | `power_of_two` | Variable workloads | Poor | Excellent |
 | `cache_aware` | LLM inference | Excellent | Good |
 | `prefix_hash` | Consistent routing by prefix | Good | Good |
-| `manual` | Session affinity | Good | Manual |
+| `consistent_hashing` | Session affinity via hash ring | Good | Good |
+| `bucket` | Load balancing with bucket boundaries | Poor | Excellent |
+| `manual` | Sticky sessions with LRU eviction | Good | Manual |
 
 **Recommendation**: Use `cache_aware` for LLM workloads to maximize KV cache hit rates.
 

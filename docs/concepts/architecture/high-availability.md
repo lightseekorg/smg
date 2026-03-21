@@ -498,16 +498,19 @@ smg --enable-mesh --service-discovery --router-selector app=smg tier=router
 groups:
 - name: smg-mesh
   rules:
+  # router_mesh_peer_connections is a per-peer gauge (0/1, labeled by "peer").
+  # count(router_mesh_peer_connections == 1) gives the number of active peer links.
+  # Adjust the threshold to match your expected peer count (e.g. N-1 for an N-node cluster).
   - alert: SMGClusterDegraded
-    expr: sum(router_mesh_peer_connections) < 2
+    expr: count(router_mesh_peer_connections == 1) < 2
     for: 1m
     labels:
       severity: warning
     annotations:
-      summary: "SMG cluster has fewer than 3 nodes"
+      summary: "SMG cluster has fewer than expected peer connections"
 
   - alert: SMGNodeDown
-    expr: sum(router_mesh_peer_connections) == 0
+    expr: router_mesh_peer_connections == 0
     for: 30s
     labels:
       severity: critical
@@ -549,7 +552,7 @@ Keep mesh nodes in the same region (< 10ms RTT) for optimal state sync performan
 
 ### :material-monitor: Monitoring
 
-Monitor `sum(router_mesh_peer_connections)` and alert when cluster size drops below threshold.
+Monitor `count(router_mesh_peer_connections == 1)` to track active peer links and alert when the count drops below your expected threshold.
 
 </div>
 
