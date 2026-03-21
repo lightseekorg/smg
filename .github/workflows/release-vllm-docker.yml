@@ -2,9 +2,9 @@ name: Release SMG+vLLM Docker Image
 
 run-name: >-
   SMG+vLLM |
-  base=${{ inputs.base_image_ref }} |
-  engine=${{ inputs.vllm_commit }} |
-  smg=${{ inputs.smg_commit }} |
+  base=${{ inputs.base_image_ref || 'matrix' }} |
+  engine=${{ inputs.vllm_commit || 'latest' }} |
+  smg=${{ inputs.smg_commit || 'v1.3.3' }} |
   by @${{ github.actor }}
 
 on:
@@ -12,6 +12,13 @@ on:
     branches: [main]
     paths:
       - bindings/python/pyproject.toml
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker/engine.Dockerfile'
+      - '.github/workflows/_build-engine-image.yml'
+      - '.github/workflows/release-*-docker.yml'
+      - 'scripts/installation/**'
   workflow_dispatch:
     inputs:
       base_image_ref:
@@ -49,13 +56,18 @@ permissions:
 
 jobs:
   build:
+    strategy:
+      fail-fast: false
+      matrix:
+        base_image: ${{ github.event_name == 'push' && fromJSON('["vllm/vllm-openai:v0.18.0","vllm/vllm-openai:v0.17.2","vllm/vllm-openai:v0.16.0"]') || fromJSON(format('["{0}"]', inputs.base_image_ref || 'vllm/vllm-openai:v0.18.0')) }}
     uses: ./.github/workflows/_build-engine-image.yml
     with:
       engine: vllm
-      base_image_ref: ${{ inputs.base_image_ref || 'vllm/vllm-openai:v0.18.0' }}
+      base_image_ref: ${{ matrix.base_image }}
       engine_repo: ${{ inputs.vllm_repo }}
       engine_commit: ${{ inputs.vllm_commit || 'latest' }}
       smg_repo: ${{ inputs.smg_repo || 'https://github.com/lightseekorg/smg' }}
       smg_commit: ${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.3.3' }}
       tag: ${{ inputs.tag }}
+      dry_run: ${{ github.event_name == 'pull_request' }}
     secrets: inherit
