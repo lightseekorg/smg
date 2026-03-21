@@ -489,7 +489,7 @@ smg --enable-mesh --service-discovery --router-selector app=smg tier=router
 | `router_mesh_peer_reconnects_total` | Total number of peer reconnections |
 | `router_mesh_batches_total` | Total state update batches sent/received |
 | `router_mesh_bytes_total` | Total bytes transmitted in mesh |
-| `router_mesh_convergence_ms` | Time for state to converge across mesh (ms) |
+| `router_mesh_convergence_ms` | State convergence time across the mesh |
 | `router_mesh_snapshot_trigger_total` | Total number of snapshot triggers |
 
 ### Alerting Rules
@@ -499,7 +499,7 @@ groups:
 - name: smg-mesh
   rules:
   - alert: SMGClusterDegraded
-    expr: router_mesh_peer_connections < 2
+    expr: sum(router_mesh_peer_connections) < 2
     for: 1m
     labels:
       severity: warning
@@ -507,7 +507,7 @@ groups:
       summary: "SMG cluster has fewer than 3 nodes"
 
   - alert: SMGNodeDown
-    expr: router_mesh_peer_connections == 0
+    expr: sum(router_mesh_peer_connections) == 0
     for: 30s
     labels:
       severity: critical
@@ -549,7 +549,7 @@ Keep mesh nodes in the same region (< 10ms RTT) for optimal state sync performan
 
 ### :material-monitor: Monitoring
 
-Monitor `router_mesh_peer_connections` and alert when cluster size drops below threshold.
+Monitor `sum(router_mesh_peer_connections)` and alert when cluster size drops below threshold.
 
 </div>
 
