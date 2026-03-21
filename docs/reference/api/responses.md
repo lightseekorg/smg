@@ -356,6 +356,32 @@ Returns the full response object as shown in the Create Response section.
 
 ---
 
+## Cancel Response
+
+Cancel a background response that is in progress.
+
+```
+POST /v1/responses/{response_id}/cancel
+```
+
+### Path Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `response_id` | string | The response ID to cancel |
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:30000/v1/responses/resp_abc123def456/cancel
+```
+
+### Response
+
+Returns the response object with updated status.
+
+---
+
 ## Delete Response
 
 Delete a stored response.
