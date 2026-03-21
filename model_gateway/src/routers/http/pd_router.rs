@@ -579,10 +579,29 @@ impl PDRouter {
         }
         .emit();
 
-        let (prefill_result, decode_result) =
-            tokio::join!(prefill_request.send(), decode_request.send());
+        // Send both requests concurrently. Use try_join so that if either side
+        // hits a transport error, the other is cancelled immediately — otherwise
+        // the surviving request hangs waiting for a PD bootstrap that will never
+        // come (see #831).
+        let pd_result = tokio::try_join!(prefill_request.send(), decode_request.send());
 
         events::RequestReceivedEvent {}.emit();
+
+        let (prefill_result, decode_result): (
+            Result<reqwest::Response, reqwest::Error>,
+            Result<reqwest::Response, reqwest::Error>,
+        ) = match pd_result {
+            Ok((prefill_resp, decode_resp)) => (Ok(prefill_resp), Ok(decode_resp)),
+            Err(e) => {
+                error!("PD request transport error, both sides aborted: {e}");
+                // Don't record_outcome here — the caller (execute_dual_dispatch)
+                // records outcomes from the response status after we return.
+                return error::bad_gateway(
+                    "PD disaggregation request failed",
+                    format!("Transport error: {e}"),
+                );
+            }
+        };
 
         // Process decode response
         match decode_result {
