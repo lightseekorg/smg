@@ -152,12 +152,10 @@ The `POST /workers` endpoint accepts additional fields:
 {
   "url": "http://worker:8000",
   "api_key": "optional-key",
-  "model_id": "llama-70b",
   "runtime": "sglang",
   "worker_type": "regular",
   "priority": 50,
   "cost": 1.0,
-  "disable_health_check": false,
   "labels": {"region": "us-east"}
 }
 ```
@@ -166,12 +164,10 @@ The `POST /workers` endpoint accepts additional fields:
 |-------|---------|-------------|
 | `url` | (required) | Worker URL (`http://`, `grpc://`, or `https://` for cloud) |
 | `api_key` | — | API key for authenticated workers |
-| `model_id` | auto-discovered | Model identifier |
 | `runtime` | `sglang` | Runtime: `sglang`, `vllm`, `trtllm`, or `external` |
 | `worker_type` | `regular` | Type: `regular`, `prefill`, or `decode` |
 | `priority` | `50` | Routing priority (0–100, higher = preferred) |
 | `cost` | `1.0` | Cost multiplier for cost-aware routing |
-| `disable_health_check` | `false` | Skip health checking for this worker |
 | `labels` | `{}` | Arbitrary metadata |
 
 ## Verify
