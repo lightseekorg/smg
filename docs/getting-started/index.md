@@ -41,7 +41,7 @@ Shepherd Model Gateway (SMG) routes and manages LLM traffic across workers. This
     docker run --rm lightseekorg/smg:latest --version
     ```
 
-    Available tags: `latest` (stable), `v0.3.x` (specific version), `main` (development).
+    Available tags: `latest` (stable), `v0.3.x` (specific version), `nightly` (development, from `ghcr.io/lightseekorg/smg:nightly`).
 
 === "From Source"
 
@@ -105,7 +105,7 @@ This starts `--data-parallel-size` worker replicas, waits for readiness, then st
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--backend` | `sglang` | Inference backend: `sglang`, `vllm`, or `trtllm` |
-| `--connection-mode` | `grpc` | Worker connection mode: `grpc` or `http` (vLLM and TensorRT-LLM only support gRPC) |
+| `--connection-mode` | `grpc` | Worker connection mode: `grpc` or `http` (TensorRT-LLM only supports gRPC) |
 | `--data-parallel-size` | `1` | Number of worker replicas (one per GPU) |
 | `--worker-base-port` | `31000` | Base port for worker processes |
 | `--host` | `127.0.0.1` | Router host |
