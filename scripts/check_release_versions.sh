@@ -230,11 +230,13 @@ detect_bump_level() {
 }
 
 # Bump version by level: major, minor, or patch.
-# If VERSION_OVERRIDE is set, always returns the override (ignoring level).
+# If VERSION_OVERRIDE is set AND this is the smg crate (3rd arg = "smg"),
+# returns the override. Independent crates always use normal bump logic.
 bump_version() {
     local version="$1"
     local level="$2"
-    if [[ -n "$VERSION_OVERRIDE" ]]; then
+    local crate_name="${3:-}"
+    if [[ -n "$VERSION_OVERRIDE" && "$crate_name" == "smg" ]]; then
         echo "$VERSION_OVERRIDE"
         return
     fi
@@ -528,7 +530,7 @@ smg_target_version="$smg_version"
 for entry in ${NEEDS_BUMP[@]+"${NEEDS_BUMP[@]}"}; do
     IFS='|' read -r _name _path _dep_key _cur _level <<< "$entry"
     if [[ "$_name" == "smg" ]]; then
-        smg_target_version=$(bump_version "$_cur" "$_level")
+        smg_target_version=$(bump_version "$_cur" "$_level" "smg")
         break
     fi
 done
@@ -590,7 +592,7 @@ echo -e "${BOLD}Proposed fixes:${NC}"
 
 for entry in ${NEEDS_BUMP[@]+"${NEEDS_BUMP[@]}"}; do
     IFS='|' read -r name path dep_key current_version level <<< "$entry"
-    new_version=$(bump_version "$current_version" "$level")
+    new_version=$(bump_version "$current_version" "$level" "$name")
     echo -e "  $(bump_label "$level") $name v$current_version → v$new_version ($path/Cargo.toml)"
     if [[ "$dep_key" != "-" ]]; then
         echo -e "       sync workspace Cargo.toml $dep_key → v$new_version"
@@ -606,7 +608,7 @@ fi
 
 for entry in ${NEEDS_PY_BUMP[@]+"${NEEDS_PY_BUMP[@]}"}; do
     IFS='|' read -r name path version_file current_version level <<< "$entry"
-    new_version=$(bump_version "$current_version" "$level")
+    new_version=$(bump_version "$current_version" "$level" "$name")
     echo -e "  $(bump_label "$level") $name v$current_version → v$new_version ($version_file)"
 done
 
@@ -630,7 +632,7 @@ fix_failed=0
 
 for entry in ${NEEDS_BUMP[@]+"${NEEDS_BUMP[@]}"}; do
     IFS='|' read -r name path dep_key current_version level <<< "$entry"
-    new_version=$(bump_version "$current_version" "$level")
+    new_version=$(bump_version "$current_version" "$level" "$name")
 
     # Bump crate Cargo.toml
     if set_crate_version "$path/Cargo.toml" "$new_version"; then
@@ -663,7 +665,7 @@ fi
 
 for entry in ${NEEDS_PY_BUMP[@]+"${NEEDS_PY_BUMP[@]}"}; do
     IFS='|' read -r name path version_file current_version level <<< "$entry"
-    new_version=$(bump_version "$current_version" "$level")
+    new_version=$(bump_version "$current_version" "$level" "$name")
 
     if set_python_version "$version_file" "$new_version"; then
         echo -e "  ${GREEN}✓${NC} $version_file → v$new_version"
