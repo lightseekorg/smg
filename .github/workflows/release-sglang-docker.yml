@@ -4,7 +4,8 @@ run-name: >-
   SMG+SGLang |
   ${{ github.event_name == 'push' && '3-version matrix' || format('base={0}', inputs.base_image_ref || 'lmsysorg/sglang:v0.5.9') }} |
   engine=${{ inputs.sglang_commit || 'latest' }} |
-  smg=${{ inputs.smg_commit || 'v1.3.3' }} |
+  smg=${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.3.3' }} |
+  ${{ github.event_name == 'pull_request' && 'dry-run |' || '' }}
   by @${{ github.actor }}
 
 on:

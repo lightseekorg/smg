@@ -4,8 +4,8 @@ run-name: >-
   SMG+TRTLLM |
   ${{ github.event_name == 'push' && '3-version matrix' || format('base={0}', inputs.base_image_ref || 'nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8') }} |
   engine=${{ inputs.trtllm_commit || 'latest' }} |
-  smg=${{ inputs.smg_commit || 'v1.3.3' }} |
-  ${{ github.event_name == 'pull_request' && 'dry-run' || '' }}
+  smg=${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.3.3' }} |
+  ${{ github.event_name == 'pull_request' && 'dry-run |' || '' }}
   by @${{ github.actor }}
 
 on:
