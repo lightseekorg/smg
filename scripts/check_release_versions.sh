@@ -97,6 +97,7 @@ SMG_VERSION_SYNC=(
     "smg-python|bindings/python/Cargo.toml|cargo"
     "smg-golang|bindings/golang/Cargo.toml|cargo"
     "smg pyproject|bindings/python/pyproject.toml|pyproject"
+    "helm chart|deploy/helm/smg/Chart.yaml|helm"
     "sglang-docker|.github/workflows/release-sglang-docker.yml|workflow"
     "vllm-docker|.github/workflows/release-vllm-docker.yml|workflow"
     "trtllm-docker|.github/workflows/release-trtllm-docker.yml|workflow"
@@ -361,6 +362,27 @@ has_non_version_changes() {
     [[ "$non_ver_lines" -gt 0 ]]
 }
 
+# Extract version from a Helm Chart.yaml (the `version:` field, not appVersion)
+get_helm_chart_version() {
+    local file="$1"
+    grep -m1 '^version:' "$file" | sed 's/version: *//'
+}
+
+# Update both version and appVersion in a Helm Chart.yaml
+set_helm_chart_version() {
+    local file="$1"
+    local old_version="$2"
+    local new_version="$3"
+    local escaped_old
+    escaped_old=$(escape_version "$old_version")
+    sed_inplace "s/^version: ${escaped_old}/version: ${new_version}/" "$file"
+    sed_inplace "s/^appVersion: \"${escaped_old}\"/appVersion: \"${new_version}\"/" "$file"
+    if ! grep -q "^version: ${new_version}" "$file"; then
+        echo -e "    ${RED}FAILED to update $file${NC}" >&2
+        return 1
+    fi
+}
+
 # Extract smg_commit default version from a workflow file (e.g. "default: 'v1.2.0'")
 get_workflow_smg_version() {
     local file="$1"
@@ -548,6 +570,9 @@ for entry in "${SMG_VERSION_SYNC[@]}"; do
         pyproject)
             file_version=$(grep -m1 '^version' "$file" | sed 's/.*"\([^"]*\)".*/\1/')
             ;;
+        helm)
+            file_version=$(get_helm_chart_version "$file")
+            ;;
         workflow)
             file_version=$(get_workflow_smg_version "$file")
             ;;
@@ -686,6 +711,13 @@ for entry in ${NEEDS_VERSION_SYNC[@]+"${NEEDS_VERSION_SYNC[@]}"}; do
             ;;
         pyproject)
             if set_python_version "$file" "$smg_target_version"; then
+                echo -e "  ${GREEN}✓${NC} $file → v$smg_target_version"
+            else
+                fix_failed=$((fix_failed + 1))
+            fi
+            ;;
+        helm)
+            if set_helm_chart_version "$file" "$file_version" "$smg_target_version"; then
                 echo -e "  ${GREEN}✓${NC} $file → v$smg_target_version"
             else
                 fix_failed=$((fix_failed + 1))
