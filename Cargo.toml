@@ -1,5 +1,5 @@
 [workspace]
-members = ["model_gateway", "crates/protocols", "crates/reasoning_parser", "crates/tool_parser", "crates/workflow", "crates/tokenizer", "crates/auth", "crates/mcp", "crates/kv_index", "crates/data_connector", "crates/multimodal", "crates/wasm", "crates/mesh", "crates/grpc_client", "bindings/python", "bindings/golang", "clients/rust", "clients/openapi-gen"]
+members = ["model_gateway", "crates/protocols", "crates/reasoning_parser", "crates/tool_parser", "crates/workflow", "crates/tokenizer", "crates/auth", "crates/mcp", "crates/kv_index", "crates/data_connector", "crates/multimodal", "crates/wasm", "crates/mesh", "crates/grpc_client", "bindings/python", "bindings/golang", "clients/rust", "clients/openapi-gen", "tui"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -17,6 +17,7 @@ llm-multimodal = { version = "1.4.0", path = "crates/multimodal" }
 smg-wasm = { version = "1.1.0", path = "crates/wasm", package = "smg-wasm" }
 smg-mesh = { version = "1.2.1", path = "crates/mesh", package = "smg-mesh" }
 smg-grpc-client = { version = "1.4.0", path = "crates/grpc_client" }
+smg-tui = { version = "0.1.0", path = "tui" }
 
 # Shared dependencies
 anyhow = "1.0"
