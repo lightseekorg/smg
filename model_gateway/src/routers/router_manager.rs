@@ -510,9 +510,9 @@ impl RouterTrait for RouterManager {
         &self,
         headers: Option<&HeaderMap>,
         body: &GenerateRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, model_id);
+        let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
             router.route_generate(headers, body, model_id).await
@@ -529,13 +529,12 @@ impl RouterTrait for RouterManager {
         &self,
         headers: Option<&HeaderMap>,
         body: &ChatCompletionRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
-        let selected_model = model_id.or(Some(&body.model));
-        let router = self.select_router_for_request(headers, selected_model);
+        let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_chat(headers, body, selected_model).await
+            router.route_chat(headers, body, model_id).await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -549,13 +548,12 @@ impl RouterTrait for RouterManager {
         &self,
         headers: Option<&HeaderMap>,
         body: &CompletionRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
-        let selected_model = model_id.or(Some(&body.model));
-        let router = self.select_router_for_request(headers, selected_model);
+        let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_completion(headers, body, selected_model).await
+            router.route_completion(headers, body, model_id).await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -588,13 +586,12 @@ impl RouterTrait for RouterManager {
         &self,
         headers: Option<&HeaderMap>,
         body: &ResponsesRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
-        let selected_model = model_id.or(Some(body.model.as_str()));
-        let router = self.select_router_for_request(headers, selected_model);
+        let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_responses(headers, body, selected_model).await
+            router.route_responses(headers, body, model_id).await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -688,9 +685,9 @@ impl RouterTrait for RouterManager {
         &self,
         headers: Option<&HeaderMap>,
         body: &EmbeddingRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, model_id);
+        let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
             router.route_embeddings(headers, body, model_id).await
@@ -707,9 +704,9 @@ impl RouterTrait for RouterManager {
         &self,
         headers: Option<&HeaderMap>,
         body: &ClassifyRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, model_id);
+        let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
             router.route_classify(headers, body, model_id).await
@@ -726,9 +723,9 @@ impl RouterTrait for RouterManager {
         &self,
         headers: Option<&HeaderMap>,
         body: &RerankRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, model_id);
+        let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
             router.route_rerank(headers, body, model_id).await

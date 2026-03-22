@@ -50,7 +50,6 @@ pub struct PDRouter {
     pub client: Client,
     pub retry_config: RetryConfig,
     pub api_key: Option<String>,
-    pub enable_igw: bool,
 }
 
 #[derive(Clone)]
@@ -60,7 +59,7 @@ struct PDRequestContext<'a> {
     is_stream: bool,
     return_logprob: bool,
     request_text: Option<String>,
-    model_id: Option<&'a str>,
+    model_id: &'a str,
     headers: Option<HeaderMap>,
 }
 
@@ -167,7 +166,6 @@ impl PDRouter {
             client: ctx.client.clone(),
             retry_config: ctx.router_config.effective_retry_config(),
             api_key: ctx.router_config.api_key.clone(),
-            enable_igw: ctx.router_config.enable_igw,
         })
     }
 
@@ -286,7 +284,7 @@ impl PDRouter {
         let start_time = Instant::now();
 
         let route = context.route;
-        let model = context.model_id.unwrap_or(UNKNOWN_MODEL_ID);
+        let model = context.model_id;
         let endpoint = route_to_endpoint(route);
 
         // Record request start (Layer 2)
@@ -728,45 +726,46 @@ impl PDRouter {
     async fn select_pd_pair(
         &self,
         request_text: Option<&str>,
-        model_id: Option<&str>,
+        model_id: &str,
         headers: Option<&HeaderMap>,
     ) -> Result<(Arc<dyn Worker>, Arc<dyn Worker>), String> {
-        let effective_model_id = if self.enable_igw { model_id } else { None };
+        debug!("Selecting PD pair: model_id={:?}", model_id);
 
-        debug!(
-            "Selecting PD pair: enable_igw={}, model_id={:?}, effective_model_id={:?}",
-            self.enable_igw, model_id, effective_model_id
-        );
-
-        let prefill_workers = if let Some(model) = effective_model_id {
-            self.worker_registry
-                .get_by_model(model)
+        let prefill_workers = {
+            let by_model: Vec<_> = self
+                .worker_registry
+                .get_by_model(model_id)
                 .iter()
                 .filter(|w| matches!(w.worker_type(), WorkerType::Prefill))
                 .cloned()
-                .collect()
-        } else {
-            self.worker_registry.get_prefill_workers()
+                .collect();
+            if by_model.is_empty() {
+                self.worker_registry.get_prefill_workers()
+            } else {
+                by_model
+            }
         };
 
-        let decode_workers = if let Some(model) = effective_model_id {
-            self.worker_registry
-                .get_by_model(model)
+        let decode_workers = {
+            let by_model: Vec<_> = self
+                .worker_registry
+                .get_by_model(model_id)
                 .iter()
                 .filter(|w| matches!(w.worker_type(), WorkerType::Decode))
                 .cloned()
-                .collect()
-        } else {
-            self.worker_registry.get_decode_workers()
+                .collect();
+            if by_model.is_empty() {
+                self.worker_registry.get_decode_workers()
+            } else {
+                by_model
+            }
         };
 
         let prefill_policy = self.policy_registry.get_prefill_policy();
         let decode_policy = self.policy_registry.get_decode_policy();
 
         // Get cached hash ring for consistent hashing
-        let hash_ring = self
-            .worker_registry
-            .get_hash_ring(effective_model_id.unwrap_or(UNKNOWN_MODEL_ID));
+        let hash_ring = self.worker_registry.get_hash_ring(model_id);
 
         let prefill = Self::pick_worker_by_policy_arc(
             &prefill_workers,
@@ -787,7 +786,7 @@ impl PDRouter {
         )?;
 
         // Record worker selection metrics (Layer 3)
-        let model = model_id.unwrap_or(UNKNOWN_MODEL_ID);
+        let model = model_id;
         Metrics::record_worker_selection(
             metrics_labels::WORKER_PREFILL,
             metrics_labels::CONNECTION_HTTP,
@@ -1176,7 +1175,7 @@ impl RouterTrait for PDRouter {
         // Note: This endpoint actually causes the model to generate tokens, so we only test one pair
 
         // Select a random worker pair using the policy
-        let (prefill, decode) = match self.select_pd_pair(None, None, None).await {
+        let (prefill, decode) = match self.select_pd_pair(None, UNKNOWN_MODEL_ID, None).await {
             Ok(pair) => pair,
             Err(e) => {
                 return error::service_unavailable(
@@ -1270,7 +1269,7 @@ impl RouterTrait for PDRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &GenerateRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         let is_stream = body.stream;
         let return_logprob = body.return_logprob.unwrap_or(false);
@@ -1300,7 +1299,7 @@ impl RouterTrait for PDRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &ChatCompletionRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         let is_stream = body.stream;
         let return_logprob = body.logprobs;
@@ -1342,7 +1341,7 @@ impl RouterTrait for PDRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &CompletionRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         let is_stream = body.stream;
         let return_logprob = body.logprobs.is_some();
@@ -1376,7 +1375,7 @@ impl RouterTrait for PDRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &RerankRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         // Extract text for cache-aware routing
         let req_text = if self.policies_need_request_text() {
@@ -1421,7 +1420,6 @@ mod tests {
             client: Client::new(),
             retry_config: RetryConfig::default(),
             api_key: Some("test_api_key".to_string()),
-            enable_igw: false,
         }
     }
 
@@ -1448,7 +1446,7 @@ mod tests {
         router.worker_registry.register(Arc::from(healthy_worker));
         router.worker_registry.register(Arc::from(decode_worker));
 
-        let result = router.select_pd_pair(None, None, None).await;
+        let result = router.select_pd_pair(None, UNKNOWN_MODEL_ID, None).await;
 
         assert!(result.is_ok());
         let (prefill, _decode) = result.unwrap();
@@ -1461,7 +1459,7 @@ mod tests {
     async fn test_empty_worker_lists() {
         let router = create_test_pd_router();
 
-        let result = router.select_pd_pair(None, None, None).await;
+        let result = router.select_pd_pair(None, UNKNOWN_MODEL_ID, None).await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No prefill workers available"));

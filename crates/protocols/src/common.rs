@@ -8,6 +8,12 @@ use validator;
 // Default value helpers
 // ============================================================================
 
+/// Default model for endpoints where model is optional (e.g., /generate).
+/// Uses "unknown" to indicate model was not specified by the caller.
+pub fn default_unknown_model() -> String {
+    "unknown".to_string()
+}
+
 /// Helper function for serde default value (returns true)
 pub fn default_true() -> bool {
     true

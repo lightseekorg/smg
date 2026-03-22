@@ -38,7 +38,7 @@ pub(super) struct ToolLoopState {
 /// Bundles values that are always threaded together through the regular responses call chain.
 pub(super) struct ResponsesCallContext {
     pub headers: Option<http::HeaderMap>,
-    pub model_id: Option<String>,
+    pub model_id: String,
     pub response_id: Option<String>,
 }
 

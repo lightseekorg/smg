@@ -180,10 +180,9 @@ async fn generate(
     headers: http::HeaderMap,
     Json(body): Json<GenerateRequest>,
 ) -> Response {
-    let model_id = body.model.as_deref();
     state
         .router
-        .route_generate(Some(&headers), &body, model_id)
+        .route_generate(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -194,7 +193,7 @@ async fn v1_chat_completions(
 ) -> Response {
     state
         .router
-        .route_chat(Some(&headers), &body, Some(&body.model))
+        .route_chat(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -205,7 +204,7 @@ async fn v1_completions(
 ) -> Response {
     state
         .router
-        .route_completion(Some(&headers), &body, Some(&body.model))
+        .route_completion(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -216,7 +215,7 @@ async fn rerank(
 ) -> Response {
     state
         .router
-        .route_rerank(Some(&headers), &body, Some(&body.model))
+        .route_rerank(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -225,10 +224,17 @@ async fn v1_rerank(
     headers: http::HeaderMap,
     Json(body): Json<V1RerankReqInput>,
 ) -> Response {
-    let rerank_body = &body.into();
+    let mut rerank_body: RerankRequest = body.into();
+    // V1 rerank format has no model field — resolve from available workers
+    if rerank_body.model.is_empty() {
+        let models = state.context.worker_registry.get_models();
+        if let Some(first) = models.into_iter().next() {
+            rerank_body.model = first;
+        }
+    }
     state
         .router
-        .route_rerank(Some(&headers), rerank_body, Some(&rerank_body.model))
+        .route_rerank(Some(&headers), &rerank_body, &rerank_body.model)
         .await
 }
 
@@ -239,7 +245,7 @@ async fn v1_responses(
 ) -> Response {
     state
         .router
-        .route_responses(Some(&headers), &body, Some(&body.model))
+        .route_responses(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -262,7 +268,7 @@ async fn v1_embeddings(
 ) -> Response {
     state
         .router
-        .route_embeddings(Some(&headers), &body, Some(&body.model))
+        .route_embeddings(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -284,7 +290,7 @@ async fn v1_classify(
 ) -> Response {
     state
         .router
-        .route_classify(Some(&headers), &body, Some(&body.model))
+        .route_classify(Some(&headers), &body, &body.model)
         .await
 }
 
