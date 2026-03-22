@@ -152,9 +152,11 @@ router:
     minAvailable: 1
 
   # -- Security context for router container
+  # NOTE: The default SMG image runs as root. Set runAsNonRoot: true only if
+  # using a custom image that runs as a non-root user.
   securityContext:
     readOnlyRootFilesystem: true
-    runAsNonRoot: true
+    runAsNonRoot: false
     allowPrivilegeEscalation: false
 
   # -- Liveness probe tuning
