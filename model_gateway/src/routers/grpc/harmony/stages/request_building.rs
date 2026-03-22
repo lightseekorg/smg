@@ -63,6 +63,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             RequestType::Chat(_) => format!("chatcmpl-{}", Uuid::now_v7()),
             RequestType::Responses(_) => format!("responses-{}", Uuid::now_v7()),
             request_type @ (RequestType::Generate(_)
+            | RequestType::Completion(_)
             | RequestType::Embedding(_)
             | RequestType::Classify(_)
             | RequestType::Messages(_)) => {
