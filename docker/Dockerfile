@@ -75,5 +75,9 @@ RUN uv pip install --force-reinstall dist/*.whl
 RUN rm -rf /root/.cache dist/ \
     && apt purge -y --auto-remove curl
 
+# Run as non-root user (SMG only binds to unprivileged ports 30000/29000)
+RUN useradd --create-home --uid 1000 smg
+USER smg
+
 # Set the entrypoint to the main command
 ENTRYPOINT ["python3", "-m", "smg.launch_router"]
