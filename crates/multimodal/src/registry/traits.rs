@@ -42,6 +42,24 @@ impl<'a> ModelMetadata<'a> {
         Self::find_value(self.config, path).and_then(|value| value.as_u64().map(|v| v as u32))
     }
 
+    pub fn config_model_type(&self) -> Option<&str> {
+        Self::find_value(self.config, &["model_type"]).and_then(Value::as_str)
+    }
+
+    pub fn matches_model_type_hints(&self, hints: &[&str]) -> bool {
+        Self::matches_all_hints(self.model_id, hints)
+            || self
+                .config_model_type()
+                .is_some_and(|model_type| Self::matches_all_hints(model_type, hints))
+    }
+
+    fn matches_all_hints(candidate: &str, hints: &[&str]) -> bool {
+        let candidate = candidate.to_ascii_lowercase();
+        hints
+            .iter()
+            .all(|hint| candidate.contains(&hint.to_ascii_lowercase()))
+    }
+
     fn find_value<'v>(value: &'v Value, path: &[&str]) -> Option<&'v Value> {
         let mut current = value;
         for key in path {
