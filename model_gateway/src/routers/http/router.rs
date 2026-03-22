@@ -278,7 +278,27 @@ impl Router {
         let worker = match self.select_worker_for_model(model_id, Some(text), headers) {
             Some(w) => w,
             None => {
-                return error::model_not_found(model_id);
+                // Distinguish "no workers for this model" from "workers exist but unavailable"
+                let model_filter = if model_id == crate::core::UNKNOWN_MODEL_ID {
+                    None
+                } else {
+                    Some(model_id)
+                };
+                let total = self.worker_registry.get_workers_filtered(
+                    model_filter,
+                    Some(WorkerType::Regular),
+                    Some(ConnectionMode::Http),
+                    None,
+                    false,
+                );
+                return if total.is_empty() {
+                    error::model_not_found(model_id)
+                } else {
+                    error::service_unavailable(
+                        "no_available_workers",
+                        "All workers are unavailable (circuit breaker open or unhealthy)",
+                    )
+                };
             }
         };
 

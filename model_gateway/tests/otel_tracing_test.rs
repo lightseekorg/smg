@@ -210,7 +210,7 @@ async fn test_router_with_tracing() {
 
     // 10. send request
     let request_body = json!({
-        "model": "test-model",
+        "model": "mock-model",
         "messages": [
             {"role": "user", "content": "Hello, test OpenTelemetry tracing!"}
         ],
