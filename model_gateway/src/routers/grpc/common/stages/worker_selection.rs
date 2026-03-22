@@ -8,7 +8,7 @@ use tracing::{error, warn};
 
 use super::PipelineStage;
 use crate::{
-    core::{ConnectionMode, RuntimeType, Worker, WorkerRegistry, WorkerType},
+    core::{ConnectionMode, RuntimeType, Worker, WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID},
     observability::metrics::{metrics_labels, Metrics},
     policies::{PolicyRegistry, SelectWorkerInfo},
     routers::{
@@ -91,10 +91,7 @@ impl PipelineStage for WorkerSelectionStage {
                             model_id = %model_id,
                             "No available workers for model"
                         );
-                        return Err(error::service_unavailable(
-                            "no_available_workers",
-                            format!("No available workers for model: {model_id}"),
-                        ));
+                        return Err(error::model_not_found(model_id));
                     }
                 }
             }
@@ -112,10 +109,7 @@ impl PipelineStage for WorkerSelectionStage {
                             model_id = %model_id,
                             "No available PD worker pairs for model"
                         );
-                        return Err(error::service_unavailable(
-                            "no_available_pd_worker_pairs",
-                            format!("No available PD worker pairs for model: {model_id}"),
-                        ));
+                        return Err(error::model_not_found(model_id));
                     }
                 }
             }
@@ -138,9 +132,16 @@ impl WorkerSelectionStage {
         tokens: Option<&[u32]>,
         headers: Option<&http::HeaderMap>,
     ) -> Option<Arc<dyn Worker>> {
+        // Treat "unknown" model as wildcard (match any worker)
+        let model_filter = if model_id == UNKNOWN_MODEL_ID {
+            None
+        } else {
+            Some(model_id)
+        };
+
         // Get workers for the specified model, filtered by connection mode
         let workers = self.worker_registry.get_workers_filtered(
-            Some(model_id),
+            model_filter,
             Some(WorkerType::Regular),
             Some(ConnectionMode::Grpc),
             None,  // any runtime type
@@ -191,8 +192,15 @@ impl WorkerSelectionStage {
         tokens: Option<&[u32]>,
         headers: Option<&http::HeaderMap>,
     ) -> Option<PdWorkerPair> {
+        // Treat "unknown" model as wildcard (match any worker)
+        let model_filter = if model_id == UNKNOWN_MODEL_ID {
+            None
+        } else {
+            Some(model_id)
+        };
+
         let all_workers = self.worker_registry.get_workers_filtered(
-            Some(model_id),
+            model_filter,
             None,
             Some(ConnectionMode::Grpc), // Match any gRPC worker
             None,                       // any runtime type

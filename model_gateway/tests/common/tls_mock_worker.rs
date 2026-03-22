@@ -106,6 +106,7 @@ impl TlsMockWorker {
         let app = Router::new()
             .route("/health", get(health_handler))
             .route("/health_generate", get(health_generate_handler))
+            .route("/server_info", get(server_info_handler))
             .route("/get_server_info", get(server_info_handler))
             .route("/generate", post(generate_handler))
             .route("/v1/chat/completions", post(chat_completions_handler))
@@ -300,6 +301,7 @@ async fn server_info_handler(State(config): State<Arc<RwLock<TlsMockWorkerConfig
 
     Json(json!({
         "model_path": "mock-tls-model",
+        "served_model_name": "mock-tls-model",
         "port": config.port,
         "host": "127.0.0.1",
         "tls_enabled": true,

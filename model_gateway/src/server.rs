@@ -224,14 +224,7 @@ async fn v1_rerank(
     headers: http::HeaderMap,
     Json(body): Json<V1RerankReqInput>,
 ) -> Response {
-    let mut rerank_body: RerankRequest = body.into();
-    // V1 rerank format has no model field — resolve from available workers
-    if rerank_body.model.is_empty() {
-        let models = state.context.worker_registry.get_models();
-        if let Some(first) = models.into_iter().next() {
-            rerank_body.model = first;
-        }
-    }
+    let rerank_body: RerankRequest = body.into();
     state
         .router
         .route_rerank(Some(&headers), &rerank_body, &rerank_body.model)

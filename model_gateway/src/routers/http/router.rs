@@ -137,7 +137,7 @@ impl Router {
         text: Option<&str>,
         headers: Option<&HeaderMap>,
     ) -> Option<Arc<dyn Worker>> {
-        // "unknown" means model was not specified — match any worker
+        // UNKNOWN_MODEL_ID means caller didn't specify a model — find any available worker
         let model_filter = if model_id == crate::core::UNKNOWN_MODEL_ID {
             None
         } else {

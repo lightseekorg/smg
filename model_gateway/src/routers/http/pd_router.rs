@@ -731,6 +731,8 @@ impl PDRouter {
     ) -> Result<(Arc<dyn Worker>, Arc<dyn Worker>), String> {
         debug!("Selecting PD pair: model_id={:?}", model_id);
 
+        let is_unknown_model = model_id == UNKNOWN_MODEL_ID;
+
         let prefill_workers = {
             let by_model: Vec<_> = self
                 .worker_registry
@@ -739,7 +741,8 @@ impl PDRouter {
                 .filter(|w| matches!(w.worker_type(), WorkerType::Prefill))
                 .cloned()
                 .collect();
-            if by_model.is_empty() {
+            if by_model.is_empty() && is_unknown_model {
+                // "auto" means pick any — fall back to all prefill workers
                 self.worker_registry.get_prefill_workers()
             } else {
                 by_model
@@ -754,7 +757,8 @@ impl PDRouter {
                 .filter(|w| matches!(w.worker_type(), WorkerType::Decode))
                 .cloned()
                 .collect();
-            if by_model.is_empty() {
+            if by_model.is_empty() && is_unknown_model {
+                // Only fall back to all workers when model is "unknown" (wildcard)
                 self.worker_registry.get_decode_workers()
             } else {
                 by_model

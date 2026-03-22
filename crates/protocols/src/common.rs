@@ -9,9 +9,9 @@ use validator;
 // ============================================================================
 
 /// Default model for endpoints where model is optional (e.g., /generate).
-/// Uses "unknown" to indicate model was not specified by the caller.
+/// Uses UNKNOWN_MODEL_ID so routers treat it as "any available worker."
 pub fn default_unknown_model() -> String {
-    "unknown".to_string()
+    super::UNKNOWN_MODEL_ID.to_string()
 }
 
 /// Helper function for serde default value (returns true)

@@ -379,7 +379,7 @@ fn test_v1_to_rerank_request_conversion() {
 
     assert_eq!(request.query, "test query");
     assert_eq!(request.documents, vec!["doc1", "doc2"]);
-    assert!(request.model.is_empty()); // V1 format has no model, converted to empty string
+    assert_eq!(request.model, "unknown"); // V1 format has no model, defaults to UNKNOWN_MODEL_ID
     assert_eq!(request.top_k, None);
     assert!(request.return_documents);
     assert_eq!(request.rid, None);

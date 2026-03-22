@@ -229,6 +229,13 @@ mod tests {
     }
 
     #[test]
+    fn test_detokenize_request_requires_model() {
+        let json = r#"{"tokens": [1, 2, 3]}"#;
+        let result = serde_json::from_str::<DetokenizeRequest>(json);
+        assert!(result.is_err(), "Should fail without model field");
+    }
+
+    #[test]
     fn test_detokenize_request_single() {
         let json = r#"{"model": "test-model", "tokens": [1, 2, 3]}"#;
         let req: DetokenizeRequest = serde_json::from_str(json).unwrap();

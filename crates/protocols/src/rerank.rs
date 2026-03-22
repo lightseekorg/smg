@@ -204,7 +204,7 @@ impl From<V1RerankReqInput> for RerankRequest {
         RerankRequest {
             query: v1.query,
             documents: v1.documents,
-            model: String::new(),
+            model: super::UNKNOWN_MODEL_ID.to_string(),
             top_k: None,
             return_documents: true,
             rid: None,
