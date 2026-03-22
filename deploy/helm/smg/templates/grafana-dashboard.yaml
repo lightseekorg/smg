@@ -5,8 +5,8 @@ metadata:
   name: {{ include "smg.fullname" . }}-grafana-dashboard
   labels:
     {{- include "smg.labels" . | nindent 4 }}
-    {{- with .Values.grafana.dashboard.labels }}
-    {{- toYaml . | nindent 4 }}
+    {{- range $key, $value := .Values.grafana.dashboard.labels }}
+    {{ $key }}: {{ $value | quote }}
     {{- end }}
 data:
   smg-dashboard.json: |

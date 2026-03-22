@@ -5,8 +5,8 @@ metadata:
   name: {{ include "smg.fullname" . }}-router
   labels:
     {{- include "smg.labels" . | nindent 4 }}
-    {{- with .Values.router.metrics.serviceMonitor.labels }}
-    {{- toYaml . | nindent 4 }}
+    {{- range $key, $value := .Values.router.metrics.serviceMonitor.labels }}
+    {{ $key }}: {{ $value | quote }}
     {{- end }}
 spec:
   selector:

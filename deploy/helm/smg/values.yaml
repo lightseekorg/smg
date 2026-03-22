@@ -154,7 +154,7 @@ router:
   # -- Security context for router container
   securityContext:
     readOnlyRootFilesystem: true
-    runAsNonRoot: true
+    runAsNonRoot: false
     allowPrivilegeEscalation: false
 
   # -- Liveness probe tuning
