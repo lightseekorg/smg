@@ -365,7 +365,7 @@ has_non_version_changes() {
 # Extract version from a Helm Chart.yaml (the `version:` field, not appVersion)
 get_helm_chart_version() {
     local file="$1"
-    grep -m1 '^version:' "$file" | sed 's/version: *//'
+    awk -F':[[:space:]]*' '/^version:/ {gsub(/"/, "", $2); print $2; exit}' "$file"
 }
 
 # Update both version and appVersion in a Helm Chart.yaml
@@ -375,9 +375,11 @@ set_helm_chart_version() {
     local new_version="$3"
     local escaped_old
     escaped_old=$(escape_version "$old_version")
-    sed_inplace "s/^version: ${escaped_old}/version: ${new_version}/" "$file"
-    sed_inplace "s/^appVersion: \"${escaped_old}\"/appVersion: \"${new_version}\"/" "$file"
-    if ! grep -q "^version: ${new_version}" "$file"; then
+    sed_inplace "s/^\(version:[[:space:]]*\)${escaped_old}/\1${new_version}/" "$file"
+    # Unconditionally set appVersion to new_version (handles drift)
+    sed_inplace "s/^appVersion:[[:space:]]*.*/appVersion: \"${new_version}\"/" "$file"
+    if ! grep -q "^version:[[:space:]]*${new_version}" "$file" \
+       || ! grep -q "^appVersion: \"${new_version}\"" "$file"; then
         echo -e "    ${RED}FAILED to update $file${NC}" >&2
         return 1
     fi
