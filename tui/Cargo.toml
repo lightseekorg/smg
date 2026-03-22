@@ -1,0 +1,27 @@
+[package]
+name = "smg-tui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "smg-tui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+futures.workspace = true
+openai-protocol.workspace = true
+
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+[lints]
+workspace = true
