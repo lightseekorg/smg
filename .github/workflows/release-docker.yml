@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Determine version tag
         id: version
@@ -48,6 +48,8 @@ jobs:
         id: should-push
         env:
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          EVENT_AFTER: ${{ github.sha }}
         run: |
           PUSH="false"
           # Manual dispatch always pushes
@@ -55,8 +57,10 @@ jobs:
             PUSH="true"
           fi
           # Push event: only push if pyproject.toml changed (version bump)
+          # Uses the full push range (before..after) to catch changes across
+          # multiple commits, not just HEAD~1.
           if [[ "${EVENT_NAME}" == "push" ]]; then
-            if git diff --name-only HEAD~1 HEAD | grep -q 'bindings/python/pyproject.toml'; then
+            if git diff --name-only "${EVENT_BEFORE}" "${EVENT_AFTER}" | grep -q '^bindings/python/pyproject.toml$'; then
               PUSH="true"
             fi
           fi
