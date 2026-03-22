@@ -76,7 +76,9 @@ RUN rm -rf /root/.cache dist/ \
     && apt purge -y --auto-remove curl
 
 # Run as non-root user (SMG only binds to unprivileged ports 30000/29000)
-RUN useradd --create-home --uid 1000 smg
+# UID 65532 follows the nonroot convention used by distroless images.
+# UID 1000 is already taken by the 'ubuntu' user in ubuntu:24.04.
+RUN useradd --no-log-init --create-home --uid 65532 smg
 USER smg
 
 # Set the entrypoint to the main command
