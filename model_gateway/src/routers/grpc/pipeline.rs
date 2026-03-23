@@ -42,7 +42,7 @@ use super::{
     utils::error_type_from_status,
 };
 use crate::{
-    core::{WorkerRegistry, UNKNOWN_MODEL_ID},
+    core::WorkerRegistry,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     policies::PolicyRegistry,
     routers::error,
@@ -363,7 +363,7 @@ impl RequestPipeline {
         &self,
         request: Arc<ChatCompletionRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
         let start = Instant::now();
@@ -470,7 +470,7 @@ impl RequestPipeline {
         &self,
         request: Arc<GenerateRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
         let start = Instant::now();
@@ -481,7 +481,7 @@ impl RequestPipeline {
             metrics_labels::ROUTER_GRPC,
             self.backend_type,
             metrics_labels::CONNECTION_GRPC,
-            model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+            &model_id,
             metrics_labels::ENDPOINT_GENERATE,
             bool_to_static_str(streaming),
         );
@@ -495,7 +495,7 @@ impl RequestPipeline {
                         metrics_labels::ROUTER_GRPC,
                         self.backend_type,
                         metrics_labels::CONNECTION_GRPC,
-                        model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                        &model_id,
                         metrics_labels::ENDPOINT_GENERATE,
                         start.elapsed(),
                     );
@@ -507,7 +507,7 @@ impl RequestPipeline {
                         metrics_labels::ROUTER_GRPC,
                         self.backend_type,
                         metrics_labels::CONNECTION_GRPC,
-                        model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                        &model_id,
                         metrics_labels::ENDPOINT_GENERATE,
                         error_type_from_status(response.status()),
                     );
@@ -527,7 +527,7 @@ impl RequestPipeline {
                     metrics_labels::ROUTER_GRPC,
                     self.backend_type,
                     metrics_labels::CONNECTION_GRPC,
-                    model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                    &model_id,
                     metrics_labels::ENDPOINT_GENERATE,
                     start.elapsed(),
                 );
@@ -545,7 +545,7 @@ impl RequestPipeline {
                     metrics_labels::ROUTER_GRPC,
                     self.backend_type,
                     metrics_labels::CONNECTION_GRPC,
-                    model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                    &model_id,
                     metrics_labels::ENDPOINT_GENERATE,
                     metrics_labels::ERROR_INTERNAL,
                 );
@@ -560,7 +560,7 @@ impl RequestPipeline {
                     metrics_labels::ROUTER_GRPC,
                     self.backend_type,
                     metrics_labels::CONNECTION_GRPC,
-                    model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                    &model_id,
                     metrics_labels::ENDPOINT_GENERATE,
                     metrics_labels::ERROR_INTERNAL,
                 );
@@ -574,12 +574,12 @@ impl RequestPipeline {
         &self,
         request: Arc<EmbeddingRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
         debug!(
             "execute_embeddings: Starting execution for model: {}",
-            model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID)
+            &model_id
         );
         let start = Instant::now();
 
@@ -588,7 +588,7 @@ impl RequestPipeline {
             metrics_labels::ROUTER_GRPC,
             self.backend_type,
             metrics_labels::CONNECTION_GRPC,
-            model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+            &model_id,
             metrics_labels::ENDPOINT_EMBEDDINGS,
             bool_to_static_str(false),
         );
@@ -607,7 +607,7 @@ impl RequestPipeline {
                         metrics_labels::ROUTER_GRPC,
                         self.backend_type,
                         metrics_labels::CONNECTION_GRPC,
-                        model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                        &model_id,
                         metrics_labels::ENDPOINT_EMBEDDINGS,
                         start.elapsed(),
                     );
@@ -630,7 +630,7 @@ impl RequestPipeline {
                         metrics_labels::ROUTER_GRPC,
                         self.backend_type,
                         metrics_labels::CONNECTION_GRPC,
-                        model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                        &model_id,
                         metrics_labels::ENDPOINT_EMBEDDINGS,
                         error_type_from_status(response.status()),
                     );
@@ -649,7 +649,7 @@ impl RequestPipeline {
                     metrics_labels::ROUTER_GRPC,
                     self.backend_type,
                     metrics_labels::CONNECTION_GRPC,
-                    model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                    &model_id,
                     metrics_labels::ENDPOINT_EMBEDDINGS,
                     start.elapsed(),
                 );
@@ -674,12 +674,12 @@ impl RequestPipeline {
         &self,
         request: Arc<ClassifyRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
         debug!(
             "execute_classify: Starting execution for model: {}",
-            model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID)
+            &model_id
         );
         let start = Instant::now();
 
@@ -688,7 +688,7 @@ impl RequestPipeline {
             metrics_labels::ROUTER_GRPC,
             self.backend_type,
             metrics_labels::CONNECTION_GRPC,
-            model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+            &model_id,
             metrics_labels::ENDPOINT_CLASSIFY,
             bool_to_static_str(false), // Classify is never streaming
         );
@@ -707,7 +707,7 @@ impl RequestPipeline {
                         metrics_labels::ROUTER_GRPC,
                         self.backend_type,
                         metrics_labels::CONNECTION_GRPC,
-                        model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                        &model_id,
                         metrics_labels::ENDPOINT_CLASSIFY,
                         start.elapsed(),
                     );
@@ -730,7 +730,7 @@ impl RequestPipeline {
                         metrics_labels::ROUTER_GRPC,
                         self.backend_type,
                         metrics_labels::CONNECTION_GRPC,
-                        model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                        &model_id,
                         metrics_labels::ENDPOINT_CLASSIFY,
                         error_type_from_status(response.status()),
                     );
@@ -749,7 +749,7 @@ impl RequestPipeline {
                     metrics_labels::ROUTER_GRPC,
                     self.backend_type,
                     metrics_labels::CONNECTION_GRPC,
-                    model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID),
+                    &model_id,
                     metrics_labels::ENDPOINT_CLASSIFY,
                     start.elapsed(),
                 );
@@ -774,7 +774,7 @@ impl RequestPipeline {
         &self,
         request: Arc<CreateMessageRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
         let start = Instant::now();
@@ -884,7 +884,7 @@ impl RequestPipeline {
         &self,
         request: Arc<ChatCompletionRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Result<ChatCompletionResponse, Response> {
         let mut ctx = RequestContext::for_chat(request, headers, model_id, components);
@@ -969,8 +969,8 @@ impl RequestPipeline {
         // Create RequestContext for this Responses request
         let mut ctx = RequestContext::for_responses(
             Arc::new(request.clone()),
-            None, // No headers needed for internal pipeline execution
-            None, // Model ID already set in request
+            None,                  // No headers needed for internal pipeline execution
+            request.model.clone(), // Model ID from request
             harmony_ctx.components.clone(),
         );
 
@@ -1033,7 +1033,7 @@ impl RequestPipeline {
         let mut ctx = RequestContext::for_responses(
             Arc::new(request.clone()),
             None,
-            None,
+            request.model.clone(),
             harmony_ctx.components.clone(),
         );
 

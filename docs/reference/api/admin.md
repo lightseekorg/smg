@@ -165,27 +165,30 @@ Registers a new backend worker.
 **Request Body:**
 ```json
 {
-  "name": "gpu-worker-1",
   "url": "http://gpu1:8000",
-  "model_name": "llama3-70b",
+  "models": [{ "id": "llama3-70b" }],
   "api_key": "worker-secret-key"
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | Yes | Worker identifier |
 | `url` | string | Yes | Worker base URL |
-| `model_name` | string | No | Model served by worker |
-| `api_key` | string | No | API key for worker auth |
+| `worker_type` | string | No | `regular`, `prefill`, or `decode` (default: `regular`) |
+| `connection_mode` | string | No | `http` or `grpc` (default: `http`) |
+| `runtime_type` | string | No | `sglang`, `vllm`, `trtllm`, or `external` (default: auto-detect) |
+| `models` | array | No | Model cards served by this worker (empty = wildcard) |
+| `api_key` | string | No | API key for worker authentication |
+| `priority` | integer | No | Routing priority (higher = preferred, default: 50) |
 
-**Response:** `201 Created`
+**Response:** `202 Accepted`
 ```json
 {
-  "id": "worker-1",
-  "name": "gpu-worker-1",
+  "status": "accepted",
+  "worker_id": "worker-abc123",
   "url": "http://gpu1:8000",
-  "status": "healthy"
+  "location": "/workers/worker-abc123",
+  "message": "Worker addition queued for background processing"
 }
 ```
 
@@ -202,12 +205,26 @@ Updates worker configuration.
 **Request Body:**
 ```json
 {
-  "name": "gpu-worker-1-updated",
+  "priority": 75,
   "api_key": "new-api-key"
 }
 ```
 
-**Response:** `200 OK`
+| Field | Type | Description |
+|-------|------|-------------|
+| `priority` | integer | New routing priority |
+| `cost` | number | New cost factor |
+| `labels` | object | Updated labels |
+| `api_key` | string | New API key (for key rotation) |
+
+**Response:** `202 Accepted`
+```json
+{
+  "status": "accepted",
+  "worker_id": "worker-abc123",
+  "message": "Worker update queued for background processing"
+}
+```
 
 ---
 
@@ -219,11 +236,12 @@ DELETE /workers/{worker_id}
 
 Removes a worker from the pool.
 
-**Response:** `200 OK`
+**Response:** `202 Accepted`
 ```json
 {
-  "success": true,
-  "message": "Worker removed successfully"
+  "status": "accepted",
+  "worker_id": "worker-abc123",
+  "message": "Worker removal queued for background processing"
 }
 ```
 

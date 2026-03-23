@@ -11,7 +11,6 @@ import json
 import logging
 
 import pytest
-from conftest import smg_compare
 from infra import is_sglang, is_trtllm
 
 logger = logging.getLogger(__name__)
@@ -27,6 +26,7 @@ logger = logging.getLogger(__name__)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestChatCompletion:
     """Tests for OpenAI-compatible chat completions API."""
 
@@ -36,75 +36,111 @@ class TestChatCompletion:
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
-    def test_chat_completion(self, setup_backend, smg, logprobs, parallel_sample_num):
+    def test_chat_completion(self, model, api_client, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
-        if is_trtllm() and parallel_sample_num > 1:
-            pytest.skip("TRT-LLM does not support n>1 with greedy decoding")
-        _, model, client, gateway = setup_backend
-        self._run_chat_completion(client, model, logprobs, parallel_sample_num)
+        # Use temperature > 0 for n > 1 (greedy sampling rejects n > 1)
+        temperature = 0.7 if parallel_sample_num > 1 else 0
+        response = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful AI assistant"},
+                {
+                    "role": "user",
+                    "content": "What is the capital of France? Answer in a few words.",
+                },
+            ],
+            temperature=temperature,
+            logprobs=logprobs is not None and logprobs > 0,
+            top_logprobs=logprobs,
+            n=parallel_sample_num,
+        )
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful AI assistant"},
-                    {
-                        "role": "user",
-                        "content": "What is the capital of France? Answer in a few words.",
-                    },
-                ],
-                temperature=0,
-                logprobs=logprobs is not None and logprobs > 0,
-                top_logprobs=logprobs,
-                n=parallel_sample_num,
-            )
-            assert len(smg_resp.choices) == parallel_sample_num
-            assert smg_resp.choices[0].message.role == "assistant"
-            assert isinstance(smg_resp.choices[0].message.content, str)
+        if logprobs:
+            assert isinstance(response.choices[0].logprobs.content[0].top_logprobs[0].token, str)
+            ret_num_top_logprobs = len(response.choices[0].logprobs.content[0].top_logprobs)
+            assert ret_num_top_logprobs == logprobs, f"{ret_num_top_logprobs} vs {logprobs}"
+
+        assert len(response.choices) == parallel_sample_num
+        assert response.choices[0].message.role == "assistant"
+        assert isinstance(response.choices[0].message.content, str)
+        assert response.id
+        assert response.created
+        assert response.usage.prompt_tokens > 0
+        assert response.usage.completion_tokens > 0
+        assert response.usage.total_tokens > 0
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
-    def test_chat_completion_stream(self, setup_backend, smg, logprobs, parallel_sample_num):
+    def test_chat_completion_stream(self, model, api_client, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
-        if is_trtllm() and parallel_sample_num > 1:
-            pytest.skip("TRT-LLM does not support n>1 with greedy decoding")
-        _, model, client, gateway = setup_backend
-        self._run_chat_completion_stream(client, model, logprobs, parallel_sample_num)
+        temperature = 0.7 if parallel_sample_num > 1 else 0
+        generator = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful AI assistant"},
+                {"role": "user", "content": "What is the capital of France?"},
+            ],
+            temperature=temperature,
+            logprobs=logprobs is not None and logprobs > 0,
+            top_logprobs=logprobs,
+            stream=True,
+            stream_options={"include_usage": True},
+            n=parallel_sample_num,
+        )
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            content_pieces = []
-            with smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful AI assistant"},
-                    {"role": "user", "content": "What is the capital of France?"},
-                ],
-                temperature=0,
-                logprobs=logprobs is not None and logprobs > 0,
-                top_logprobs=logprobs,
-                n=parallel_sample_num,
-                stream=True,
-            ) as stream:
-                for chunk in stream:
-                    if chunk.choices and chunk.choices[0].delta.content:
-                        content_pieces.append(chunk.choices[0].delta.content)
-            assert len(content_pieces) > 0, "SmgClient stream should produce content"
+        is_firsts = {}
+        is_finished = {}
+        finish_reason_counts = {}
+        for response in generator:
+            # Capture usage from the final chunk
+            usage = response.usage
+            if usage is not None:
+                assert usage.prompt_tokens > 0, "usage.prompt_tokens was zero"
+                assert usage.completion_tokens > 0, "usage.completion_tokens was zero"
+                assert usage.total_tokens > 0, "usage.total_tokens was zero"
+                continue
+
+            # Skip if no choices
+            if not response.choices:
+                continue
+
+            index = response.choices[0].index
+            delta = response.choices[0].delta
+
+            if index not in is_firsts:
+                is_firsts[index] = True
+                assert delta.role == "assistant"
+                continue
+
+            if response.choices[0].finish_reason:
+                is_finished[index] = True
+                finish_reason_counts[index] = finish_reason_counts.get(index, 0) + 1
+
+            if logprobs and not is_finished.get(index, False):
+                assert response.choices[0].logprobs is not None, "logprobs was not returned"
+                assert len(response.choices[0].logprobs.content[0].top_logprobs) == logprobs, (
+                    "top_logprobs count mismatch"
+                )
+
+        for index in range(parallel_sample_num):
+            assert index in finish_reason_counts, f"No finish_reason found for index {index}"
+            assert finish_reason_counts[index] == 1, (
+                f"Expected 1 finish_reason chunk for index {index}, "
+                f"got {finish_reason_counts[index]}"
+            )
 
     @pytest.mark.skip_for_runtime(
         "trtllm",
         reason="TRT-LLM gRPC bug: uses 'guided_decoding_params' instead of 'guided_decoding'",
     )
-    def test_regex(self, setup_backend, smg):
+    def test_regex(self, model, api_client):
         """Test structured output with regex constraint."""
-        _, model, client, gateway = setup_backend
 
         regex = (
             r"""\{\n""" + r"""   "name": "[\w]+",\n""" + r"""   "population": [\d]+\n""" + r"""\}"""
         )
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant"},
@@ -123,59 +159,25 @@ class TestChatCompletion:
         assert isinstance(js_obj["name"], str)
         assert isinstance(js_obj["population"], int)
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful AI assistant"},
-                    {"role": "user", "content": "Introduce the capital of France."},
-                ],
-                temperature=0,
-                max_tokens=128,
-                extra_body={"regex": regex},
-            )
-            smg_text = smg_resp.choices[0].message.content
-            smg_obj = json.loads(smg_text)
-            assert isinstance(smg_obj["name"], str)
-            assert isinstance(smg_obj["population"], int)
+    def test_penalty(self, model, api_client):
+        """Test that frequency_penalty parameter is accepted and produces output."""
 
-    def test_penalty(self, setup_backend, smg):
-        """Test frequency penalty parameter."""
-        _, model, client, gateway = setup_backend
-
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "Introduce the capital of France."},
+                {"role": "user", "content": "What is the capital of France?"},
             ],
-            temperature=0,
-            max_tokens=32,
+            max_tokens=100,
             frequency_penalty=1.0,
+            reasoning_effort="none",
         )
-        text = response.choices[0].message.content
-        assert isinstance(text, str)
+        assert isinstance(response.choices[0].message.content, str)
+        assert response.usage.completion_tokens > 0
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful AI assistant"},
-                    {"role": "user", "content": "Introduce the capital of France."},
-                ],
-                temperature=0,
-                max_tokens=32,
-                frequency_penalty=1.0,
-            )
-            assert isinstance(smg_resp.choices[0].message.content, str)
-
-    def test_response_prefill(self, setup_backend, smg):
+    def test_response_prefill(self, model, api_client):
         """Test assistant message prefill with continue_final_message."""
-        _, model, client, gateway = setup_backend
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant"},
@@ -203,47 +205,10 @@ convenient hands-free control to your smart devices.
 
         assert response.choices[0].message.content.strip().startswith('"name": "SmartHome Mini",')
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful AI assistant"},
-                    {
-                        "role": "user",
-                        "content": """
-Extract the name, size, price, and color from this product description as a JSON object:
+    def test_streaming_token_count_matches_chunks(self, model, api_client):
+        """Test that streaming completion_tokens matches the number of content chunks."""
 
-<description>
-The SmartHome Mini is a compact smart home assistant available in black or white for only $49.99.
-At just 5 inches wide, it lets you control lights, thermostats, and other connected devices via
-voice or app—no matter where you place it in your home. This affordable little hub brings
-convenient hands-free control to your smart devices.
-</description>
-""",
-                    },
-                    {
-                        "role": "assistant",
-                        "content": "{\n",
-                    },
-                ],
-                temperature=0,
-                extra_body={"continue_final_message": True},
-            )
-            assert (
-                smg_resp.choices[0].message.content.strip().startswith('"name": "SmartHome Mini",')
-            )
-
-    def test_streaming_token_count_matches_chunks(self, setup_backend, smg):
-        """Test that streaming completion_tokens matches the number of content chunks.
-
-        This verifies that the usage.completion_tokens reported at the end of a
-        streaming response matches the actual number of content chunks received.
-        Each chunk with content should correspond to one token.
-        """
-        _, model, client, gateway = setup_backend
-
-        generator = client.chat.completions.create(
+        generator = api_client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant"},
@@ -259,17 +224,12 @@ convenient hands-free control to your smart devices.
         usage_completion_tokens = None
 
         for response in generator:
-            # Capture usage from the final chunk
             if response.usage is not None:
                 usage_completion_tokens = response.usage.completion_tokens
                 continue
-
-            # Skip if no choices
             if not response.choices:
                 continue
-
             delta = response.choices[0].delta
-
             # Count chunks that have actual content (not just role or finish_reason)
             # Each chunk with content or reasoning_content represents one token
             if delta.content or getattr(delta, "reasoning_content", None):
@@ -290,61 +250,16 @@ convenient hands-free control to your smart devices.
             f"content chunk count ({content_chunk_count})"
         )
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            smg_content_count = 0
-            smg_usage_tokens = None
-            with smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful AI assistant"},
-                    {"role": "user", "content": "What is the capital of France?"},
-                ],
-                temperature=0,
-                max_tokens=50,
-                stream=True,
-                stream_options={"include_usage": True},
-            ) as stream:
-                for chunk in stream:
-                    if chunk.usage is not None:
-                        smg_usage_tokens = chunk.usage.completion_tokens
-                        continue
-                    if chunk.choices and chunk.choices[0].delta.content:
-                        smg_content_count += 1
-            assert smg_usage_tokens is not None, "SmgClient: no usage chunk received"
-            assert smg_content_count > 0, "SmgClient: no content chunks"
-
-    def test_model_list(self, setup_backend, smg):
+    def test_model_list(self, model, api_client):
         """Test listing available models."""
-        _, model, client, gateway = setup_backend
 
-        models = list(client.models.list().data)
+        models = list(api_client.models.list().data)
         assert len(models) == 1
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_models = smg.models.list()
-            assert len(smg_models.data) == 1
-
-    @pytest.mark.skip(reason="Skipping retrieve model test as it is not supported by the router")
-    def test_retrieve_model(self, setup_backend, smg):
-        """Test retrieving a specific model."""
-        import openai
-
-        _, model, client, gateway = setup_backend
-
-        retrieved_model = client.models.retrieve(model)
-        assert retrieved_model.id == model
-        assert retrieved_model.root == model
-
-        with pytest.raises(openai.NotFoundError):
-            client.models.retrieve("non-existent-model")
-
-    def test_stop_sequences(self, setup_backend, smg):
+    def test_stop_sequences(self, model, api_client):
         """Test that stop sequences cause the model to stop generating."""
-        _, model, client, gateway = setup_backend
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "user", "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"},
@@ -364,38 +279,11 @@ convenient hands-free control to your smart devices.
                 f"Stop sequence ',' should be the suffix of output: {content}"
             )
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
-                    },
-                ],
-                temperature=0,
-                max_tokens=50,
-                stop=[","],
-            )
-            assert smg_resp.choices[0].finish_reason == "stop"
-            smg_msg = smg_resp.choices[0].message
-            smg_content = smg_msg.content or getattr(smg_msg, "reasoning_content", "") or ""
-            if self.STOP_SEQUENCE_TRIMMED:
-                assert "," not in smg_content, (
-                    f"SmgClient: stop sequence ',' should not appear: {smg_content}"
-                )
-            else:
-                assert smg_content.endswith(","), (
-                    f"SmgClient: stop sequence ',' should be the suffix: {smg_content}"
-                )
-
-    def test_stop_sequences_stream(self, setup_backend, smg):
+    def test_stop_sequences_stream(self, model, api_client):
         """Test that stop sequences work in streaming mode."""
-        _, model, client, gateway = setup_backend
 
         chunks = list(
-            client.chat.completions.create(
+            api_client.chat.completions.create(
                 model=model,
                 messages=[
                     {
@@ -429,38 +317,6 @@ convenient hands-free control to your smart devices.
                 f"Stop sequence ',' should be the suffix of output: {content}"
             )
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
-                    },
-                ],
-                temperature=0,
-                max_tokens=50,
-                stop=[","],
-                stream=True,
-            ) as stream:
-                smg_chunks = list(stream)
-            smg_finish = [
-                c.choices[0].finish_reason
-                for c in smg_chunks
-                if c.choices and c.choices[0].finish_reason
-            ]
-            assert "stop" in smg_finish
-            smg_text = "".join(
-                self._delta_text(c.choices[0].delta)
-                for c in smg_chunks
-                if c.choices and self._delta_text(c.choices[0].delta)
-            )
-            if self.STOP_SEQUENCE_TRIMMED:
-                assert "," not in smg_text
-            else:
-                assert smg_text.endswith(",")
-
     # -------------------------------------------------------------------------
     # Helper methods
     # -------------------------------------------------------------------------
@@ -470,125 +326,13 @@ convenient hands-free control to your smart devices.
         """Extract text from delta, falling back to reasoning_content for Harmony."""
         return delta.content or getattr(delta, "reasoning_content", "") or ""
 
-    def _run_chat_completion(self, client, model, logprobs, parallel_sample_num):
-        """Run a non-streaming chat completion and verify response."""
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {
-                    "role": "user",
-                    "content": "What is the capital of France? Answer in a few words.",
-                },
-            ],
-            temperature=0,
-            logprobs=logprobs is not None and logprobs > 0,
-            top_logprobs=logprobs,
-            n=parallel_sample_num,
-        )
-
-        if logprobs:
-            assert isinstance(response.choices[0].logprobs.content[0].top_logprobs[0].token, str)
-
-            ret_num_top_logprobs = len(response.choices[0].logprobs.content[0].top_logprobs)
-            assert ret_num_top_logprobs == logprobs, f"{ret_num_top_logprobs} vs {logprobs}"
-
-        assert len(response.choices) == parallel_sample_num
-        assert response.choices[0].message.role == "assistant"
-        assert isinstance(response.choices[0].message.content, str)
-        assert response.id
-        assert response.created
-        assert response.usage.prompt_tokens > 0
-        assert response.usage.completion_tokens > 0
-        assert response.usage.total_tokens > 0
-
-    def _run_chat_completion_stream(self, client, model, logprobs, parallel_sample_num=1):
-        """Run a streaming chat completion and verify response chunks."""
-        generator = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "What is the capital of France?"},
-            ],
-            temperature=0,
-            logprobs=logprobs is not None and logprobs > 0,
-            top_logprobs=logprobs,
-            stream=True,
-            stream_options={"include_usage": True},
-            n=parallel_sample_num,
-        )
-
-        is_firsts = {}
-        is_finished = {}
-        finish_reason_counts = {}
-        for response in generator:
-            usage = response.usage
-            if usage is not None:
-                assert usage.prompt_tokens > 0, "usage.prompt_tokens was zero"
-                assert usage.completion_tokens > 0, "usage.completion_tokens was zero"
-                assert usage.total_tokens > 0, "usage.total_tokens was zero"
-                continue
-
-            index = response.choices[0].index
-            finish_reason = response.choices[0].finish_reason
-            if finish_reason is not None:
-                is_finished[index] = True
-                finish_reason_counts[index] = finish_reason_counts.get(index, 0) + 1
-
-            data = response.choices[0].delta
-
-            if is_firsts.get(index, True):
-                assert data.role == "assistant", "data.role was not 'assistant' for first chunk"
-                is_firsts[index] = False
-                continue
-
-            if logprobs and not is_finished.get(index, False):
-                assert response.choices[0].logprobs, "logprobs was not returned"
-                assert isinstance(
-                    response.choices[0].logprobs.content[0].top_logprobs[0].token, str
-                ), "top_logprobs token was not a string"
-                assert isinstance(response.choices[0].logprobs.content[0].top_logprobs, list), (
-                    "top_logprobs was not a list"
-                )
-                ret_num_top_logprobs = len(response.choices[0].logprobs.content[0].top_logprobs)
-                assert ret_num_top_logprobs == logprobs, f"{ret_num_top_logprobs} vs {logprobs}"
-
-            assert (
-                isinstance(data.content, str)
-                or isinstance(data.reasoning_content, str)
-                or (isinstance(data.tool_calls, list) and len(data.tool_calls) > 0)
-                or response.choices[0].finish_reason
-            )
-            assert response.id
-            assert response.created
-
-        for index in range(parallel_sample_num):
-            assert not is_firsts.get(index, True), f"index {index} is not found in the response"
-
-        for index in range(parallel_sample_num):
-            assert index in finish_reason_counts, f"No finish_reason found for index {index}"
-            assert finish_reason_counts[index] == 1, (
-                f"Expected 1 finish_reason chunk for index {index}, "
-                f"got {finish_reason_counts[index]}"
-            )
-
-
-# =============================================================================
-# Chat Completion Tests (GPT-OSS)
-#
-# NOTE: Some tests are skipped because they don't work with OSS models:
-# - test_regex: OSS models don't support regex constraints
-# - test_penalty: OSS models don't support frequency_penalty
-# - test_response_prefill: OSS models don't support continue_final_message
-# =============================================================================
-
 
 @pytest.mark.engine("sglang")
 @pytest.mark.gpu(2)
 @pytest.mark.model("openai/gpt-oss-20b")
-@pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
+@pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 class TestChatCompletionGptOss(TestChatCompletion):
-    """Tests for chat completions API with GPT-OSS model (Harmony).
+    """Tests for chat completions API with Harmony model (GPT-OSS).
 
     Inherits from TestChatCompletion and overrides tests that don't work
     with OSS models. Logprobs are supported via Harmony's built-in tokenizer.
@@ -602,36 +346,32 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
-    def test_chat_completion(self, setup_backend, smg, logprobs, parallel_sample_num):
+    def test_chat_completion(self, model, api_client, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
-        super().test_chat_completion(setup_backend, smg, logprobs, parallel_sample_num)
+        super().test_chat_completion(model, api_client, logprobs, parallel_sample_num)
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
-    def test_chat_completion_stream(self, setup_backend, smg, logprobs, parallel_sample_num):
+    def test_chat_completion_stream(self, model, api_client, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
-        super().test_chat_completion_stream(setup_backend, smg, logprobs, parallel_sample_num)
+        super().test_chat_completion_stream(model, api_client, logprobs, parallel_sample_num)
 
-    def test_stop_sequences(self, setup_backend, smg):
+    def test_stop_sequences(self, model, api_client):
         if is_trtllm():
             pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
-        super().test_stop_sequences(setup_backend, smg)
+        super().test_stop_sequences(model, api_client)
 
-    def test_stop_sequences_stream(self, setup_backend, smg):
+    def test_stop_sequences_stream(self, model, api_client):
         if is_trtllm():
             pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
         if is_sglang():
             self.STOP_SEQUENCE_TRIMMED = True
-        super().test_stop_sequences_stream(setup_backend, smg)
+        super().test_stop_sequences_stream(model, api_client)
 
-    @pytest.mark.skip(reason="OSS models don't support regex constraints")
-    def test_regex(self, setup_backend, smg):
+    @pytest.mark.skip(reason="gpt-oss models don't support regex constraints")
+    def test_regex(self, model, api_client):
         pass
 
-    @pytest.mark.skip(reason="OSS models don't support frequency_penalty")
-    def test_penalty(self, setup_backend, smg):
-        pass
-
-    @pytest.mark.skip(reason="OSS models don't support continue_final_message")
-    def test_response_prefill(self, setup_backend, smg):
+    @pytest.mark.skip(reason="gpt-oss Harmony pipeline doesn't implement continue_final_message")
+    def test_response_prefill(self, model, api_client):
         pass

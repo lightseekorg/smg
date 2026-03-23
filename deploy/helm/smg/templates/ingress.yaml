@@ -1,0 +1,35 @@
+{{- if .Values.router.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "smg.fullname" . }}-router
+  labels:
+    {{- include "smg.labels" . | nindent 4 }}
+  {{- with .Values.router.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.router.ingress.className }}
+  ingressClassName: {{ .Values.router.ingress.className }}
+  {{- end }}
+  {{- if .Values.router.ingress.tls }}
+  tls:
+    {{- toYaml .Values.router.ingress.tls | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.router.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "smg.fullname" $ }}-router
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

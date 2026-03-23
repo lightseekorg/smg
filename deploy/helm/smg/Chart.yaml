@@ -1,0 +1,29 @@
+apiVersion: v2
+name: smg
+description: "Shepherd Model Gateway - high-performance inference router for LLM deployments"
+type: application
+version: 1.3.3
+appVersion: "1.3.3"
+kubeVersion: ">=1.26.0-0"
+home: https://github.com/lightseekorg/smg
+sources:
+  - https://github.com/lightseekorg/smg
+maintainers:
+  - name: LightSeek
+    url: https://github.com/lightseekorg
+keywords:
+  - llm
+  - inference
+  - gateway
+  - router
+  - sglang
+  - vllm
+# dependencies:
+#   - name: postgresql
+#     version: "~16"
+#     repository: https://charts.bitnami.com/bitnami
+#     condition: history.postgres.deploy
+#   - name: redis
+#     version: "~20"
+#     repository: https://charts.bitnami.com/bitnami
+#     condition: history.redis.deploy

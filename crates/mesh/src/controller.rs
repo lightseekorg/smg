@@ -29,6 +29,7 @@ use super::{
     stores::StateStores,
     sync::MeshSyncManager,
 };
+use crate::flow_control::MessageSizeValidator;
 
 pub struct MeshController {
     state: ClusterState,
@@ -117,6 +118,14 @@ impl MeshController {
                 random_nodes.first().map(|&node| node.clone())
             };
             cnt += 1;
+
+            // Periodic GC: clean up tombstoned CRDT metadata every 60 rounds (~60s)
+            if cnt.is_multiple_of(60) {
+                let removed = self.stores.gc_tombstones();
+                if removed > 0 {
+                    log::info!("GC: removed {removed} tombstoned CRDT metadata entries");
+                }
+            }
 
             tokio::select! {
 
@@ -376,6 +385,7 @@ impl MeshController {
                     let self_name_incremental = self_name.clone();
                     let peer_name_incremental = peer_name.clone();
                     let shared_sequence = sequence.clone();
+                    let size_validator = MessageSizeValidator::default();
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
@@ -390,6 +400,19 @@ impl MeshController {
                             if !all_updates.is_empty() {
                                 for (store_type, updates) in all_updates {
                                     let proto_store_type = store_type.to_proto();
+
+                                    // Validate message size before sending
+                                    let batch_size: usize = updates.iter().map(|u| u.value.len()).sum();
+                                    if let Err(e) = size_validator.validate(batch_size) {
+                                        log::warn!(
+                                            "Incremental update too large, skipping store {:?}: {} (max: {} bytes)",
+                                            store_type,
+                                            e,
+                                            size_validator.max_size()
+                                        );
+                                        collector.mark_sent(store_type, &updates);
+                                        continue;
+                                    }
 
                                     let incremental_update = StreamMessage {
                                         message_type: StreamMessageType::IncrementalUpdate as i32,
@@ -406,12 +429,11 @@ impl MeshController {
                                         peer_id: self_name_incremental.clone(),
                                     };
 
-                                    log::info!(
-                                        "Sending incremental update to {}: store={:?}, {} updates, versions: {:?}",
+                                    log::debug!(
+                                        "Sending incremental update to {}: store={:?}, {} updates",
                                         peer_name_incremental,
                                         store_type,
                                         updates.len(),
-                                        updates.iter().map(|u| (u.key.clone(), u.version)).collect::<Vec<_>>()
                                     );
 
                                     match tx_incremental.try_send(incremental_update) {
@@ -474,7 +496,7 @@ impl MeshController {
                                             match store_type {
                                                 LocalStoreType::App => {
                                                     // Deserialize and apply app state
-                                                    if let Ok(app_state) = serde_json::from_slice::<
+                                                    if let Ok(app_state) = bincode::deserialize::<
                                                         super::stores::AppState,
                                                     >(
                                                         &state_update.value
@@ -493,7 +515,7 @@ impl MeshController {
                                                 }
                                                 LocalStoreType::Membership => {
                                                     // Deserialize and apply membership state
-                                                    if let Ok(membership_state) = serde_json::from_slice::<
+                                                    if let Ok(membership_state) = bincode::deserialize::<
                                                         super::stores::MembershipState,
                                                     >(
                                                         &state_update.value
@@ -508,7 +530,7 @@ impl MeshController {
                                                 }
                                                 LocalStoreType::Worker => {
                                                     // Deserialize and apply worker state
-                                                    if let Ok(worker_state) = serde_json::from_slice::<
+                                                    if let Ok(worker_state) = bincode::deserialize::<
                                                         super::stores::WorkerState,
                                                     >(
                                                         &state_update.value
@@ -522,7 +544,7 @@ impl MeshController {
                                                 }
                                                 LocalStoreType::Policy => {
                                                     // Deserialize and apply policy state
-                                                    if let Ok(policy_state) = serde_json::from_slice::<
+                                                    if let Ok(policy_state) = bincode::deserialize::<
                                                         super::stores::PolicyState,
                                                     >(
                                                         &state_update.value
@@ -537,14 +559,14 @@ impl MeshController {
                                                 LocalStoreType::RateLimit => {
                                                     // Backward-compatible rate-limit decoding:
                                                     // old payloads may send OperationLog, newer ones send raw i64.
-                                                    if let Ok(log) = serde_json::from_slice::<
+                                                    if let Ok(log) = bincode::deserialize::<
                                                         super::crdt_kv::OperationLog,
                                                     >(&state_update.value)
                                                     {
                                                         sync_manager
                                                             .apply_remote_rate_limit_counter(&log);
                                                     } else if let Ok(counter_value) =
-                                                        serde_json::from_slice::<i64>(
+                                                        bincode::deserialize::<i64>(
                                                             &state_update.value,
                                                         )
                                                     {

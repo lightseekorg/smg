@@ -14,9 +14,11 @@ pub use openai_protocol::UNKNOWN_MODEL_ID;
 
 pub mod circuit_breaker;
 pub mod error;
+pub mod http_client;
 pub mod job_queue;
 pub mod kv_event_monitor;
 pub mod metrics_aggregator;
+pub mod resilience;
 pub mod retry;
 pub mod steps;
 pub mod token_bucket;
@@ -29,6 +31,7 @@ pub mod worker_service;
 // Re-export commonly used types for convenience
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use error::{WorkerError, WorkerResult};
+pub use http_client::build_worker_http_client;
 pub use job_queue::{Job, JobQueue, JobQueueConfig};
 pub use kv_event_monitor::KvEventMonitor;
 pub use openai_protocol::{
@@ -36,6 +39,7 @@ pub use openai_protocol::{
     model_type::{Endpoint, ModelType},
     worker::{ProviderType, WorkerGroupKey},
 };
+pub use resilience::{resolve_resilience, ResolvedResilience, DEFAULT_RETRYABLE_STATUS_CODES};
 pub use retry::{is_retryable_status, RetryExecutor};
 pub use worker::{
     AttachedBody, BasicWorker, ConnectionMode, RuntimeType, Worker, WorkerLoadGuard, WorkerType,

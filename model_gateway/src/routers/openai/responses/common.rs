@@ -39,13 +39,10 @@ impl ChunkProcessor {
             Ok(s) => Cow::Borrowed(s),
             Err(_) => Cow::Owned(String::from_utf8_lossy(chunk).into_owned()),
         };
-        let mut chars = chunk_str.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '\r' && chars.peek() == Some(&'\n') {
-                // Skip \r when followed by \n
-                continue;
-            }
-            self.pending.push(c);
+        if chunk_str.contains('\r') {
+            self.pending.push_str(&chunk_str.replace("\r\n", "\n"));
+        } else {
+            self.pending.push_str(&chunk_str);
         }
     }
 

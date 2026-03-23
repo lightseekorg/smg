@@ -41,10 +41,10 @@ pub(in crate::routers::openai) async fn route_responses(
     deps: &ResponsesRouterContext<'_>,
     headers: Option<&HeaderMap>,
     body: &ResponsesRequest,
-    model_id: Option<&str>,
+    model_id: &str,
 ) -> Response {
     let start = Instant::now();
-    let model = model_id.unwrap_or(body.model.as_str());
+    let model = model_id;
     let streaming = body.stream.unwrap_or(false);
 
     Metrics::record_router_request(
@@ -105,9 +105,7 @@ pub(in crate::routers::openai) async fn route_responses(
     }
 
     let mut request_body = body.clone();
-    if let Some(model) = model_id {
-        request_body.model = model.to_string();
-    }
+    request_body.model = model_id.to_string();
     request_body.conversation = None;
 
     let original_previous_response_id = match super::history::load_input_history(
@@ -161,7 +159,7 @@ pub(in crate::routers::openai) async fn route_responses(
     let mut ctx = RequestContext::for_responses(
         Arc::new(body.clone()),
         headers.cloned(),
-        model_id.map(String::from),
+        Some(model_id.to_string()),
         ComponentRefs::Responses(Arc::clone(deps.responses_components)),
     );
 

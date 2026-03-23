@@ -87,8 +87,8 @@ pub struct OperationLog {
 
 impl OperationLog {
     fn decode_counter_payload(value: &[u8]) -> Option<i64> {
-        serde_json::from_slice::<i64>(value).ok().or_else(|| {
-            serde_json::from_slice::<HashMap<String, i64>>(value)
+        bincode::deserialize::<i64>(value).ok().or_else(|| {
+            bincode::deserialize::<HashMap<String, i64>>(value)
                 .ok()
                 .and_then(|map| map.get("value").copied())
         })
@@ -101,9 +101,37 @@ impl OperationLog {
         }
     }
 
-    /// Append operation to log
+    /// Threshold at which auto-compaction triggers. After compaction, the log
+    /// shrinks to at most one entry per unique key, so the next compaction
+    /// won't trigger until enough new operations accumulate again.
+    const AUTO_COMPACT_THRESHOLD: usize = 10_000;
+
+    /// Append operation to log. Auto-compacts when the log exceeds the threshold.
+    /// Compaction keeps only the latest operation per key, providing hysteresis:
+    /// if there are N unique keys, the next compaction triggers after N + (threshold - N)
+    /// new appends, not on every append. If compaction doesn't reduce below
+    /// threshold (very high key cardinality), the oldest entries are truncated.
     pub fn append(&mut self, operation: Operation) {
         self.operations.push(operation);
+        if self.operations.len() > Self::AUTO_COMPACT_THRESHOLD {
+            self.compact();
+            // If still over threshold after dedup (extremely high key cardinality
+            // >10K unique keys), truncate oldest entries. This drops state for the
+            // oldest keys, which will be re-synced from peers on the next merge.
+            // This is a safety valve — in practice mesh stores have hundreds
+            // of keys, not tens of thousands.
+            if self.operations.len() > Self::AUTO_COMPACT_THRESHOLD {
+                let keep = Self::AUTO_COMPACT_THRESHOLD * 3 / 4;
+                let drain_count = self.operations.len() - keep;
+                tracing::warn!(
+                    total = self.operations.len(),
+                    draining = drain_count,
+                    keeping = keep,
+                    "Operation log still over threshold after compaction, truncating oldest entries"
+                );
+                self.operations.drain(..drain_count);
+            }
+        }
     }
 
     /// Get all operations
@@ -111,14 +139,14 @@ impl OperationLog {
         &self.operations
     }
 
-    /// Serialize to JSON bytes
-    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(self)
+    /// Serialize to bincode bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Box<bincode::ErrorKind>> {
+        bincode::serialize(self)
     }
 
-    /// Deserialize from JSON bytes
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
+    /// Deserialize from bincode bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<bincode::ErrorKind>> {
+        bincode::deserialize(bytes)
     }
 
     /// Get number of operations

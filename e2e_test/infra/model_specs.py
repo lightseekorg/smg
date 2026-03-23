@@ -83,6 +83,14 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 2,
         "features": ["chat", "streaming", "reasoning", "harmony"],
     },
+    # MiniMax M2 - nightly benchmarks
+    "minimaxai/minimax-m2": {
+        "model": _resolve_model_path("minimaxai/minimax-m2"),
+        "tp": 4,
+        "features": ["chat", "streaming", "function_calling", "reasoning"],
+        "worker_args": ["--trust-remote-code"],
+        "vllm_args": ["--trust-remote-code"],
+    },
     # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
         "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),

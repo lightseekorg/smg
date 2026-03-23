@@ -120,8 +120,11 @@ pub fn create_worker_registration_workflow(
                 Arc::new(DetectBackendStep),
             )
             .with_retry(RetryPolicy {
-                max_attempts: 2,
-                backoff: BackoffStrategy::Fixed(Duration::from_secs(1)),
+                max_attempts,
+                backoff: BackoffStrategy::Linear {
+                    increment: Duration::from_secs(1),
+                    max: Duration::from_secs(5),
+                },
             })
             .with_timeout(Duration::from_secs(10))
             .with_failure_action(FailureAction::ContinueNextStep)

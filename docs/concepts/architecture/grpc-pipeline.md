@@ -327,7 +327,7 @@ DeepSeek-R1 with reasoning extraction.
 smg \
   --model-path deepseek-ai/DeepSeek-R1 \
   --reasoning-parser deepseek_r1 \
-  --grpc-workers grpc://worker1:50051
+  --worker-urls grpc://worker1:50051
 ```
 
 </div>
@@ -361,7 +361,7 @@ smg \
   --mcp-config-path /config/mcp.json \
   --tokenizer-cache-enable-l0 \
   --tokenizer-cache-enable-l1 \
-  --grpc-workers grpc://worker:50051
+  --worker-urls grpc://worker:50051
 ```
 
 </div>

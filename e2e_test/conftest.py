@@ -21,11 +21,11 @@ Fixtures
 --------
 setup_backend: Class-scoped fixture that launches workers + gateway per test class.
     Returns (backend_name, model_path, client, gateway).
+model: Convenience fixture that returns just the model_path from setup_backend.
 """
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import sys
 from importlib.util import find_spec
@@ -111,37 +111,33 @@ from fixtures import (
     setup_backend,
 )
 from smg_client import SmgClient
-from smg_client._errors import SmgError
 
 
 @pytest.fixture
-def smg(setup_backend):
-    """SmgClient pointing at the same gateway as setup_backend.
+def model(setup_backend):
+    """Return the model path from setup_backend."""
+    _, model_path, _, _ = setup_backend
+    return model_path
 
-    Uses max_retries=0 to avoid amplifying load on GPU backends —
-    SmgClient comparison calls already double the inference load.
+
+@pytest.fixture
+def api_client(request, setup_backend):
+    """Client fixture that supports parametrization with OpenAI SDK and SmgClient.
+
+    By default returns the OpenAI client. To run a test with both clients,
+    add ``@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)``
+    to the test class or method.
     """
-    _, _, _, gateway = setup_backend
-    client = SmgClient(base_url=gateway.base_url, max_retries=0)
-    yield client
-    client.close()
-
-
-@contextlib.contextmanager
-def smg_compare():
-    """Wrap SmgClient comparison blocks to handle backend errors gracefully.
-
-    SmgClient assertions double the inference load on GPU backends. When the
-    backend returns a server error (5xx), the request fails, or an assertion
-    differs (e.g. enum vs string comparison), log a warning instead of failing
-    the test — the primary SDK assertion already passed.
-    """
-    try:
-        yield
-    except SmgError as exc:
-        logger.warning("SmgClient comparison skipped (SmgError): %s", exc)
-    except AssertionError as exc:
-        logger.warning("SmgClient comparison mismatch: %s", exc)
+    _, _, openai_client, gateway = setup_backend
+    param = getattr(request, "param", "openai")
+    if param == "openai":
+        yield openai_client
+    elif param == "smg":
+        client = SmgClient(base_url=gateway.base_url, max_retries=0)
+        yield client
+        client.close()
+    else:
+        raise ValueError(f"Unknown api_client param: {param!r} (expected 'openai' or 'smg')")
 
 
 # Re-export for pytest discovery
@@ -154,5 +150,6 @@ __all__ = [
     # Fixtures
     "setup_backend",
     "backend_router",
-    "smg",
+    "model",
+    "api_client",
 ]

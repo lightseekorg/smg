@@ -1,0 +1,10 @@
+# Router with PostgreSQL history backend.
+# Usage: helm install smg deploy/helm/smg -f deploy/helm/smg/examples/with-postgres.yaml
+router:
+  workerUrls:
+    - http://worker-1:8000
+history:
+  backend: postgres
+  postgres:
+    url: "postgresql://smg:<YOUR_PASSWORD>@postgres:5432/smg"  # replace with real credentials
+    poolMax: 10
