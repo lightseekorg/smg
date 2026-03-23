@@ -15,7 +15,7 @@ pub fn render_models(f: &mut Frame, app: &App, area: Rect) {
 
     let block = theme::panel(" Models ");
 
-    let header = Row::new(vec!["ID", "OWNER", "WORKERS", "CREATED"]).style(
+    let header = Row::new(vec!["ID", "NAME", "WORKERS", "CREATED"]).style(
         Style::default()
             .fg(theme::ACCENT)
             .bg(theme::PANEL_BG)

@@ -290,7 +290,8 @@ fn parse_token_counts(metrics_text: &str) -> (u64, u64) {
 
 async fn poll_once(client: &SmgClient, state: &SharedState, interval_secs: u64) {
     // Fire all requests concurrently.
-    let (health, workers, loads, cluster, mesh, rates, models, metrics, gpus) = tokio::join!(
+    let (alive, health, workers, loads, cluster, mesh, rates, models, metrics, gpus) = tokio::join!(
+        client.check_alive(),
         client.check_health(),
         client.list_workers(),
         client.get_loads(),
@@ -306,17 +307,19 @@ async fn poll_once(client: &SmgClient, state: &SharedState, interval_secs: u64) 
     #[expect(clippy::unwrap_used)]
     let mut s = state.write().unwrap();
 
-    // Connection / readiness
+    // Connection (liveness) vs readiness (health) are distinct:
+    // connected = server is reachable; healthy = readiness check passes
+    s.connected = alive.is_ok();
     match health {
         Ok(()) => {
-            s.connected = true;
             s.healthy = true;
             s.last_error = None;
         }
         Err(e) => {
-            s.connected = false;
             s.healthy = false;
-            s.last_error = Some(e.to_string());
+            if !s.connected {
+                s.last_error = Some(e.to_string());
+            }
         }
     }
 

@@ -161,8 +161,22 @@ fn render_tui_logs(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_file_log(f: &mut Frame, path: &str, label: &str, app: &App, area: Rect) {
-    let content = match std::fs::read_to_string(path) {
-        Ok(s) => s,
+    // Read only the tail of the file to avoid blocking the render loop on large files
+    use std::io::{Read, Seek, SeekFrom};
+    let content = match std::fs::File::open(path) {
+        Ok(mut file) => {
+            // Read at most the last 64KB to avoid blocking on large files
+            const TAIL_BYTES: u64 = 64 * 1024;
+            let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+            if len > TAIL_BYTES {
+                let _ = file.seek(SeekFrom::Start(len - TAIL_BYTES));
+            }
+            let mut buf = String::new();
+            if file.read_to_string(&mut buf).is_err() {
+                buf.clear();
+            }
+            buf
+        }
         Err(_) => {
             let block = Block::default()
                 .title(format!(" {label} "))
@@ -183,7 +197,7 @@ fn render_file_log(f: &mut Frame, path: &str, label: &str, app: &App, area: Rect
         }
     };
 
-    // Take last N lines to avoid rendering huge files
+    // Take last N lines
     let all_lines: Vec<&str> = content.lines().collect();
     let max_lines = 500;
     let start = all_lines.len().saturating_sub(max_lines);

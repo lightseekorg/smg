@@ -25,6 +25,7 @@ pub fn render_pulse(f: &mut Frame, app: &App, area: Rect) {
             constraints.push(Constraint::Fill(1));
         }
         constraints.push(Constraint::Fill(1)); // Throughput
+        constraints.push(Constraint::Fill(1)); // Request Stats
 
         let rows = Layout::vertical(constraints).split(area);
         let mut i = 0;
@@ -35,6 +36,8 @@ pub fn render_pulse(f: &mut Frame, app: &App, area: Rect) {
             i += 1;
         }
         render_throughput_compact(f, &state, rows[i]);
+        i += 1;
+        render_request_stats(f, &state, rows[i]);
         return;
     }
 

@@ -450,8 +450,14 @@ impl App {
             Some("add") => self.cmd_add(parts.get(1).copied()).await,
             Some("delete") => {
                 if let Some(id) = parts.get(1) {
-                    match self.client.delete_worker(id.trim()).await {
-                        Ok(_) => self.set_status(format!("Worker {} deleted", id.trim())),
+                    let id = id.trim().to_string();
+                    match self.client.delete_worker(&id).await {
+                        Ok(_) => {
+                            // Also clean up spawned process and GPU claims (like interactive delete)
+                            let worker_url = self.selected_worker_url().unwrap_or_default();
+                            self.claimed_gpus.remove(&worker_url);
+                            self.set_status(format!("Worker {id} deleted"));
+                        }
                         Err(e) => self.set_status(format!("Error: {e}")),
                     }
                 } else {
@@ -532,10 +538,12 @@ impl App {
                 }
             }
             Some("toggle-health") => {
-                if let Some(id) = self.selected_worker_id() {
+                if let Some(worker) = self.selected_worker() {
+                    // Toggle: if healthy, disable health check; if unhealthy, re-enable
+                    let disable = worker.is_healthy;
                     let update = openai_protocol::worker::WorkerUpdateRequest {
                         health: Some(openai_protocol::worker::HealthCheckUpdate {
-                            disable_health_check: Some(true),
+                            disable_health_check: Some(disable),
                             timeout_secs: None,
                             check_interval_secs: None,
                             success_threshold: None,
@@ -546,8 +554,9 @@ impl App {
                         labels: None,
                         api_key: None,
                     };
-                    match self.client.update_worker(&id, &update).await {
-                        Ok(_) => self.set_status("Health check toggled".to_string()),
+                    let action = if disable { "disabled" } else { "enabled" };
+                    match self.client.update_worker(&worker.id, &update).await {
+                        Ok(_) => self.set_status(format!("Health check {action}")),
                         Err(e) => self.set_status(format!("Error: {e}")),
                     }
                 } else {
@@ -636,7 +645,7 @@ impl App {
 
     fn handle_chat_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') if !self.chat_streaming => {
+            KeyCode::Char('q') if !self.chat_streaming && self.chat_input.is_empty() => {
                 self.should_quit = true;
             }
             // Tab to cycle model, Backtab (Shift+Tab) to cycle endpoint
@@ -758,24 +767,23 @@ impl App {
         #[expect(clippy::unwrap_used)]
         let state = self.state.read().unwrap();
 
-        // Collect models from workers (filter external/OpenAI to gpt-5.4 prefix only)
+        // Collect all available models from workers
         let mut models: Vec<String> = Vec::new();
         if let Some(ref workers) = state.workers {
             for w in &workers.workers {
-                let is_external = w.runtime_type == "external";
-                if is_external && w.models.is_empty() {
-                    // Wildcard external worker — add gpt-5.4-nano as placeholder
-                    if !models.contains(&"gpt-5.4-nano".to_string()) {
-                        models.push("gpt-5.4-nano".to_string());
-                    }
-                    continue;
-                }
                 for m in &w.models {
-                    if is_external && !m.id.starts_with("gpt-5.4") {
-                        continue;
-                    }
                     if !models.contains(&m.id) {
                         models.push(m.id.clone());
+                    }
+                }
+            }
+        }
+        // Fallback: if no models listed, use the models endpoint
+        if models.is_empty() {
+            if let Some(ref m) = state.models {
+                for model in &m.data {
+                    if !models.contains(&model.id) {
+                        models.push(model.id.clone());
                     }
                 }
             }
@@ -908,18 +916,20 @@ impl App {
                         }
                     }
                     ActionMenuItem::ToggleHealthCheck => {
-                        if let Some(id) = self.selected_worker_id() {
+                        if let Some(worker) = self.selected_worker() {
+                            let disable = worker.is_healthy;
+                            let action = if disable { "disabled" } else { "enabled" };
                             match self
                                 .client
                                 .update_worker(
-                                    &id,
+                                    &worker.id,
                                     &openai_protocol::worker::WorkerUpdateRequest {
                                         priority: None,
                                         cost: None,
                                         labels: None,
                                         api_key: None,
                                         health: Some(openai_protocol::worker::HealthCheckUpdate {
-                                            disable_health_check: Some(true),
+                                            disable_health_check: Some(disable),
                                             timeout_secs: None,
                                             check_interval_secs: None,
                                             success_threshold: None,
@@ -929,7 +939,9 @@ impl App {
                                 )
                                 .await
                             {
-                                Ok(_) => self.set_status("Health check toggled".to_string()),
+                                Ok(_) => {
+                                    self.set_status(format!("Health check {action}"));
+                                }
                                 Err(e) => self.set_status(format!("Error: {e}")),
                             }
                         }
@@ -1289,7 +1301,18 @@ impl App {
                             LogLevel::Error,
                             &format!("Failed to register worker {url}: {e}"),
                         );
-                        self.set_status(format!("Started {desc} but registration failed: {e}"));
+                        // Roll back: kill the spawned process and release claimed GPUs
+                        if let Some(pos) = self.worker_children.iter().position(|(d, _)| d == &desc)
+                        {
+                            let (_, mut child) = self.worker_children.remove(pos);
+                            let _ = child.kill().await;
+                            self.add_log(
+                                LogLevel::Info,
+                                &format!("Rolled back spawned worker: {desc}"),
+                            );
+                        }
+                        self.claimed_gpus.remove(&url);
+                        self.set_status(format!("Registration failed, worker rolled back: {e}"));
                     }
                 }
             }

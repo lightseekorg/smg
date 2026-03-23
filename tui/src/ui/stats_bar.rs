@@ -78,6 +78,8 @@ fn render_stats_cards(f: &mut Frame, state: &GatewayState, area: Rect, bg: Style
     let unhealthy = total.saturating_sub(healthy);
     let health_text = if !state.connected {
         ("--".to_string(), theme::TEXT_MUTED)
+    } else if total == 0 {
+        ("no workers".to_string(), theme::TEXT_MUTED)
     } else if unhealthy == 0 {
         ("all healthy".to_string(), theme::GREEN)
     } else {

@@ -40,7 +40,7 @@ Workers View
         _ => {
             text.push_str(
                 "\
-Navigation
+General
   j / Down     Move selection down
   k / Up       Move selection up
 

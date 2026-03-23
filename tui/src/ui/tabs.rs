@@ -13,9 +13,8 @@ pub fn render_tabs(f: &mut Frame, active: View, area: Rect) {
     let bg = Style::default().bg(theme::PANEL_BG);
     let tabs: Vec<Span> = View::all()
         .iter()
-        .enumerate()
-        .flat_map(|(i, view)| {
-            let num = format!("{}", i + 1);
+        .flat_map(|view| {
+            let num = format!("{}", view.index());
             let label = view.label();
             let style = if *view == active {
                 Style::default()

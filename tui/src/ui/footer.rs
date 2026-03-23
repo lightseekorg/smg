@@ -22,7 +22,7 @@ pub fn render_footer(f: &mut Frame, app: &App, area: Rect) {
             View::Workers => {
                 vec![
                     hint("q", "quit"),
-                    hint("1-5", "view"),
+                    hint("1-7", "view"),
                     hint("j/k", "nav"),
                     hint("/", "filter"),
                     hint(":", "cmd"),
@@ -34,7 +34,7 @@ pub fn render_footer(f: &mut Frame, app: &App, area: Rect) {
             _ => {
                 vec![
                     hint("q", "quit"),
-                    hint("1-5", "view"),
+                    hint("1-7", "view"),
                     hint("/", "filter"),
                     hint(":", "cmd"),
                     hint("?", "help"),

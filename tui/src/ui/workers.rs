@@ -278,7 +278,12 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
     drop(state);
 
     if let Some(detail_area) = detail_area {
-        if let Some(worker) = filtered.get(app.selected_index) {
+        let clamped = if row_count > 0 {
+            app.selected_index.min(row_count.saturating_sub(1))
+        } else {
+            0
+        };
+        if let Some(worker) = filtered.get(clamped) {
             detail::render_detail(f, app, worker, detail_area);
         }
     }
@@ -297,10 +302,11 @@ fn matches_filter(worker: &WorkerInfo, filter: Option<&String>) -> bool {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max - 1])
+        let prefix: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{prefix}…")
     }
 }
 
@@ -323,12 +329,15 @@ fn get_worker_load_info(
     worker_rps: &std::collections::HashMap<String, f64>,
     worker_url: &str,
 ) -> (String, String) {
-    // HTTP sglang workers: use num_running_reqs and token_usage from /get_loads
+    // HTTP sglang/vllm workers: aggregate across all loads (TP>1 workers have multiple entries)
     if let Some(wl) = loads.get(worker_url) {
         if let Some(ref details) = wl.details {
-            if let Some(load) = details.loads.first() {
-                let running = format!("{}", load.num_running_reqs);
-                let usage = format!("{:.1}%", load.token_usage * 100.0);
+            if !details.loads.is_empty() {
+                let total_running: i32 = details.loads.iter().map(|l| l.num_running_reqs).sum();
+                let avg_usage: f64 = details.loads.iter().map(|l| l.token_usage).sum::<f64>()
+                    / details.loads.len() as f64;
+                let running = format!("{total_running}");
+                let usage = format!("{:.1}%", avg_usage * 100.0);
                 return (running, usage);
             }
         }

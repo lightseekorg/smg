@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
 
     // Auto-start gateway if requested and not reachable
     let _gateway_child = if cli.auto_start {
-        match client.check_health().await {
+        match client.check_alive().await {
             Ok(()) => {
                 tracing::info!("Gateway already running at {}", cli.gateway_url);
                 None
