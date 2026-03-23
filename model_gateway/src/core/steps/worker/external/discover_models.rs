@@ -106,6 +106,18 @@ pub fn infer_model_type_from_id(id: &str) -> ModelType {
         return ModelType::RERANK_MODEL;
     }
 
+    // Diffusion models (Stable Diffusion, Flux, SDXL, etc.)
+    // Must be checked before the generic "image" heuristic so that IDs like
+    // "flux-image-*" or "stable-diffusion-image-*" are not misclassified.
+    if id_lower.starts_with("sd-")
+        || id_lower.starts_with("sd3")
+        || id_lower.starts_with("sdxl")
+        || id_lower.starts_with("flux")
+        || id_lower.contains("diffusion")
+    {
+        return ModelType::DIFFUSION_MODEL;
+    }
+
     // Image generation models
     if id_lower.starts_with("dall-e")
         || id_lower.starts_with("sora")
@@ -316,5 +328,57 @@ impl StepExecutor<WorkerWorkflowData> for DiscoverModelsStep {
 
     fn is_retryable(&self, _error: &WorkflowError) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_infer_diffusion_models() {
+        assert_eq!(
+            infer_model_type_from_id("stable-diffusion-xl-base-1.0"),
+            ModelType::DIFFUSION_MODEL
+        );
+        assert_eq!(
+            infer_model_type_from_id("stable_diffusion_3"),
+            ModelType::DIFFUSION_MODEL
+        );
+        assert_eq!(
+            infer_model_type_from_id("sd-v1-5"),
+            ModelType::DIFFUSION_MODEL
+        );
+        assert_eq!(
+            infer_model_type_from_id("sd3-medium"),
+            ModelType::DIFFUSION_MODEL
+        );
+        assert_eq!(
+            infer_model_type_from_id("sdxl-turbo"),
+            ModelType::DIFFUSION_MODEL
+        );
+        assert_eq!(
+            infer_model_type_from_id("flux-1-dev"),
+            ModelType::DIFFUSION_MODEL
+        );
+        assert_eq!(
+            infer_model_type_from_id("FLUX-schnell"),
+            ModelType::DIFFUSION_MODEL
+        );
+        assert_eq!(
+            infer_model_type_from_id("my-custom-diffusion-model"),
+            ModelType::DIFFUSION_MODEL
+        );
+    }
+
+    #[test]
+    fn test_infer_non_diffusion_models() {
+        assert_eq!(infer_model_type_from_id("gpt-4o"), ModelType::VISION_LLM);
+        assert_eq!(infer_model_type_from_id("dall-e-3"), ModelType::IMAGE_MODEL);
+        assert_eq!(
+            infer_model_type_from_id("text-embedding-3-small"),
+            ModelType::EMBED_MODEL
+        );
+        assert_eq!(infer_model_type_from_id("llama-3-70b"), ModelType::LLM);
     }
 }
