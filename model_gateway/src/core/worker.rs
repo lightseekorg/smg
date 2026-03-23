@@ -19,7 +19,10 @@ use openai_protocol::{
 };
 use tokio::{sync::OnceCell, time};
 
-use super::{CircuitBreaker, ResolvedResilience, WorkerError, WorkerResult, UNKNOWN_MODEL_ID};
+use super::{
+    lora::WorkerLoraState, CircuitBreaker, ResolvedResilience, WorkerError, WorkerResult,
+    UNKNOWN_MODEL_ID,
+};
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::grpc::client::GrpcClient,
@@ -506,6 +509,9 @@ pub struct BasicWorker {
     pub http_client: reqwest::Client,
     /// Resolved resilience config (retry + circuit breaker settings).
     pub resilience: ResolvedResilience,
+    /// Per-worker LoRA adapter lifecycle state.
+    /// Present only when `RouterConfig.lora` is configured.
+    pub lora_state: Option<Arc<WorkerLoraState>>,
 }
 
 impl fmt::Debug for BasicWorker {
@@ -542,6 +548,46 @@ impl Worker for BasicWorker {
 
     fn connection_mode(&self) -> &ConnectionMode {
         &self.metadata.spec.connection_mode
+    }
+
+    /// Transform the request JSON before forwarding.
+    ///
+    /// Applies, in order:
+    /// 1. DP-aware rank injection (same logic as the trait default).
+    /// 2. LoRA adapter resolution and request rewriting (if `lora_state` is set).
+    async fn prepare_request(&self, mut req: serde_json::Value) -> WorkerResult<serde_json::Value> {
+        // 1. DP-aware rank injection (mirrors the trait default implementation).
+        if let Some(rank) = self.metadata.spec.dp_rank {
+            if let Some(map) = req.as_object_mut() {
+                map.insert("data_parallel_rank".to_string(), serde_json::json!(rank));
+            } else {
+                return Err(WorkerError::InvalidConfiguration {
+                    message: "Request must be a JSON object for DP-aware routing".to_string(),
+                });
+            }
+        }
+
+        // 2. LoRA: if `lora_path` is present, resolve it and rewrite JSON fields.
+        if let Some(lora) = &self.lora_state {
+            if let Some(path) = req
+                .get("lora_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+            {
+                use super::lora::LoraStateError;
+                lora.resolve(&path, &mut req).await.map_err(|e| match e {
+                    LoraStateError::UnsupportedUri(inner) => WorkerError::LoraUnsupportedUri {
+                        message: inner.to_string(),
+                    },
+                    LoraStateError::UnsupportedRuntime(rt) => WorkerError::InvalidConfiguration {
+                        message: format!("runtime {rt:?} does not support LoRA"),
+                    },
+                    LoraStateError::EngineLoad(msg) => WorkerError::LoraLoadFailed { message: msg },
+                })?;
+            }
+        }
+
+        Ok(req)
     }
 
     fn is_healthy(&self) -> bool {

@@ -35,6 +35,7 @@ fn get_bootstrap_info(worker: &BasicWorker) -> (String, Option<u16>) {
 }
 
 /// Create a default GenerateRequest for benchmarks with minimal fields set
+#[expect(deprecated, reason = "lora_id kept until callers migrate to lora_path")]
 fn default_generate_request() -> GenerateRequest {
     GenerateRequest {
         text: None,

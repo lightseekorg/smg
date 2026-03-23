@@ -105,7 +105,7 @@ pub struct CompletionRequest {
     #[serde(default = "default_true")]
     pub skip_special_tokens: bool,
 
-    /// Path to LoRA adapter(s) for model customization
+    /// LoRA adapter path or pre-loaded adapter name.
     pub lora_path: Option<String>,
 
     /// Session parameters for continual prompting
