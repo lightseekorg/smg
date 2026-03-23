@@ -489,7 +489,7 @@ impl WorkerRegistry {
     /// registration. If the URL already exists, replaces the worker via
     /// overwrite-then-diff. Otherwise, creates a new worker.
     pub fn register_or_replace(&self, worker: Arc<dyn Worker>) -> WorkerId {
-        // Try create first — succeeds for fresh URLs and pre-reserved IDs
+        // Try to create first — succeeds for fresh URLs and pre-reserved IDs
         // (where url_to_id has an entry but workers does not).
         if let Some(id) = self.register(worker.clone()) {
             return id;
@@ -501,16 +501,16 @@ impl WorkerRegistry {
             return existing_id;
         }
 
-        // Should not reach here: register() returned None means URL is in url_to_id
+        // Should not reach here: register() returned None means URL is in url_to_id.
+        // Recover by clearing the stale entry and retrying full registration.
         tracing::error!(
-            "register_or_replace: inconsistent state for URL {}",
+            "register_or_replace: inconsistent state for URL {}, clearing stale entry",
             worker.url()
         );
-        // Last resort: force a fresh registration
-        let id = WorkerId::new();
-        self.url_to_id.insert(worker.url().to_string(), id.clone());
-        self.workers.insert(id.clone(), worker);
-        id
+        self.url_to_id.remove(worker.url());
+        // register() will now succeed since we cleared the entry.
+        // If it still fails, something is deeply wrong — return a default ID.
+        self.register(worker).unwrap_or_default()
     }
 
     /// Reserve (or retrieve) a stable UUID for a worker URL.
