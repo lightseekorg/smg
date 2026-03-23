@@ -4,6 +4,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/sglang_scheduler.proto");
     println!("cargo:rerun-if-changed=proto/vllm_engine.proto");
     println!("cargo:rerun-if-changed=proto/trtllm_service.proto");
+    println!("cargo:rerun-if-changed=proto/render_service.proto");
 
     // Pass 1: compile shared message types (no gRPC service generation)
     tonic_prost_build::configure()
@@ -37,6 +38,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ],
             &["proto"],
         )?;
+
+    // Pass 3: compile render service proto with serde support for HTTP+gRPC shared types
+    // Apply serde derive to ALL types in the render package (including oneof inner enums)
+    let render_serde = "#[derive(serde::Serialize, serde::Deserialize)]";
+    tonic_prost_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .type_attribute(".", render_serde)
+        .protoc_arg("--experimental_allow_proto3_optional")
+        .compile_protos(&["proto/render_service.proto"], &["proto"])?;
 
     Ok(())
 }

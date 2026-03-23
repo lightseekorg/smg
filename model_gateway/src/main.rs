@@ -143,6 +143,11 @@ struct CliArgs {
     #[arg(long, default_value_t = 30000, help_heading = "Worker Configuration")]
     port: u16,
 
+    /// Server protocol mode: http (REST API) or grpc (gRPC render service)
+    /// Server protocol mode: http (REST API) or grpc (gRPC render service)
+    #[arg(long, value_enum, default_value_t = server::ServerMode::Http, help_heading = "Worker Configuration")]
+    server: server::ServerMode,
+
     /// List of worker URLs (supports IPv4 and IPv6)
     #[arg(long, num_args = 0.., help_heading = "Worker Configuration")]
     worker_urls: Vec<String>,
@@ -1274,6 +1279,7 @@ impl CliArgs {
             mesh_server_config,
             webrtc_bind_addr: self.webrtc_bind_addr,
             webrtc_stun_server: self.webrtc_stun_server.clone(),
+            server_mode: self.server,
         })
     }
 }

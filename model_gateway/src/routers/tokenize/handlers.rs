@@ -11,16 +11,24 @@ use axum::{
     Json,
 };
 use llm_tokenizer::{registry::TokenizerEntry, traits::Tokenizer, TokenizerRegistry};
-use openai_protocol::tokenize::{
-    AddTokenizerRequest, AddTokenizerResponse, CountResult, DetokenizeRequest, DetokenizeResponse,
-    ListTokenizersResponse, RemoveTokenizerResponse, TextResult, TokenizeRequest, TokenizeResponse,
-    TokenizerInfo, TokensResult,
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    tokenize::{
+        AddTokenizerRequest, AddTokenizerResponse, CountResult, DetokenizeRequest,
+        DetokenizeResponse, ListTokenizersResponse, RemoveTokenizerResponse, RenderChatRequest,
+        RenderCompletionRequest, RenderResponse, TextResult, TokenizeRequest, TokenizeResponse,
+        TokenizerInfo, TokensResult,
+    },
 };
 use tracing::{debug, error, warn};
 
 use crate::{
     app_context::AppContext,
     core::{steps::TokenizerConfigRequest, Job, UNKNOWN_MODEL_ID},
+    routers::grpc::{
+        harmony::{builder::HarmonyBuilder, detector::HarmonyDetector},
+        utils::process_chat_messages,
+    },
 };
 
 /// Helper to create error responses
@@ -180,6 +188,107 @@ pub async fn detokenize(registry: &Arc<TokenizerRegistry>, request: DetokenizeRe
     };
 
     Json(DetokenizeResponse { text }).into_response()
+}
+
+// ============================================================================
+// Render Core Logic (shared by HTTP and gRPC handlers)
+// ============================================================================
+
+/// Core render chat logic: apply chat template and tokenize.
+/// Shared by HTTP and gRPC handlers.
+pub fn render_chat_core(
+    registry: &TokenizerRegistry,
+    chat_request: &ChatCompletionRequest,
+) -> Result<Vec<u32>, String> {
+    // Check if this is a Harmony (gpt-oss) model
+    if HarmonyDetector::is_harmony_model(&chat_request.model) {
+        let builder = HarmonyBuilder::new();
+        let output = builder.build_from_chat(chat_request)?;
+        return Ok(output.input_ids);
+    }
+
+    // HuggingFace / tiktoken path
+    let tokenizer = get_tokenizer(registry, &chat_request.model)?;
+
+    let processed = process_chat_messages(chat_request, tokenizer.as_ref())?;
+
+    let encoding = tokenizer
+        .encode(&processed.text, false)
+        .map_err(|e| format!("Tokenization failed: {e}"))?;
+
+    Ok(encoding.token_ids().to_vec())
+}
+
+/// Core render completion logic: tokenize prompt with optional special tokens.
+/// Shared by HTTP and gRPC handlers.
+pub fn render_completion_core(
+    registry: &TokenizerRegistry,
+    model: &str,
+    prompt: &str,
+    add_special_tokens: bool,
+) -> Result<Vec<u32>, String> {
+    let tokenizer = get_tokenizer(registry, model)?;
+
+    let encoding = tokenizer
+        .encode(prompt, add_special_tokens)
+        .map_err(|e| format!("Tokenization failed: {e}"))?;
+
+    Ok(encoding.token_ids().to_vec())
+}
+
+// ============================================================================
+// Render HTTP Handlers
+// ============================================================================
+
+/// Handle POST /v1/chat/completions/render
+pub async fn render_chat(
+    registry: &Arc<TokenizerRegistry>,
+    request: RenderChatRequest,
+) -> Response {
+    debug!("Render chat request for model: {}", request.model);
+
+    let chat_request = ChatCompletionRequest {
+        model: request.model,
+        messages: request.messages,
+        tools: request.tools,
+        tool_choice: request.tool_choice,
+        continue_final_message: request.continue_final_message,
+        chat_template_kwargs: request.chat_template_kwargs,
+        ..Default::default()
+    };
+
+    match render_chat_core(registry, &chat_request) {
+        Ok(token_ids) => {
+            let count = token_ids.len();
+            Json(RenderResponse { token_ids, count }).into_response()
+        }
+        Err(e) => {
+            error!("Render chat failed: {}", e);
+            error_response(StatusCode::BAD_REQUEST, &e, "render_error")
+        }
+    }
+}
+
+/// Handle POST /v1/completions/render
+pub async fn render_completion(
+    registry: &Arc<TokenizerRegistry>,
+    request: RenderCompletionRequest,
+) -> Response {
+    debug!("Render completion request for model: {}", request.model);
+
+    let texts = request.prompt.as_strings();
+    let text = texts.first().copied().unwrap_or("");
+
+    match render_completion_core(registry, &request.model, text, request.add_special_tokens) {
+        Ok(token_ids) => {
+            let count = token_ids.len();
+            Json(RenderResponse { token_ids, count }).into_response()
+        }
+        Err(e) => {
+            error!("Render completion failed: {}", e);
+            error_response(StatusCode::BAD_REQUEST, &e, "render_error")
+        }
+    }
 }
 
 // ============================================================================
@@ -405,5 +514,25 @@ mod tests {
             Err(e) => assert!(e.contains("No tokenizers available")),
             Ok(_) => panic!("Expected error"),
         }
+    }
+
+    #[test]
+    fn test_render_completion_core_model_not_found() {
+        let registry = TokenizerRegistry::new();
+        let result = render_completion_core(&registry, "nonexistent", "hello", true);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No tokenizers available"));
+    }
+
+    #[test]
+    fn test_render_chat_core_model_not_found() {
+        let registry = TokenizerRegistry::new();
+        let chat_request = ChatCompletionRequest {
+            model: "nonexistent".to_string(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let result = render_chat_core(&registry, &chat_request);
+        assert!(result.is_err());
     }
 }

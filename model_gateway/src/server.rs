@@ -29,7 +29,10 @@ use openai_protocol::{
     },
     rerank::{RerankRequest, V1RerankReqInput},
     responses::{ResponsesGetParams, ResponsesRequest},
-    tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
+    tokenize::{
+        AddTokenizerRequest, DetokenizeRequest, RenderChatRequest, RenderCompletionRequest,
+        TokenizeRequest,
+    },
     validated::ValidatedJson,
     worker::{WorkerSpec, WorkerUpdateRequest},
 };
@@ -584,6 +587,20 @@ async fn v1_detokenize(
     tokenize::detokenize(&state.context.tokenizer_registry, request).await
 }
 
+async fn v1_chat_completions_render(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RenderChatRequest>,
+) -> Response {
+    tokenize::render_chat(&state.context.tokenizer_registry, request).await
+}
+
+async fn v1_completions_render(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RenderCompletionRequest>,
+) -> Response {
+    tokenize::render_completion(&state.context.tokenizer_registry, request).await
+}
+
 async fn v1_tokenizers_add(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AddTokenizerRequest>,
@@ -616,6 +633,14 @@ async fn v1_tokenizers_remove(
     tokenize::remove_tokenizer(&state.context, &tokenizer_id).await
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub enum ServerMode {
+    #[value(name = "http")]
+    Http,
+    #[value(name = "grpc")]
+    Grpc,
+}
+
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -638,6 +663,8 @@ pub struct ServerConfig {
     /// STUN server for ICE candidate gathering (host:port).
     /// `None` means use the default (stun.l.google.com:19302).
     pub webrtc_stun_server: Option<String>,
+    /// Server protocol mode: http (REST) or grpc (render service)
+    pub server_mode: ServerMode,
 }
 
 pub fn build_app(
@@ -692,9 +719,14 @@ pub fn build_app(
             "/v1/conversations/{conversation_id}/items/{item_id}",
             get(v1_conversations_get_item).delete(v1_conversations_delete_item),
         )
-        // Tokenize / Detokenize endpoints
+        // Tokenize / Detokenize / Render endpoints
         .route("/v1/tokenize", post(v1_tokenize))
         .route("/v1/detokenize", post(v1_detokenize))
+        .route(
+            "/v1/chat/completions/render",
+            post(v1_chat_completions_render),
+        )
+        .route("/v1/completions/render", post(v1_completions_render))
         // Realtime REST endpoints (same middleware as other protected routes)
         .route("/v1/realtime/sessions", post(v1_realtime_session))
         .route(
@@ -1195,45 +1227,68 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         .parse()
         .map_err(|e| format!("Invalid address: {e}"))?;
 
-    let handle = axum_server::Handle::new();
-    let handle_clone = handle.clone();
-    let grace_period = Duration::from_secs(config.shutdown_grace_period_secs);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "shutdown signal handler must outlive the server to trigger graceful shutdown"
-    )]
-    spawn(async move {
-        shutdown_signal().await;
-        handle_clone.graceful_shutdown(Some(grace_period));
-    });
+    let server_result = match config.server_mode {
+        ServerMode::Grpc => {
+            // gRPC render service mode
+            info!("Starting gRPC render server on {}", bind_addr);
+            let render_service = tokenize::grpc_service::RenderGrpcService::new(
+                app_context.tokenizer_registry.clone(),
+            );
+            {
+                use smg_grpc_client::render_service_proto::render_service_server::RenderServiceServer;
+                tonic::transport::Server::builder()
+                    .add_service(RenderServiceServer::new(render_service))
+            }
+                .serve_with_shutdown(addr, shutdown_signal())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        ServerMode::Http => {
+            // HTTP REST API mode (default)
+            let handle = axum_server::Handle::new();
+            let handle_clone = handle.clone();
+            let grace_period = Duration::from_secs(config.shutdown_grace_period_secs);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "shutdown signal handler must outlive the server to trigger graceful shutdown"
+            )]
+            spawn(async move {
+                shutdown_signal().await;
+                handle_clone.graceful_shutdown(Some(grace_period));
+            });
 
-    let server_result = if let (Some(cert), Some(key)) = (
-        &config.router_config.server_cert,
-        &config.router_config.server_key,
-    ) {
-        info!("TLS enabled");
-        ring::default_provider()
-            .install_default()
-            .map_err(|e| format!("Failed to install rustls ring provider: {e:?}"))?;
+            if let (Some(cert), Some(key)) = (
+                &config.router_config.server_cert,
+                &config.router_config.server_key,
+            ) {
+                info!("TLS enabled");
+                ring::default_provider()
+                    .install_default()
+                    .map_err(|e| format!("Failed to install rustls ring provider: {e:?}"))?;
 
-        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(cert.clone(), key.clone())
-            .await
-            .map_err(|e| format!("Failed to create TLS config: {e}"))?;
+                let tls_config =
+                    axum_server::tls_rustls::RustlsConfig::from_pem(cert.clone(), key.clone())
+                        .await
+                        .map_err(|e| format!("Failed to create TLS config: {e}"))?;
 
-        axum_server::bind_rustls(addr, tls_config)
-            .handle(handle)
-            .serve(app.into_make_service())
-            .await
-    } else {
-        axum_server::bind(addr)
-            .handle(handle)
-            .serve(app.into_make_service())
-            .await
+                axum_server::bind_rustls(addr, tls_config)
+                    .handle(handle)
+                    .serve(app.into_make_service())
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                axum_server::bind(addr)
+                    .handle(handle)
+                    .serve(app.into_make_service())
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        }
     };
 
     // Graceful Shutdown
 
-    info!("HTTP server stopped. Starting component cleanup...");
+    info!("Server stopped. Starting component cleanup...");
 
     // This triggers background task cancellation, waits for tools, and denies approvals
     if let Some(orchestrator) = app_context.mcp_orchestrator.get() {
@@ -1243,7 +1298,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     info!("Cleanup complete. Process exiting.");
 
     // Return original server error if any, otherwise Ok
-    server_result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+    server_result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })
 }
 
 #[expect(
