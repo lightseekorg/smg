@@ -85,9 +85,32 @@ impl ConsistentHashRing {
         owners
     }
 
-    /// Check if a node is an owner of a key
+    /// Check if a node is an owner of a key.
+    /// Zero-allocation: walks the ring with early return instead of building an owner list.
     pub fn is_owner(&self, key: &str, node_name: &str) -> bool {
-        self.get_owners(key).contains(&node_name.to_string())
+        if self.ring.is_empty() {
+            return false;
+        }
+
+        let key_hash = Self::hash(key);
+        let mut seen_nodes = 0usize;
+        let mut seen_unique = HashSet::new();
+        let total_unique_nodes = self.node_hashes.len();
+
+        let mut iter = self.ring.range(key_hash..);
+        while seen_nodes < NUM_OWNERS && seen_unique.len() < total_unique_nodes {
+            if let Some((_, node)) = iter.next() {
+                if seen_unique.insert(node.as_str()) {
+                    if node == node_name {
+                        return true;
+                    }
+                    seen_nodes += 1;
+                }
+            } else {
+                iter = self.ring.range(..);
+            }
+        }
+        false
     }
 
     /// Get all nodes in the ring

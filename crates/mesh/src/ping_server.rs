@@ -74,75 +74,80 @@ impl GossipService {
 
         let proto_store_type = store_type.to_proto();
 
-        // Get all entries from the store
-        let entries: Vec<(String, Vec<u8>)> = match store_type {
+        // Get all entries from the store, carrying version to avoid re-fetching
+        let entries: Vec<(String, Vec<u8>, u64)> = match store_type {
             LocalStoreType::Membership => stores
                 .membership
                 .all()
                 .into_iter()
-                .map(|(k, v)| {
-                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
-                        log::error!("Failed to serialize membership state: {}", e);
-                        vec![]
-                    });
-                    (k, serialized)
+                .filter_map(|(k, v)| {
+                    let version = v.version;
+                    bincode::serialize(&v)
+                        .map(|bytes| (k, bytes, version))
+                        .map_err(|e| log::error!("Failed to serialize membership state: {e}"))
+                        .ok()
                 })
                 .collect(),
             LocalStoreType::App => stores
                 .app
                 .all()
                 .into_iter()
-                .map(|(k, v)| {
-                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
-                        log::error!("Failed to serialize app state: {}", e);
-                        vec![]
-                    });
-                    (k, serialized)
+                .filter_map(|(k, v)| {
+                    let version = v.version;
+                    bincode::serialize(&v)
+                        .map(|bytes| (k, bytes, version))
+                        .map_err(|e| log::error!("Failed to serialize app state: {e}"))
+                        .ok()
                 })
                 .collect(),
             LocalStoreType::Worker => stores
                 .worker
                 .all()
                 .into_iter()
-                .map(|(k, v)| {
-                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
-                        log::error!("Failed to serialize worker state: {}", e);
-                        vec![]
-                    });
-                    (k, serialized)
+                .filter_map(|(k, v)| {
+                    let version = v.version;
+                    bincode::serialize(&v)
+                        .map(|bytes| (k, bytes, version))
+                        .map_err(|e| log::error!("Failed to serialize worker state: {e}"))
+                        .ok()
                 })
                 .collect(),
             LocalStoreType::Policy => stores
                 .policy
                 .all()
                 .into_iter()
-                .map(|(k, v)| {
-                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
-                        log::error!("Failed to serialize policy state: {}", e);
-                        vec![]
-                    });
-                    (k, serialized)
+                .filter_map(|(k, v)| {
+                    let version = v.version;
+                    bincode::serialize(&v)
+                        .map(|bytes| (k, bytes, version))
+                        .map_err(|e| log::error!("Failed to serialize policy state: {e}"))
+                        .ok()
                 })
                 .collect(),
             LocalStoreType::RateLimit => {
-                // For rate limit, serialize all counters from owners
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock before UNIX_EPOCH")
+                    .as_nanos() as u64;
                 stores
                     .rate_limit
                     .keys()
                     .into_iter()
                     .filter_map(|key| {
                         if stores.rate_limit.is_owner(&key) {
-                            stores.rate_limit.get_counter(&key).map(|counter_value| {
-                                let serialized =
-                                    bincode::serialize(&counter_value).unwrap_or_else(|e| {
-                                        log::error!(
-                                            "Failed to serialize rate limit counter: {}",
-                                            e
-                                        );
-                                        vec![]
-                                    });
-                                (key.clone(), serialized)
-                            })
+                            stores
+                                .rate_limit
+                                .get_counter(&key)
+                                .and_then(|counter_value| {
+                                    bincode::serialize(&counter_value)
+                                        .map(|bytes| (key.clone(), bytes, now))
+                                        .map_err(|e| {
+                                            log::error!(
+                                                "Failed to serialize rate limit counter: {e}"
+                                            );
+                                        })
+                                        .ok()
+                                })
                         } else {
                             None
                         }
@@ -159,45 +164,20 @@ impl GossipService {
         let mut chunks = Vec::new();
         let total_chunks = entries.len().div_ceil(chunk_size);
 
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before UNIX_EPOCH")
+            .as_nanos() as u64;
+
         for (chunk_idx, chunk_entries) in entries.chunks(chunk_size).enumerate() {
             let state_updates: Vec<StateUpdate> = chunk_entries
                 .iter()
-                .map(|(key, value)| {
-                    // Get actual version from CRDT metadata
-                    let version = match store_type {
-                        LocalStoreType::Membership => {
-                            stores.membership.get(key).map(|s| s.version).unwrap_or(1)
-                        }
-                        LocalStoreType::App => stores.app.get(key).map(|s| s.version).unwrap_or(1),
-                        LocalStoreType::Worker => {
-                            stores.worker.get(key).map(|s| s.version).unwrap_or(1)
-                        }
-                        LocalStoreType::Policy => {
-                            stores.policy.get(key).map(|s| s.version).unwrap_or(1)
-                        }
-                        LocalStoreType::RateLimit => {
-                            // For rate limit, use timestamp as version
-                            {
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .expect("system clock before UNIX_EPOCH; cannot generate valid timestamps")
-                                    .as_nanos() as u64
-                            }
-                        }
-                    };
-
-                    let timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .expect("system clock before UNIX_EPOCH; cannot generate valid timestamps")
-                        .as_nanos() as u64;
-
-                    StateUpdate {
-                        key: key.clone(),
-                        value: value.clone(),
-                        version,
-                        actor: self.self_name.clone(),
-                        timestamp,
-                    }
+                .map(|(key, value, version)| StateUpdate {
+                    key: key.clone(),
+                    value: value.clone(),
+                    version: *version,
+                    actor: self.self_name.clone(),
+                    timestamp,
                 })
                 .collect();
 
