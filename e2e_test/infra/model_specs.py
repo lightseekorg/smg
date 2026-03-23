@@ -61,7 +61,7 @@ MODEL_SPECS: dict[str, dict] = {
     # Thinking/reasoning model (larger)
     "Qwen/Qwen3-30B-A3B": {
         "model": _resolve_model_path("Qwen/Qwen3-30B-A3B"),
-        "tp": 4,
+        "tp": 1,
         "features": ["chat", "streaming", "thinking", "reasoning"],
         "vllm_args": [] if _is_nightly else ["--enforce-eager"],
     },
