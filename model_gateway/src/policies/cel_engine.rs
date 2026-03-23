@@ -314,10 +314,22 @@ impl CelPolicyEngine {
             CelValue::Int(snapshot.avg_tokens_per_req as i64),
         );
 
-        // Expose all custom metrics to the CEL context
+        // Expose all custom metrics to the CEL context as top-level vars
+        // AND as a `custom_metrics` dictionary so they can be indexed.
+        let mut custom_map = HashMap::new();
         for (k, v) in &snapshot.custom_metrics {
             let _ = context.add_variable(k.as_str(), CelValue::Float(*v));
+            custom_map.insert(
+                cel_interpreter::objects::Key::from(k.clone()),
+                CelValue::Float(*v),
+            );
         }
+        let _ = context.add_variable(
+            "custom_metrics",
+            CelValue::Map(cel_interpreter::objects::Map {
+                map: Arc::new(custom_map),
+            }),
+        );
 
         match program.execute(&context) {
             Ok(CelValue::Int(val)) => val,
