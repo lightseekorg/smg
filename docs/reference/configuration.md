@@ -451,6 +451,27 @@ smg \
 --request-id-headers x-request-id x-trace-id x-correlation-id
 ```
 
+### Storage Context Headers
+
+| Option | `--storage-context-headers` |
+|--------|-----------------------------|
+| Environment | - |
+| Default | Empty |
+| Format | Space-separated `header=context_key` entries |
+| Description | Maps request headers into storage hook request context |
+
+**Example**:
+
+```bash
+--storage-context-headers x-tenant-id=tenant_id x-user-id=user_id
+```
+
+This lets storage hooks read values such as `tenant_id` and `user_id` from the
+request context without hard-coding specific headers in the gateway.
+
+Only map headers that are injected or sanitized by a trusted upstream. Client-supplied
+headers can otherwise spoof storage hook request context values.
+
 ---
 
 ## Rate Limiting Configuration
