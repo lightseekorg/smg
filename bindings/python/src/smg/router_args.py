@@ -64,6 +64,8 @@ class RouterArgs:
     prometheus_duration_buckets: list[float] | None = None
     # Request ID headers configuration
     request_id_headers: list[str] | None = None
+    # HTTP header to storage hook context mapping
+    storage_context_headers: dict[str, str] = dataclasses.field(default_factory=dict)
     # Request timeout in seconds
     request_timeout_secs: int = 1800
     # Grace period in seconds to wait for in-flight requests during shutdown
@@ -549,6 +551,16 @@ class RouterArgs:
             help=(
                 "Custom HTTP headers to check for request IDs (e.g., x-request-id x-trace-id)."
                 " If not specified, uses common defaults."
+            ),
+        )
+        request_group.add_argument(
+            f"--{prefix}storage-context-headers",
+            type=str,
+            nargs="*",
+            default=[],
+            help=(
+                "Map HTTP headers into storage hook request context using HEADER=CONTEXT_KEY "
+                "entries, for example x-tenant-id=tenant_id"
             ),
         )
         request_group.add_argument(
@@ -1119,6 +1131,9 @@ class RouterArgs:
         )
         args_dict["router_selector"] = cls._parse_selector(
             cli_args_dict.get(f"{prefix}router_selector", None)
+        )
+        args_dict["storage_context_headers"] = cls._parse_selector(
+            cli_args_dict.get(f"{prefix}storage_context_headers", None)
         )
 
         # Mooncake-specific annotation
