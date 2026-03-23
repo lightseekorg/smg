@@ -42,18 +42,19 @@ impl DirectScraper {
                 let store = Arc::clone(&self.store);
                 let client = self.client.clone();
                 let w_url = url.clone();
-                let semaphore = Arc::clone(&self.semaphore);
+                // Acquire a permit before spawning to bound queued tasks as well as active I/O.
+                // This prevents memory growth and increasingly stale scrape results from an
+                // unbounded backlog when /metrics endpoints are slow or the fleet is very large.
+                let Ok(permit) = Arc::clone(&self.semaphore).acquire_owned().await else {
+                    return; // Semaphore closed — shutting down
+                };
 
                 #[expect(
                     clippy::disallowed_methods,
                     reason = "background scrape task; gateway shutdown without waiting for it is acceptable"
                 )]
                 tokio::spawn(async move {
-                    // Acquire a permit before any network I/O; bounds concurrent
-                    // scrape tasks to MAX_CONCURRENT_SCRAPES regardless of fleet size.
-                    let Ok(_permit) = semaphore.acquire_owned().await else {
-                        return; // Semaphore closed — shutting down
-                    };
+                    let _p = permit; // hold permit until work finishes
 
                     let mut snapshot =
                         WorkerSnapshot::new(w_url.clone(), MetricSource::DirectScrape);
