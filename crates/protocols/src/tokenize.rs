@@ -174,6 +174,86 @@ pub struct RemoveTokenizerResponse {
 }
 
 // ============================================================================
+// Render API (chat template + tokenization, no generation)
+// ============================================================================
+
+/// Request schema for the /v1/chat/completions/render endpoint
+///
+/// Applies the chat template to messages and tokenizes the result,
+/// returning token IDs without performing any generation.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct RenderChatRequest {
+    /// ID of the model to use for tokenizer selection
+    pub model: String,
+
+    /// A list of messages comprising the conversation
+    pub messages: Vec<super::chat::ChatMessage>,
+
+    /// A list of tools the model may call
+    #[serde(default)]
+    pub tools: Option<Vec<super::common::Tool>>,
+
+    /// Controls which (if any) tool is called by the model
+    pub tool_choice: Option<super::common::ToolChoice>,
+
+    /// Custom chat template (path or inline Jinja2 string)
+    pub chat_template: Option<String>,
+
+    /// Whether to add a generation prompt after the messages
+    #[serde(default = "default_true")]
+    pub add_generation_prompt: bool,
+
+    /// Continue generating from final assistant message
+    #[serde(default)]
+    pub continue_final_message: bool,
+
+    /// Additional template keyword arguments
+    pub chat_template_kwargs: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+/// Request schema for the /v1/completions/render endpoint
+///
+/// Tokenizes the prompt text with optional special tokens,
+/// returning token IDs without performing any generation.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct RenderCompletionRequest {
+    /// ID of the model to use for tokenizer selection
+    pub model: String,
+
+    /// The prompt(s) to tokenize - can be a single string or array of strings
+    pub prompt: StringOrArray,
+
+    /// Whether to add special tokens (BOS/EOS) during tokenization
+    #[serde(default = "default_true")]
+    pub add_special_tokens: bool,
+
+    /// Echo back the prompt in addition to the completion
+    #[serde(default)]
+    pub echo: Option<bool>,
+
+    /// The suffix that comes after a completion of inserted text
+    pub suffix: Option<String>,
+
+    /// Number of prompt logprobs to return
+    pub prompt_logprobs: Option<i32>,
+
+    /// Cache salt for prompt caching
+    pub cache_salt: Option<String>,
+}
+
+/// Response schema for the /v1/chat/completions/render and /v1/completions/render endpoints
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RenderResponse {
+    /// The resulting token IDs
+    pub token_ids: Vec<u32>,
+
+    /// Number of tokens
+    pub count: usize,
+}
+
+// ============================================================================
 // Helper Types
 // ============================================================================
 

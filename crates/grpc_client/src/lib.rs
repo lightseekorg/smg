@@ -7,6 +7,15 @@ pub mod common_proto {
     #![allow(clippy::all, clippy::absolute_paths, unused_qualifications)]
     tonic::include_proto!("smg.grpc.common");
 }
+pub mod render_service_proto {
+    #![allow(
+        clippy::all,
+        clippy::absolute_paths,
+        clippy::allow_attributes,
+        unused_qualifications
+    )]
+    tonic::include_proto!("smg.grpc.render");
+}
 pub mod sglang_scheduler;
 pub mod tokenizer_bundle;
 pub mod trtllm_service;
