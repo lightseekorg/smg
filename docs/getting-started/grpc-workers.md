@@ -51,8 +51,22 @@ In HTTP mode, SMG is a smart proxy — routing and failover only. In gRPC mode, 
     python -m vllm.entrypoints.grpc_server \
       --model meta-llama/Llama-3.1-8B-Instruct \
       --host 0.0.0.0 \
-      --port 50051
+      --port 50051 \
+      --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558","buffer_steps":10000,"topic":""}'
     ```
+
+    `--kv-events-config` is only required if you want SMG to subscribe to
+    `SubscribeKvEvents`, such as for cache-aware routing and KV cache event
+    monitoring. This works with upstream vLLM as-is; no vLLM source patch is
+    required.
+
+    Current limitation: restart recovery is based on observed sequence numbers.
+    SMG can detect a backend restart when the first fresh batch on reconnect has
+    a lower sequence number than the last batch it had already applied. If the
+    restarted backend catches up before SMG reconnects, the current protocol
+    does not expose a producer epoch, so that restart is indistinguishable from
+    normal continuation. Unsupported null-block `BlockStored` layouts also fail
+    closed today because the stream does not carry per-block token ranges.
 
 === "TensorRT-LLM"
 
