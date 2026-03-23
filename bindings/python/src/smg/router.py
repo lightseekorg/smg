@@ -204,6 +204,8 @@ class Router:
             specified, uses common defaults: ['x-request-id', 'x-correlation-id',
             'x-trace-id', 'request-id']. Example: ['x-my-request-id',
             'x-custom-trace-id']. Default: None
+        storage_context_headers: Mapping of incoming HTTP headers to storage hook
+            context keys. Example: {'x-tenant-id': 'tenant_id'}. Default: {}
         bootstrap_port_annotation: Kubernetes annotation name for bootstrap port (PD
             mode). Default: 'sglang.ai/bootstrap-port'
         request_timeout_secs: Request timeout in seconds. Default: 600

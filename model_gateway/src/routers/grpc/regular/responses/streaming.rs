@@ -30,7 +30,10 @@ use openai_protocol::{
     },
 };
 use serde_json::{json, Value};
-use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
+use smg_data_connector::{
+    current_request_context, with_request_context, ConversationItemStorage, ConversationStorage,
+    ResponseStorage,
+};
 use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -101,28 +104,36 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
     let response_storage = ctx.response_storage.clone();
     let conversation_storage = ctx.conversation_storage.clone();
     let conversation_item_storage = ctx.conversation_item_storage.clone();
+    let request_ctx = current_request_context();
 
     #[expect(
         clippy::disallowed_methods,
         reason = "streaming task is fire-and-forget; client disconnect terminates it"
     )]
     tokio::spawn(async move {
-        if let Err(e) = process_and_transform_sse_stream(
-            body,
-            original_request_clone,
-            response_storage,
-            conversation_storage,
-            conversation_item_storage,
-            tx.clone(),
-        )
-        .await
-        {
-            warn!("Error transforming SSE stream: {}", e);
-            utils::send_error_sse(&tx, &e, "stream_error");
-        }
+        let run = async move {
+            if let Err(e) = process_and_transform_sse_stream(
+                body,
+                original_request_clone,
+                response_storage,
+                conversation_storage,
+                conversation_item_storage,
+                tx.clone(),
+            )
+            .await
+            {
+                warn!("Error transforming SSE stream: {}", e);
+                utils::send_error_sse(&tx, &e, "stream_error");
+            }
 
-        // Send final [DONE] event
-        let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+            // Send final [DONE] event
+            let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+        };
+
+        match request_ctx {
+            Some(ctx) => Box::pin(with_request_context(ctx, run)).await,
+            None => run.await,
+        }
     });
 
     // Build SSE response with transformed stream
@@ -430,6 +441,7 @@ pub(super) fn execute_tool_loop_streaming(
     // Clone data for background task
     let ctx_clone = ctx.clone();
     let original_request_clone = original_request.clone();
+    let request_ctx = current_request_context();
 
     // Spawn background task for tool loop
     #[expect(
@@ -437,23 +449,30 @@ pub(super) fn execute_tool_loop_streaming(
         reason = "streaming task is fire-and-forget; client disconnect terminates it"
     )]
     tokio::spawn(async move {
-        let result = execute_tool_loop_streaming_internal(
-            &ctx_clone,
-            current_request,
-            &original_request_clone,
-            params,
-            mcp_servers,
-            tx.clone(),
-        )
-        .await;
+        let run = async move {
+            let result = execute_tool_loop_streaming_internal(
+                &ctx_clone,
+                current_request,
+                &original_request_clone,
+                params,
+                mcp_servers,
+                tx.clone(),
+            )
+            .await;
 
-        if let Err(e) = result {
-            warn!("Streaming tool loop error: {}", e);
-            utils::send_error_sse(&tx, &e, "tool_loop_error");
+            if let Err(e) = result {
+                warn!("Streaming tool loop error: {}", e);
+                utils::send_error_sse(&tx, &e, "tool_loop_error");
+            }
+
+            // Send [DONE]
+            let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+        };
+
+        match request_ctx {
+            Some(ctx) => Box::pin(with_request_context(ctx, run)).await,
+            None => run.await,
         }
-
-        // Send [DONE]
-        let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
     });
 
     // Build SSE response
