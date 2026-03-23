@@ -422,24 +422,17 @@ jobs:
         include:
           - engine: sglang
             timeout: 30
-            runner: 1-gpu
-            test_filter: ""
           - engine: vllm
             timeout: 20
-            runner: 1-gpu
-            test_filter: ""
           - engine: trtllm
             timeout: 90
-            runner: 1-gpu-h100
-            test_filter: ""
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
       gpu_tier: "1"
-      runner: ${{ matrix.runner }}
+      runner: 1-gpu-h100
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/chat_completions
-      test_filter: ${{ matrix.test_filter }}
     secrets: inherit
 
   e2e-1gpu-responses:
@@ -468,7 +461,7 @@ jobs:
     with:
       engine: ${{ matrix.engine }}
       gpu_tier: "1"
-      runner: 1-gpu
+      runner: 1-gpu-h100
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/responses
       setup_agentic_deps: true
