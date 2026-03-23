@@ -44,6 +44,7 @@ pub fn render_sparkline(f: &mut Frame, data: &VecDeque<f64>, color: Color, area:
 /// Build a gauge bar string: filled portion + empty portion.
 /// Returns (filled_str, empty_str, percentage).
 pub fn gauge_bar(ratio: f64, width: usize) -> (String, String, u16) {
+    let ratio = ratio.clamp(0.0, 1.0);
     let pct = (ratio * 100.0).round() as u16;
     let filled = ((ratio * width as f64).round() as usize).min(width);
     let empty = width.saturating_sub(filled);

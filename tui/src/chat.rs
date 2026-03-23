@@ -226,6 +226,11 @@ async fn process_sse_stream(resp: reqwest::Response, tx: mpsc::UnboundedSender<S
 
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
+                    // Surface mid-stream errors
+                    if let Some(err_msg) = parsed["error"]["message"].as_str() {
+                        let _ = tx.send(format!("\n[ERROR]{err_msg}"));
+                        return;
+                    }
                     if let Some(delta) = parsed["choices"][0]["delta"]["content"].as_str() {
                         let _ = tx.send(delta.to_string());
                     }

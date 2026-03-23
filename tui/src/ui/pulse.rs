@@ -245,9 +245,9 @@ fn shorten_gpu_name(name: &str) -> String {
         .trim_start_matches("NVIDIA ")
         .trim_start_matches("Tesla ")
         .trim_start_matches("GeForce ");
-    // Truncate if too long
-    if name.len() > 12 {
-        name[..12].to_string()
+    // Truncate if too long (char-safe)
+    if name.chars().count() > 12 {
+        name.chars().take(12).collect()
     } else {
         name.to_string()
     }
@@ -376,7 +376,12 @@ fn render_throughput_compact(f: &mut Frame, state: &crate::state::GatewayState, 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if state.throughput_history.is_empty() {
+    let rps = state
+        .requests_per_sec_history
+        .back()
+        .copied()
+        .unwrap_or(0.0);
+    if state.requests_per_sec_history.is_empty() && state.throughput_history.is_empty() {
         f.render_widget(
             Paragraph::new(Line::styled("No data", theme::label())),
             inner,
@@ -384,11 +389,10 @@ fn render_throughput_compact(f: &mut Frame, state: &crate::state::GatewayState, 
         return;
     }
 
-    let latest = state.throughput_history.back().copied().unwrap_or(0.0);
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Latest: ", theme::label()),
-            Span::styled(format!("{latest:.1} req/s"), theme::text().fg(theme::GREEN)),
+            Span::styled(format!("{rps:.1} req/s"), theme::text().fg(theme::GREEN)),
         ])),
         inner,
     );

@@ -106,11 +106,11 @@ async fn main() -> Result<()> {
                             child.id().unwrap_or(0)
                         );
                         let deadline =
-                            tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+                            tokio::time::Instant::now() + tokio::time::Duration::from_secs(120);
                         loop {
                             if tokio::time::Instant::now() >= deadline {
                                 tracing::warn!(
-                                    "Gateway did not become ready within 30s, continuing anyway"
+                                    "Gateway did not become ready within 120s, continuing anyway"
                                 );
                                 break;
                             }
@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
     result
 }
 
-/// Extract port from a URL like "http://localhost:30000".
+/// Extract port from a URL like "http://localhost:30000" or "http://localhost:30000/health".
 fn extract_port(url: &str) -> Option<u16> {
-    url.rsplit(':').next()?.trim_end_matches('/').parse().ok()
+    url.rsplit(':').next()?.split('/').next()?.parse().ok()
 }

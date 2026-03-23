@@ -171,11 +171,19 @@ fn render_file_log(f: &mut Frame, path: &str, label: &str, app: &App, area: Rect
             if len > TAIL_BYTES {
                 let _ = file.seek(SeekFrom::Start(len - TAIL_BYTES));
             }
-            let mut buf = String::new();
-            if file.read_to_string(&mut buf).is_err() {
-                buf.clear();
+            let mut raw = Vec::new();
+            if file.read_to_end(&mut raw).is_err() {
+                raw.clear();
             }
-            buf
+            let buf = String::from_utf8_lossy(&raw).into_owned();
+            // If we seeked into the middle, skip the first partial line
+            if len > TAIL_BYTES {
+                buf.split_once('\n')
+                    .map(|(_, rest)| rest.to_string())
+                    .unwrap_or(buf)
+            } else {
+                buf
+            }
         }
         Err(_) => {
             let block = Block::default()

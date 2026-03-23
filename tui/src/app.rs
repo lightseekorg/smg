@@ -471,11 +471,22 @@ impl App {
             Some("delete") => {
                 if let Some(id) = parts.get(1) {
                     let id = id.trim().to_string();
+                    // Look up the worker's URL by ID from state before deleting
+                    let worker_url = {
+                        #[expect(clippy::unwrap_used)]
+                        let state = self.state.read().unwrap();
+                        state.workers.as_ref().and_then(|w| {
+                            w.workers
+                                .iter()
+                                .find(|wi| wi.id == id)
+                                .map(|wi| wi.url.clone())
+                        })
+                    };
                     match self.client.delete_worker(&id).await {
                         Ok(_) => {
-                            // Also clean up spawned process and GPU claims (like interactive delete)
-                            let worker_url = self.selected_worker_url().unwrap_or_default();
-                            self.claimed_gpus.remove(&worker_url);
+                            if let Some(url) = worker_url {
+                                self.claimed_gpus.remove(&url);
+                            }
                             self.set_status(format!("Worker {id} deleted"));
                         }
                         Err(e) => self.set_status(format!("Error: {e}")),
@@ -1378,11 +1389,22 @@ impl App {
     }
 
     fn clamp_selection(&mut self) {
-        // Safety: RwLock is not poisoned — no panics while holding the lock
+        // Clamp against filtered list size (matches what the UI renders)
         #[expect(clippy::unwrap_used)]
         let state = self.state.read().unwrap();
         if let Some(ref wl) = state.workers {
-            let count = wl.workers.len();
+            let count = wl
+                .workers
+                .iter()
+                .filter(|w| {
+                    self.active_filter.as_ref().is_none_or(|f| {
+                        f.is_empty()
+                            || w.id.to_lowercase().contains(&f.to_lowercase())
+                            || w.url.to_lowercase().contains(&f.to_lowercase())
+                            || w.runtime_type.to_lowercase().contains(&f.to_lowercase())
+                    })
+                })
+                .count();
             if count > 0 {
                 self.selected_index = self.selected_index.min(count - 1);
             }
