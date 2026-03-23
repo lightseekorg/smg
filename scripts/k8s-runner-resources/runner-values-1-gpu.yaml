@@ -18,6 +18,9 @@ keyVault: {}
 ## Runner pod template
 template:
   spec:
+    securityContext:
+      fsGroup: 1001
+      fsGroupChangePolicy: OnRootMismatch
     terminationGracePeriodSeconds: 600
 
     nodeSelector:

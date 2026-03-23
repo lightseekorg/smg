@@ -198,7 +198,7 @@ jobs:
           fi
 
           E2E_RUNTIME=${{ matrix.variant.runtime }} \
-          ROUTER_LOCAL_MODEL_PATH="/raid/models" \
+          HF_HOME="/models" \
             pytest e2e_test/benchmarks/test_nightly_perf.py \
               -k "$K_FILTER" \
               -s -vv -o log_cli=true --log-cli-level=INFO
@@ -311,7 +311,7 @@ jobs:
           fi
 
           E2E_RUNTIME=${{ matrix.variant.runtime }} \
-          ROUTER_LOCAL_MODEL_PATH="/raid/models" \
+          HF_HOME="/models" \
             pytest e2e_test/benchmarks/test_nightly_perf.py \
               -k "$K_FILTER" \
               -s -vv -o log_cli=true --log-cli-level=INFO
@@ -418,6 +418,8 @@ jobs:
           GPU_TYPE: H200
           E2E_NIGHTLY: "1"
           E2E_LOG_DIR: nightly_gateway_logs
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HOME: /raid/models
         run: |
           mkdir -p nightly_gateway_logs
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
