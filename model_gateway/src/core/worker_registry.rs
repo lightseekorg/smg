@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
 };
 
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use parking_lot::RwLock;
 use smg_mesh::OptionalMeshSyncManager;
 use uuid::Uuid;
@@ -204,6 +204,10 @@ pub struct WorkerRegistry {
     /// URL to worker ID mapping
     url_to_id: Arc<DashMap<String, WorkerId>>,
 
+    /// Per-worker-ID locks for serializing replace() operations.
+    /// Only held during the in-memory model index diff (no I/O, microseconds).
+    replace_locks: Arc<DashMap<WorkerId, Arc<parking_lot::Mutex<()>>>>,
+
     /// Optional mesh sync manager for state synchronization
     /// When None, the registry works independently without mesh synchronization
     /// Uses RwLock for thread-safe access when setting mesh_sync after initialization
@@ -220,6 +224,7 @@ impl WorkerRegistry {
             type_workers: Arc::new(DashMap::new()),
             connection_workers: Arc::new(DashMap::new()),
             url_to_id: Arc::new(DashMap::new()),
+            replace_locks: Arc::new(DashMap::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
         }
     }
@@ -234,6 +239,7 @@ impl WorkerRegistry {
             type_workers: self.type_workers.clone(),
             connection_workers: self.connection_workers.clone(),
             url_to_id: self.url_to_id.clone(),
+            replace_locks: self.replace_locks.clone(),
             mesh_sync: self.mesh_sync.clone(),
         }
     }
@@ -320,19 +326,29 @@ impl WorkerRegistry {
     /// Register a new worker (create-only).
     ///
     /// Returns the new `WorkerId` on success, or `None` if a worker with
-    /// the same URL is already registered. Callers that need to update an
-    /// existing worker should use [`replace()`](Self::replace) instead.
+    /// the same URL is already registered and active. A URL that was
+    /// pre-reserved via `reserve_id_for_url()` but has no worker yet is
+    /// treated as a new registration (reuses the reserved ID).
     pub fn register(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
-        // Reject if URL already exists
-        if self.url_to_id.contains_key(worker.url()) {
-            return None;
-        }
-
-        let worker_id = WorkerId::new();
-
-        // Store URL → ID mapping
-        self.url_to_id
-            .insert(worker.url().to_string(), worker_id.clone());
+        // Atomic check-and-insert via entry API to avoid TOCTOU races.
+        // If URL already has an ID AND a worker object, it's a duplicate.
+        // If URL has a reserved ID but no worker, it's a pre-reserved slot.
+        let worker_id = match self.url_to_id.entry(worker.url().to_string()) {
+            Entry::Occupied(entry) => {
+                let existing_id = entry.get().clone();
+                if self.workers.contains_key(&existing_id) {
+                    // URL already has an active worker — reject
+                    return None;
+                }
+                // Pre-reserved ID with no worker yet — use it
+                existing_id
+            }
+            Entry::Vacant(entry) => {
+                let new_id = WorkerId::new();
+                entry.insert(new_id.clone());
+                new_id
+            }
+        };
 
         // Store worker
         self.workers.insert(worker_id.clone(), worker.clone());
@@ -381,6 +397,15 @@ impl WorkerRegistry {
     ///
     /// Returns `true` if the worker was replaced, `false` if the ID was not found.
     pub fn replace(&self, worker_id: &WorkerId, new_worker: Arc<dyn Worker>) -> bool {
+        // Serialize concurrent replacements for the same worker ID.
+        // Lock is held only during the in-memory diff (no I/O, microseconds).
+        let lock = self
+            .replace_locks
+            .entry(worker_id.clone())
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
+
         let old_worker = match self.workers.get(worker_id) {
             Some(entry) => entry.clone(),
             None => return false,
@@ -389,15 +414,18 @@ impl WorkerRegistry {
         let old_models: HashSet<String> = Self::worker_model_ids(&old_worker).into_iter().collect();
         let new_models: HashSet<String> = Self::worker_model_ids(&new_worker).into_iter().collect();
 
+        // URL changes are not supported via replace — use remove + register instead
+        if old_worker.url() != new_worker.url() {
+            tracing::error!(
+                old_url = old_worker.url(),
+                new_url = new_worker.url(),
+                "replace() does not support URL changes"
+            );
+            return false;
+        }
+
         // Overwrite worker object atomically
         self.workers.insert(worker_id.clone(), new_worker.clone());
-
-        // Update URL mapping if URL changed (unlikely but defensive)
-        if old_worker.url() != new_worker.url() {
-            self.url_to_id.remove(old_worker.url());
-            self.url_to_id
-                .insert(new_worker.url().to_string(), worker_id.clone());
-        }
 
         // Diff model indexes: remove stale, add new
         for removed_model in old_models.difference(&new_models) {
@@ -461,28 +489,28 @@ impl WorkerRegistry {
     /// registration. If the URL already exists, replaces the worker via
     /// overwrite-then-diff. Otherwise, creates a new worker.
     pub fn register_or_replace(&self, worker: Arc<dyn Worker>) -> WorkerId {
+        // Try create first — succeeds for fresh URLs and pre-reserved IDs
+        // (where url_to_id has an entry but workers does not).
+        if let Some(id) = self.register(worker.clone()) {
+            return id;
+        }
+
+        // URL exists with an active worker — replace it
         if let Some(existing_id) = self.url_to_id.get(worker.url()).map(|e| e.clone()) {
             self.replace(&existing_id, worker);
-            existing_id
-        } else {
-            match self.register(worker.clone()) {
-                Some(id) => id,
-                None => {
-                    // Race: URL was registered between our check and register().
-                    if let Some(existing_id) = self.url_to_id.get(worker.url()).map(|e| e.clone()) {
-                        self.replace(&existing_id, worker);
-                        existing_id
-                    } else {
-                        // Should never happen — register returned None means URL exists
-                        tracing::error!(
-                            "register_or_replace: unexpected state for URL {}",
-                            worker.url()
-                        );
-                        WorkerId::new()
-                    }
-                }
-            }
+            return existing_id;
         }
+
+        // Should not reach here: register() returned None means URL is in url_to_id
+        tracing::error!(
+            "register_or_replace: inconsistent state for URL {}",
+            worker.url()
+        );
+        // Last resort: force a fresh registration
+        let id = WorkerId::new();
+        self.url_to_id.insert(worker.url().to_string(), id.clone());
+        self.workers.insert(id.clone(), worker);
+        id
     }
 
     /// Reserve (or retrieve) a stable UUID for a worker URL.
@@ -506,6 +534,8 @@ impl WorkerRegistry {
         if let Some((_, worker)) = self.workers.remove(worker_id) {
             // Remove from URL mapping
             self.url_to_id.remove(worker.url());
+            // Clean up replace lock
+            self.replace_locks.remove(worker_id);
 
             for model_id in Self::worker_model_ids(&worker) {
                 self.remove_worker_from_model_index(&model_id, worker.url());
