@@ -336,6 +336,9 @@ pub struct ChatTemplateParams<'a> {
     pub tools: Option<&'a [serde_json::Value]>,
     pub documents: Option<&'a [serde_json::Value]>,
     pub template_kwargs: Option<&'a HashMap<String, serde_json::Value>>,
+    /// Special tokens (bos_token, eos_token, etc.) to inject into the template context.
+    /// Many chat templates (e.g., Llama 2) reference these directly.
+    pub special_tokens: Option<&'a crate::traits::SpecialTokens>,
 }
 
 /// Custom tojson filter compatible with HuggingFace transformers' implementation.
@@ -486,12 +489,49 @@ fn render_chat_template(
         .documents
         .map_or(Value::UNDEFINED, Value::from_serialize);
 
-    let base_context = context! {
+    // Build special token values — serialize SpecialTokens and inject each field
+    // into the template context. Use UNDEFINED for missing tokens so templates
+    // can check `{% if bos_token is defined %}` correctly.
+    let special_token_values: Vec<(String, Value)> = if let Some(st) = params.special_tokens {
+        serde_json::to_value(st)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .map(|map| {
+                map.into_iter()
+                    .map(|(k, v)| {
+                        let val = match &v {
+                            serde_json::Value::String(s) => Value::from(s.as_str()),
+                            serde_json::Value::Null => Value::UNDEFINED,
+                            _ => Value::UNDEFINED,
+                        };
+                        (k, val)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let mut base_context = context! {
         messages => &minijinja_messages,
         add_generation_prompt => params.add_generation_prompt,
         tools => tools_value,
         documents => documents_value,
     };
+
+    // Merge special tokens into context
+    if !special_token_values.is_empty() {
+        let token_ctx = Value::from(
+            special_token_values
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        );
+        base_context = context! {
+            ..base_context,
+            ..token_ctx,
+        };
+    }
 
     // Merge with template_kwargs if provided
     let ctx = if let Some(kwargs) = params.template_kwargs {
@@ -698,5 +738,76 @@ mod tests {
     fn test_chat_template_processor_invalid_template() {
         let result = ChatTemplateProcessor::new("{% invalid".to_string());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_special_tokens_in_template_context() {
+        // Llama 2 style template that uses bos_token and eos_token
+        let template =
+            "{{ bos_token }}{% for message in messages %}{{ message.content }}{% endfor %}{{ eos_token }}";
+        let state = ChatTemplateState::new(Some(template.to_string())).unwrap();
+
+        let messages = vec![serde_json::json!({"role": "user", "content": "hello"})];
+
+        let special_tokens = crate::traits::SpecialTokens {
+            bos_token: Some("<s>".to_string()),
+            eos_token: Some("</s>".to_string()),
+            ..Default::default()
+        };
+
+        let result = state
+            .apply(
+                &messages,
+                ChatTemplateParams {
+                    special_tokens: Some(&special_tokens),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(result, "<s>hello</s>");
+    }
+
+    #[test]
+    fn test_special_tokens_undefined_when_not_provided() {
+        // Template that guards with `{% if bos_token is defined %}`
+        let template = "{% if bos_token is defined %}{{ bos_token }}{% endif %}hello";
+        let state = ChatTemplateState::new(Some(template.to_string())).unwrap();
+
+        let messages: Vec<serde_json::Value> = vec![];
+
+        // Without special tokens — bos_token should be undefined
+        let result = state
+            .apply(&messages, ChatTemplateParams::default())
+            .unwrap();
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_special_tokens_partial() {
+        // Only bos_token set, eos_token is None
+        let template =
+            "{{ bos_token }}hello{% if eos_token is defined %}{{ eos_token }}{% endif %}";
+        let state = ChatTemplateState::new(Some(template.to_string())).unwrap();
+
+        let messages: Vec<serde_json::Value> = vec![];
+
+        let special_tokens = crate::traits::SpecialTokens {
+            bos_token: Some("<s>".to_string()),
+            eos_token: None,
+            ..Default::default()
+        };
+
+        let result = state
+            .apply(
+                &messages,
+                ChatTemplateParams {
+                    special_tokens: Some(&special_tokens),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(result, "<s>hello");
     }
 }

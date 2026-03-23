@@ -99,7 +99,7 @@ impl Hash for Encoding {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SpecialTokens {
     pub bos_token: Option<String>,
     pub eos_token: Option<String>,
@@ -109,4 +109,9 @@ pub struct SpecialTokens {
     pub cls_token: Option<String>,
     pub mask_token: Option<String>,
     pub additional_special_tokens: Vec<String>,
+    /// Extra tokens from tokenizer_config.json not covered by the named fields above.
+    /// Any key ending in `_token` that isn't a known field is captured here,
+    /// so new special tokens are automatically available in chat templates.
+    #[serde(flatten)]
+    pub extra_tokens: std::collections::HashMap<String, String>,
 }

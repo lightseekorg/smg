@@ -405,10 +405,12 @@ pub fn process_chat_messages(
             Some(&combined_template_kwargs)
         };
 
+        let special_tokens = tokenizer.get_special_tokens();
         let params = ChatTemplateParams {
             add_generation_prompt: true,
             tools: tools_json.as_deref(),
             template_kwargs: final_template_kwargs,
+            special_tokens: Some(special_tokens),
             ..Default::default()
         };
 

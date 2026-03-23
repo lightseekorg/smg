@@ -34,11 +34,13 @@ fn apply_chat_template_impl(
     let empty_tools: [Value; 0] = [];
     let empty_docs: [Value; 0] = [];
 
+    let special_tokens = tokenizer.get_special_tokens();
     let params = ChatTemplateParams {
         add_generation_prompt: true,
         tools: Some(tools.unwrap_or(&empty_tools)),
         documents: Some(&empty_docs),
         template_kwargs: None,
+        special_tokens: Some(special_tokens),
     };
 
     tokenizer

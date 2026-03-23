@@ -41,7 +41,7 @@ impl HuggingFaceTokenizer {
             .map_err(|e| Error::msg(format!("Failed to load tokenizer: {e}")))?;
 
         // Extract special tokens
-        let special_tokens = Self::extract_special_tokens(&tokenizer);
+        let special_tokens = Self::extract_special_tokens(&tokenizer, file_path);
 
         // Build vocab mappings (include special tokens to get added_tokens like <|im_start|>)
         let vocab = tokenizer.get_vocab(true); // true = include special tokens and added_tokens
@@ -137,7 +137,7 @@ impl HuggingFaceTokenizer {
 
     /// Create from an existing HuggingFace tokenizer
     pub fn from_tokenizer(tokenizer: HfTokenizer) -> Self {
-        let special_tokens = Self::extract_special_tokens(&tokenizer);
+        let special_tokens = Self::extract_special_tokens(&tokenizer, "");
         let vocab = tokenizer.get_vocab(true); // true = include special tokens and added_tokens
         let reverse_vocab: HashMap<TokenIdType, String> = vocab
             .iter()
@@ -154,7 +154,7 @@ impl HuggingFaceTokenizer {
     }
 
     /// Extract special tokens from the tokenizer
-    fn extract_special_tokens(tokenizer: &HfTokenizer) -> SpecialTokens {
+    fn extract_special_tokens(tokenizer: &HfTokenizer, tokenizer_path: &str) -> SpecialTokens {
         // Get vocab with special tokens included (added_tokens like <|im_start|>)
         let vocab = tokenizer.get_vocab(true);
 
@@ -175,6 +175,19 @@ impl HuggingFaceTokenizer {
             .map(|(_id, token)| token.content.clone())
             .collect();
 
+        // Collect extra *_token keys from tokenizer_config.json not covered by named fields
+        const KNOWN_TOKENS: &[&str] = &[
+            "bos_token",
+            "eos_token",
+            "unk_token",
+            "sep_token",
+            "pad_token",
+            "cls_token",
+            "mask_token",
+            "additional_special_tokens",
+        ];
+        let extra_tokens = Self::extract_extra_tokens(tokenizer_path, KNOWN_TOKENS);
+
         SpecialTokens {
             bos_token: find_token(&["<s>", "<|startoftext|>", "<BOS>", "[CLS]"]),
             eos_token: find_token(&["</s>", "<|endoftext|>", "<EOS>", "[SEP]"]),
@@ -184,7 +197,32 @@ impl HuggingFaceTokenizer {
             cls_token: find_token(&["[CLS]", "<cls>", "<CLS>"]),
             mask_token: find_token(&["[MASK]", "<mask>", "<MASK>"]),
             additional_special_tokens,
+            extra_tokens,
         }
+    }
+
+    /// Extract extra *_token keys from tokenizer_config.json not in the known set.
+    fn extract_extra_tokens(tokenizer_path: &str, known: &[&str]) -> HashMap<String, String> {
+        let get_str = |v: &serde_json::Value| -> Option<String> {
+            v.as_str()
+                .map(String::from)
+                .or_else(|| v.get("content").and_then(|c| c.as_str()).map(String::from))
+        };
+
+        (|| {
+            let path = std::path::Path::new(tokenizer_path);
+            let config_path = path.parent()?.join("tokenizer_config.json");
+            let content = std::fs::read_to_string(config_path).ok()?;
+            let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+            let obj = config.as_object()?;
+            Some(
+                obj.iter()
+                    .filter(|(k, _)| k.ends_with("_token") && !known.contains(&k.as_str()))
+                    .filter_map(|(k, v)| get_str(v).map(|s| (k.clone(), s)))
+                    .collect(),
+            )
+        })()
+        .unwrap_or_default()
     }
 
     /// Load chat template and special token settings from tokenizer_config.json
