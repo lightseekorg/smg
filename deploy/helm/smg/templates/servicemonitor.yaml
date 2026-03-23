@@ -1,0 +1,19 @@
+{{- if .Values.router.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "smg.fullname" . }}-router
+  labels:
+    {{- include "smg.labels" . | nindent 4 }}
+    {{- range $key, $value := .Values.router.metrics.serviceMonitor.labels }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "smg.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: router
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.router.metrics.serviceMonitor.interval }}
+{{- end }}

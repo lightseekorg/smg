@@ -38,7 +38,7 @@ fn get_bootstrap_info(worker: &BasicWorker) -> (String, Option<u16>) {
 fn default_generate_request() -> GenerateRequest {
     GenerateRequest {
         text: None,
-        model: None,
+        model: "unknown".to_string(),
         input_ids: None,
         input_embeds: None,
         image_data: None,

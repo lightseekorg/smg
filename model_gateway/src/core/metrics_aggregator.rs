@@ -1,4 +1,3 @@
-use anyhow::ensure;
 use openmetrics_parser::{MetricFamily, MetricsExposition, PrometheusType, PrometheusValue};
 use tracing::warn;
 
@@ -66,14 +65,41 @@ fn merge_exposition(
 }
 
 fn merge_family(a: PrometheusFamily, b: PrometheusFamily) -> anyhow::Result<PrometheusFamily> {
-    ensure!(
-        a.get_label_names() == b.get_label_names(),
-        "Label names should agree a={:?} b={:?}",
-        a.get_label_names(),
-        b.get_label_names()
-    );
+    // When label schemas differ (e.g., prefill vs decode workers with different DP
+    // configs), pad missing labels with empty strings so both families share the
+    // same label set before merging.
+    let (a, b) = align_labels(a, b);
     a.with_samples(b.into_iter_samples())
         .map_err(|e| anyhow::anyhow!("failed to merge samples: {e:?}"))
+}
+
+/// Ensure two families have identical label sets by padding missing labels with `""`.
+/// Returns both families unchanged if labels already match.
+fn align_labels(a: PrometheusFamily, b: PrometheusFamily) -> (PrometheusFamily, PrometheusFamily) {
+    let a_names = a.get_label_names();
+    let b_names = b.get_label_names();
+    if a_names == b_names {
+        return (a, b);
+    }
+
+    let pad = |family: PrometheusFamily, other_names: &[String]| -> PrometheusFamily {
+        let own_names = family.get_label_names();
+        let missing: Vec<(&str, &str)> = other_names
+            .iter()
+            .filter(|n| !own_names.contains(n))
+            .map(|n| (n.as_str(), ""))
+            .collect();
+        if missing.is_empty() {
+            family
+        } else {
+            family.with_labels(missing)
+        }
+    };
+
+    // Clone names before moving families into pad()
+    let a_names = a_names.to_vec();
+    let b_names = b_names.to_vec();
+    (pad(a, &b_names), pad(b, &a_names))
 }
 
 fn try_reduce<I, T, E, F>(iterable: I, f: F) -> Result<Option<T>, E>

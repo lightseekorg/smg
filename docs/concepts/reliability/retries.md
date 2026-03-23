@@ -232,8 +232,9 @@ When a circuit is **open**:
 
 | Metric | Description |
 |--------|-------------|
-| `smg_retry_attempts_total` | Total retry attempts by status |
-| `smg_retry_backoff_seconds` | Histogram of backoff delays |
+| `smg_worker_retries_total` | Total retry attempts by worker type and endpoint |
+| `smg_worker_retries_exhausted_total` | Requests that exhausted all retries by worker type and endpoint |
+| `smg_worker_retry_backoff_seconds` | Histogram of backoff delays |
 
 ### Useful PromQL Queries
 
@@ -245,11 +246,10 @@ When a circuit is **open**:
 
 ```promql
 # Retries per second
-rate(smg_retry_attempts_total[5m])
+rate(smg_worker_retries_total[5m])
 
-# Retry success rate
-rate(smg_retry_attempts_total{status="success"}[5m]) /
-rate(smg_retry_attempts_total[5m])
+# Retries exhausted per second
+rate(smg_worker_retries_exhausted_total[5m])
 ```
 
 </div>
@@ -260,11 +260,11 @@ rate(smg_retry_attempts_total[5m])
 
 ```promql
 # Average backoff delay
-rate(smg_retry_backoff_seconds_sum[5m]) /
-rate(smg_retry_backoff_seconds_count[5m])
+rate(smg_worker_retry_backoff_seconds_sum[5m]) /
+rate(smg_worker_retry_backoff_seconds_count[5m])
 
 # 99th percentile backoff
-histogram_quantile(0.99, smg_retry_backoff_seconds_bucket)
+histogram_quantile(0.99, smg_worker_retry_backoff_seconds_bucket)
 ```
 
 </div>

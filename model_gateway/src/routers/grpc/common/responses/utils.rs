@@ -91,14 +91,7 @@ pub(crate) fn validate_worker_availability(
     let available_models = worker_registry.get_models();
 
     if !available_models.contains(&model.to_string()) {
-        return Some(error::service_unavailable(
-            "no_available_workers",
-            format!(
-                "No workers available for model '{}'. Available models: {}",
-                model,
-                available_models.join(", ")
-            ),
-        ));
+        return Some(error::model_not_found(model));
     }
 
     None

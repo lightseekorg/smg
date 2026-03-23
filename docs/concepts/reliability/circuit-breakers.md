@@ -236,10 +236,10 @@ smg \
 
 | Metric | Description |
 |--------|-------------|
-| `smg_circuit_breaker_state` | Current state per worker (0=closed, 1=open, 2=half-open) |
-| `smg_circuit_breaker_transitions_total` | State transitions by worker and direction |
-| `smg_circuit_breaker_consecutive_failures` | Current failure count per worker |
-| `smg_circuit_breaker_consecutive_successes` | Current success count per worker |
+| `smg_worker_cb_state` | Current state per worker (0=closed, 1=open, 2=half-open) |
+| `smg_worker_cb_transitions_total` | State transitions by worker and direction |
+| `smg_worker_cb_consecutive_failures` | Current failure count per worker |
+| `smg_worker_cb_consecutive_successes` | Current success count per worker |
 
 ### Useful PromQL Queries
 
@@ -251,10 +251,10 @@ smg \
 
 ```promql
 # Current circuit breaker states
-smg_circuit_breaker_state
+smg_worker_cb_state
 
 # Workers with open circuits
-count(smg_circuit_breaker_state == 1)
+count(smg_worker_cb_state == 1)
 ```
 
 </div>
@@ -265,10 +265,10 @@ count(smg_circuit_breaker_state == 1)
 
 ```promql
 # State transitions rate
-rate(smg_circuit_breaker_transitions_total[5m])
+rate(smg_worker_cb_transitions_total[5m])
 
 # Consecutive failures per worker
-smg_circuit_breaker_consecutive_failures
+smg_worker_cb_consecutive_failures
 ```
 
 </div>
@@ -290,15 +290,15 @@ groups:
   - name: smg-circuit-breakers
     rules:
       - alert: CircuitBreakerOpen
-        expr: smg_circuit_breaker_state == 1
+        expr: smg_worker_cb_state == 1
         for: 1m
         labels:
           severity: warning
         annotations:
-          summary: "Circuit breaker open for {{ $labels.worker_id }}"
+          summary: "Circuit breaker open for {{ $labels.worker }}"
 
       - alert: AllCircuitsOpen
-        expr: count(smg_circuit_breaker_state == 1) == count(smg_circuit_breaker_state)
+        expr: count(smg_worker_cb_state == 1) == count(smg_worker_cb_state)
         for: 30s
         labels:
           severity: critical

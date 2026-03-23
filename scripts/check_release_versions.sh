@@ -97,6 +97,7 @@ SMG_VERSION_SYNC=(
     "smg-python|bindings/python/Cargo.toml|cargo"
     "smg-golang|bindings/golang/Cargo.toml|cargo"
     "smg pyproject|bindings/python/pyproject.toml|pyproject"
+    "helm chart|deploy/helm/smg/Chart.yaml|helm"
     "sglang-docker|.github/workflows/release-sglang-docker.yml|workflow"
     "vllm-docker|.github/workflows/release-vllm-docker.yml|workflow"
     "trtllm-docker|.github/workflows/release-trtllm-docker.yml|workflow"
@@ -230,11 +231,13 @@ detect_bump_level() {
 }
 
 # Bump version by level: major, minor, or patch.
-# If VERSION_OVERRIDE is set, always returns the override (ignoring level).
+# If VERSION_OVERRIDE is set AND this is the smg crate (3rd arg = "smg"),
+# returns the override. Independent crates always use normal bump logic.
 bump_version() {
     local version="$1"
     local level="$2"
-    if [[ -n "$VERSION_OVERRIDE" ]]; then
+    local crate_name="${3:-}"
+    if [[ -n "$VERSION_OVERRIDE" && "$crate_name" == "smg" ]]; then
         echo "$VERSION_OVERRIDE"
         return
     fi
@@ -357,6 +360,29 @@ has_non_version_changes() {
         | grep '^[+-]' | grep -v '^[+-][+-][+-]' \
         | grep -cv "$pattern" || true)
     [[ "$non_ver_lines" -gt 0 ]]
+}
+
+# Extract version from a Helm Chart.yaml (the `version:` field, not appVersion)
+get_helm_chart_version() {
+    local file="$1"
+    awk -F':[[:space:]]*' '/^version:/ {gsub(/"/, "", $2); print $2; exit}' "$file"
+}
+
+# Update both version and appVersion in a Helm Chart.yaml
+set_helm_chart_version() {
+    local file="$1"
+    local old_version="$2"
+    local new_version="$3"
+    local escaped_old
+    escaped_old=$(escape_version "$old_version")
+    sed_inplace "s/^\(version:[[:space:]]*\)${escaped_old}/\1${new_version}/" "$file"
+    # Unconditionally set appVersion to new_version (handles drift)
+    sed_inplace "s/^appVersion:[[:space:]]*.*/appVersion: \"${new_version}\"/" "$file"
+    if ! grep -q "^version:[[:space:]]*${new_version}" "$file" \
+       || ! grep -q "^appVersion: \"${new_version}\"" "$file"; then
+        echo -e "    ${RED}FAILED to update $file${NC}" >&2
+        return 1
+    fi
 }
 
 # Extract smg_commit default version from a workflow file (e.g. "default: 'v1.2.0'")
@@ -528,7 +554,7 @@ smg_target_version="$smg_version"
 for entry in ${NEEDS_BUMP[@]+"${NEEDS_BUMP[@]}"}; do
     IFS='|' read -r _name _path _dep_key _cur _level <<< "$entry"
     if [[ "$_name" == "smg" ]]; then
-        smg_target_version=$(bump_version "$_cur" "$_level")
+        smg_target_version=$(bump_version "$_cur" "$_level" "smg")
         break
     fi
 done
@@ -545,6 +571,9 @@ for entry in "${SMG_VERSION_SYNC[@]}"; do
             ;;
         pyproject)
             file_version=$(grep -m1 '^version' "$file" | sed 's/.*"\([^"]*\)".*/\1/')
+            ;;
+        helm)
+            file_version=$(get_helm_chart_version "$file")
             ;;
         workflow)
             file_version=$(get_workflow_smg_version "$file")
@@ -590,7 +619,7 @@ echo -e "${BOLD}Proposed fixes:${NC}"
 
 for entry in ${NEEDS_BUMP[@]+"${NEEDS_BUMP[@]}"}; do
     IFS='|' read -r name path dep_key current_version level <<< "$entry"
-    new_version=$(bump_version "$current_version" "$level")
+    new_version=$(bump_version "$current_version" "$level" "$name")
     echo -e "  $(bump_label "$level") $name v$current_version → v$new_version ($path/Cargo.toml)"
     if [[ "$dep_key" != "-" ]]; then
         echo -e "       sync workspace Cargo.toml $dep_key → v$new_version"
@@ -606,7 +635,7 @@ fi
 
 for entry in ${NEEDS_PY_BUMP[@]+"${NEEDS_PY_BUMP[@]}"}; do
     IFS='|' read -r name path version_file current_version level <<< "$entry"
-    new_version=$(bump_version "$current_version" "$level")
+    new_version=$(bump_version "$current_version" "$level" "$name")
     echo -e "  $(bump_label "$level") $name v$current_version → v$new_version ($version_file)"
 done
 
@@ -630,7 +659,7 @@ fix_failed=0
 
 for entry in ${NEEDS_BUMP[@]+"${NEEDS_BUMP[@]}"}; do
     IFS='|' read -r name path dep_key current_version level <<< "$entry"
-    new_version=$(bump_version "$current_version" "$level")
+    new_version=$(bump_version "$current_version" "$level" "$name")
 
     # Bump crate Cargo.toml
     if set_crate_version "$path/Cargo.toml" "$new_version"; then
@@ -663,7 +692,7 @@ fi
 
 for entry in ${NEEDS_PY_BUMP[@]+"${NEEDS_PY_BUMP[@]}"}; do
     IFS='|' read -r name path version_file current_version level <<< "$entry"
-    new_version=$(bump_version "$current_version" "$level")
+    new_version=$(bump_version "$current_version" "$level" "$name")
 
     if set_python_version "$version_file" "$new_version"; then
         echo -e "  ${GREEN}✓${NC} $version_file → v$new_version"
@@ -684,6 +713,13 @@ for entry in ${NEEDS_VERSION_SYNC[@]+"${NEEDS_VERSION_SYNC[@]}"}; do
             ;;
         pyproject)
             if set_python_version "$file" "$smg_target_version"; then
+                echo -e "  ${GREEN}✓${NC} $file → v$smg_target_version"
+            else
+                fix_failed=$((fix_failed + 1))
+            fi
+            ;;
+        helm)
+            if set_helm_chart_version "$file" "$file_version" "$smg_target_version"; then
                 echo -e "  ${GREEN}✓${NC} $file → v$smg_target_version"
             else
                 fix_failed=$((fix_failed + 1))

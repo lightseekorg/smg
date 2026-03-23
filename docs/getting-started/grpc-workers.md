@@ -154,8 +154,8 @@ Auto-detected from the model name. Override with `--reasoning-parser` if needed.
 | Parser | Models |
 |--------|--------|
 | `deepseek_r1` | DeepSeek-R1 |
-| `qwen3` | Qwen3, Nemotron Nano |
-| `qwen_thinking` | Qwen3-Thinking |
+| `qwen3` | Qwen3 |
+| `qwen3_thinking` | Qwen3-Thinking |
 | `kimi` | Kimi |
 | `glm45` | GLM-4.5, GLM-4.7 |
 | `step3` | Step-3 |

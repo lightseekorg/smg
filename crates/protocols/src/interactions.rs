@@ -9,7 +9,7 @@ use serde_with::skip_serializing_none;
 use validator::{Validate, ValidationError};
 
 use super::{
-    common::{default_model, default_true, Function, GenerationRequest},
+    common::{default_true, Function, GenerationRequest},
     sampling_params::validate_top_p_value,
     validated::Normalizable,
 };
@@ -76,7 +76,7 @@ pub struct InteractionsRequest {
 impl Default for InteractionsRequest {
     fn default() -> Self {
         Self {
-            model: Some(default_model()),
+            model: None,
             agent: None,
             agent_config: None,
             input: InteractionsInput::Text(String::new()),

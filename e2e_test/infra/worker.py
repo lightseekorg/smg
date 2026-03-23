@@ -60,8 +60,18 @@ class Worker:
         """HTTP URL (used for health checks even on gRPC workers)."""
         return f"http://{DEFAULT_HOST}:{self.port}"
 
-    def start(self, timeout: int = DEFAULT_STARTUP_TIMEOUT) -> None:
-        """Launch worker process and wait for health."""
+    def start(
+        self,
+        timeout: int = DEFAULT_STARTUP_TIMEOUT,
+        wait_ready: bool = True,
+    ) -> None:
+        """Launch worker process and optionally wait for health.
+
+        Args:
+            timeout: Seconds to wait for health check (only used when wait_ready=True).
+            wait_ready: If True, block until the worker passes health checks.
+                If False, spawn the process and return immediately.
+        """
         cmd = self._build_cmd()
         env = self._build_env()
 
@@ -76,6 +86,15 @@ class Worker:
         logger.debug("Command: %s", " ".join(cmd))
 
         self.process = self._spawn_process(cmd, env)
+
+        if not wait_ready:
+            logger.info(
+                "Worker %s spawned at %s (PID %d) — not waiting for health",
+                self.model_id,
+                self.base_url,
+                self.process.pid,
+            )
+            return
 
         # Wait for health check
         if self.mode == ConnectionMode.GRPC:
@@ -377,6 +396,7 @@ def start_workers(
     timeout: int = DEFAULT_STARTUP_TIMEOUT,
     log_dir: str | None = None,
     gpu_offset: int = 0,
+    wait_ready: bool = True,
 ) -> list[Worker]:
     """Start N workers for a model. GPU IDs assigned sequentially.
 
@@ -390,6 +410,8 @@ def start_workers(
         timeout: Seconds to wait for each worker to become healthy.
         log_dir: Directory to store worker log files.
         gpu_offset: Starting GPU index for worker assignment.
+        wait_ready: If True (default), block until each worker is healthy.
+            If False, spawn processes and return immediately.
 
     Returns:
         List of started Worker instances.
@@ -430,7 +452,7 @@ def start_workers(
                 logger.info("Staggering launch by %ds", LAUNCH_STAGGER_DELAY)
                 time.sleep(LAUNCH_STAGGER_DELAY)
 
-            worker.start(timeout=timeout)
+            worker.start(timeout=timeout, wait_ready=wait_ready)
             workers.append(worker)
     except Exception:
         stop_workers(workers)

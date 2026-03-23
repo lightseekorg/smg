@@ -1,0 +1,245 @@
+# =============================================================================
+# SMG Helm Chart - values.yaml
+# =============================================================================
+
+# -- Global settings shared across all components
+global:
+  image:
+    registry: docker.io
+    repository: lightseekorg/smg
+    tag: ""  # defaults to Chart.appVersion
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+
+# =============================================================================
+# Router Configuration
+# =============================================================================
+router:
+  replicas: 1
+
+  # -- Routing policy: cache_aware, round_robin, power_of_two, manual, random, prefix_hash
+  policy: cache_aware
+
+  # -- Explicit worker URLs
+  workerUrls: []
+  #   - http://worker-1:8000
+  #   - grpc://worker-2:8001
+
+  # -- Kubernetes service discovery (auto-discover worker pods by label)
+  serviceDiscovery:
+    enabled: false
+    namespace: ""          # defaults to release namespace
+    selector: ""           # e.g. "app=sglang-worker"
+    port: 80
+    # -- Extract model ID from pod metadata
+    modelIdFrom: ""        # "namespace", "label:key", or "annotation:key"
+
+  # -- Model / tokenizer
+  model: ""                # HuggingFace model ID or local path
+  tokenizerPath: ""        # override tokenizer (defaults to model)
+  chatTemplate: ""         # custom chat template path
+
+  # -- Cache-aware routing tuning
+  cacheThreshold: 0.3
+  balanceAbsThreshold: 64
+  balanceRelThreshold: 1.5
+  evictionIntervalSecs: 120
+  maxTreeSize: 67108864
+  blockSize: 16
+
+  # -- Request handling
+  maxPayloadSize: 536870912    # 512MB in bytes
+  requestTimeoutSecs: 1800
+  maxConcurrentRequests: -1    # -1 = unlimited
+  queueSize: 100
+  queueTimeoutSecs: 60
+
+  # -- Resilience: retry
+  retry:
+    enabled: true
+    maxRetries: 5
+    initialBackoffMs: 50
+    maxBackoffMs: 30000
+    backoffMultiplier: 1.5
+    jitterFactor: 0.2
+
+  # -- Resilience: circuit breaker
+  circuitBreaker:
+    enabled: true
+    failureThreshold: 10
+    successThreshold: 3
+    timeoutDurationSecs: 60
+    windowDurationSecs: 120
+
+  # -- Resilience: health checks on workers
+  healthCheck:
+    enabled: true
+    failureThreshold: 3
+    successThreshold: 2
+    timeoutSecs: 5
+    intervalSecs: 60
+    endpoint: /health
+
+  # -- Networking
+  port: 30000
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+    #   - host: smg.example.com
+    #     paths:
+    #       - path: /
+    #         pathType: Prefix
+    tls: []
+
+  # -- Observability: Prometheus metrics
+  metrics:
+    port: 29000
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      labels: {}
+
+  # -- Observability: OpenTelemetry tracing
+  tracing:
+    enabled: false
+    otlpEndpoint: ""
+
+  # -- Observability: logging
+  logging:
+    level: info
+    json: false
+    dir: ""
+
+  # -- Pod resources
+  resources: {}
+  #   requests:
+  #     cpu: "2"
+  #     memory: 4Gi
+  #   limits:
+  #     cpu: "4"
+  #     memory: 8Gi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+
+  # -- Extra CLI args appended to the smg binary invocation
+  extraArgs: []
+
+  # -- Extra environment variables
+  extraEnv: []
+
+  # -- Autoscaling (HPA)
+  # NOTE: HPA scales on CPU utilization, so router.resources.requests.cpu must
+  # be set when autoscaling is enabled.
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+
+  # -- Pod disruption budget
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+  # -- Security context for router container
+  # NOTE: The default SMG image runs as root. Set runAsNonRoot: true only if
+  # your image is built with a non-root USER directive.
+  securityContext:
+    readOnlyRootFilesystem: true
+    runAsNonRoot: false
+    allowPrivilegeEscalation: false
+
+  # -- Liveness probe tuning
+  livenessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 30
+
+  # -- Readiness probe tuning
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+  # -- Optional features
+  wasm:
+    path: ""
+  mcp:
+    enabled: false
+    configPath: ""
+  reasoningParser: ""
+  toolCallParser: ""
+
+# =============================================================================
+# Auth Configuration
+# =============================================================================
+auth:
+  # -- API key authentication (passed via --api-key CLI flag)
+  apiKey: ""
+
+  # -- Rate limiting
+  rateLimitTokensPerSecond: -1  # -1 = disabled
+
+# =============================================================================
+# History / Storage Backend
+# =============================================================================
+history:
+  # -- Backend type: none, memory, postgres, redis, oracle
+  backend: memory
+
+  postgres:
+    url: ""                    # "postgresql://user:pass@host:5432/db"
+    poolMax: 10
+    # -- Deploy a PostgreSQL instance via sub-chart
+    deploy: false
+
+  redis:
+    url: ""                    # "redis://localhost:6379"
+    poolMax: 10
+    # -- Deploy a Redis instance via sub-chart
+    deploy: false
+
+  oracle:
+    dsn: ""                    # Oracle connect descriptor / DSN
+    user: ""
+    password: ""
+    poolMax: 10
+
+# =============================================================================
+# Service Account & RBAC
+# =============================================================================
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  # -- Create Role/RoleBinding for K8s service discovery (pods list/watch).
+  #    Automatically enabled when router.serviceDiscovery.enabled=true.
+  create: false
+
+# =============================================================================
+# Grafana Dashboard
+# =============================================================================
+grafana:
+  dashboard:
+    enabled: false
+    labels:
+      grafana_dashboard: "1"
+
+# =============================================================================
+# Dependency Sub-Charts (overrides go here)
+# =============================================================================
+postgresql:
+  enabled: false
+
+redis:
+  enabled: false

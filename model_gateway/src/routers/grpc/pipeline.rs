@@ -43,7 +43,7 @@ use super::{
     utils::error_type_from_status,
 };
 use crate::{
-    core::{WorkerRegistry, UNKNOWN_MODEL_ID},
+    core::WorkerRegistry,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     policies::PolicyRegistry,
     routers::error,
@@ -406,7 +406,7 @@ impl RequestPipeline {
         &self,
         request: Arc<ChatCompletionRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
         let start = Instant::now();
@@ -498,7 +498,7 @@ impl RequestPipeline {
         &self,
         request: Arc<GenerateRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
         let start = Instant::now();
@@ -684,7 +684,7 @@ impl RequestPipeline {
         &self,
         request: Arc<EmbeddingRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
         let model = model_id.clone().unwrap_or_else(|| request.model.clone());
@@ -785,7 +785,7 @@ impl RequestPipeline {
         &self,
         request: Arc<ClassifyRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
         let model = model_id.clone().unwrap_or_else(|| request.model.clone());
@@ -883,7 +883,7 @@ impl RequestPipeline {
         &self,
         request: Arc<CreateMessageRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
         let start = Instant::now();
@@ -978,7 +978,7 @@ impl RequestPipeline {
         &self,
         request: Arc<ChatCompletionRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Result<ChatCompletionResponse, Response> {
         let mut ctx = RequestContext::for_chat(request, headers, model_id, components);

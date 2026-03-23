@@ -55,11 +55,21 @@ struct LastSentVersions {
     rate_limit: HashMap<String, u64>, // Track last sent timestamp for rate limit counter shards
 }
 
+/// Tracks store generation to skip unchanged stores
+#[derive(Debug, Clone, Default)]
+struct LastScannedGenerations {
+    worker: u64,
+    policy: u64,
+    app: u64,
+    membership: u64,
+}
+
 /// Incremental update collector
 pub struct IncrementalUpdateCollector {
     stores: Arc<StateStores>,
     self_name: String,
     last_sent: Arc<RwLock<LastSentVersions>>,
+    last_scanned: Arc<RwLock<LastScannedGenerations>>,
 }
 
 impl IncrementalUpdateCollector {
@@ -68,6 +78,7 @@ impl IncrementalUpdateCollector {
             stores,
             self_name,
             last_sent: Arc::new(RwLock::new(LastSentVersions::default())),
+            last_scanned: Arc::new(RwLock::new(LastScannedGenerations::default())),
         }
     }
 
@@ -126,13 +137,19 @@ impl IncrementalUpdateCollector {
         updates
     }
 
-    /// Collect incremental updates for a specific store type
+    /// Collect incremental updates for a specific store type.
+    /// Skips the expensive `.all()` scan when the store generation hasn't changed.
     pub fn collect_updates_for_store(&self, store_type: StoreType) -> Vec<StateUpdate> {
         let mut updates = Vec::new();
         let last_sent = self.last_sent.read();
+        let last_scanned = self.last_scanned.read();
 
         match store_type {
             StoreType::Worker => {
+                let gen = self.stores.worker.generation();
+                if gen == last_scanned.worker {
+                    return vec![];
+                }
                 let all_workers = self.stores.worker.all();
                 updates = self.collect_serializable_updates(
                     all_workers,
@@ -142,6 +159,10 @@ impl IncrementalUpdateCollector {
                 );
             }
             StoreType::Policy => {
+                let gen = self.stores.policy.generation();
+                if gen == last_scanned.policy {
+                    return vec![];
+                }
                 let all_policies = self.stores.policy.all();
                 updates = self.collect_serializable_updates(
                     all_policies,
@@ -151,6 +172,10 @@ impl IncrementalUpdateCollector {
                 );
             }
             StoreType::App => {
+                let gen = self.stores.app.generation();
+                if gen == last_scanned.app {
+                    return vec![];
+                }
                 let all_apps = self.stores.app.all();
                 updates = self.collect_serializable_updates(
                     all_apps,
@@ -160,6 +185,10 @@ impl IncrementalUpdateCollector {
                 );
             }
             StoreType::Membership => {
+                let gen = self.stores.membership.generation();
+                if gen == last_scanned.membership {
+                    return vec![];
+                }
                 let all_members = self.stores.membership.all();
                 updates = self.collect_serializable_updates(
                     all_members,
@@ -232,9 +261,23 @@ impl IncrementalUpdateCollector {
         all_updates
     }
 
-    /// Mark updates as sent (called after successful transmission)
+    /// Mark updates as sent (called after successful transmission).
+    /// Also records the store generation to enable skipping unchanged stores.
     pub fn mark_sent(&self, store_type: StoreType, updates: &[StateUpdate]) {
         let mut last_sent = self.last_sent.write();
+        let mut last_scanned = self.last_scanned.write();
+
+        // Record the current generation so the next collection cycle can skip
+        // this store if nothing has changed since.
+        match store_type {
+            StoreType::Worker => last_scanned.worker = self.stores.worker.generation(),
+            StoreType::Policy => last_scanned.policy = self.stores.policy.generation(),
+            StoreType::App => last_scanned.app = self.stores.app.generation(),
+            StoreType::Membership => {
+                last_scanned.membership = self.stores.membership.generation();
+            }
+            StoreType::RateLimit => {} // Rate limit uses timestamp-based tracking
+        }
 
         for update in updates {
             match store_type {

@@ -88,7 +88,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &GenerateRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (
             StatusCode::NOT_IMPLEMENTED,
@@ -102,7 +102,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &ChatCompletionRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (
             StatusCode::NOT_IMPLEMENTED,
@@ -116,7 +116,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &CompletionRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (
             StatusCode::NOT_IMPLEMENTED,
@@ -130,7 +130,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &ResponsesRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (
             StatusCode::NOT_IMPLEMENTED,
@@ -185,7 +185,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &EmbeddingRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (StatusCode::NOT_IMPLEMENTED, "Embeddings not implemented").into_response()
     }
@@ -195,7 +195,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &ClassifyRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (StatusCode::NOT_IMPLEMENTED, "Classify not implemented").into_response()
     }
@@ -205,7 +205,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &RerankRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (StatusCode::NOT_IMPLEMENTED, "Rerank not implemented").into_response()
     }

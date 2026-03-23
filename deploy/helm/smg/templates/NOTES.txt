@@ -1,0 +1,17 @@
+{{- $fullname := include "smg.fullname" . -}}
+
+Router:
+  Endpoint: http://{{ $fullname }}-router:{{ .Values.router.service.port }}
+  Metrics:  http://{{ $fullname }}-router:{{ .Values.router.metrics.port }}/metrics
+  Policy:   {{ .Values.router.policy }}
+
+{{- if .Values.router.ingress.enabled }}
+
+Ingress:
+{{- range .Values.router.ingress.hosts }}
+  http{{ if $.Values.router.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- end }}
+
+To test the deployment:
+  helm test {{ .Release.Name }}

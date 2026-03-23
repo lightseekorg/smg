@@ -74,7 +74,7 @@ Controls how requests are distributed across workers.
 |--------|------------|
 | Environment | - |
 | Default | `cache_aware` |
-| Values | `random`, `round_robin`, `cache_aware`, `power_of_two`, `prefix_hash`, `manual` |
+| Values | `random`, `round_robin`, `cache_aware`, `power_of_two`, `prefix_hash`, `consistent_hashing`, `bucket`, `manual` |
 
 **Policy Comparison**:
 
@@ -85,7 +85,9 @@ Controls how requests are distributed across workers.
 | `power_of_two` | Variable workloads | Poor | Excellent |
 | `cache_aware` | LLM inference | Excellent | Good |
 | `prefix_hash` | Consistent routing by prefix | Good | Good |
-| `manual` | Session affinity | Good | Manual |
+| `consistent_hashing` | Session affinity via hash ring | Good | Good |
+| `bucket` | Load balancing with bucket boundaries | Poor | Excellent |
+| `manual` | Sticky sessions with LRU eviction | Good | Manual |
 
 **Recommendation**: Use `cache_aware` for LLM workloads to maximize KV cache hit rates.
 
@@ -317,8 +319,8 @@ Note: Enabling service discovery automatically enables IGW mode.
 | Option | `--backend` |
 |--------|-------------|
 | Environment | - |
-| Default | `sglang` |
-| Values | `sglang`, `vllm`, `trtllm`, `openai`, `anthropic` |
+| Default | None (auto-detected) |
+| Values | `sglang`, `vllm`, `trtllm`, `openai`, `anthropic`, `gemini` |
 
 ### History Backend
 

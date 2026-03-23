@@ -29,7 +29,7 @@ impl RouterTrait for MockRouter {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &ChatCompletionRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response<Body> {
         StatusCode::OK.into_response()
     }

@@ -231,7 +231,7 @@ mod header_forwarding_tests {
         let app = ctx.create_app();
 
         let payload = json!({
-            "model": "test-model",
+            "model": "mock-model",
             "messages": [{"role": "user", "content": "Hello"}],
             "stream": false
         });

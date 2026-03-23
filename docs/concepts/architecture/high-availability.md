@@ -418,6 +418,9 @@ spec:
           name: mesh
 ```
 
+!!! tip "Engine images"
+    For all-in-one deployments where each pod runs both gateway and engine, use an engine image tag (e.g., `ghcr.io/lightseekorg/smg:{smg_version}-{engine}-{engine_version}`). See [Getting Started](../../getting-started/index.md#install) for available tags.
+
 ### Headless Service
 
 ```yaml
@@ -485,12 +488,12 @@ smg --enable-mesh --service-discovery --router-selector app=smg tier=router
 
 | Metric | Description |
 |--------|-------------|
-| `smg_mesh_peers_total` | Number of connected peers |
-| `smg_mesh_peer_status` | Status of each peer (1=alive, 0=down) |
-| `smg_mesh_sync_operations_total` | State sync operations by type |
-| `smg_mesh_sync_latency_seconds` | State sync latency histogram |
-| `smg_mesh_leader_elections_total` | Leader election events |
-| `smg_mesh_gossip_messages_total` | Gossip messages sent/received |
+| `router_mesh_peer_connections` | Number of active peer connections |
+| `router_mesh_peer_reconnects_total` | Total number of peer reconnections |
+| `router_mesh_batches_total` | Total state update batches sent/received |
+| `router_mesh_bytes_total` | Total bytes transmitted in mesh |
+| `router_mesh_convergence_ms` | State convergence time across the mesh |
+| `router_mesh_snapshot_trigger_total` | Total number of snapshot triggers |
 
 ### Alerting Rules
 
@@ -498,16 +501,19 @@ smg --enable-mesh --service-discovery --router-selector app=smg tier=router
 groups:
 - name: smg-mesh
   rules:
+  # router_mesh_peer_connections is a per-peer gauge (0/1, labeled by "peer").
+  # count(router_mesh_peer_connections == 1) gives the number of active peer links.
+  # Adjust the threshold to match your expected peer count (e.g. N-1 for an N-node cluster).
   - alert: SMGClusterDegraded
-    expr: smg_mesh_peers_total < 2
+    expr: count(router_mesh_peer_connections == 1) < 2
     for: 1m
     labels:
       severity: warning
     annotations:
-      summary: "SMG cluster has fewer than 3 nodes"
+      summary: "SMG cluster has fewer than expected peer connections"
 
   - alert: SMGNodeDown
-    expr: smg_mesh_peer_status == 0
+    expr: router_mesh_peer_connections == 0
     for: 30s
     labels:
       severity: critical
@@ -549,7 +555,7 @@ Keep mesh nodes in the same region (< 10ms RTT) for optimal state sync performan
 
 ### :material-monitor: Monitoring
 
-Monitor `smg_mesh_peers_total` and alert when cluster size drops below threshold.
+Monitor `count(router_mesh_peer_connections == 1)` to track active peer links and alert when the count drops below your expected threshold.
 
 </div>
 

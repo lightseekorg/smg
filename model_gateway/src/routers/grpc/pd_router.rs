@@ -13,10 +13,7 @@ use super::{
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
-    core::{
-        is_retryable_status, ConnectionMode, RetryExecutor, WorkerRegistry, WorkerType,
-        UNKNOWN_MODEL_ID,
-    },
+    core::{is_retryable_status, ConnectionMode, RetryExecutor, WorkerRegistry, WorkerType},
     observability::metrics::{metrics_labels, Metrics},
     routers::RouterTrait,
 };
@@ -103,17 +100,17 @@ impl GrpcPDRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &GenerateRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         debug!(
             "Processing generate request for model: {} (PD mode)",
-            model_id.unwrap_or(UNKNOWN_MODEL_ID)
+            model_id
         );
 
         // Clone values needed for retry closure
         let request = Arc::new(body.clone());
         let headers_cloned = headers.cloned();
-        let model_id_cloned = model_id.map(|s| s.to_string());
+        let model_id_cloned = model_id.to_string();
         let components = self.shared_components.clone();
         let pipeline = &self.pipeline;
 
@@ -171,7 +168,7 @@ impl GrpcPDRouter {
         // Clone values needed for retry closure
         let request = Arc::new(body.clone());
         let headers_cloned = headers.cloned();
-        let model_id_cloned = Some(model_id.to_string());
+        let model_id_cloned = model_id.to_string();
         let components = self.shared_components.clone();
         let pipeline = &self.messages_pipeline;
 
@@ -219,17 +216,17 @@ impl GrpcPDRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &ChatCompletionRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         debug!(
             "Processing chat completion request for model: {} (PD mode)",
-            model_id.unwrap_or(UNKNOWN_MODEL_ID)
+            model_id
         );
 
         // Clone values needed for retry closure
         let request = Arc::new(body.clone());
         let headers_cloned = headers.cloned();
-        let model_id_cloned = model_id.map(|s| s.to_string());
+        let model_id_cloned = model_id.to_string();
         let components = self.shared_components.clone();
         let pipeline = &self.pipeline;
 
@@ -306,7 +303,7 @@ impl RouterTrait for GrpcPDRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &GenerateRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_generate_impl(headers, body, model_id).await
     }
@@ -315,7 +312,7 @@ impl RouterTrait for GrpcPDRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &ChatCompletionRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_chat_impl(headers, body, model_id).await
     }

@@ -43,7 +43,7 @@ pub(crate) struct RequestContext {
 pub(crate) struct RequestInput {
     pub request_type: RequestType,
     pub headers: Option<HeaderMap>,
-    pub model_id: Option<String>,
+    pub model_id: String,
 }
 
 /// Request type variants
@@ -238,7 +238,7 @@ impl RequestContext {
     pub fn for_chat(
         request: Arc<ChatCompletionRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
         Self {
@@ -256,7 +256,7 @@ impl RequestContext {
     pub fn for_generate(
         request: Arc<GenerateRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
         Self {
@@ -292,7 +292,7 @@ impl RequestContext {
     pub fn for_responses(
         request: Arc<ResponsesRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
         Self {
@@ -310,7 +310,7 @@ impl RequestContext {
     pub fn for_embedding(
         request: Arc<EmbeddingRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
         Self {
@@ -328,7 +328,7 @@ impl RequestContext {
     pub fn for_classify(
         request: Arc<ClassifyRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
         Self {
@@ -346,7 +346,7 @@ impl RequestContext {
     pub fn for_messages(
         request: Arc<CreateMessageRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
         Self {

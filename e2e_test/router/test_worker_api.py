@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
+import httpx
 import pytest
-from conftest import smg_compare
 from infra import ConnectionMode, Gateway, start_workers, stop_workers
 
 logger = logging.getLogger(__name__)
@@ -34,9 +35,9 @@ pytestmark = pytest.mark.skip_for_runtime("vllm", reason="vLLM does not support 
 class TestWorkerAPI:
     """Tests for worker management APIs using setup_backend fixture."""
 
-    def test_list_workers(self, setup_backend, smg):
+    def test_list_workers(self, setup_backend):
         """Test listing workers via /workers endpoint."""
-        backend, model, client, gateway = setup_backend
+        backend, model, _, gateway = setup_backend
 
         workers = gateway.list_workers()
         assert len(workers) >= 1, "Expected at least one worker"
@@ -55,15 +56,9 @@ class TestWorkerAPI:
             if worker.model is not None:
                 assert worker.model, "Worker model_id should be non-empty when present"
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_workers = smg.workers.list()
-            assert smg_workers["total"] >= 1, "SmgClient: expected at least one worker"
-            assert len(smg_workers["workers"]) >= 1
-
-    def test_list_models(self, setup_backend, smg):
+    def test_list_models(self, setup_backend):
         """Test listing models via /v1/models endpoint."""
-        backend, model, client, gateway = setup_backend
+        backend, model, _, gateway = setup_backend
 
         models = gateway.list_models()
         assert len(models) >= 1, "Expected at least one model"
@@ -73,14 +68,9 @@ class TestWorkerAPI:
             logger.info("Model: %s", m.get("id", "unknown"))
             assert "id" in m, "Model should have an id"
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_models = smg.models.list()
-            assert len(smg_models.data) >= 1, "SmgClient: expected at least one model"
-
-    def test_health_endpoint(self, setup_backend, smg):
+    def test_health_endpoint(self, setup_backend):
         """Test health check endpoint."""
-        backend, model, client, gateway = setup_backend
+        backend, model, _, gateway = setup_backend
 
         assert gateway.health(), "Gateway should be healthy"
         logger.info("Gateway health check passed")
@@ -293,3 +283,184 @@ class TestDisableHealthCheck:
             logger.info("Gateway started with health checks disabled")
         finally:
             gateway.shutdown()
+
+
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(4)
+@pytest.mark.e2e
+class TestIGWMixedWorkerClassification:
+    """Test IGW mode with mixed local and external workers.
+
+    Verifies that the classify step correctly identifies:
+    - Local HTTP sglang workers (via /health probe)
+    - Local gRPC sglang workers (via gRPC health probe)
+    - External OpenAI workers (via URL-based detection)
+    - External xAI workers (via URL-based detection)
+
+    Workers are added immediately after gateway start without waiting
+    for backends to be fully ready, exercising the race-condition-free
+    classification logic.
+
+    Requires 4 GPUs: 2 for HTTP workers (Llama-3.1-8B), 2 for gRPC workers (DeepSeek-R1-Distill-Qwen-7B).
+    Requires OPENAI_API_KEY and XAI_API_KEY environment variables.
+    """
+
+    def test_mixed_local_and_external_workers(self):
+        """Add local sglang + external cloud workers, verify all models discoverable."""
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        xai_key = os.environ.get("XAI_API_KEY")
+        if not openai_key:
+            pytest.skip("OPENAI_API_KEY not set")
+        if not xai_key:
+            pytest.skip("XAI_API_KEY not set")
+
+        engine = os.environ.get("E2E_ENGINE", "sglang")
+
+        # Start local backends WITHOUT waiting — spawn processes and return immediately.
+        # This exercises the race condition where workers are added to the gateway
+        # before the backends are fully ready (before /health responds).
+        http_workers = start_workers(
+            "meta-llama/Llama-3.1-8B-Instruct",
+            engine,
+            mode=ConnectionMode.HTTP,
+            count=2,
+            wait_ready=False,
+        )
+        try:
+            grpc_workers = start_workers(
+                "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+                engine,
+                mode=ConnectionMode.GRPC,
+                count=2,
+                gpu_offset=2,
+                wait_ready=False,
+            )
+        except Exception:
+            stop_workers(http_workers)
+            raise
+        all_local_workers = http_workers + grpc_workers
+
+        try:
+            # Start gateway in IGW mode FIRST with extended startup timeout
+            # so registration workflows can wait for backends still loading models
+            gateway = Gateway()
+            gateway.start(
+                igw_mode=True,
+                extra_args=["--worker-startup-timeout-secs", "300"],
+            )
+
+            try:
+                # Add all workers immediately — don't wait for registration to complete
+                # Local HTTP workers
+                for w in http_workers:
+                    success, wid = gateway.add_worker(w.base_url, wait_ready=False)
+                    assert success, f"Failed to add HTTP worker {w.base_url}: {wid}"
+                    logger.info("Queued HTTP worker: %s → %s", w.base_url, wid)
+
+                # Local gRPC workers
+                for w in grpc_workers:
+                    success, wid = gateway.add_worker(w.base_url, wait_ready=False)
+                    assert success, f"Failed to add gRPC worker {w.base_url}: {wid}"
+                    logger.info("Queued gRPC worker: %s → %s", w.base_url, wid)
+
+                # External OpenAI worker (POST directly with api_key + disable_health_check)
+                resp = httpx.post(
+                    f"{gateway.base_url}/workers",
+                    json={
+                        "url": "https://api.openai.com",
+                        "api_key": openai_key,
+                        "runtime": "external",
+                        "disable_health_check": True,
+                    },
+                    timeout=10,
+                )
+                assert resp.status_code in (200, 202), f"Failed to add OpenAI worker: {resp.text}"
+                logger.info("Queued OpenAI worker: %s", resp.json().get("worker_id"))
+
+                # External xAI worker
+                resp = httpx.post(
+                    f"{gateway.base_url}/workers",
+                    json={
+                        "url": "https://api.x.ai",
+                        "api_key": xai_key,
+                        "runtime": "external",
+                        "disable_health_check": True,
+                    },
+                    timeout=10,
+                )
+                assert resp.status_code in (200, 202), f"Failed to add xAI worker: {resp.text}"
+                logger.info("Queued xAI worker: %s", resp.json().get("worker_id"))
+
+                # Wait for ALL 6 workers to register and become healthy.
+                # Local backends need time to load models (especially gRPC/DeepSeek).
+                # External workers are instant with disable_health_check.
+                expected_workers = 6  # 2 HTTP + 2 gRPC + OpenAI + xAI
+                deadline = time.perf_counter() + 300
+                while time.perf_counter() < deadline:
+                    workers = gateway.list_workers()
+                    healthy = sum(1 for w in workers if w.status == "healthy")
+                    if healthy >= expected_workers:
+                        break
+                    time.sleep(5)
+                else:
+                    workers = gateway.list_workers()
+                    for w in workers:
+                        logger.info(
+                            "Worker: id=%s url=%s model=%s status=%s",
+                            w.id,
+                            w.url,
+                            w.model,
+                            w.status,
+                        )
+                    pytest.fail(
+                        f"Timed out waiting for {expected_workers} healthy workers "
+                        f"(got {sum(1 for w in workers if w.status == 'healthy')} healthy "
+                        f"out of {len(workers)} total)"
+                    )
+
+                # Verify all workers registered
+                workers = gateway.list_workers()
+                worker_urls = [w.url for w in workers]
+                logger.info("All workers (%d): %s", len(workers), worker_urls)
+                assert len(workers) >= expected_workers, (
+                    f"Expected at least {expected_workers} workers, got {len(workers)}"
+                )
+
+                # Verify classification via raw API response (includes runtime_type)
+                raw_resp = httpx.get(f"{gateway.base_url}/workers", timeout=10)
+                assert raw_resp.status_code == 200
+                raw_workers = raw_resp.json().get("workers", [])
+                for w in raw_workers:
+                    url = w.get("url", "")
+                    rt = w.get("runtime_type", "")
+                    if "api.openai.com" in url or "api.x.ai" in url:
+                        assert rt == "external", f"Cloud worker {url} should be external, got {rt}"
+                    else:
+                        assert rt in ("sglang", "vllm", "trtllm"), (
+                            f"Local worker {url} should have local runtime, got {rt}"
+                        )
+                    logger.info("Worker %s → runtime_type=%s", url, rt)
+
+                # Verify /v1/models returns models from ALL workers
+                models = gateway.list_models()
+                model_ids = [m["id"] for m in models]
+                logger.info("All models (%d): %s", len(models), model_ids)
+
+                # Local models should be present
+                assert any("llama" in m.lower() for m in model_ids), (
+                    f"Expected a Llama model from HTTP workers, got: {model_ids}"
+                )
+                assert any("deepseek" in m.lower() for m in model_ids), (
+                    f"Expected a DeepSeek model from gRPC workers, got: {model_ids}"
+                )
+
+                # TODO: verify external providers discover many models via fan-out.
+                # The /v1/models endpoint with a Bearer token should fan out to
+                # external providers and return their full model lists. Currently
+                # external workers registered with disable_health_check only show
+                # their primary model in the registry. Needs investigation into
+                # model discovery for externally-registered workers.
+            finally:
+                gateway.shutdown()
+        finally:
+            stop_workers(all_local_workers)

@@ -82,9 +82,8 @@ smg \
 |-----------|---------|-------------|
 | `--service-discovery` | `false` | Enable Kubernetes service discovery |
 | `--selector` | - | Label selector for worker pods (required) |
-| `--service-discovery-namespace` | `default` | Kubernetes namespace to watch |
-| `--service-discovery-port` | `8000` | Port to use for worker connections |
-| `--service-discovery-protocol` | `http` | Protocol for worker connections (`http` or `grpc`) |
+| `--service-discovery-namespace` | (all namespaces) | Kubernetes namespace to watch |
+| `--service-discovery-port` | `80` | Port to use for worker connections |
 
 ### Environment Variables
 
@@ -303,6 +302,9 @@ spec:
               name: admin
 ```
 
+!!! tip "Engine images"
+    For all-in-one deployments where each pod runs both gateway and engine, use an engine image tag (e.g., `ghcr.io/lightseekorg/smg:{smg_version}-{engine}-{engine_version}`). See [Getting Started](../../getting-started/index.md#install) for available tags.
+
 ### Worker StatefulSet
 
 ```yaml
@@ -368,9 +370,9 @@ spec:
 
 | Metric | Description |
 |--------|-------------|
-| `smg_discovered_workers_total` | Total workers discovered |
-| `smg_worker_registrations_total` | Worker registration events |
-| `smg_worker_removals_total` | Worker removal events |
+| `smg_discovery_workers_discovered` | Workers known via discovery |
+| `smg_discovery_registrations_total` | Worker registration events |
+| `smg_discovery_deregistrations_total` | Worker deregistration events |
 
 ### Logs
 

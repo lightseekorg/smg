@@ -1,0 +1,20 @@
+# Router with Ingress and TLS.
+# Usage: helm install smg deploy/helm/smg -f deploy/helm/smg/examples/with-ingress.yaml
+router:
+  workerUrls:
+    - http://worker-1:8000
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "1800"
+    hosts:
+      - host: smg.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: smg-tls
+        hosts:
+          - smg.example.com
