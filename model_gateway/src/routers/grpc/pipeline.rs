@@ -502,9 +502,6 @@ impl RequestPipeline {
         components: Arc<SharedComponents>,
     ) -> Response {
         let start = Instant::now();
-        let model = model_id
-            .clone()
-            .unwrap_or_else(|| UNKNOWN_MODEL_ID.to_string());
         let streaming = request.stream;
 
         // Record request start
@@ -512,12 +509,12 @@ impl RequestPipeline {
             metrics_labels::ROUTER_GRPC,
             self.backend_type,
             metrics_labels::CONNECTION_GRPC,
-            &model,
+            &model_id,
             metrics_labels::ENDPOINT_GENERATE,
             bool_to_static_str(streaming),
         );
 
-        let mut ctx = RequestContext::for_generate(request, headers, model_id, components);
+        let mut ctx = RequestContext::for_generate(request, headers, model_id.clone(), components);
 
         for stage in self.stages.iter() {
             match stage.execute(&mut ctx).await {
@@ -526,7 +523,7 @@ impl RequestPipeline {
                         metrics_labels::ROUTER_GRPC,
                         self.backend_type,
                         metrics_labels::CONNECTION_GRPC,
-                        &model,
+                        &model_id,
                         metrics_labels::ENDPOINT_GENERATE,
                         start.elapsed(),
                     );
@@ -538,7 +535,7 @@ impl RequestPipeline {
                         metrics_labels::ROUTER_GRPC,
                         self.backend_type,
                         metrics_labels::CONNECTION_GRPC,
-                        &model,
+                        &model_id,
                         metrics_labels::ENDPOINT_GENERATE,
                         error_type_from_status(response.status()),
                     );
@@ -558,7 +555,7 @@ impl RequestPipeline {
                     metrics_labels::ROUTER_GRPC,
                     self.backend_type,
                     metrics_labels::CONNECTION_GRPC,
-                    &model,
+                    &model_id,
                     metrics_labels::ENDPOINT_GENERATE,
                     start.elapsed(),
                 );
@@ -574,12 +571,12 @@ impl RequestPipeline {
                 "execute_generate",
                 "Generate",
                 &response_type,
-                &model,
+                &model_id,
                 metrics_labels::ENDPOINT_GENERATE,
             ),
             None => self.no_response_produced(
                 "execute_generate",
-                &model,
+                &model_id,
                 metrics_labels::ENDPOINT_GENERATE,
             ),
         }
@@ -687,10 +684,9 @@ impl RequestPipeline {
         model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
-        let model = model_id.clone().unwrap_or_else(|| request.model.clone());
         debug!(
             "execute_embeddings: Starting execution for model: {}",
-            &model
+            &model_id
         );
         let start = Instant::now();
 
@@ -699,12 +695,12 @@ impl RequestPipeline {
             metrics_labels::ROUTER_GRPC,
             self.backend_type,
             metrics_labels::CONNECTION_GRPC,
-            &model,
+            &model_id,
             metrics_labels::ENDPOINT_EMBEDDINGS,
             bool_to_static_str(false),
         );
 
-        let mut ctx = RequestContext::for_embedding(request, headers, model_id, components);
+        let mut ctx = RequestContext::for_embedding(request, headers, model_id.clone(), components);
 
         for stage in self.stages.iter() {
             debug!("execute_embeddings: Executing stage: {}", stage.name());
@@ -718,7 +714,7 @@ impl RequestPipeline {
                         metrics_labels::ROUTER_GRPC,
                         self.backend_type,
                         metrics_labels::CONNECTION_GRPC,
-                        &model,
+                        &model_id,
                         metrics_labels::ENDPOINT_EMBEDDINGS,
                         start.elapsed(),
                     );
@@ -741,7 +737,7 @@ impl RequestPipeline {
                         metrics_labels::ROUTER_GRPC,
                         self.backend_type,
                         metrics_labels::CONNECTION_GRPC,
-                        &model,
+                        &model_id,
                         metrics_labels::ENDPOINT_EMBEDDINGS,
                         error_type_from_status(response.status()),
                     );
@@ -760,7 +756,7 @@ impl RequestPipeline {
                     metrics_labels::ROUTER_GRPC,
                     self.backend_type,
                     metrics_labels::CONNECTION_GRPC,
-                    &model,
+                    &model_id,
                     metrics_labels::ENDPOINT_EMBEDDINGS,
                     start.elapsed(),
                 );
@@ -788,8 +784,10 @@ impl RequestPipeline {
         model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
-        let model = model_id.clone().unwrap_or_else(|| request.model.clone());
-        debug!("execute_classify: Starting execution for model: {}", &model);
+        debug!(
+            "execute_classify: Starting execution for model: {}",
+            &model_id
+        );
         let start = Instant::now();
 
         // Record request start
@@ -797,12 +795,12 @@ impl RequestPipeline {
             metrics_labels::ROUTER_GRPC,
             self.backend_type,
             metrics_labels::CONNECTION_GRPC,
-            &model,
+            &model_id,
             metrics_labels::ENDPOINT_CLASSIFY,
             bool_to_static_str(false), // Classify is never streaming
         );
 
-        let mut ctx = RequestContext::for_classify(request, headers, model_id, components);
+        let mut ctx = RequestContext::for_classify(request, headers, model_id.clone(), components);
 
         for stage in self.stages.iter() {
             debug!("execute_classify: Executing stage: {}", stage.name());
@@ -816,7 +814,7 @@ impl RequestPipeline {
                         metrics_labels::ROUTER_GRPC,
                         self.backend_type,
                         metrics_labels::CONNECTION_GRPC,
-                        &model,
+                        &model_id,
                         metrics_labels::ENDPOINT_CLASSIFY,
                         start.elapsed(),
                     );
@@ -839,7 +837,7 @@ impl RequestPipeline {
                         metrics_labels::ROUTER_GRPC,
                         self.backend_type,
                         metrics_labels::CONNECTION_GRPC,
-                        &model,
+                        &model_id,
                         metrics_labels::ENDPOINT_CLASSIFY,
                         error_type_from_status(response.status()),
                     );
@@ -858,7 +856,7 @@ impl RequestPipeline {
                     metrics_labels::ROUTER_GRPC,
                     self.backend_type,
                     metrics_labels::CONNECTION_GRPC,
-                    &model,
+                    &model_id,
                     metrics_labels::ENDPOINT_CLASSIFY,
                     start.elapsed(),
                 );
@@ -1021,7 +1019,7 @@ impl RequestPipeline {
             | Some(FinalResponse::Messages(_)) => {
                 error!(
                     function = "execute_chat_for_responses",
-                    "Wrong response type: expected Chat, got Generate/Completion/Embedding/Classify/Messages"
+                    "Wrong response type: expected Chat, got Generate/Embedding/Classify/Messages"
                 );
                 Err(error::internal_error(
                     "wrong_response_type",
@@ -1064,8 +1062,8 @@ impl RequestPipeline {
         // Create RequestContext for this Responses request
         let mut ctx = RequestContext::for_responses(
             Arc::new(request.clone()),
-            None,                        // No headers needed for internal pipeline execution
-            Some(request.model.clone()), // Model ID from request
+            None,                  // No headers needed for internal pipeline execution
+            request.model.clone(), // Model ID from request
             harmony_ctx.components.clone(),
         );
 
@@ -1128,7 +1126,7 @@ impl RequestPipeline {
         let mut ctx = RequestContext::for_responses(
             Arc::new(request.clone()),
             None,
-            Some(request.model.clone()),
+            request.model.clone(),
             harmony_ctx.components.clone(),
         );
 

@@ -277,6 +277,7 @@ impl RequestContext {
         model_id: Option<String>,
         components: Arc<SharedComponents>,
     ) -> Self {
+        let model_id = model_id.unwrap_or_else(|| request.model.clone());
         Self {
             input: RequestInput {
                 request_type: RequestType::Completion(request),
