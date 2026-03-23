@@ -1,4 +1,4 @@
-use crossterm::event::{Event, EventStream, KeyEvent};
+use crossterm::event::{Event, EventStream, KeyEvent, KeyEventKind};
 use futures::StreamExt;
 use tokio::{
     sync::mpsc,
@@ -44,9 +44,12 @@ impl EventHandler {
                     maybe_event = reader.next() => {
                         match maybe_event {
                             Some(Ok(Event::Key(key)))
-                                if tx.send(AppEvent::Key(key)).is_err() => {
+                                if key.kind == KeyEventKind::Press =>
+                            {
+                                if tx.send(AppEvent::Key(key)).is_err() {
                                     break;
                                 }
+                            }
                             Some(Ok(Event::Resize(w, h)))
                                 if tx.send(AppEvent::Resize(w, h)).is_err() => {
                                     break;

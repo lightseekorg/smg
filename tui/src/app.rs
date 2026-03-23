@@ -614,7 +614,13 @@ impl App {
                 "--runtime" | "-r" => {
                     i += 1;
                     if i < tokens.len() {
-                        spec.runtime_type = tokens[i].parse().unwrap_or_default();
+                        spec.runtime_type = match tokens[i].parse() {
+                            Ok(rt) => rt,
+                            Err(_) => {
+                                self.set_status(format!("Error: Invalid runtime '{}'", tokens[i]));
+                                return;
+                            }
+                        };
                     }
                 }
                 _ => {} // skip unknown flags

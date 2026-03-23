@@ -42,7 +42,8 @@ pub fn render_detail(f: &mut Frame, app: &App, worker: &WorkerInfo, area: Rect) 
         .as_ref()
         .and_then(|l| l.workers.iter().find(|wl| wl.worker == worker.url));
     let worker_rps = state.worker_rps.get(&worker.url).copied().unwrap_or(0.0);
-    render_stats(f, worker, worker_load, worker_rps, right_area);
+    let cb_has_open = state.circuit_breakers.open > 0;
+    render_stats(f, worker, worker_load, worker_rps, cb_has_open, right_area);
 }
 
 fn render_config(f: &mut Frame, worker: &WorkerInfo, area: Rect) {
@@ -110,6 +111,7 @@ fn render_stats(
     worker: &WorkerInfo,
     worker_load: Option<&crate::client::WorkerLoad>,
     worker_rps: f64,
+    cb_has_open: bool,
     area: Rect,
 ) {
     if area.height == 0 {
@@ -127,13 +129,11 @@ fn render_stats(
     // Req/s from Prometheus (all workers)
     lines.push(line_kv("Req/s", &format!("{worker_rps:.1}")));
 
-    // Circuit breaker (all workers)
-    let cb_label = if worker.is_healthy { "closed" } else { "open" };
-    let cb_color = if worker.is_healthy {
-        theme::GREEN
-    } else {
-        theme::RED
-    };
+    // Circuit breaker — use actual breaker state from Prometheus metrics
+    // If worker is unhealthy, show open; if there are open breakers globally and worker unhealthy, show open
+    let cb_is_open = !worker.is_healthy && cb_has_open;
+    let cb_label = if cb_is_open { "open" } else { "closed" };
+    let cb_color = if cb_is_open { theme::RED } else { theme::GREEN };
     lines.push(Line::from(vec![
         Span::styled(
             "Circuit: ".to_string(),
@@ -223,9 +223,10 @@ fn line_kv(key: &str, value: &str) -> Line<'static> {
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
+        let prefix: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{prefix}…")
     }
 }

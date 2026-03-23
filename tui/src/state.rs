@@ -92,7 +92,11 @@ pub type SharedState = Arc<RwLock<GatewayState>>;
 
 /// Spawn a background poller that periodically fetches data from all SMG
 /// endpoints and updates [`SharedState`].
-pub fn spawn_poller(client: SmgClient, state: SharedState, interval_secs: u64) {
+pub fn spawn_poller(
+    client: SmgClient,
+    state: SharedState,
+    interval_secs: u64,
+) -> tokio::task::JoinHandle<()> {
     // Safety: fire-and-forget background poller that runs for the app's lifetime
     #[expect(clippy::disallowed_methods)]
     tokio::spawn(async move {
@@ -101,7 +105,7 @@ pub fn spawn_poller(client: SmgClient, state: SharedState, interval_secs: u64) {
             ticker.tick().await;
             poll_once(&client, &state, interval_secs).await;
         }
-    });
+    })
 }
 
 /// Query nvidia-smi for GPU information. Returns None if nvidia-smi is not available.
@@ -365,12 +369,10 @@ async fn poll_once(client: &SmgClient, state: &SharedState, interval_secs: u64) 
 
     let has_worker_metrics = !worker_metrics.is_empty();
     if has_worker_metrics {
-        let mut total_throughput = 0.0_f64;
         let mut total_cache_hits = 0.0_f64;
         let worker_count = worker_metrics.len() as u32;
 
         for (worker_name, throughput, cache_hit) in worker_metrics {
-            total_throughput += throughput;
             total_cache_hits += cache_hit;
 
             let th = s
@@ -391,11 +393,6 @@ async fn poll_once(client: &SmgClient, state: &SharedState, interval_secs: u64) 
             }
             ch.push_back(cache_hit);
         }
-
-        if s.throughput_history.len() >= SPARKLINE_CAP {
-            s.throughput_history.pop_front();
-        }
-        s.throughput_history.push_back(total_throughput);
 
         let avg_cache = if worker_count > 0 {
             total_cache_hits / worker_count as f64
@@ -450,7 +447,11 @@ async fn poll_once(client: &SmgClient, state: &SharedState, interval_secs: u64) 
         // Compute avg latency from duration sum/count delta
         let (cur_sum, cur_count) = parse_duration_stats(&metrics_text);
         if let (Some(prev_sum), Some(prev_count)) = (s.prev_duration_sum, s.prev_duration_count) {
-            let delta_sum = cur_sum - prev_sum;
+            let delta_sum = if cur_sum >= prev_sum {
+                cur_sum - prev_sum
+            } else {
+                0.0
+            };
             let delta_count = cur_count.saturating_sub(prev_count);
             let avg_latency = if delta_count > 0 {
                 delta_sum / delta_count as f64

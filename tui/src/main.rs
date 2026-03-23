@@ -153,14 +153,10 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(RwLock::new(GatewayState::default()));
 
-    spawn_poller(client.clone(), Arc::clone(&state), cli.poll_interval);
+    let _poller = spawn_poller(client.clone(), Arc::clone(&state), cli.poll_interval);
 
-    // Terminal setup
+    // Terminal setup — use RAII guard so the terminal is restored on error or panic
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
 
     // Install panic hook that restores the terminal
     let panic_hook = std::panic::take_hook();
@@ -169,6 +165,21 @@ async fn main() -> Result<()> {
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         panic_hook(info);
     }));
+
+    let mut stdout = io::stdout();
+    if let Err(e) = execute!(stdout, EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(e.into());
+    }
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = match Terminal::new(backend) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            return Err(e.into());
+        }
+    };
 
     // Run
     let mut app = App::new(state, client);

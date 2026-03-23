@@ -144,17 +144,13 @@ pub fn render_add_menu(f: &mut Frame, app: &App) {
         }
         AddMenuState::SelectModel { runtime, .. } => {
             let presets = LocalModelPreset::all();
-            let mut items: Vec<(&str, String, String)> = presets
+            let mut items: Vec<(String, String, String)> = presets
                 .iter()
                 .enumerate()
-                .map(|(i, p)| {
-                    let num = Box::leak(format!("{}", i + 1).into_boxed_str()) as &str;
-                    (num, p.label(), format!("TP={}", p.tp()))
-                })
+                .map(|(i, p)| (format!("{}", i + 1), p.label(), format!("TP={}", p.tp())))
                 .collect();
-            let custom_num = Box::leak(format!("{}", presets.len() + 1).into_boxed_str()) as &str;
             items.push((
-                custom_num,
+                format!("{}", presets.len() + 1),
                 "Custom model...".to_string(),
                 "enter model ID + TP".to_string(),
             ));
@@ -162,7 +158,7 @@ pub fn render_add_menu(f: &mut Frame, app: &App) {
             let title = format!(" {} — Model ", runtime.label());
             let refs: Vec<(&str, &str, &str)> = items
                 .iter()
-                .map(|(n, l, d)| (*n, l.as_str(), d.as_str()))
+                .map(|(n, l, d)| (n.as_str(), l.as_str(), d.as_str()))
                 .collect();
             render_menu(f, &title, &refs);
         }
