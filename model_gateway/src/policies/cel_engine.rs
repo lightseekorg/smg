@@ -238,7 +238,7 @@ impl CelPolicyEngine {
             }
 
             // Score worker based on chosen strategy
-            let score = Self::score_worker(snapshot, strategy);
+            let score = Self::score_worker(&snapshot, strategy);
 
             // Lower score = better (fewer tokens, fewer in-flight)
             if best_score.is_none_or(|best| score < best) {

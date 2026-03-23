@@ -345,7 +345,7 @@ impl AppContextBuilder {
     ) -> Result<Self, String> {
         let scraper_cfg = &router_config.metrics_scraper;
 
-        let mut builder = Self::new().with_client(&router_config, request_timeout_secs)?;
+        let builder = Self::new().with_client(&router_config, request_timeout_secs)?;
         let gateway_client = builder
             .client
             .clone()
