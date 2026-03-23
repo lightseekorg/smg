@@ -15,7 +15,7 @@ use crate::{
             },
             proto_wrapper::{
                 ProtoEmbedRequest, ProtoEmbedResponseVariant, ProtoGenerateRequest, ProtoRequest,
-                ProtoStream,
+                ProtoStream, StatsProtoStream,
             },
             utils::tonic_ext::{TonicResultExt, TonicStatusExt},
         },
@@ -27,6 +27,7 @@ type StreamResult = Result<ProtoStream, tonic::Status>;
 /// Request execution stage: Execute gRPC requests (single or dual dispatch)
 pub(crate) struct RequestExecutionStage {
     mode: ExecutionMode,
+    router_backend: &'static str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -38,8 +39,11 @@ pub(crate) enum ExecutionMode {
 }
 
 impl RequestExecutionStage {
-    pub fn new(mode: ExecutionMode) -> Self {
-        Self { mode }
+    pub fn new(mode: ExecutionMode, router_backend: &'static str) -> Self {
+        Self {
+            mode,
+            router_backend,
+        }
     }
 }
 
@@ -95,9 +99,26 @@ impl PipelineStage for RequestExecutionStage {
         );
 
         let result = async {
+            let enable_request_statistics = ctx.components.enable_request_statistics;
+            let router_backend = self.router_backend;
+            let wrap = |stream| {
+                StatsProtoStream::new(
+                    stream,
+                    enable_request_statistics,
+                    request_id,
+                    model,
+                    router_backend,
+                )
+            };
+
             match proto_request {
                 ProtoRequest::Generate(req) => match self.mode {
-                    ExecutionMode::Single => self.execute_single(req, clients, workers).await,
+                    ExecutionMode::Single => {
+                        let stream = self.execute_single(req, clients, workers).await?;
+                        Ok(ExecutionResult::Single {
+                            stream: wrap(stream),
+                        })
+                    }
                     ExecutionMode::DualDispatch => {
                         // Dispatch based on runtime type:
                         // - SGLang: parallel dual dispatch with bootstrap metadata
@@ -105,10 +126,19 @@ impl PipelineStage for RequestExecutionStage {
                         let runtime_type = workers.pd_runtime_type();
                         match runtime_type {
                             Some(RuntimeType::Vllm) => {
-                                self.execute_sequential_pd(req, clients, workers).await
+                                let stream =
+                                    self.execute_sequential_pd(req, clients, workers).await?;
+                                Ok(ExecutionResult::Single {
+                                    stream: wrap(stream),
+                                })
                             }
                             Some(RuntimeType::Sglang) => {
-                                self.execute_dual_dispatch(req, clients, workers).await
+                                let (prefill, decode) =
+                                    self.execute_dual_dispatch(req, clients, workers).await?;
+                                Ok(ExecutionResult::Dual {
+                                    prefill: wrap(prefill),
+                                    decode: Box::new(wrap(decode)),
+                                })
                             }
                             Some(RuntimeType::Trtllm)
                             | Some(RuntimeType::External)
@@ -158,7 +188,7 @@ impl RequestExecutionStage {
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
-    ) -> Result<ExecutionResult, Response> {
+    ) -> Result<ProtoStream, Response> {
         let client = clients.single_mut().ok_or_else(|| {
             error!(
                 function = "execute_single",
@@ -181,7 +211,7 @@ impl RequestExecutionStage {
             )
         })?;
 
-        Ok(ExecutionResult::Single { stream })
+        Ok(stream)
     }
 
     async fn execute_single_embed(
@@ -241,7 +271,7 @@ impl RequestExecutionStage {
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
-    ) -> Result<ExecutionResult, Response> {
+    ) -> Result<(ProtoStream, ProtoStream), Response> {
         let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
             error!(
                 function = "execute_dual_dispatch",
@@ -279,10 +309,7 @@ impl RequestExecutionStage {
             )
         })?;
 
-        Ok(ExecutionResult::Dual {
-            prefill: prefill_stream,
-            decode: Box::new(decode_stream),
-        })
+        Ok((prefill_stream, decode_stream))
     }
 
     /// Execute vLLM PD: send to prefill with max_tokens=1 first, wait for completion,
@@ -296,7 +323,7 @@ impl RequestExecutionStage {
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
-    ) -> Result<ExecutionResult, Response> {
+    ) -> Result<ProtoStream, Response> {
         let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
             error!(
                 function = "execute_sequential_pd",
@@ -408,8 +435,6 @@ impl RequestExecutionStage {
 
         workers.record_outcome_decode(true);
 
-        Ok(ExecutionResult::Single {
-            stream: decode_stream,
-        })
+        Ok(decode_stream)
     }
 }
