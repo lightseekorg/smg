@@ -13,7 +13,8 @@ fn help_text(view: View) -> String {
         "\
 Navigation
   1-7          Switch view (Pulse/Workers/Chat/Logs/Bench/Traffic/Mesh)
-  q / Ctrl+C   Quit
+  q            Quit TUI (services keep running)
+  Ctrl+C ×2    Full shutdown (stop all services)
   ?            Toggle this help
   /            Filter
   :            Command mode

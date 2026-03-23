@@ -21,6 +21,10 @@ pub struct App {
     pub input_buffer: String,
     pub active_filter: Option<String>,
     pub should_quit: bool,
+    /// True when user wants full shutdown (kill workers + gateway). False = quit TUI only.
+    pub full_shutdown: bool,
+    /// Tracks first Ctrl+C press for double-Ctrl+C full shutdown.
+    ctrl_c_at: Option<std::time::Instant>,
     pub selected_index: usize,
     pub state: SharedState,
     pub client: SmgClient,
@@ -99,6 +103,8 @@ impl App {
             input_buffer: String::new(),
             active_filter: None,
             should_quit: false,
+            full_shutdown: false,
+            ctrl_c_at: None,
             selected_index: 0,
             state,
             client,
@@ -149,10 +155,12 @@ impl App {
             }
         }
 
-        // Clean up spawned worker processes
-        for (desc, child) in &mut self.worker_children {
-            if let Err(e) = child.kill().await {
-                tracing::warn!("Failed to kill worker {desc}: {e}");
+        // Only kill spawned workers on full shutdown (Ctrl+C×2)
+        if self.full_shutdown {
+            for (desc, child) in &mut self.worker_children {
+                if let Err(e) = child.kill().await {
+                    tracing::warn!("Failed to kill worker {desc}: {e}");
+                }
             }
         }
 
@@ -231,9 +239,21 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) {
-        // Ctrl+C always quits
+        // Ctrl+C: double-press for full shutdown, single press warns
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.should_quit = true;
+            if let Some(first) = self.ctrl_c_at {
+                if first.elapsed() < std::time::Duration::from_secs(2) {
+                    // Second Ctrl+C within 2s → full shutdown
+                    self.should_quit = true;
+                    self.full_shutdown = true;
+                    return;
+                }
+            }
+            // First Ctrl+C → warn and record time
+            self.ctrl_c_at = Some(std::time::Instant::now());
+            self.set_status(
+                "Press Ctrl+C again to stop all services, or q to quit TUI only".to_string(),
+            );
             return;
         }
 
@@ -767,23 +787,23 @@ impl App {
         #[expect(clippy::unwrap_used)]
         let state = self.state.read().unwrap();
 
-        // Collect all available models from workers
+        // Collect chat-capable models from workers.
+        // OpenAI has too many models — only show gpt-5.4* to keep the list manageable.
+        // All other providers/local workers show all chat models.
         let mut models: Vec<String> = Vec::new();
         if let Some(ref workers) = state.workers {
             for w in &workers.workers {
+                let is_openai = w.url.contains("openai.com");
                 for m in &w.models {
+                    let is_chat = m.model_type.iter().any(|t| t == "chat");
+                    if !is_chat {
+                        continue;
+                    }
+                    if is_openai && !m.id.starts_with("gpt-5.4") {
+                        continue;
+                    }
                     if !models.contains(&m.id) {
                         models.push(m.id.clone());
-                    }
-                }
-            }
-        }
-        // Fallback: if no models listed, use the models endpoint
-        if models.is_empty() {
-            if let Some(ref m) = state.models {
-                for model in &m.data {
-                    if !models.contains(&model.id) {
-                        models.push(model.id.clone());
                     }
                 }
             }

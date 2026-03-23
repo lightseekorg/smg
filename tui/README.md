@@ -15,13 +15,13 @@ cargo build -p smg-tui --release
 
 ```bash
 # Auto-start gateway and connect
-smg-tui --auto-start
+ ./target/release/smg-tui --auto-start
 
 # Connect to an existing gateway
-smg-tui --gateway-url http://localhost:30000
+ ./target/release/smg-tui --gateway-url http://localhost:30000
 
 # With API key for OpenAI/Anthropic models
-OPENAI_API_KEY=sk-... smg-tui --auto-start
+OPENAI_API_KEY=sk-...  ./target/release/smg-tui --auto-start
 ```
 
 ## CLI Options
@@ -41,7 +41,7 @@ When `--auto-start` is passed and the gateway is not reachable:
 1. Launches `smg launch` with `--enable-igw --policy round_robin`
 2. Falls back to `cargo run -p smg` if the binary isn't in PATH
 3. Polls the health endpoint until the gateway is ready (up to 120s)
-4. Kills the gateway process on TUI exit
+4. On `q`: TUI exits but gateway keeps running. On `Ctrl+C ×2`: full shutdown kills the gateway
 
 ## Views
 
@@ -149,7 +149,7 @@ Interactive chat with any model through the SMG gateway.
   - **Responses API** (`/v1/responses`): uses `previous_response_id` for efficient multi-turn
 - Title bar shows current model, endpoint, and multi-turn mode
 - Auto-selects first available model on send
-- Model filtering: local models shown as-is, external (OpenAI) filtered to `gpt-5.4*` prefix; wildcard workers get `gpt-5.4-nano` placeholder
+- Model filtering: local models shown as-is, OpenAI filtered to `gpt-5.4*` to keep the list manageable
 
 ---
 
@@ -237,7 +237,8 @@ Press `:` for command mode:
 | Key             | Context    | Action                           |
 |-----------------|------------|----------------------------------|
 | `1`-`7`         | Global     | Switch view                      |
-| `q` / `Ctrl+C`  | Global     | Quit                             |
+| `q`             | Global     | Quit TUI (services keep running) |
+| `Ctrl+C` ×2    | Global     | Full shutdown (stop all services) |
 | `?`             | Global     | Toggle help overlay              |
 | `/`             | Workers    | Filter mode                      |
 | `:`             | Workers    | Command mode                     |

@@ -190,16 +190,17 @@ async fn main() -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    // Kill spawned worker processes
-    for (desc, mut child) in app.worker_children.drain(..) {
-        tracing::info!("Shutting down worker: {desc}");
-        let _ = child.kill().await;
-    }
-
-    // If we auto-started the gateway, kill it on exit
-    if let Some(mut child) = _gateway_child {
-        tracing::info!("Shutting down auto-started gateway...");
-        let _ = child.kill().await;
+    // Full shutdown (Ctrl+C×2): kill all spawned workers and auto-started gateway
+    // Quit (q): leave everything running in the background
+    if app.full_shutdown {
+        for (desc, mut child) in app.worker_children.drain(..) {
+            tracing::info!("Shutting down worker: {desc}");
+            let _ = child.kill().await;
+        }
+        if let Some(mut child) = _gateway_child {
+            tracing::info!("Shutting down auto-started gateway...");
+            let _ = child.kill().await;
+        }
     }
 
     result
