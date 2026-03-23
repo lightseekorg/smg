@@ -5,28 +5,92 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use openai_protocol::worker::WorkerLoadResponse;
 use rand::Rng;
+use tokio::sync::broadcast::error::RecvError;
 use tracing::debug;
 
 use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
 use crate::core::Worker;
 
+/// Polls the `MetricsStore` on every load update and refreshes the local cache.
+pub fn start_metrics_sync_task(
+    metrics_store: Arc<metrics_service::MetricsStore>,
+    cached_loads: Arc<RwLock<HashMap<String, isize>>>,
+) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "background metrics sync task; lifecycle tied to router"
+    )]
+    tokio::spawn(async move {
+        let (mut rx, initial) = metrics_store.subscribe();
+
+        // Seed from current snapshots
+        {
+            let mut map = cached_loads.write().unwrap_or_else(|e| e.into_inner());
+            for snap in &initial {
+                let load = snap.kv_cache_tokens.unwrap_or_else(|| {
+                    let avg = if snap.avg_tokens_per_req > 0 {
+                        snap.avg_tokens_per_req
+                    } else {
+                        1024
+                    };
+                    snap.in_flight_requests * avg
+                });
+                map.insert(snap.url.clone(), load);
+            }
+        }
+
+        // Update on every new snapshot from the bus
+        loop {
+            match rx.recv().await {
+                Ok(snap) => {
+                    let load = snap.kv_cache_tokens.unwrap_or_else(|| {
+                        let avg = if snap.avg_tokens_per_req > 0 {
+                            snap.avg_tokens_per_req
+                        } else {
+                            1024
+                        };
+                        snap.in_flight_requests * avg
+                    });
+                    let mut map = cached_loads.write().unwrap_or_else(|e| e.into_inner());
+                    map.insert(snap.url.clone(), load);
+                }
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!("PowerOfTwoPolicy metrics sync lagged by {} messages", n);
+                }
+                Err(RecvError::Closed) => {
+                    tracing::warn!("PowerOfTwoPolicy metrics sync channel closed");
+                    break;
+                }
+            }
+        }
+    });
+}
+
 /// Power-of-two choices policy
 ///
 /// Randomly selects two workers and routes to the one with lower load.
-/// This provides good load distribution with minimal coordination overhead.
+/// Load information is driven by `MetricsStore` events (event-driven)
+/// and can also be seeded via the legacy `update_loads` path.
 #[derive(Debug)]
 pub struct PowerOfTwoPolicy {
-    /// Cached load information from external monitoring
-    cached_loads: RwLock<HashMap<String, WorkerLoadResponse>>,
+    /// Cached token-load (or estimated load) per worker URL.
+    /// Updated either via `update_loads()` (legacy) or event-driven via `start_metrics_sync_task`.
+    cached_loads: Arc<RwLock<HashMap<String, isize>>>,
 }
 
 impl PowerOfTwoPolicy {
     pub fn new() -> Self {
         Self {
-            cached_loads: RwLock::new(HashMap::new()),
+            cached_loads: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Create a new policy and immediately start a background event-driven sync task.
+    pub fn with_metrics_store(metrics_store: Arc<metrics_service::MetricsStore>) -> Self {
+        let policy = Self::new();
+        start_metrics_sync_task(metrics_store, Arc::clone(&policy.cached_loads));
+        policy
     }
 }
 
@@ -69,12 +133,8 @@ impl LoadBalancingPolicy for PowerOfTwoPolicy {
         // we must degrade BOTH to request counts to ensure fairness.
         let (load1, load2, metric_label) = match (load1_response, load2_response) {
             (Some(r1), Some(r2)) => {
-                // Both have load data. Compare by token usage ratio (0.0–1.0).
-                (
-                    r1.effective_token_usage(),
-                    r2.effective_token_usage(),
-                    "token_usage",
-                )
+                // Both have load data (isize token estimate). Compare directly.
+                (*r1 as f64, *r2 as f64, "token_load")
             }
             _ => {
                 // One or both are missing load data.
@@ -113,9 +173,9 @@ impl LoadBalancingPolicy for PowerOfTwoPolicy {
         "power_of_two"
     }
 
-    fn update_loads(&self, loads: &HashMap<String, WorkerLoadResponse>) {
+    fn update_loads(&self, loads: &HashMap<String, isize>) {
         if let Ok(mut cached) = self.cached_loads.write() {
-            cached.extend(loads.iter().map(|(k, v)| (k.clone(), v.clone())));
+            cached.extend(loads.iter().map(|(k, v)| (k.clone(), *v)));
         }
     }
 
@@ -132,30 +192,13 @@ impl Default for PowerOfTwoPolicy {
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::worker::SchedulerLoadSnapshot;
-
     use super::*;
     use crate::core::{BasicWorkerBuilder, WorkerType};
 
-    /// Create a `WorkerLoadResponse` with a single DP rank at the given token_usage ratio.
-    fn make_load(token_usage: f64) -> WorkerLoadResponse {
-        WorkerLoadResponse {
-            timestamp: String::new(),
-            dp_rank_count: 1,
-            loads: vec![SchedulerLoadSnapshot {
-                dp_rank: 0,
-                num_running_reqs: 0,
-                num_waiting_reqs: 0,
-                num_total_reqs: 0,
-                num_used_tokens: 0,
-                max_total_num_tokens: 0,
-                token_usage,
-                gen_throughput: 0.0,
-                cache_hit_rate: 0.0,
-                utilization: 0.0,
-                max_running_requests: 0,
-            }],
-        }
+    /// Create an isize token-load value from a 0.0–1.0 usage ratio.
+    /// Scaled by 10_000 to preserve ordering in comparisons.
+    fn make_load(token_usage: f64) -> isize {
+        (token_usage * 10_000.0) as isize
     }
 
     #[test]

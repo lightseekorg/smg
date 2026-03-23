@@ -95,6 +95,7 @@ impl OpenAIRouter {
             response_storage: ctx.response_storage.clone(),
             conversation_storage: ctx.conversation_storage.clone(),
             conversation_item_storage: ctx.conversation_item_storage.clone(),
+            metrics_store: ctx.metrics_store.clone(),
         });
 
         Ok(Self {

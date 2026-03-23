@@ -1,11 +1,11 @@
 //! Factory for creating load balancing policies
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use super::{
-    BucketConfig, BucketPolicy, CacheAwareConfig, CacheAwarePolicy, ConsistentHashingPolicy,
-    LoadBalancingPolicy, ManualConfig, ManualPolicy, PowerOfTwoPolicy, PrefixHashConfig,
-    PrefixHashPolicy, RandomPolicy, RoundRobinPolicy,
+    BucketConfig, BucketPolicy, CacheAwareConfig, CacheAwarePolicy, CelPolicyEngine,
+    ConsistentHashingPolicy, LoadBalancingPolicy, ManualConfig, ManualPolicy, PowerOfTwoPolicy,
+    PrefixHashConfig, PrefixHashPolicy, RandomPolicy, RoundRobinPolicy, RoutingStrategy,
 };
 use crate::config::PolicyConfig;
 
@@ -13,12 +13,36 @@ use crate::config::PolicyConfig;
 pub struct PolicyFactory;
 
 impl PolicyFactory {
-    /// Create a policy from configuration
+    /// Create a policy from configuration.
+    ///
+    /// For the `MetricsDriven` policy variant, `metrics_store` must be `Some`.
+    /// If it is `None` the factory falls back to `RoundRobinPolicy` and logs a
+    /// warning.
     pub fn create_from_config(config: &PolicyConfig) -> Arc<dyn LoadBalancingPolicy> {
+        Self::create_from_config_with_store(config, None)
+    }
+
+    /// Create a policy from configuration, optionally supplying a `MetricsStore`
+    /// for the `MetricsDriven` variant.
+    pub fn create_from_config_with_store(
+        config: &PolicyConfig,
+        metrics_store: Option<Arc<metrics_service::MetricsStore>>,
+    ) -> Arc<dyn LoadBalancingPolicy> {
         match config {
             PolicyConfig::Random => Arc::new(RandomPolicy::new()),
             PolicyConfig::RoundRobin => Arc::new(RoundRobinPolicy::new()),
-            PolicyConfig::PowerOfTwo { .. } => Arc::new(PowerOfTwoPolicy::new()),
+            PolicyConfig::PowerOfTwo { .. } => {
+                if let Some(store) = metrics_store {
+                    Arc::new(PowerOfTwoPolicy::with_metrics_store(store))
+                } else {
+                    tracing::warn!(
+                        "PowerOfTwo policy created without a MetricsStore; \
+                         load metrics will not be available and the policy \
+                         will fall back to request-count estimates"
+                    );
+                    Arc::new(PowerOfTwoPolicy::new())
+                }
+            }
             PolicyConfig::CacheAware {
                 cache_threshold,
                 balance_abs_threshold,
@@ -72,6 +96,50 @@ impl PolicyFactory {
                 };
                 Arc::new(PrefixHashPolicy::new(config))
             }
+            PolicyConfig::MetricsDriven {
+                strategy,
+                fresh_threshold_secs,
+                stale_threshold_secs,
+            } => {
+                if let Some(store) = metrics_store {
+                    let routing_strategy = Self::parse_routing_strategy(strategy);
+                    Arc::new(CelPolicyEngine::with_strategy(
+                        store,
+                        Duration::from_secs(*fresh_threshold_secs),
+                        Duration::from_secs(*stale_threshold_secs),
+                        routing_strategy,
+                    ))
+                } else {
+                    tracing::warn!(
+                        "MetricsDriven policy requested but no MetricsStore provided; \
+                         falling back to round-robin"
+                    );
+                    Arc::new(RoundRobinPolicy::new())
+                }
+            }
+        }
+    }
+
+    /// Parse a strategy string into a `RoutingStrategy`.
+    ///
+    /// Named strategies (`"min_kv_cache_tokens"`, `"min_in_flight"`) are
+    /// recognized case-insensitively; anything else is treated as a CEL
+    /// expression to compile.
+    fn parse_routing_strategy(strategy: &str) -> RoutingStrategy {
+        match strategy.to_lowercase().as_str() {
+            "min_kv_cache_tokens" | "minkvcachetokens" => RoutingStrategy::MinKvCacheTokens,
+            "min_in_flight" | "mininflight" => RoutingStrategy::MinInFlight,
+            _ => {
+                // Treat as CEL expression — compile once
+                RoutingStrategy::custom(strategy).unwrap_or_else(|err| {
+                    tracing::warn!(
+                        "Failed to compile CEL strategy '{}': {}; falling back to MinKvCacheTokens",
+                        strategy,
+                        err
+                    );
+                    RoutingStrategy::MinKvCacheTokens
+                })
+            }
         }
     }
 
@@ -88,6 +156,15 @@ impl PolicyFactory {
                 Some(Arc::new(ConsistentHashingPolicy::new()))
             }
             "prefix_hash" | "prefixhash" => Some(Arc::new(PrefixHashPolicy::with_defaults())),
+            // MetricsDriven requires a MetricsStore — callers that know the
+            // store should use create_from_config_with_store instead.
+            "metrics_driven" | "metricsdriven" => {
+                tracing::warn!(
+                    "create_by_name(\"metrics_driven\") called without a MetricsStore; \
+                     use create_from_config_with_store instead. Falling back to round-robin."
+                );
+                Some(Arc::new(RoundRobinPolicy::new()))
+            }
             _ => None,
         }
     }
@@ -155,5 +232,26 @@ mod tests {
         assert!(PolicyFactory::create_by_name("consistent_hashing").is_some());
         assert!(PolicyFactory::create_by_name("ConsistentHashing").is_some());
         assert!(PolicyFactory::create_by_name("unknown").is_none());
+    }
+
+    #[test]
+    fn test_parse_routing_strategy() {
+        assert!(matches!(
+            PolicyFactory::parse_routing_strategy("min_kv_cache_tokens"),
+            RoutingStrategy::MinKvCacheTokens
+        ));
+        assert!(matches!(
+            PolicyFactory::parse_routing_strategy("MinKvCacheTokens"),
+            RoutingStrategy::MinKvCacheTokens
+        ));
+        assert!(matches!(
+            PolicyFactory::parse_routing_strategy("min_in_flight"),
+            RoutingStrategy::MinInFlight
+        ));
+        // Valid CEL compiles fine
+        assert!(matches!(
+            PolicyFactory::parse_routing_strategy("in_flight_requests * 2"),
+            RoutingStrategy::Custom { .. }
+        ));
     }
 }

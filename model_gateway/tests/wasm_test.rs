@@ -19,7 +19,7 @@ use llm_tokenizer::TokenizerRegistry;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
-    core::{LoadMonitor, WorkerRegistry},
+    core::WorkerRegistry,
     policies::PolicyRegistry,
     routers::RouterFactory,
     server::{build_app, AppState},
@@ -60,13 +60,12 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
     let conversation_storage = Arc::new(MemoryConversationStorage::new());
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
-    // Initialize load monitor
-    let load_monitor = Some(Arc::new(LoadMonitor::new(
-        worker_registry.clone(),
-        policy_registry.clone(),
-        client.clone(),
-        config.worker_startup_check_interval_secs,
-    )));
+    // Create a minimal MetricsStore (no scrapers needed in tests)
+    let bus = Arc::new(metrics_service::EventBus::new(64));
+    let metrics_store = Arc::new(metrics_service::MetricsStore::new(
+        bus,
+        Duration::from_secs(60),
+    ));
 
     // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
     use std::sync::OnceLock;
@@ -87,7 +86,7 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
-            .load_monitor(load_monitor)
+            .metrics_store(metrics_store)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
             .mcp_orchestrator(mcp_orchestrator_lock)

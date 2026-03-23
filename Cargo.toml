@@ -1,5 +1,5 @@
 [workspace]
-members = ["model_gateway", "crates/protocols", "crates/reasoning_parser", "crates/tool_parser", "crates/workflow", "crates/tokenizer", "crates/auth", "crates/mcp", "crates/kv_index", "crates/data_connector", "crates/multimodal", "crates/wasm", "crates/mesh", "crates/grpc_client", "bindings/python", "bindings/golang", "clients/rust", "clients/openapi-gen"]
+members = ["model_gateway", "crates/protocols", "crates/reasoning_parser", "crates/tool_parser", "crates/workflow", "crates/tokenizer", "crates/auth", "crates/mcp", "crates/kv_index", "crates/data_connector", "crates/multimodal", "crates/wasm", "crates/mesh", "crates/grpc_client", "bindings/python", "bindings/golang", "clients/rust", "clients/openapi-gen", "metrics_service"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -27,6 +27,7 @@ prost-types = "0.14.1"
 tonic = { version = "0.14.2", features = ["gzip", "transport"] }
 tonic-prost = "0.14.2"
 axum = { version = "0.8.6" }
+cel-interpreter = "0.8"
 blake3 = "1.5"
 bytemuck = { version = "1.21" }
 chrono = { version = "0.4" }
@@ -55,6 +56,8 @@ multer = "3"
 scopeguard = "1.2"
 bitflags = "2.10.0"
 schemars = "0.8"
+metrics = "0.24.2"
+metrics-exporter-prometheus = "0.18.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
