@@ -155,10 +155,12 @@ impl App {
             }
         }
 
-        // Only kill spawned workers on full shutdown (Ctrl+C×2)
+        // Only kill spawned workers on full shutdown (Ctrl+C×2).
+        // Note: main() also handles this after terminal cleanup, but we start
+        // killing here so processes begin dying while the terminal restores.
         if self.full_shutdown {
             for (desc, child) in &mut self.worker_children {
-                if let Err(e) = child.kill().await {
+                if let Err(e) = child.start_kill() {
                     tracing::warn!("Failed to kill worker {desc}: {e}");
                 }
             }
@@ -242,14 +244,14 @@ impl App {
         // Ctrl+C: double-press for full shutdown, single press warns
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if let Some(first) = self.ctrl_c_at {
-                if first.elapsed() < std::time::Duration::from_secs(2) {
-                    // Second Ctrl+C within 2s → full shutdown
+                if first.elapsed() < std::time::Duration::from_secs(3) {
+                    // Second Ctrl+C within 3s → full shutdown
                     self.should_quit = true;
                     self.full_shutdown = true;
                     return;
                 }
             }
-            // First Ctrl+C → warn and record time
+            // First (or expired) Ctrl+C → warn and record time
             self.ctrl_c_at = Some(std::time::Instant::now());
             self.set_status(
                 "Press Ctrl+C again to stop all services, or q to quit TUI only".to_string(),

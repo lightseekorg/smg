@@ -193,17 +193,49 @@ async fn main() -> Result<()> {
     // Full shutdown (Ctrl+C×2): kill all spawned workers and auto-started gateway
     // Quit (q): leave everything running in the background
     if app.full_shutdown {
+        tracing::info!("Full shutdown: stopping all services...");
         for (desc, mut child) in app.worker_children.drain(..) {
-            tracing::info!("Shutting down worker: {desc}");
+            tracing::info!("Stopping worker: {desc}");
             let _ = child.kill().await;
+            let _ = child.wait().await;
         }
         if let Some(mut child) = _gateway_child {
-            tracing::info!("Shutting down auto-started gateway...");
+            tracing::info!("Stopping auto-started gateway...");
             let _ = child.kill().await;
+            let _ = child.wait().await;
+        } else {
+            // Gateway wasn't auto-started by this session — kill by port
+            let port = extract_port(&cli.gateway_url).unwrap_or(30000);
+            tracing::info!("Stopping gateway on port {port}...");
+            kill_process_on_port(port).await;
         }
+        tracing::info!("All services stopped.");
     }
 
     result
+}
+
+/// Kill the process listening on the given TCP port using lsof + kill.
+async fn kill_process_on_port(port: u16) {
+    let output = tokio::process::Command::new("lsof")
+        .args(["-ti", &format!("tcp:{port}")])
+        .output()
+        .await;
+    match output {
+        Ok(out) if out.status.success() => {
+            let pids = String::from_utf8_lossy(&out.stdout);
+            for pid_str in pids.split_whitespace() {
+                tracing::info!("Killing process {pid_str} on port {port}");
+                let _ = tokio::process::Command::new("kill")
+                    .args(["-TERM", pid_str.trim()])
+                    .output()
+                    .await;
+            }
+        }
+        _ => {
+            tracing::warn!("Could not find process on port {port}");
+        }
+    }
 }
 
 /// Extract port from a URL like "http://localhost:30000" or "http://localhost:30000/health".
