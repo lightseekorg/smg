@@ -274,10 +274,9 @@ impl RequestContext {
     pub fn for_completion(
         request: Arc<CompletionRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
-        let model_id = model_id.unwrap_or_else(|| request.model.clone());
         Self {
             input: RequestInput {
                 request_type: RequestType::Completion(request),

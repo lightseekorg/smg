@@ -591,7 +591,7 @@ impl RequestPipeline {
         &self,
         request: Arc<CompletionRequest>,
         headers: Option<http::HeaderMap>,
-        model_id: Option<String>,
+        _model_id: Option<String>,
         components: Arc<SharedComponents>,
     ) -> Response {
         let start = Instant::now();
@@ -607,8 +607,7 @@ impl RequestPipeline {
             bool_to_static_str(streaming),
         );
 
-        let mut ctx =
-            RequestContext::for_completion(request, headers, model_id.clone(), components);
+        let mut ctx = RequestContext::for_completion(request, headers, model.clone(), components);
 
         for stage in self.stages.iter() {
             match stage.execute(&mut ctx).await {
