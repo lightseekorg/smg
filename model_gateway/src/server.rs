@@ -1147,7 +1147,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let mesh_port = config
         .mesh_server_config
         .as_ref()
-        .map(|c| c.self_addr.port());
+        .map(|c| c.advertise_addr.port());
 
     let app_state = Arc::new(AppState {
         router,

@@ -781,6 +781,7 @@ impl MeshController {
                                         let service = GossipService::new(
                                             Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
                                             SocketAddr::from(([0, 0, 0, 0], 0)),
+                                            SocketAddr::from(([0, 0, 0, 0], 0)),
                                             &self_name,
                                         )
                                         .with_stores(stores.clone())

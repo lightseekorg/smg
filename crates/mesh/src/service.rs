@@ -41,7 +41,8 @@ pub type ClusterState = Arc<RwLock<BTreeMap<String, NodeState>>>;
 
 pub struct MeshServerConfig {
     pub self_name: String,
-    pub self_addr: SocketAddr,
+    pub bind_addr: SocketAddr,
+    pub advertise_addr: SocketAddr,
     pub init_peer: Option<SocketAddr>,
     pub mtls_config: Option<MTLSConfig>,
 }
@@ -267,18 +268,24 @@ pub struct MeshServerBuilder {
     state: ClusterState,
     stores: Arc<StateStores>,
     self_name: String,
-    self_addr: SocketAddr,
+    bind_addr: SocketAddr,
+    advertise_addr: SocketAddr,
     init_peer: Option<SocketAddr>,
     mtls_manager: Option<Arc<MTLSManager>>,
 }
 
 impl MeshServerBuilder {
-    pub fn new(self_name: String, self_addr: SocketAddr, init_peer: Option<SocketAddr>) -> Self {
+    pub fn new(
+        self_name: String,
+        bind_addr: SocketAddr,
+        advertise_addr: SocketAddr,
+        init_peer: Option<SocketAddr>,
+    ) -> Self {
         let state = Arc::new(RwLock::new(BTreeMap::from([(
             self_name.clone(),
             NodeState {
                 name: self_name.clone(),
-                address: self_addr.to_string(),
+                address: advertise_addr.to_string(),
                 status: NodeStatus::Alive as i32,
                 version: 1,
                 metadata: HashMap::new(),
@@ -289,7 +296,8 @@ impl MeshServerBuilder {
             state,
             stores,
             self_name,
-            self_addr,
+            bind_addr,
+            advertise_addr,
             init_peer,
             mtls_manager: None,
         }
@@ -319,7 +327,8 @@ impl MeshServerBuilder {
                 stores: self.stores.clone(),
                 sync_manager: sync_manager.clone(),
                 self_name: self.self_name.clone(),
-                self_addr: self.self_addr,
+                bind_addr: self.bind_addr,
+                advertise_addr: self.advertise_addr,
                 init_peer: self.init_peer,
                 signal_rx,
                 partition_detector: Some(partition_detector.clone()),
@@ -330,7 +339,7 @@ impl MeshServerBuilder {
                 stores: self.stores.clone(),
                 sync_manager,
                 self_name: self.self_name.clone(),
-                _self_addr: self.self_addr,
+                _self_addr: self.advertise_addr,
                 signal_tx,
                 partition_detector: Some(partition_detector),
                 state_machine: Some(state_machine),
@@ -342,8 +351,12 @@ impl MeshServerBuilder {
 
 impl From<&MeshServerConfig> for MeshServerBuilder {
     fn from(value: &MeshServerConfig) -> Self {
-        let mut builder =
-            MeshServerBuilder::new(value.self_name.clone(), value.self_addr, value.init_peer);
+        let mut builder = MeshServerBuilder::new(
+            value.self_name.clone(),
+            value.bind_addr,
+            value.advertise_addr,
+            value.init_peer,
+        );
         if let Some(mtls_config) = &value.mtls_config {
             builder = builder.with_mtls(mtls_config.clone());
         }
@@ -356,7 +369,8 @@ pub struct MeshServer {
     stores: Arc<StateStores>,
     sync_manager: Arc<MeshSyncManager>,
     self_name: String,
-    self_addr: SocketAddr,
+    bind_addr: SocketAddr,
+    advertise_addr: SocketAddr,
     init_peer: Option<SocketAddr>,
     signal_rx: watch::Receiver<bool>,
     partition_detector: Option<Arc<PartitionDetector>>,
@@ -365,13 +379,18 @@ pub struct MeshServer {
 
 impl MeshServer {
     fn build_ping_server(&self) -> GossipService {
-        GossipService::new(self.state.clone(), self.self_addr, &self.self_name)
+        GossipService::new(
+            self.state.clone(),
+            self.bind_addr,
+            self.advertise_addr,
+            &self.self_name,
+        )
     }
 
     fn build_controller(&self) -> MeshController {
         MeshController::new(
             self.state.clone(),
-            self.self_addr,
+            self.advertise_addr,
             &self.self_name,
             self.init_peer,
             self.stores.clone(),
@@ -388,20 +407,24 @@ impl MeshServer {
         let bound_addr = listener
             .local_addr()
             .map_err(|e| anyhow::anyhow!("Failed to read listener local addr: {e}"))?;
-        if bound_addr != self.self_addr {
+        if bound_addr != self.bind_addr {
             return Err(anyhow::anyhow!(
-                "Listener/self_addr mismatch: listener={}, self_addr={}",
+                "Listener/bind_addr mismatch: listener={}, bind_addr={}",
                 bound_addr,
-                self.self_addr
+                self.bind_addr
             ));
         }
         self.start_inner(Some(listener)).await
     }
 
     async fn start_inner(self, listener: Option<tokio::net::TcpListener>) -> Result<()> {
-        log::info!("Mesh server listening on {}", self.self_addr);
+        log::info!(
+            "Mesh server listening on {} and advertising {}",
+            self.bind_addr,
+            self.advertise_addr
+        );
         let self_name = self.self_name.clone();
-        let self_address = self.self_addr;
+        let advertise_address = self.advertise_addr;
 
         #[expect(
             clippy::expect_used,
@@ -456,7 +479,7 @@ impl MeshServer {
         log::info!(
             "Mesh server {} at {} is shutting down",
             self_name,
-            self_address
+            advertise_address
         );
         Ok(())
     }
@@ -622,7 +645,7 @@ macro_rules! mesh_run {
         tracing::info!("Starting mesh server : {}", $addr);
         use $crate::MeshServerBuilder;
         let (server, handler) =
-            MeshServerBuilder::new($name.to_string(), $addr, $init_peer).build();
+            MeshServerBuilder::new($name.to_string(), $addr, $addr, $init_peer).build();
         #[expect(clippy::disallowed_methods, reason = "test macro: spawned server runs for the test lifetime and handler is returned for assertions")]
         tokio::spawn(async move {
             if let Err(e) = server.start().await {
@@ -636,7 +659,7 @@ macro_rules! mesh_run {
         tracing::info!("Starting mesh server : {}", $addr);
         use $crate::MeshServerBuilder;
         let (server, handler) =
-            MeshServerBuilder::new($name.to_string(), $addr, $init_peer).build();
+            MeshServerBuilder::new($name.to_string(), $addr, $addr, $init_peer).build();
         #[expect(clippy::disallowed_methods, reason = "test macro: spawned server runs for the test lifetime and handler is returned for assertions")]
         tokio::spawn(async move {
             if let Err(e) = server.start_with_listener($listener).await {
@@ -671,6 +694,52 @@ mod tests {
                 )
                 .try_init();
         });
+    }
+
+    #[tokio::test]
+    async fn test_ping_advertises_configured_address() {
+        init();
+
+        let (listener, bind_addr) = bind_node().await;
+        let advertise_addr = SocketAddr::from(([10, 20, 30, 40], bind_addr.port()));
+        let (server, handler) =
+            MeshServerBuilder::new("A".to_string(), bind_addr, advertise_addr, None).build();
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test server runs in the background for the duration of the assertion"
+        )]
+        tokio::spawn(async move {
+            if let Err(e) = server.start_with_listener(listener).await {
+                tracing::error!("Mesh server failed: {}", e);
+            }
+        });
+
+        wait_for(
+            || std::net::TcpStream::connect(bind_addr).is_ok(),
+            Duration::from_secs(5),
+            "mesh listener started",
+        )
+        .await;
+
+        let response = try_ping(
+            &NodeState {
+                name: "A".to_string(),
+                address: bind_addr.to_string(),
+                status: NodeStatus::Alive as i32,
+                version: 1,
+                metadata: HashMap::new(),
+            },
+            Some(gossip_message::Payload::Ping(Ping {
+                state_sync: Some(StateSync { nodes: vec![] }),
+            })),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.address, advertise_addr.to_string());
+        handler.shutdown();
     }
 
     #[tokio::test]

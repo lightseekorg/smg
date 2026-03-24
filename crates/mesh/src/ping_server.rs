@@ -44,7 +44,8 @@ use super::{
 #[derive(Debug)]
 pub struct GossipService {
     state: ClusterState,
-    self_addr: SocketAddr,
+    listen_addr: SocketAddr,
+    advertise_addr: SocketAddr,
     self_name: String,
     stores: Option<Arc<StateStores>>, // Optional state stores for CRDT-based sync
     sync_manager: Option<Arc<MeshSyncManager>>, // Optional sync manager for applying remote updates
@@ -232,10 +233,16 @@ impl GossipService {
 }
 
 impl GossipService {
-    pub fn new(state: ClusterState, self_addr: SocketAddr, self_name: &str) -> Self {
+    pub fn new(
+        state: ClusterState,
+        listen_addr: SocketAddr,
+        advertise_addr: SocketAddr,
+        self_name: &str,
+    ) -> Self {
         Self {
             state,
-            self_addr,
+            listen_addr,
+            advertise_addr,
             self_name: self_name.to_string(),
             stores: None,
             sync_manager: None,
@@ -277,7 +284,7 @@ impl GossipService {
         self,
         signal: F,
     ) -> Result<()> {
-        let listen_addr = self.self_addr;
+        let listen_addr = self.listen_addr;
         let service = GossipServer::new(self)
             .max_decoding_message_size(MAX_MESSAGE_SIZE)
             .max_encoding_message_size(MAX_MESSAGE_SIZE)
@@ -361,7 +368,7 @@ impl Gossip for GossipService {
                 };
                 Ok(Response::new(NodeUpdate {
                     name: self.self_name.clone(),
-                    address: self.self_addr.to_string(),
+                    address: self.advertise_addr.to_string(),
                     status: current_status,
                 }))
             }
@@ -800,7 +807,8 @@ impl Gossip for GossipService {
                                     // Generate and send snapshot chunks
                                     let service = GossipService {
                                         state: state.clone(),
-                                        self_addr: SocketAddr::from(([0, 0, 0, 0], 0)), // Not used in snapshot generation
+                                        listen_addr: SocketAddr::from(([0, 0, 0, 0], 0)), // Not used in snapshot generation
+                                        advertise_addr: SocketAddr::from(([0, 0, 0, 0], 0)), // Not used in snapshot generation
                                         self_name: self_name.clone(),
                                         stores: stores.clone(),
                                         sync_manager: sync_manager.clone(),
