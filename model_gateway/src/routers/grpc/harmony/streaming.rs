@@ -39,7 +39,7 @@ use crate::{
             },
         },
         context,
-        proto_wrapper::{ProtoResponseVariant, ProtoStream},
+        proto_wrapper::{ProtoResponseVariant, StatsProtoStream},
         utils,
     },
 };
@@ -125,7 +125,7 @@ impl HarmonyStreamingProcessor {
 
     /// Process streaming chunks from a single stream
     async fn process_single_stream(
-        grpc_stream: ProtoStream,
+        grpc_stream: StatsProtoStream,
         dispatch: context::DispatchMetadata,
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
@@ -145,8 +145,8 @@ impl HarmonyStreamingProcessor {
 
     /// Process streaming chunks from dual streams (prefill + decode)
     async fn process_dual_stream(
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: StatsProtoStream,
+        decode_stream: StatsProtoStream,
         dispatch: context::DispatchMetadata,
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
@@ -188,7 +188,7 @@ impl HarmonyStreamingProcessor {
     /// (dual stream) or empty (single stream). Values from `Complete` messages
     /// are inserted only if not already present.
     async fn process_chat_decode_stream(
-        mut decode_stream: ProtoStream,
+        mut decode_stream: StatsProtoStream,
         dispatch: &context::DispatchMetadata,
         original_request: &ChatCompletionRequest,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
@@ -335,6 +335,8 @@ impl HarmonyStreamingProcessor {
             input_tokens: Some(total_prompt as u64),
             output_tokens: total_completion as u64,
         });
+
+        decode_stream.spawn_stats_emission();
 
         Ok(())
     }
@@ -495,8 +497,8 @@ impl HarmonyStreamingProcessor {
     }
 
     async fn process_responses_dual_stream(
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: StatsProtoStream,
+        decode_stream: StatsProtoStream,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
@@ -523,7 +525,7 @@ impl HarmonyStreamingProcessor {
 
     /// Process decode stream for tool call events.
     async fn process_decode_stream(
-        mut decode_stream: ProtoStream,
+        mut decode_stream: StatsProtoStream,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,

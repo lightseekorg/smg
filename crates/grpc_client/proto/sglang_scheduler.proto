@@ -30,6 +30,9 @@ service SglangScheduler {
   // Get comprehensive load metrics
   rpc GetLoads(GetLoadsRequest) returns (GetLoadsResponse);
 
+  // Get request-level statistics for a completed request
+  rpc GetRequestStats(GetRequestStatsRequest) returns (GetRequestStatsResponse);
+
   // Get tokenizer artifacts for remote construction
   rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest) returns (stream smg.grpc.common.GetTokenizerChunk);
 
@@ -255,6 +258,27 @@ message GenerateError {
   string message = 1;
   string http_status_code = 2;
   string details = 3;
+}
+
+message GetRequestStatsRequest {
+  string request_id = 1;
+}
+
+message RequestStats {
+  uint32 index = 1;
+  optional double request_received_timestamp_s = 2;
+  optional double first_token_generated_timestamp_s = 3;
+  optional double request_finished_timestamp_s = 4;
+  optional double response_sent_timestamp_s = 5;
+  optional double cache_hit_rate = 6;
+  optional double spec_decoding_acceptance_rate = 7;
+  optional uint32 prompt_tokens = 8;
+  optional uint32 completion_tokens = 9;
+  optional uint32 cached_tokens = 10;
+}
+
+message GetRequestStatsResponse {
+  repeated RequestStats stats = 1;
 }
 
 // Output logprobs - all values are present (no None)

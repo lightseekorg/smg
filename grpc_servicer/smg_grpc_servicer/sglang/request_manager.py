@@ -32,10 +32,12 @@ from sglang.srt.managers.io_struct import (
 from sglang.srt.observability.req_time_stats import (
     APIServerReqTimeStats,
     calibrate_time_diff,
+    convert_time_to_realtime,
     real_time,
 )
 from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.utils import get_or_create_event_loop, get_zmq_socket, kill_process_tree
+from sglang.srt.utils import get_or_create_event_loop, kill_process_tree
+from sglang.srt.utils.network import get_zmq_socket
 from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
@@ -141,6 +143,8 @@ class GrpcReqState:
     # Metrics (same as TokenizerManager's ReqState)
     time_stats: APIServerReqTimeStats
     last_completion_tokens: int = 1
+    last_prompt_tokens: int = 0
+    last_cached_tokens: int = 0
 
     # Streaming state
     stream_finished: bool = False
@@ -167,6 +171,9 @@ class GrpcRequestManager:
     Manages gRPC request lifecycle, mimicking TokenizerManager's orchestration
     behaviors without tokenization.
     """
+
+    # Max completed request stats entries kept in memory for GetRequestStats lookups.
+    _MAX_COMPLETED_STATS_CACHE = 4096
 
     def __init__(
         self,
@@ -220,6 +227,8 @@ class GrpcRequestManager:
         self.get_loads_communicator = _GrpcCommunicator(
             self.send_to_scheduler, fan_out=server_args.dp_size
         )
+
+        self.completed_request_stats: dict[str, dict[int, dict[str, Any]]] = {}
 
         logger.info(
             f"GrpcRequestManager initialized with ZMQ IPC: "
@@ -294,7 +303,15 @@ class GrpcRequestManager:
             request_ids.append(gen_request_id)
 
             # Start generation request
-            generators.append(self._handle_single_request(gen_obj, gen_request_id, grpc_context))
+            generators.append(
+                self._handle_single_request(
+                    gen_obj,
+                    gen_request_id,
+                    grpc_context,
+                    parent_request_id=base_request_id,
+                    parent_index=i,
+                )
+            )
 
         # Handle response aggregation
         is_stream = getattr(obj, "stream", False)
@@ -348,6 +365,8 @@ class GrpcRequestManager:
         obj: TokenizedGenerateReqInput,
         request_id: str | None = None,
         grpc_context: grpc.aio.ServicerContext | None = None,
+        parent_request_id: str | None = None,
+        parent_index: int = 0,
     ):
         """Handle a single request - core implementation without n>1 logic."""
         # Generate request ID if not provided
@@ -369,10 +388,13 @@ class GrpcRequestManager:
             is_stream = getattr(obj, "stream", False)
 
             while True:
+                response = None
                 try:
                     response = await state.out_queue.get()
 
                     if is_stream:
+                        if state.time_stats.response_sent_to_client_time == 0.0:
+                            state.time_stats.set_response_sent_to_client_time()
                         yield response
 
                     # Non-streaming: yield final response with accumulated tokens from state
@@ -381,6 +403,15 @@ class GrpcRequestManager:
                             final_response = response.copy()
                             final_response["token_ids"] = state.output_ids
                             yield final_response
+                        if state.time_stats.response_sent_to_client_time == 0.0:
+                            state.time_stats.set_response_sent_to_client_time()
+                        self._populate_timestamps(response["meta_info"], state.time_stats)
+                        self._store_request_stats(
+                            request_id,
+                            response,
+                            parent_request_id,
+                            parent_index,
+                        )
                         break
 
                 except asyncio.CancelledError:
@@ -581,21 +612,33 @@ class GrpcRequestManager:
             else:
                 state.time_stats.set_last_time()
 
-            # Extract output for this request
+            prompt_tokens = batch_out.prompt_tokens[i] if batch_out.prompt_tokens else 0
+            completion_tokens = batch_out.completion_tokens[i] if batch_out.completion_tokens else 0
+            cached_tokens = batch_out.cached_tokens[i] if batch_out.cached_tokens else 0
+            is_finished = batch_out.finished_reasons[i] is not None
+
+            state.last_prompt_tokens = prompt_tokens
+            state.last_completion_tokens = completion_tokens
+            state.last_cached_tokens = cached_tokens
+
+            meta_info: dict[str, Any] = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cached_tokens": cached_tokens,
+                "finish_reason": (
+                    batch_out.finished_reasons[i] if batch_out.finished_reasons[i] else None
+                ),
+            }
+
+            if is_finished:
+                state.time_stats.set_finished_time()
+                meta_info.update(self._build_finished_meta(state, batch_out, i))
+
             output_data = {
                 "request_id": rid,
                 "token_ids": batch_out.output_ids[i] if batch_out.output_ids else [],
-                "finished": batch_out.finished_reasons[i] is not None,
-                "meta_info": {
-                    "prompt_tokens": (batch_out.prompt_tokens[i] if batch_out.prompt_tokens else 0),
-                    "completion_tokens": (
-                        batch_out.completion_tokens[i] if batch_out.completion_tokens else 0
-                    ),
-                    "cached_tokens": (batch_out.cached_tokens[i] if batch_out.cached_tokens else 0),
-                    "finish_reason": (
-                        batch_out.finished_reasons[i] if batch_out.finished_reasons[i] else None
-                    ),
-                },
+                "finished": is_finished,
+                "meta_info": meta_info,
             }
 
             # Accumulate logprobs (following tokenizer_manager pattern)
@@ -666,7 +709,6 @@ class GrpcRequestManager:
             # Handle completion
             if output_data["finished"]:
                 state.finished = True
-                state.time_stats.set_finished_time()
                 state.stream_finished = True
                 state.event.set()
 
@@ -804,6 +846,112 @@ class GrpcRequestManager:
         except Exception as e:
             logger.error(f"Failed to send to scheduler: {e}")
             raise
+
+    def _build_finished_meta(
+        self,
+        state: GrpcReqState,
+        batch_out: BatchTokenIDOutput,
+        index: int,
+    ) -> dict[str, Any]:
+        """Build additional meta_info fields for a finished request
+        (timestamps, cache hit rate, spec decoding metrics, etc).
+        Only called once when a request completes.
+        """
+
+        meta: dict[str, Any] = state.time_stats.convert_to_output_meta_info(
+            completion_tokens=state.last_completion_tokens,
+        )
+        self._populate_timestamps(meta, state.time_stats)
+
+        if state.last_prompt_tokens > 0:
+            meta["cache_hit_rate"] = state.last_cached_tokens / state.last_prompt_tokens
+
+        if self.server_args.speculative_algorithm:
+            self._populate_spec_decoding_metrics(meta, batch_out, index)
+
+        return meta
+
+    def _populate_spec_decoding_metrics(
+        self,
+        meta_info: dict[str, Any],
+        batch_out: BatchTokenIDOutput,
+        index: int,
+    ) -> None:
+        """Populate speculative decoding stats when available."""
+        if not (
+            len(batch_out.spec_verify_ct) > index
+            and batch_out.spec_verify_ct[index] > 0
+            and len(batch_out.spec_accepted_tokens) > index
+        ):
+            return
+
+        verify_ct = batch_out.spec_verify_ct[index]
+        accepted_tokens = batch_out.spec_accepted_tokens[index]
+        num_draft_tokens = self.server_args.speculative_num_draft_tokens or 0
+        num_guess_tokens = max(num_draft_tokens - 1, 0)
+        total_draft_tokens = verify_ct * num_guess_tokens
+
+        if total_draft_tokens > 0:
+            accept_rate = accepted_tokens / total_draft_tokens
+            meta_info["spec_decoding_acceptance_rate"] = accept_rate
+
+    @staticmethod
+    def _populate_timestamps(
+        meta_info: dict[str, Any],
+        time_stats: APIServerReqTimeStats,
+    ) -> None:
+        """Add canonical timestamp fields to meta_info using proto field names."""
+        if time_stats.created_time > 0.0:
+            meta_info.setdefault(
+                "request_received_timestamp_s",
+                convert_time_to_realtime(time_stats.created_time),
+            )
+        if time_stats.first_token_time > 0.0:
+            meta_info.setdefault(
+                "first_token_generated_timestamp_s",
+                convert_time_to_realtime(time_stats.first_token_time),
+            )
+        if time_stats.finished_time > 0.0:
+            meta_info.setdefault(
+                "request_finished_timestamp_s",
+                convert_time_to_realtime(time_stats.finished_time),
+            )
+        if time_stats.response_sent_to_client_time > 0.0:
+            meta_info.setdefault(
+                "response_sent_timestamp_s",
+                time_stats.get_response_sent_to_client_realtime(),
+            )
+
+    def _store_request_stats(
+        self,
+        request_id: str,
+        output: dict[str, Any],
+        parent_request_id: str | None = None,
+        parent_index: int = 0,
+    ) -> None:
+        """Persist final per-request stats for GetRequestStats RPC."""
+        meta_info = output.get("meta_info")
+        if not isinstance(meta_info, dict):
+            return
+
+        index = int(output.get("index", 0))
+        entry: dict[str, Any] = {"index": index, "meta_info": dict(meta_info)}
+
+        entries = self.completed_request_stats.setdefault(request_id, {})
+        entries[index] = entry
+
+        if parent_request_id is not None:
+            parent_entries = self.completed_request_stats.setdefault(parent_request_id, {})
+            parent_entries[parent_index] = {**entry, "index": parent_index}
+
+        while len(self.completed_request_stats) > self._MAX_COMPLETED_STATS_CACHE:
+            oldest = next(iter(self.completed_request_stats))
+            del self.completed_request_stats[oldest]
+
+    def get_request_stats(self, request_id: str) -> list[dict[str, Any]]:
+        """Get persisted request stats by request ID."""
+        entries = self.completed_request_stats.get(request_id, {})
+        return [entries[idx] for idx in sorted(entries.keys())]
 
     def record_request_for_crash_dump(self, obj):
         """Record request for potential crash dump."""

@@ -3,7 +3,7 @@
 //! This module provides unified enums that wrap proto types from SGLang, vLLM, and TensorRT-LLM,
 //! allowing the router to work with any backend transparently.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use futures_util::StreamExt;
 use smg_grpc_client::{
@@ -14,6 +14,8 @@ use smg_grpc_client::{
     vllm_engine::AbortOnDropStream as VllmStream,
     vllm_proto::{self as vllm, generate_complete::MatchedStop as VllmMatchedStop},
 };
+
+use crate::observability::events::UnifiedRequestStats;
 
 // =====================
 // Multimodal Data
@@ -861,6 +863,24 @@ impl ProtoGenerateComplete {
     }
 }
 
+fn unified_stats_from_sglang(stats: sglang::RequestStats) -> UnifiedRequestStats {
+    UnifiedRequestStats {
+        engine: "sglang",
+        request_received_timestamp_s: stats.request_received_timestamp_s,
+        first_token_generated_timestamp_s: stats.first_token_generated_timestamp_s,
+        request_finished_timestamp_s: stats.request_finished_timestamp_s,
+        response_sent_timestamp_s: stats.response_sent_timestamp_s,
+        cache_hit_rate: stats.cache_hit_rate,
+        spec_decoding_acceptance_rate: stats.spec_decoding_acceptance_rate,
+        prompt_tokens: stats.prompt_tokens.map(Into::into),
+        completion_tokens: stats.completion_tokens.map(Into::into),
+        cached_tokens: stats.cached_tokens.map(Into::into),
+    }
+}
+
+/// Timeout for fetching request stats from the engine via RPC.
+const REQUEST_STATS_FETCH_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Unified GenerateError
 /// Note: vLLM proto no longer has GenerateError - errors are returned via gRPC status
 #[derive(Clone)]
@@ -912,6 +932,121 @@ impl ProtoStream {
             Self::Vllm(stream) => stream.mark_completed(),
             Self::Trtllm(stream) => stream.mark_completed(),
         }
+    }
+
+    /// Spawn a fire-and-forget task to fetch per-request stats from the engine
+    /// and emit a tracing event. Each engine arm implements its own RPC; arms
+    /// that do not yet support stats retrieval are no-ops.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "stats fetch+emit is best-effort observability; safe to drop on shutdown"
+    )]
+    fn spawn_stats_emission(
+        &self,
+        request_id: String,
+        model: String,
+        router_backend: &'static str,
+    ) {
+        match self {
+            Self::Sglang(stream) => {
+                let client = stream.scheduler_client().clone();
+                let engine_request_id = stream.request_id().to_string();
+                tokio::spawn(async move {
+                    let response = match tokio::time::timeout(
+                        REQUEST_STATS_FETCH_TIMEOUT,
+                        client.get_request_stats(engine_request_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(r)) => r,
+                        Ok(Err(status)) => {
+                            tracing::debug!("GetRequestStats failed: {}", status.message());
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                timeout_ms = REQUEST_STATS_FETCH_TIMEOUT.as_millis(),
+                                "GetRequestStats timed out"
+                            );
+                            return;
+                        }
+                    };
+                    let merged = response
+                        .stats
+                        .into_iter()
+                        .map(unified_stats_from_sglang)
+                        .reduce(|mut merged, sample| {
+                            merged.merge(&sample);
+                            merged
+                        });
+                    UnifiedRequestStats::maybe_emit_event(
+                        merged,
+                        &request_id,
+                        &model,
+                        router_backend,
+                    );
+                });
+            }
+            Self::Vllm(_) | Self::Trtllm(_) => {}
+        }
+    }
+}
+
+/// Thin wrapper around [`ProtoStream`] that can fire-and-forget a stats fetch
+/// after the stream is consumed.
+pub struct StatsProtoStream {
+    stream: ProtoStream,
+    enable_request_statistics: bool,
+    request_id: Option<String>,
+    model: Option<String>,
+    router_backend: &'static str,
+}
+
+impl StatsProtoStream {
+    pub fn new(
+        stream: ProtoStream,
+        enable_request_statistics: bool,
+        request_id: &str,
+        model: &str,
+        router_backend: &'static str,
+    ) -> Self {
+        let (request_id, model) = if enable_request_statistics {
+            (Some(request_id.to_owned()), Some(model.to_owned()))
+        } else {
+            (None, None)
+        };
+
+        Self {
+            stream,
+            enable_request_statistics,
+            request_id,
+            model,
+            router_backend,
+        }
+    }
+
+    pub async fn next(&mut self) -> Option<Result<ProtoGenerateResponse, tonic::Status>> {
+        self.stream.next().await
+    }
+
+    pub fn mark_completed(&mut self) {
+        self.stream.mark_completed();
+    }
+
+    /// Spawn a fire-and-forget stats fetch+emit for the current request.
+    /// No-op when stats collection is disabled. Moves the stored request
+    /// metadata into the spawned task, so this should only be called once.
+    pub fn spawn_stats_emission(&mut self) {
+        if !self.enable_request_statistics {
+            return;
+        }
+
+        let (Some(request_id), Some(model)) = (self.request_id.take(), self.model.take()) else {
+            return;
+        };
+
+        self.stream
+            .spawn_stats_emission(request_id, model, self.router_backend);
     }
 }
 
@@ -1038,5 +1173,48 @@ impl ProtoEmbedError {
         match self {
             Self::Sglang(e) => &e.code,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unified_stats_from_sglang() {
+        let stats = sglang::RequestStats {
+            request_received_timestamp_s: Some(1.0),
+            first_token_generated_timestamp_s: Some(2.0),
+            request_finished_timestamp_s: Some(3.0),
+            response_sent_timestamp_s: Some(4.0),
+            cache_hit_rate: Some(0.5),
+            spec_decoding_acceptance_rate: Some(0.8),
+            prompt_tokens: Some(100),
+            completion_tokens: Some(200),
+            cached_tokens: Some(50),
+            ..Default::default()
+        };
+        let unified = unified_stats_from_sglang(stats);
+
+        assert_eq!(unified.engine, "sglang");
+        assert_eq!(unified.request_received_timestamp_s, Some(1.0));
+        assert_eq!(unified.first_token_generated_timestamp_s, Some(2.0));
+        assert_eq!(unified.request_finished_timestamp_s, Some(3.0));
+        assert_eq!(unified.response_sent_timestamp_s, Some(4.0));
+        assert_eq!(unified.cache_hit_rate, Some(0.5));
+        assert_eq!(unified.spec_decoding_acceptance_rate, Some(0.8));
+        assert_eq!(unified.prompt_tokens, Some(100u64));
+        assert_eq!(unified.completion_tokens, Some(200u64));
+        assert_eq!(unified.cached_tokens, Some(50u64));
+
+        // None fields in the proto stay None in the unified struct
+        let partial = unified_stats_from_sglang(sglang::RequestStats {
+            prompt_tokens: Some(42),
+            ..Default::default()
+        });
+        assert_eq!(partial.engine, "sglang");
+        assert_eq!(partial.prompt_tokens, Some(42u64));
+        assert_eq!(partial.completion_tokens, None);
+        assert_eq!(partial.first_token_generated_timestamp_s, None);
     }
 }
