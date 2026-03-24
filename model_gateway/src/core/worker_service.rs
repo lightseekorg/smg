@@ -246,16 +246,15 @@ impl WorkerService {
 
         let worker_url = config.url.clone();
 
-        // Reject if a worker with this URL is already registered and active.
-        if self.worker_registry.get_by_url(&worker_url).is_some() {
-            let existing_id = self.worker_registry.reserve_id_for_url(&worker_url);
+        // Reserve (or retrieve) a stable ID for the 202 response.
+        // If this URL already has an active worker, reject with 409.
+        let worker_id = self.worker_registry.reserve_id_for_url(&worker_url);
+        if self.worker_registry.get(&worker_id).is_some() {
             return Err(WorkerServiceError::Conflict {
                 url: worker_url,
-                worker_id: existing_id,
+                worker_id,
             });
         }
-
-        let worker_id = self.worker_registry.reserve_id_for_url(&worker_url);
 
         let job = Job::AddWorker {
             config: Box::new(config),
