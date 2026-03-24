@@ -152,7 +152,7 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageT
 
 /// Create Oracle storage backends with a single shared connection pool.
 fn create_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageTuple, String> {
-    use crate::oracle::OracleStore;
+    use crate::oracle::{init_extra_tables, OracleStore};
 
     let store = OracleStore::new(
         oracle_cfg,
@@ -160,6 +160,7 @@ fn create_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageTuple, Stri
             OracleConversationStorage::init_schema,
             OracleConversationItemStorage::init_schema,
             OracleResponseStorage::init_schema,
+            init_extra_tables,
         ],
     )?;
 
@@ -190,6 +191,9 @@ async fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<Storag
     if !applied.is_empty() {
         store.ensure_response_indexes().await?;
     }
+
+    // Create extra side tables declared by schema config
+    store.ensure_extra_tables().await?;
 
     Ok((
         Arc::new(postgres_resp),
@@ -332,7 +336,7 @@ mod tests {
 
         use crate::{
             context::RequestContext,
-            hooks::{BeforeHookResult, ExtraColumns, HookError, StorageHook, StorageOperation},
+            hooks::{BeforeHookResult, HookError, HookWrites, StorageHook, StorageOperation},
         };
 
         struct NoOpHook;
@@ -354,9 +358,9 @@ mod tests {
                 _ctx: Option<&RequestContext>,
                 _payload: &serde_json::Value,
                 _result: &serde_json::Value,
-                extra: &ExtraColumns,
-            ) -> Result<ExtraColumns, HookError> {
-                Ok(extra.clone())
+                writes: &HookWrites,
+            ) -> Result<HookWrites, HookError> {
+                Ok(writes.clone())
             }
         }
 

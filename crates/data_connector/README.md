@@ -219,17 +219,21 @@ pub trait StorageHook: Send + Sync + 'static {
         context: Option<&RequestContext>,
         payload: &Value,
         result: &Value,
-        extra: &ExtraColumns,
-    ) -> Result<ExtraColumns, HookError>;
+        writes: &HookWrites,
+    ) -> Result<HookWrites, HookError>;
 }
 ```
 
-- `before()` returning `Continue(extra_columns)` proceeds with the operation.
-  The extra columns map is forwarded to the backend for persistence.
+- `before()` returning `Continue(hook_writes)` proceeds with the operation.
+  `HookWrites` contains both `extra_columns` (forwarded to the backend for
+  persistence in the main table) and `extra_table_writes` (inserted into
+  configured side tables in the same transaction).
 - `before()` returning `Reject(reason)` aborts the operation with an error.
 - `before()` returning `Err(_)` logs a warning and **continues** (non-fatal).
-- `after()` receives the result and extra columns from `before()`. It can
-  return modified extra columns for the caller.
+- `after()` receives the result and hook writes from `before()`. It can
+  return modified extra columns for the caller. Note: `extra_table_writes`
+  in the `after()` return are ignored — side-table writes only execute from
+  the before-hook to ensure atomicity with the main write.
 
 ### Wiring a Hook
 
@@ -295,6 +299,52 @@ Extra columns are write-side enrichment (audit trail, tenant ID, etc.). They
 are included in DDL for schema creation and in INSERT statements, but are
 **not** read back into `StoredResponse`/`Conversation`/`ConversationItem`
 structs on SELECT.
+
+### Extra Table Writes
+
+Extra table writes let hooks insert rows into additional side tables in the
+same transaction as the main storage operation. This is useful for scheduling
+jobs, writing audit records, or any case where atomicity with the main write
+is required.
+
+Configure side tables in `SchemaConfig`:
+
+```yaml
+schema:
+  extra_tables:
+    ltm_jobs:
+      table: "ltm_jobs"
+      columns:
+        response_id:
+          sql_type: "VARCHAR(64)"
+        tenant_id:
+          sql_type: "VARCHAR(128)"
+        status:
+          sql_type: "VARCHAR(32)"
+          default_value: "pending"
+```
+
+A before-hook populates extra table writes via `HookWrites`:
+
+```rust
+fn before(...) -> Result<BeforeHookResult, HookError> {
+    let mut writes = HookWrites::default();
+    writes.extra_table_writes.push(ExtraTableWrite {
+        table: "ltm_jobs".to_string(),
+        row: HashMap::from([
+            ("response_id".to_string(), json!("resp_123")),
+            ("tenant_id".to_string(), json!("acme-corp")),
+        ]),
+    });
+    Ok(BeforeHookResult::Continue(writes))
+}
+```
+
+The backend resolves each write against the `extra_tables` schema config:
+unknown columns are rejected, missing columns with `default_value` are filled
+in. The INSERT executes on the same connection as the main write (Oracle uses
+the same `Connection` inside `spawn_blocking`; Postgres uses the same pooled
+`Client`).
 
 ### Skip Columns
 
