@@ -261,6 +261,47 @@ sglang_prompt_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct",source=
     assert_eq_sorted(&result, expected);
 }
 
+#[test]
+fn test_mismatched_labels_pd_mode() {
+    // Simulates PD disaggregation: prefill worker has no dp_rank label,
+    // decode worker has dp_rank. Previously this caused a 500 error.
+    let prefill = MetricPack {
+        labels: vec![("worker_addr".to_string(), "prefill:8000".to_string())],
+        metrics_text: r#"
+# HELP sglang_num_running_reqs The number of running requests
+# TYPE sglang_num_running_reqs gauge
+sglang_num_running_reqs{engine_type="prefill",model_name="kimi",tp_rank="0"} 10
+"#
+        .to_string(),
+    };
+    let decode = MetricPack {
+        labels: vec![("worker_addr".to_string(), "decode:8000".to_string())],
+        metrics_text: r#"
+# HELP sglang_num_running_reqs The number of running requests
+# TYPE sglang_num_running_reqs gauge
+sglang_num_running_reqs{dp_rank="0",engine_type="decode",model_name="kimi",tp_rank="0"} 20
+"#
+        .to_string(),
+    };
+
+    // Should succeed — not return an error
+    let result = aggregate_metrics(vec![prefill, decode]).unwrap();
+
+    // Both workers should appear in the output
+    assert!(result.contains("prefill:8000"), "prefill worker missing");
+    assert!(result.contains("decode:8000"), "decode worker missing");
+    // Prefill sample should get dp_rank="" (padded)
+    assert!(
+        result.contains(r#"dp_rank="""#),
+        "prefill should have empty dp_rank label"
+    );
+    // Decode sample should keep dp_rank="0"
+    assert!(
+        result.contains(r#"dp_rank="0""#),
+        "decode should keep dp_rank=0"
+    );
+}
+
 fn assert_eq_sorted(result: &str, expected: &str) {
     // Split into lines and sort to handle BTreeMap ordering issues between test environments
     let mut result_lines: Vec<_> = result.trim().lines().map(|l| l.trim()).collect();

@@ -155,6 +155,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             resp_storage.clone(),
             &response_json,
             original_body,
+            ctx.storage_request_context.clone(),
         )
         .await
         {

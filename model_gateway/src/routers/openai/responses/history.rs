@@ -134,7 +134,7 @@ pub(crate) async fn load_input_history(
                                 }
                             }
                         }
-                        "function_call_output" => {
+                        ItemType::FUNCTION_CALL_OUTPUT => {
                             tracing::debug!(
                                 item_id = %item.id.0,
                                 "Loading function_call_output from DB"

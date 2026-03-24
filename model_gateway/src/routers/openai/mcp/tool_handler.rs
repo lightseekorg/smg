@@ -97,8 +97,6 @@ pub(crate) struct StreamingToolHandler {
     pub accumulator: StreamingResponseAccumulator,
     /// Function calls being built from deltas
     pub pending_calls: Vec<FunctionCallInProgress>,
-    /// Track if we're currently in a function call
-    in_function_call: bool,
     /// Manage output_index remapping so they increment per item
     output_index_mapper: OutputIndexMapper,
     /// Original response id captured from the first response.created event
@@ -110,7 +108,6 @@ impl StreamingToolHandler {
         Self {
             accumulator: StreamingResponseAccumulator::new(),
             pending_calls: Vec::new(),
-            in_function_call: false,
             output_index_mapper: OutputIndexMapper::with_start(start),
             original_response_id: None,
         }
@@ -189,7 +186,8 @@ impl StreamingToolHandler {
     }
 
     fn handle_output_item_added(&mut self, parsed: &Value) -> StreamAction {
-        if let Some(output_index) = extract_output_index(parsed) {
+        let cached_output_index = extract_output_index(parsed);
+        if let Some(output_index) = cached_output_index {
             self.ensure_output_index(output_index);
         }
 
@@ -204,7 +202,7 @@ impl StreamingToolHandler {
             return StreamAction::Forward;
         }
 
-        let Some(output_index) = extract_output_index(parsed) else {
+        let Some(output_index) = cached_output_index else {
             warn!(
                 "Missing output_index in function_call added event, \
                  forwarding without processing for tool execution"
@@ -220,7 +218,6 @@ impl StreamingToolHandler {
         call.call_id = call_id.to_string();
         call.name = name.to_string();
         call.assigned_output_index = Some(assigned_index);
-        self.in_function_call = true;
 
         StreamAction::Forward
     }
@@ -282,8 +279,6 @@ impl StreamingToolHandler {
         let item_type = delta.get("type").and_then(|v| v.as_str());
 
         if item_type.is_some_and(is_function_call_type) {
-            self.in_function_call = true;
-
             // Get or create function call for this output index
             let call = self.get_or_create_call(output_index, delta);
             call.assigned_output_index = Some(assigned_index);

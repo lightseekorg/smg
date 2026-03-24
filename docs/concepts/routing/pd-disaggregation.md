@@ -83,7 +83,7 @@ vLLM supports two backends for KV cache transfer:
 | Backend | Transport | Configuration | Best For |
 |---------|-----------|---------------|----------|
 | **NIXL** | RDMA | `VLLM_NIXL_SIDE_CHANNEL_PORT` env var | High-bandwidth RDMA networks |
-| **Mooncake** | TCP/RDMA | `MOONCAKE_MASTER` env var or config file | Flexible deployment, TCP fallback |
+| **Mooncake** | TCP/RDMA | `VLLM_MOONCAKE_BOOTSTRAP_PORT` env var per prefill worker | Flexible deployment, TCP fallback |
 
 ---
 
@@ -176,8 +176,10 @@ Configure different routing policies for each phase:
 ```bash
 smg \
   --pd-disaggregation \
-  --worker-urls http://prefill1:8000 http://prefill2:8000 \
-  --decode http://decode1:8000 http://decode2:8000 \
+  --prefill http://prefill1:8000 \
+  --prefill http://prefill2:8000 \
+  --decode http://decode1:8000 \
+  --decode http://decode2:8000 \
   --prefill-policy cache_aware \
   --decode-policy power_of_two
 ```
@@ -357,10 +359,10 @@ Decode is **memory-bandwidth-bound**:
 
 | Metric | Description |
 |--------|-------------|
-| `smg_pd_prefill_duration_seconds` | Prefill phase duration |
-| `smg_pd_decode_duration_seconds` | Decode phase duration |
-| `smg_pd_kv_transfer_duration_seconds` | KV cache transfer time |
-| `smg_pd_pair_selections_total` | P/D pair selection count |
+| `smg_worker_requests_active` | Active requests per worker (label: `worker`) |
+| `smg_worker_selection_total` | Worker selection count (labels: `worker_type`, `connection_mode`, `model`, `policy`) |
+| `smg_router_request_duration_seconds` | End-to-end request duration |
+| `smg_router_ttft_seconds` | Time to first token (gRPC/vLLM only) |
 
 ### Key Performance Indicators
 
@@ -376,32 +378,24 @@ Decode is **memory-bandwidth-bound**:
 
 <div class="card" markdown>
 
-#### Phase Duration
+#### Active Requests by Worker
 
 ```promql
-# Average prefill time
-rate(smg_pd_prefill_duration_seconds_sum[5m]) /
-rate(smg_pd_prefill_duration_seconds_count[5m])
-
-# Average decode time per token
-rate(smg_pd_decode_duration_seconds_sum[5m]) /
-rate(smg_pd_decode_duration_seconds_count[5m])
+# Active requests per worker
+smg_worker_requests_active
 ```
 
 </div>
 
 <div class="card" markdown>
 
-#### Worker Utilization
+#### Time to First Token (gRPC/vLLM only)
 
 ```promql
-# Prefill worker utilization
-smg_worker_requests_active{role="prefill"} /
-smg_worker_max_concurrent{role="prefill"}
-
-# Decode worker utilization
-smg_worker_requests_active{role="decode"} /
-smg_worker_max_concurrent{role="decode"}
+# Average TTFT
+# gRPC/vLLM streaming path only; not available for SGLang HTTP PD
+rate(smg_router_ttft_seconds_sum[5m]) /
+rate(smg_router_ttft_seconds_count[5m])
 ```
 
 </div>

@@ -64,6 +64,8 @@ class RouterArgs:
     prometheus_duration_buckets: list[float] | None = None
     # Request ID headers configuration
     request_id_headers: list[str] | None = None
+    # HTTP header to storage hook context mapping
+    storage_context_headers: dict[str, str] = dataclasses.field(default_factory=dict)
     # Request timeout in seconds
     request_timeout_secs: int = 1800
     # Grace period in seconds to wait for in-flight requests during shutdown
@@ -154,6 +156,12 @@ class RouterArgs:
     jwt_audience: str | None = None
     jwt_jwks_uri: str | None = None
     jwt_role_mapping: dict[str, str] = dataclasses.field(default_factory=dict)
+    # Mesh server configuration
+    enable_mesh: bool = False
+    mesh_server_name: str | None = None
+    mesh_host: str = "0.0.0.0"
+    mesh_port: int = 39527
+    mesh_peer_urls: list[str] = dataclasses.field(default_factory=list)
 
     @staticmethod
     def add_cli_args(
@@ -543,6 +551,16 @@ class RouterArgs:
             help=(
                 "Custom HTTP headers to check for request IDs (e.g., x-request-id x-trace-id)."
                 " If not specified, uses common defaults."
+            ),
+        )
+        request_group.add_argument(
+            f"--{prefix}storage-context-headers",
+            type=str,
+            nargs="*",
+            default=[],
+            help=(
+                "Map HTTP headers into storage hook request context using HEADER=CONTEXT_KEY "
+                "entries, for example x-tenant-id=tenant_id"
             ),
         )
         request_group.add_argument(
@@ -1025,6 +1043,40 @@ class RouterArgs:
             ),
         )
 
+        # Mesh server configuration
+        mesh_group = parser.add_argument_group("Mesh Server")
+        mesh_group.add_argument(
+            f"--{prefix}enable-mesh",
+            action="store_true",
+            default=False,
+            help="Enable mesh server for HA multi-router coordination",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-server-name",
+            type=str,
+            default=None,
+            help="Mesh server name (default: auto-generated random name)",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-host",
+            type=str,
+            default="0.0.0.0",
+            help="Mesh server bind address (default: 0.0.0.0)",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-port",
+            type=int,
+            default=39527,
+            help="Mesh server port (default: 39527)",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-peer-urls",
+            type=str,
+            nargs="*",
+            default=[],
+            help="Peer mesh server addresses to join (format: host:port)",
+        )
+
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace, use_router_prefix: bool = False) -> RouterArgs:
         """
@@ -1079,6 +1131,9 @@ class RouterArgs:
         )
         args_dict["router_selector"] = cls._parse_selector(
             cli_args_dict.get(f"{prefix}router_selector", None)
+        )
+        args_dict["storage_context_headers"] = cls._parse_selector(
+            cli_args_dict.get(f"{prefix}storage_context_headers", None)
         )
 
         # Mooncake-specific annotation

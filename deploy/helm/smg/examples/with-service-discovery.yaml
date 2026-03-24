@@ -1,0 +1,8 @@
+# Router with Kubernetes service discovery (auto-discover worker pods).
+# Usage: helm install smg deploy/helm/smg -f deploy/helm/smg/examples/with-service-discovery.yaml
+router:
+  policy: cache_aware
+  serviceDiscovery:
+    enabled: true
+    selector: "app=sglang-worker"
+    port: 8000

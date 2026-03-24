@@ -27,6 +27,10 @@ pub enum WorkerServiceError {
     NotFound { worker_id: String },
     /// Invalid worker ID format (expected UUID)
     InvalidId { raw: String, message: String },
+    /// Bad request (e.g., URL mismatch in PUT)
+    BadRequest { message: String },
+    /// Worker with this URL already exists (duplicate POST)
+    Conflict { url: String, worker_id: WorkerId },
     /// Job queue not initialized
     QueueNotInitialized,
     /// Failed to submit job to queue
@@ -38,6 +42,8 @@ impl WorkerServiceError {
         match self {
             Self::NotFound { .. } => "WORKER_NOT_FOUND",
             Self::InvalidId { .. } => "BAD_REQUEST",
+            Self::BadRequest { .. } => "BAD_REQUEST",
+            Self::Conflict { .. } => "WORKER_ALREADY_EXISTS",
             Self::QueueNotInitialized => "INTERNAL_SERVER_ERROR",
             Self::QueueSubmitFailed { .. } => "INTERNAL_SERVER_ERROR",
         }
@@ -47,6 +53,8 @@ impl WorkerServiceError {
         match self {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::InvalidId { .. } => StatusCode::BAD_REQUEST,
+            Self::BadRequest { .. } => StatusCode::BAD_REQUEST,
+            Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::QueueNotInitialized => StatusCode::INTERNAL_SERVER_ERROR,
             Self::QueueSubmitFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -61,6 +69,15 @@ impl std::fmt::Display for WorkerServiceError {
                 write!(
                     f,
                     "Invalid worker_id '{raw}' (expected UUID). Error: {message}"
+                )
+            }
+            Self::BadRequest { message } => write!(f, "{message}"),
+            Self::Conflict { url, worker_id } => {
+                let id = worker_id.as_str();
+                write!(
+                    f,
+                    "Worker already exists at URL '{url}' with ID {id}. \
+                    Use PUT /workers/{id} to replace or PATCH /workers/{id} to update."
                 )
             }
             Self::QueueNotInitialized => write!(f, "Job queue not initialized"),
@@ -233,7 +250,16 @@ impl WorkerService {
         }
 
         let worker_url = config.url.clone();
+
+        // Reserve (or retrieve) a stable ID for the 202 response.
+        // If this URL already has an active worker, reject with 409.
         let worker_id = self.worker_registry.reserve_id_for_url(&worker_url);
+        if self.worker_registry.get(&worker_id).is_some() {
+            return Err(WorkerServiceError::Conflict {
+                url: worker_url,
+                worker_id,
+            });
+        }
 
         let job = Job::AddWorker {
             config: Box::new(config),
@@ -251,6 +277,48 @@ impl WorkerService {
             url: worker_url,
             location,
         })
+    }
+
+    /// Replace a worker by ID (full replace, re-runs registration workflow)
+    pub async fn replace_worker(
+        &self,
+        worker_id_raw: &str,
+        config: WorkerSpec,
+    ) -> Result<UpdateWorkerResult, WorkerServiceError> {
+        let worker_id = Self::parse_worker_id(worker_id_raw)?;
+
+        let url = self
+            .worker_registry
+            .get_url_by_id(&worker_id)
+            .ok_or_else(|| WorkerServiceError::NotFound {
+                worker_id: worker_id_raw.to_string(),
+            })?;
+
+        // Validate that the URL in the request body matches the existing worker.
+        // URL changes are not supported via replace — use DELETE + POST instead.
+        if config.url != url {
+            return Err(WorkerServiceError::BadRequest {
+                message: format!(
+                    "URL mismatch: worker has URL '{url}' but request body has '{}'. \
+                    URL changes are not supported via PUT. Use DELETE + POST instead.",
+                    config.url
+                ),
+            });
+        }
+
+        // Re-run the full registration workflow (model discovery, etc.)
+        // The workflow uses register_or_replace() which does overwrite-then-diff.
+        let job = Job::AddWorker {
+            config: Box::new(config),
+        };
+
+        let job_queue = self.get_job_queue()?;
+        job_queue
+            .submit(job)
+            .await
+            .map_err(|e| WorkerServiceError::QueueSubmitFailed { message: e })?;
+
+        Ok(UpdateWorkerResult { worker_id, url })
     }
 
     /// List all workers with their info

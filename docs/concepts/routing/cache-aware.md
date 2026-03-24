@@ -288,26 +288,14 @@ The radix tree grows with unique prefixes. Configure based on your memory budget
 
 | Metric | Description | Alert Threshold |
 |--------|-------------|-----------------|
-| `smg_router_cache_hits_total` | Cache hit count | - |
-| `smg_router_cache_misses_total` | Cache miss count | - |
-| `smg_router_cache_tree_size` | Radix tree node count | >90% of max |
 | `smg_worker_requests_active` | Active requests per worker | Imbalance >50% |
+| `smg_worker_selection_total` | Worker selection count | - |
+| `smg_router_request_duration_seconds` | End-to-end request latency | - |
+| `smg_router_ttft_seconds` | Time to first token (gRPC only) | - |
 
 ### Useful PromQL Queries
 
 <div class="grid" markdown>
-
-<div class="card" markdown>
-
-#### Cache Hit Rate
-
-```promql
-rate(smg_router_cache_hits_total[5m]) /
-(rate(smg_router_cache_hits_total[5m]) +
- rate(smg_router_cache_misses_total[5m]))
-```
-
-</div>
 
 <div class="card" markdown>
 
@@ -320,15 +308,25 @@ avg(smg_worker_requests_active)
 
 </div>
 
+<div class="card" markdown>
+
+#### Time to First Token (gRPC only)
+
+```promql
+rate(smg_router_ttft_seconds_sum[5m]) /
+rate(smg_router_ttft_seconds_count[5m])
+```
+
+</div>
+
 </div>
 
 ### Alert Thresholds
 
 | Metric | Warning | Critical | Action |
 |--------|---------|----------|--------|
-| Cache hit rate | <50% | <30% | Review workload patterns |
-| Tree size | >80% max | >95% max | Increase `max-tree-size` or reduce eviction interval |
 | Load imbalance | >30% | >50% | Lower balance thresholds |
+| TTFT p99 | >500ms | >1s | Review workload patterns and cache policy |
 
 ---
 
@@ -371,6 +369,33 @@ When running multiple SMG instances behind a load balancer:
       annotations:
         nginx.ingress.kubernetes.io/upstream-hash-by: "$http_x_user_id"
     ```
+
+---
+
+## Event-Driven Block Size
+
+By default, SMG uses the `--block-size` CLI flag (default: 16) to align the radix tree with backend KV cache page boundaries. However, when workers report KV cache events, the cache-aware policy can **learn the actual block size** directly from those events.
+
+This is especially useful when different backends use different page sizes—rather than requiring a single global flag, each worker's block size is discovered automatically from its event stream. The learned block size takes precedence over the CLI default, ensuring routing accuracy without manual configuration per backend.
+
+| Source | Priority | Use Case |
+|--------|----------|----------|
+| **Worker KV events** | Highest | Automatically learned per worker |
+| **`--block-size` flag** | Fallback | Global default when events are unavailable |
+
+!!! note
+    Event-driven block size detection requires backends that emit KV cache events (e.g., SGLang with event reporting enabled). If a worker does not report events, the `--block-size` CLI value is used as the fallback.
+
+---
+
+## Mesh State Synchronization
+
+When running in mesh HA mode (`--enable-mesh`), cache-aware routing state is **synchronized across all router nodes**. Each node's radix tree receives updates from the mesh, ensuring that every gateway instance has a consistent view of backend KV cache state. This eliminates the cache efficiency penalty described in [Multi-Gateway Considerations](#multi-gateway-considerations) and enables accurate cache-aware decisions across the entire cluster.
+
+For mesh setup and configuration details, see [High Availability](../architecture/high-availability.md).
+
+!!! tip
+    When using cache-aware routing with mesh HA, KV cache state is automatically synchronized across all nodes. No additional configuration is needed beyond enabling mesh.
 
 ---
 

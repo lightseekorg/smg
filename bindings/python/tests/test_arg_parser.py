@@ -167,6 +167,7 @@ class TestRouterArgs:
             router_prometheus_port=29000,
             router_prometheus_host="0.0.0.0",
             router_request_id_headers=["x-request-id", "x-trace-id"],
+            router_storage_context_headers=["x-tenant-id=tenant_id", "x-user-id=user_id"],
             router_request_timeout_secs=1200,
             router_max_concurrent_requests=512,
             router_queue_size=200,
@@ -220,6 +221,10 @@ class TestRouterArgs:
         assert router_args.prometheus_port == 29000
         assert router_args.prometheus_host == "0.0.0.0"
         assert router_args.request_id_headers == ["x-request-id", "x-trace-id"]
+        assert router_args.storage_context_headers == {
+            "x-tenant-id": "tenant_id",
+            "x-user-id": "user_id",
+        }
         assert router_args.request_timeout_secs == 1200
         assert router_args.max_concurrent_requests == 512
         assert router_args.queue_size == 200
@@ -294,6 +299,7 @@ class TestRouterArgs:
             router_prometheus_port=None,
             router_prometheus_host=None,
             router_request_id_headers=None,
+            router_storage_context_headers=None,
             router_request_timeout_secs=1800,
             router_max_concurrent_requests=256,
             router_queue_size=100,
@@ -364,6 +370,7 @@ class TestRouterArgs:
             prometheus_port=None,
             prometheus_host=None,
             request_id_headers=None,
+            storage_context_headers=None,
             request_timeout_secs=1800,
             max_concurrent_requests=256,
             queue_size=100,

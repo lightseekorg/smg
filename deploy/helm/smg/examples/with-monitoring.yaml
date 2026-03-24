@@ -1,0 +1,16 @@
+# Router with Prometheus ServiceMonitor and Grafana dashboard.
+# Usage: helm install smg deploy/helm/smg -f deploy/helm/smg/examples/with-monitoring.yaml
+router:
+  workerUrls:
+    - http://worker-1:8000
+  metrics:
+    serviceMonitor:
+      enabled: true
+      interval: 15s
+      labels:
+        release: prometheus
+grafana:
+  dashboard:
+    enabled: true
+    labels:
+      grafana_dashboard: "1"

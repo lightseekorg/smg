@@ -184,7 +184,6 @@ jobs:
       - name: Run benchmark
         if: steps.filter.outputs.skip != 'true'
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GPU_TYPE: H100
           E2E_NIGHTLY: "1"
           E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen3-30B-A3B":1}'
@@ -298,7 +297,6 @@ jobs:
       - name: Run benchmark
         if: steps.filter.outputs.skip != 'true'
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GPU_TYPE: H100
           E2E_NIGHTLY: "1"
           E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen3-30B-A3B":1}'
@@ -347,6 +345,8 @@ jobs:
       matrix:
         model:
           - { id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8, slug: meta-llama-Llama-4-Maverick-17B-128E-Instruct-FP8, test_class: TestNightlyLlama4MaverickSingle }
+          # Pausing MiniMax M2 nightly benchmark
+          # - { id: minimaxai/minimax-m2, slug: minimaxai-minimax-m2, test_class: TestNightlyMinimaxM2Single }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
           - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
@@ -416,10 +416,11 @@ jobs:
       - name: Run benchmark
         if: steps.filter.outputs.skip != 'true'
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GPU_TYPE: H200
           E2E_NIGHTLY: "1"
           E2E_LOG_DIR: nightly_gateway_logs
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HOME: /raid/models
         run: |
           mkdir -p nightly_gateway_logs
           bash scripts/ci_killall_sglang.sh "nuk_gpus"

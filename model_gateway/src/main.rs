@@ -302,6 +302,10 @@ struct CliArgs {
     #[arg(long, num_args = 0.., help_heading = "Request Handling")]
     request_id_headers: Vec<String>,
 
+    /// Map HTTP headers into storage hook request context (format: header=context_key)
+    #[arg(long, num_args = 0.., help_heading = "Request Handling")]
+    storage_context_headers: Vec<String>,
+
     /// Request timeout in seconds
     #[arg(long, default_value_t = 1800, help_heading = "Request Handling")]
     request_timeout_secs: u64,
@@ -1128,6 +1132,10 @@ impl CliArgs {
             .maybe_log_dir(self.log_dir.as_ref())
             .maybe_request_id_headers(
                 (!self.request_id_headers.is_empty()).then(|| self.request_id_headers.clone()),
+            )
+            .maybe_storage_context_headers(
+                (!self.storage_context_headers.is_empty())
+                    .then(|| Self::parse_selector(&self.storage_context_headers)),
             )
             .maybe_rate_limit_tokens_per_second(self.rate_limit_tokens_per_second)
             .maybe_model_path(self.model_path.as_ref())

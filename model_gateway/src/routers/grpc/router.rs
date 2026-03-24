@@ -30,7 +30,7 @@ use super::{
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
-    core::{is_retryable_status, RetryExecutor, WorkerRegistry, UNKNOWN_MODEL_ID},
+    core::{is_retryable_status, RetryExecutor, WorkerRegistry},
     observability::metrics::{metrics_labels, Metrics},
     routers::RouterTrait,
 };
@@ -132,6 +132,9 @@ impl GrpcRouter {
             .ok_or_else(|| "gRPC router requires MCP manager".to_string())?
             .clone();
 
+        // Capture storage request context from middleware task-local (before any spawn)
+        let storage_request_context = smg_data_connector::current_request_context();
+
         // Helper closure to create responses context with a given pipeline
         let create_responses_context = |pipeline: &RequestPipeline| {
             ResponsesContext::new(
@@ -141,6 +144,7 @@ impl GrpcRouter {
                 ctx.conversation_storage.clone(),
                 ctx.conversation_item_storage.clone(),
                 mcp_orchestrator.clone(),
+                storage_request_context.clone(),
             )
         };
 
@@ -167,7 +171,7 @@ impl GrpcRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &ChatCompletionRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         // Choose Harmony pipeline if workers indicate Harmony (checks architectures, hf_model_type)
         let is_harmony =
@@ -175,8 +179,7 @@ impl GrpcRouter {
 
         debug!(
             "Processing chat completion request for model: {}, using_harmony={}",
-            model_id.unwrap_or(UNKNOWN_MODEL_ID),
-            is_harmony
+            model_id, is_harmony
         );
 
         let pipeline = if is_harmony {
@@ -188,7 +191,7 @@ impl GrpcRouter {
         // Clone values needed for retry closure
         let request = Arc::new(body.clone());
         let headers_cloned = headers.cloned();
-        let model_id_cloned = model_id.map(|s| s.to_string());
+        let model_id_cloned = model_id.to_string();
         let components = self.shared_components.clone();
 
         RetryExecutor::execute_response_with_retry(
@@ -231,17 +234,14 @@ impl GrpcRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &GenerateRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
-        debug!(
-            "Processing generate request for model: {}",
-            model_id.unwrap_or(UNKNOWN_MODEL_ID)
-        );
+        debug!("Processing generate request for model: {}", model_id);
 
         // Clone values needed for retry closure
         let request = Arc::new(body.clone());
         let headers_cloned = headers.cloned();
-        let model_id_cloned = model_id.map(|s| s.to_string());
+        let model_id_cloned = model_id.to_string();
         let components = self.shared_components.clone();
         let pipeline = &self.pipeline;
 
@@ -287,13 +287,10 @@ impl GrpcRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &ResponsesRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         // 0. Fast worker validation (fail-fast before expensive operations)
-        let requested_model: Option<&str> = model_id.or(Some(body.model.as_str()));
-
-        if let Some(error_response) = requested_model
-            .and_then(|model| validate_worker_availability(&self.worker_registry, model))
+        if let Some(error_response) = validate_worker_availability(&self.worker_registry, model_id)
         {
             return error_response;
         }
@@ -305,7 +302,7 @@ impl GrpcRouter {
         if is_harmony {
             debug!(
                 "Processing Harmony responses request for model: {}, streaming: {}",
-                model_id.unwrap_or(UNKNOWN_MODEL_ID),
+                model_id,
                 body.stream.unwrap_or(false)
             );
             let harmony_ctx = ResponsesContext::new(
@@ -317,6 +314,7 @@ impl GrpcRouter {
                     .conversation_item_storage
                     .clone(),
                 self.harmony_responses_context.mcp_orchestrator.clone(),
+                smg_data_connector::current_request_context(),
             );
 
             if body.stream.unwrap_or(false) {
@@ -332,7 +330,7 @@ impl GrpcRouter {
                 &self.responses_context,
                 Arc::new(body.clone()),
                 headers.cloned(),
-                model_id.map(|s| s.to_string()),
+                model_id.to_string(),
             )
             .await
         }
@@ -343,18 +341,15 @@ impl GrpcRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &EmbeddingRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
-        debug!(
-            "Processing embedding request for model: {}",
-            model_id.unwrap_or(UNKNOWN_MODEL_ID)
-        );
+        debug!("Processing embedding request for model: {}", model_id);
 
         self.embedding_pipeline
             .execute_embeddings(
                 Arc::new(body.clone()),
                 headers.cloned(),
-                model_id.map(|s| s.to_string()),
+                model_id.to_string(),
                 self.shared_components.clone(),
             )
             .await
@@ -372,7 +367,7 @@ impl GrpcRouter {
         // Clone values needed for retry closure
         let request = Arc::new(body.clone());
         let headers_cloned = headers.cloned();
-        let model_id_cloned = Some(model_id.to_string());
+        let model_id_cloned = model_id.to_string();
         let components = self.shared_components.clone();
         let pipeline = &self.messages_pipeline;
 
@@ -412,18 +407,15 @@ impl GrpcRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &ClassifyRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
-        debug!(
-            "Processing classify request for model: {}",
-            model_id.unwrap_or(UNKNOWN_MODEL_ID)
-        );
+        debug!("Processing classify request for model: {}", model_id);
 
         self.classify_pipeline
             .execute_classify(
                 Arc::new(body.clone()),
                 headers.cloned(),
-                model_id.map(|s| s.to_string()),
+                model_id.to_string(),
                 self.shared_components.clone(),
             )
             .await
@@ -449,7 +441,7 @@ impl RouterTrait for GrpcRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &GenerateRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_generate_impl(headers, body, model_id).await
     }
@@ -458,7 +450,7 @@ impl RouterTrait for GrpcRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &ChatCompletionRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_chat_impl(headers, body, model_id).await
     }
@@ -467,7 +459,7 @@ impl RouterTrait for GrpcRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &ResponsesRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_responses_impl(headers, body, model_id).await
     }
@@ -489,7 +481,7 @@ impl RouterTrait for GrpcRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &EmbeddingRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_embeddings_impl(headers, body, model_id).await
     }
@@ -498,7 +490,7 @@ impl RouterTrait for GrpcRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &ClassifyRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_classify_impl(headers, body, model_id).await
     }

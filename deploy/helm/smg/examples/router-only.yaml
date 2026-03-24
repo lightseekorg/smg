@@ -1,0 +1,7 @@
+# Minimal router-only deployment pointing at existing workers.
+# Usage: helm install smg deploy/helm/smg -f deploy/helm/smg/examples/router-only.yaml
+router:
+  workerUrls:
+    - http://worker-1.default.svc:8000
+    - http://worker-2.default.svc:8000
+  policy: cache_aware

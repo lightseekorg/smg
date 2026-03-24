@@ -1,0 +1,56 @@
+{{- if .Values.grafana.dashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "smg.fullname" . }}-grafana-dashboard
+  labels:
+    {{- include "smg.labels" . | nindent 4 }}
+    {{- range $key, $value := .Values.grafana.dashboard.labels }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+data:
+  smg-dashboard.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 0,
+      "links": [],
+      "panels": [
+        {
+          "title": "Request Rate",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [{ "expr": "rate(smg_requests_total[5m])", "legendFormat": "{{ "{{" }}method{{ "}}" }} {{ "{{" }}status{{ "}}" }}" }],
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+        },
+        {
+          "title": "Request Latency (p99)",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [{ "expr": "histogram_quantile(0.99, rate(smg_request_duration_seconds_bucket[5m]))", "legendFormat": "p99" }],
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+        },
+        {
+          "title": "Active Workers",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "targets": [{ "expr": "smg_active_workers", "legendFormat": "workers" }],
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 }
+        },
+        {
+          "title": "Queue Depth",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [{ "expr": "smg_queue_depth", "legendFormat": "queue" }],
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 }
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["smg", "llm", "inference"],
+      "templating": { "list": [] },
+      "time": { "from": "now-1h", "to": "now" },
+      "title": "SMG Overview",
+      "uid": "{{ include "smg.fullname" . | trunc 31 | trimSuffix "-" }}-overview"
+    }
+{{- end }}

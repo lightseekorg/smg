@@ -5,8 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::UNKNOWN_MODEL_ID;
-
 // ============================================================================
 // Tokenize API
 // ============================================================================
@@ -17,7 +15,6 @@ use super::UNKNOWN_MODEL_ID;
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct TokenizeRequest {
     /// Model name for tokenizer selection
-    #[serde(default = "default_model_name")]
     pub model: String,
 
     /// Text(s) to tokenize - can be a single string or array of strings
@@ -63,7 +60,6 @@ pub enum CountResult {
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct DetokenizeRequest {
     /// Model name for tokenizer selection
-    #[serde(default = "default_model_name")]
     pub model: String,
 
     /// Token IDs to detokenize - single list or batch (list of lists)
@@ -209,10 +205,6 @@ impl StringOrArray {
 // Default Functions
 // ============================================================================
 
-fn default_model_name() -> String {
-    UNKNOWN_MODEL_ID.to_string()
-}
-
 fn default_true() -> bool {
     true
 }
@@ -222,11 +214,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tokenize_request_single() {
+    fn test_tokenize_request_requires_model() {
         let json = r#"{"prompt": "Hello world"}"#;
-        let req: TokenizeRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.model, "unknown");
-        assert!(matches!(req.prompt, StringOrArray::Single(_)));
+        let result = serde_json::from_str::<TokenizeRequest>(json);
+        assert!(result.is_err(), "Should fail without model field");
     }
 
     #[test]
@@ -238,8 +229,15 @@ mod tests {
     }
 
     #[test]
-    fn test_detokenize_request_single() {
+    fn test_detokenize_request_requires_model() {
         let json = r#"{"tokens": [1, 2, 3]}"#;
+        let result = serde_json::from_str::<DetokenizeRequest>(json);
+        assert!(result.is_err(), "Should fail without model field");
+    }
+
+    #[test]
+    fn test_detokenize_request_single() {
+        let json = r#"{"model": "test-model", "tokens": [1, 2, 3]}"#;
         let req: DetokenizeRequest = serde_json::from_str(json).unwrap();
         assert!(matches!(req.tokens, TokensInput::Single(_)));
         assert!(req.skip_special_tokens);
@@ -247,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_detokenize_request_batch() {
-        let json = r#"{"tokens": [[1, 2], [3, 4, 5]], "skip_special_tokens": false}"#;
+        let json = r#"{"model": "test-model", "tokens": [[1, 2], [3, 4, 5]], "skip_special_tokens": false}"#;
         let req: DetokenizeRequest = serde_json::from_str(json).unwrap();
         assert!(matches!(req.tokens, TokensInput::Batch(_)));
         assert!(!req.skip_special_tokens);

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
 
-use super::common::{default_model, default_true, GenerationRequest, StringOrArray, UsageInfo};
+use super::common::{default_true, GenerationRequest, StringOrArray, UsageInfo};
 
 fn default_rerank_object() -> String {
     "rerank".to_string()
@@ -34,7 +34,6 @@ pub struct RerankRequest {
     pub documents: Vec<String>,
 
     /// Model to use for reranking
-    #[serde(default = "default_model")]
     pub model: String,
 
     /// Maximum number of documents to return (optional)
@@ -205,7 +204,7 @@ impl From<V1RerankReqInput> for RerankRequest {
         RerankRequest {
             query: v1.query,
             documents: v1.documents,
-            model: default_model(),
+            model: super::UNKNOWN_MODEL_ID.to_string(),
             top_k: None,
             return_documents: true,
             rid: None,

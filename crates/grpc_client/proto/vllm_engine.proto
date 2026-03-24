@@ -296,6 +296,13 @@ message GetModelInfoResponse {
   uint32 vocab_size = 4;
   bool supports_vision = 5;
   string served_model_name = 6;
+  string tokenizer_path = 7;
+  string model_type = 8;
+  repeated string architectures = 9;
+  repeated int32 eos_token_ids = 10;
+  int32 pad_token_id = 11;
+  int32 bos_token_id = 12;
+  int32 max_req_input_len = 13;
 }
 
 message GetServerInfoRequest {}
