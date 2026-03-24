@@ -277,6 +277,10 @@ mod tests {
         tracker.begin_drain();
 
         let tracker_clone = tracker.clone();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test needs a concurrent task to exercise drain notification"
+        )]
         let drain_handle =
             tokio::spawn(async move { tracker_clone.wait_for_drain(Duration::from_secs(5)).await });
 
