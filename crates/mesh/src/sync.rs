@@ -20,12 +20,17 @@ pub trait TreeStateSubscriber: Send + Sync + Debug {
     fn apply_remote_tree_state(&self, model_id: &str, tree_state: &TreeState);
 }
 
+pub trait WorkerStateSubscriber: Send + Sync + Debug {
+    fn on_remote_worker_state(&self, state: &WorkerState);
+}
+
 /// Mesh sync manager for coordinating state synchronization
 #[derive(Clone, Debug)]
 pub struct MeshSyncManager {
     pub(crate) stores: Arc<StateStores>,
     self_name: String,
     tree_state_subscribers: Arc<RwLock<Vec<Arc<dyn TreeStateSubscriber>>>>,
+    worker_state_subscribers: Arc<RwLock<Vec<Arc<dyn WorkerStateSubscriber>>>>,
 }
 
 impl MeshSyncManager {
@@ -34,6 +39,7 @@ impl MeshSyncManager {
             stores,
             self_name,
             tree_state_subscribers: Arc::new(RwLock::new(Vec::new())),
+            worker_state_subscribers: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -45,6 +51,17 @@ impl MeshSyncManager {
         let subscribers = self.tree_state_subscribers.read().clone();
         for subscriber in subscribers {
             subscriber.apply_remote_tree_state(model_id, tree_state);
+        }
+    }
+
+    pub fn register_worker_state_subscriber(&self, subscriber: Arc<dyn WorkerStateSubscriber>) {
+        self.worker_state_subscribers.write().push(subscriber);
+    }
+
+    fn notify_worker_state_subscribers(&self, state: &WorkerState) {
+        let subscribers = self.worker_state_subscribers.read().clone();
+        for subscriber in subscribers {
+            subscriber.on_remote_worker_state(state);
         }
     }
 
@@ -186,6 +203,7 @@ impl MeshSyncManager {
                     "Applied remote worker state update: {} (version: {} -> {})",
                     state.worker_id, current_version, state.version
                 );
+                self.notify_worker_state_subscribers(&state);
             }
             Ok((_, false)) => {
                 debug!(

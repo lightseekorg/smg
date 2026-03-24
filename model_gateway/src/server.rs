@@ -1123,6 +1123,9 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         app_context
             .worker_registry
             .set_mesh_sync(Some(handle.sync_manager.clone()));
+        handle
+            .sync_manager
+            .register_worker_state_subscriber(app_context.worker_registry.clone());
         info!("Mesh sync manager set on worker registry");
 
         handle

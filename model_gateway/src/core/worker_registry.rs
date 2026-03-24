@@ -358,6 +358,28 @@ impl WorkerRegistry {
     /// pre-reserved via `reserve_id_for_url()` but has no worker yet is
     /// treated as a new registration (reuses the reserved ID).
     pub fn register(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
+        let worker_id = self.register_inner(worker.clone())?;
+
+        // Sync to mesh if enabled (no-op if mesh is not enabled)
+        {
+            let guard = self.mesh_sync.read();
+            if let Some(ref mesh_sync) = *guard {
+                mesh_sync.sync_worker_state(
+                    worker_id.as_str().to_string(),
+                    worker.model_id().to_string(),
+                    worker.url().to_string(),
+                    worker.is_healthy(),
+                    0.0,
+                );
+            }
+        }
+
+        Some(worker_id)
+    }
+
+    /// Core registration logic shared by local and mesh paths.
+    /// Does NOT sync to mesh — callers that need mesh sync do it themselves.
+    fn register_inner(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
         // Atomic check-and-insert via entry API to avoid TOCTOU races.
         // If URL already has an ID AND a worker object, it's a duplicate.
         // If URL has a reserved ID but no worker, it's a pre-reserved slot.
@@ -400,20 +422,6 @@ impl WorkerRegistry {
             .entry(*worker.connection_mode())
             .or_default()
             .push(worker_id.clone());
-
-        // Sync to mesh if enabled (no-op if mesh is not enabled)
-        {
-            let guard = self.mesh_sync.read();
-            if let Some(ref mesh_sync) = *guard {
-                mesh_sync.sync_worker_state(
-                    worker_id.as_str().to_string(),
-                    worker.model_id().to_string(),
-                    worker.url().to_string(),
-                    worker.is_healthy(),
-                    0.0,
-                );
-            }
-        }
 
         Some(worker_id)
     }
@@ -1037,6 +1045,26 @@ impl Default for WorkerRegistry {
     }
 }
 
+impl smg_mesh::WorkerStateSubscriber for WorkerRegistry {
+    fn on_remote_worker_state(&self, state: &smg_mesh::WorkerState) {
+        use openai_protocol::model_card::ModelCard;
+
+        let worker = super::worker_builder::BasicWorkerBuilder::new(&state.url)
+            .model(ModelCard::new(&state.model_id))
+            .build();
+
+        // register_inner skips mesh sync to avoid version-bump loop.
+        if let Some(id) = self.register_inner(Arc::new(worker)) {
+            tracing::debug!(
+                worker_id = %id.as_str(),
+                url = %state.url,
+                model = %state.model_id,
+                "Registered mesh-synced worker into local registry"
+            );
+        }
+    }
+}
+
 /// Statistics for the worker registry
 #[derive(Debug, Clone)]
 pub struct WorkerRegistryStats {
@@ -1462,5 +1490,53 @@ mod tests {
         // Remove last worker — config should be cleaned up
         registry.remove(&id2);
         assert!(registry.get_retry_config("llama-3").is_none());
+    }
+
+    #[test]
+    fn test_mesh_worker_state_subscriber() {
+        use smg_mesh::{WorkerState, WorkerStateSubscriber};
+
+        let registry = WorkerRegistry::new();
+
+        // Simulate a remote mesh worker state arriving
+        let state = WorkerState {
+            worker_id: "mesh-w1".into(),
+            model_id: "llama-3".into(),
+            url: "http://mesh-worker1:8080".into(),
+            health: true,
+            load: 0.5,
+            version: 1,
+        };
+
+        // Should register the worker locally
+        registry.on_remote_worker_state(&state);
+        assert_eq!(registry.get_by_model("llama-3").len(), 1);
+        assert!(registry.get_by_url("http://mesh-worker1:8080").is_some());
+
+        // Duplicate URL: should be a no-op (create-only semantics)
+        let state_v2 = WorkerState {
+            version: 2,
+            ..state.clone()
+        };
+        registry.on_remote_worker_state(&state_v2);
+        assert_eq!(registry.get_by_model("llama-3").len(), 1);
+
+        // Pre-existing k8s worker at the same URL: mesh should not overwrite
+        let registry2 = WorkerRegistry::new();
+        let k8s_worker = Arc::new(
+            BasicWorkerBuilder::new("http://mesh-worker1:8080")
+                .model(ModelCard::new("llama-3"))
+                .label("source", "k8s")
+                .build(),
+        );
+        registry2.register(k8s_worker);
+        registry2.on_remote_worker_state(&state);
+        // Still only one worker, and it's the original k8s one with labels
+        assert_eq!(registry2.get_by_model("llama-3").len(), 1);
+        let w = registry2.get_by_url("http://mesh-worker1:8080").unwrap();
+        assert_eq!(
+            w.metadata().spec.labels.get("source"),
+            Some(&"k8s".to_string())
+        );
     }
 }
