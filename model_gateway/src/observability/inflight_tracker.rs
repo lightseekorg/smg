@@ -135,10 +135,12 @@ pub struct InFlightGuard {
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.tracker.requests.remove(&self.request_id);
-        // Notify drain waiters when we hit zero during shutdown.
-        // Hot-path cost: DashMap::is_empty() (shard iteration, fast for empty maps).
-        // is_draining() is only checked when the map is empty (rare).
-        if self.tracker.requests.is_empty() && self.tracker.is_draining() {
+        // Notify drain waiters when we hit zero. `wait_for_drain()` re-checks
+        // the condition after waking, so spurious wakeups are harmless.
+        // We unconditionally notify (without checking is_draining()) to avoid a
+        // race where the last guard drops before begin_drain()'s Release store
+        // is visible, which would skip the notification entirely.
+        if self.tracker.requests.is_empty() {
             self.tracker.drain_complete.notify_waiters();
         }
     }
