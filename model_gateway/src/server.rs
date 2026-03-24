@@ -566,6 +566,22 @@ async fn update_worker(
     }
 }
 
+async fn replace_worker(
+    State(state): State<Arc<AppState>>,
+    Path(worker_id_raw): Path<String>,
+    Json(config): Json<WorkerSpec>,
+) -> Response {
+    match state
+        .context
+        .worker_service
+        .replace_worker(&worker_id_raw, config)
+        .await
+    {
+        Ok(result) => result.into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
 // ============================================================================
 // Tokenize / Detokenize Handlers
 // ============================================================================
@@ -771,7 +787,10 @@ pub fn build_app(
         .route("/workers", post(create_worker).get(list_workers_rest))
         .route(
             "/workers/{worker_id}",
-            get(get_worker).put(update_worker).delete(delete_worker),
+            get(get_worker)
+                .put(replace_worker)
+                .patch(update_worker)
+                .delete(delete_worker),
         );
 
     // Apply authentication middleware to control plane routes

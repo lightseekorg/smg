@@ -528,9 +528,6 @@ impl WorkerRegistry {
     /// the 202 response before the async workflow runs. The workflow's
     /// `register_or_replace()` call will find the pre-reserved entry and
     /// create the worker under this ID.
-    ///
-    /// TODO: Remove once REST API is updated to separate POST (create) from
-    /// PUT (replace). The 409 check will happen in the service layer instead.
     pub fn reserve_id_for_url(&self, url: &str) -> WorkerId {
         self.url_to_id.entry(url.to_string()).or_default().clone()
     }
