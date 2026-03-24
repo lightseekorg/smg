@@ -12,6 +12,11 @@ on:
       - 'crates/grpc_client/go/**'
       - 'crates/grpc_client/proto/**'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 1.5.0)'
+        required: true
+
 
 permissions:
   contents: read
@@ -49,7 +54,7 @@ jobs:
   release:
     name: Tag Release
     needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -91,11 +96,11 @@ jobs:
       - name: Read Version
         id: version
         run: |
-          if [ ! -f crates/grpc_client/go/VERSION ]; then
-            echo "Error: VERSION file missing"
+          VERSION="${{ github.event.inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            echo "Error: Version input is missing"
             exit 1
           fi
-          VERSION=$(cat crates/grpc_client/go/VERSION | tr -d '[:space:]')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Check if tag exists
