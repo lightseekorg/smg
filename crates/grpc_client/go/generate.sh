@@ -21,16 +21,16 @@ echo "Copying proto files..."
 cp "$PROTO_SOURCE_DIR"/*.proto "$GO_PROTO_DIR"/
 
 # Find tools in PATH or GOPATH
-PROTOC_GEN_GO=$(which protoc-gen-go || echo "$(go env GOPATH)/bin/protoc-gen-go")
-PROTOC_GEN_GO_GRPC=$(which protoc-gen-go-grpc || echo "$(go env GOPATH)/bin/protoc-gen-go-grpc")
+PROTOC_GEN_GO=$(command -v protoc-gen-go || echo "$(go env GOPATH)/bin/protoc-gen-go")
+PROTOC_GEN_GO_GRPC=$(command -v protoc-gen-go-grpc || echo "$(go env GOPATH)/bin/protoc-gen-go-grpc")
 
-if [ ! -f "$PROTOC_GEN_GO" ]; then
-  echo "Error: protoc-gen-go not found. Please install with: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest"
+if [ ! -x "$PROTOC_GEN_GO" ]; then
+  echo "Error: protoc-gen-go not found. Please install with: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest" >&2
   exit 1
 fi
 
-if [ ! -f "$PROTOC_GEN_GO_GRPC" ]; then
-  echo "Error: protoc-gen-go-grpc not found. Please install with: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest"
+if [ ! -x "$PROTOC_GEN_GO_GRPC" ]; then
+  echo "Error: protoc-gen-go-grpc not found. Please install with: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest" >&2
     exit 1
 fi
 
