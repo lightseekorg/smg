@@ -66,7 +66,7 @@ RUN case "${ENGINE}" in \
          bash /tmp/scripts/install-${ENGINE}.sh /opt/engine-src; \
        fi \
     && if [ "${ENGINE}" = "vllm" ]; then \
-         pip install --no-cache-dir smg-grpc-proto "smg-grpc-servicer[vllm]"; \
+         pip install --no-cache-dir /opt/smg-src/crates/grpc_client/python "/opt/smg-src/grpc_servicer[vllm]"; \
        fi
 
 ENTRYPOINT ["smg"]
