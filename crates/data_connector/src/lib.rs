@@ -40,13 +40,17 @@ pub use core::{
 pub use config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
 // Re-export hook infrastructure
 pub use context::{
-    current_extra_columns, current_request_context, with_extra_columns, with_request_context,
+    current_extra_columns, current_extra_table_writes, current_hook_writes,
+    current_request_context, with_extra_columns, with_hook_writes, with_request_context,
     RequestContext,
 };
 // Re-export factory
 pub use factory::{create_storage, StorageFactoryConfig};
-pub use hooks::{BeforeHookResult, ExtraColumns, HookError, StorageHook, StorageOperation};
+pub use hooks::{
+    BeforeHookResult, ExtraColumns, ExtraTableWrite, HookError, HookWrites, StorageHook,
+    StorageOperation,
+};
 // Re-export memory implementations for testing
 pub use memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage};
 // Re-export schema config types
-pub use schema::{ColumnDef, SchemaConfig, TableConfig};
+pub use schema::{ColumnDef, ExtraTableConfig, SchemaConfig, TableConfig};

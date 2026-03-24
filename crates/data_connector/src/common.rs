@@ -2,9 +2,15 @@ use serde_json::Value;
 
 use crate::{
     core::ConversationMetadata,
-    hooks::ExtraColumns,
-    schema::{SchemaConfig, TableConfig},
+    hooks::{ExtraColumns, ExtraTableWrite},
+    schema::{ExtraTableConfig, SchemaConfig, TableConfig},
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResolvedExtraTableWrite {
+    pub table_name: String,
+    pub columns: Vec<(String, Option<String>)>,
+}
 
 /// Logical column names for the responses table, in canonical SELECT order.
 ///
@@ -60,6 +66,80 @@ pub(super) fn sorted_extra_column_names(tc: &TableConfig) -> Vec<&str> {
     let mut names: Vec<&str> = tc.extra_columns.keys().map(String::as_str).collect();
     names.sort_unstable();
     names
+}
+
+/// Get extra-table column names sorted alphabetically for deterministic SQL generation.
+pub(super) fn sorted_extra_table_column_names(tc: &ExtraTableConfig) -> Vec<&str> {
+    let mut names: Vec<&str> = tc.columns.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    names
+}
+
+/// Generate DDL column definitions for extra tables.
+pub(super) fn extra_table_column_defs(tc: &ExtraTableConfig) -> Vec<String> {
+    sorted_extra_table_column_names(tc)
+        .iter()
+        .filter_map(|name| {
+            tc.columns
+                .get(*name)
+                .map(|def| format!("{name} {}", def.sql_type))
+        })
+        .collect()
+}
+
+/// Resolve hook-produced extra-table writes against schema config.
+pub(super) fn resolve_extra_table_writes(
+    schema: &SchemaConfig,
+    writes: &[ExtraTableWrite],
+) -> Result<Vec<ResolvedExtraTableWrite>, String> {
+    writes
+        .iter()
+        .map(|write| {
+            let (alias, tc) = schema
+                .extra_tables
+                .iter()
+                .find(|(alias, _)| alias.eq_ignore_ascii_case(&write.table))
+                .ok_or_else(|| format!("hook requested unknown extra table '{}'", write.table))?;
+
+            for key in write.row.keys() {
+                if !tc
+                    .columns
+                    .keys()
+                    .any(|c| c.eq_ignore_ascii_case(key))
+                {
+                    return Err(format!(
+                        "hook requested unknown column '{key}' for extra table '{alias}'"
+                    ));
+                }
+            }
+
+            let columns = sorted_extra_table_column_names(tc)
+                .into_iter()
+                .map(|name| {
+                    let val = write
+                        .row
+                        .iter()
+                        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                        .map(|(_, value)| value)
+                        .filter(|v| !v.is_null())
+                        .map(value_to_sql_string)
+                        .or_else(|| {
+                            tc.columns
+                                .get(name)
+                                .and_then(|def| def.default_value.as_ref())
+                                .filter(|v| !v.is_null())
+                                .map(value_to_sql_string)
+                        });
+                    (name.to_string(), val)
+                })
+                .collect();
+
+            Ok(ResolvedExtraTableWrite {
+                table_name: tc.qualified_table(schema.owner.as_deref()),
+                columns,
+            })
+        })
+        .collect()
 }
 
 /// Convert a `serde_json::Value` to a SQL-bindable string representation.

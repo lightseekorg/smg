@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use crate::{
-    context::{current_request_context, with_extra_columns},
+    context::{current_request_context, with_hook_writes},
     core::{
         Conversation, ConversationId, ConversationItem, ConversationItemId, ConversationItemResult,
         ConversationItemStorage, ConversationItemStorageError, ConversationMetadata,
@@ -19,28 +19,28 @@ use crate::{
         NewConversation, NewConversationItem, ResponseChain, ResponseId, ResponseResult,
         ResponseStorage, ResponseStorageError, StoredResponse,
     },
-    hooks::{BeforeHookResult, ExtraColumns, StorageHook, StorageOperation},
+    hooks::{BeforeHookResult, HookWrites, StorageHook, StorageOperation},
 };
 
 // ────────────────────────────────────────────────────────────────────────────
 // Helper
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Run the before-hook, returning the extra columns on success or mapping
+/// Run the before-hook, returning the hook writes on success or mapping
 /// `Reject` / errors to the appropriate storage error via `map_err`.
 async fn run_before<E>(
     hook: &dyn StorageHook,
     op: StorageOperation,
     payload: &serde_json::Value,
     map_err: fn(String) -> E,
-) -> Result<ExtraColumns, E> {
+) -> Result<HookWrites, E> {
     let ctx = current_request_context();
     match hook.before(op, ctx.as_ref(), payload).await {
-        Ok(BeforeHookResult::Continue(extra)) => Ok(extra),
+        Ok(BeforeHookResult::Continue(writes)) => Ok(writes),
         Ok(BeforeHookResult::Reject(msg)) => Err(map_err(msg)),
         Err(e) => {
             warn!("before hook error for {op:?}, continuing: {e}");
-            Ok(ExtraColumns::new())
+            Ok(HookWrites::default())
         }
     }
 }
@@ -51,10 +51,10 @@ async fn run_after(
     op: StorageOperation,
     payload: &serde_json::Value,
     result: &serde_json::Value,
-    extra: &ExtraColumns,
+    writes: &HookWrites,
 ) {
     let ctx = current_request_context();
-    if let Err(e) = hook.after(op, ctx.as_ref(), payload, result, extra).await {
+    if let Err(e) = hook.after(op, ctx.as_ref(), payload, result, writes).await {
         warn!("after hook error for {op:?}: {e}");
     }
 }
@@ -81,7 +81,7 @@ impl ConversationStorage for HookedConversationStorage {
         input: NewConversation,
     ) -> ConversationResult<Conversation> {
         let payload = serde_json::to_value(&input).unwrap_or_default();
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::CreateConversation,
             &payload,
@@ -90,7 +90,7 @@ impl ConversationStorage for HookedConversationStorage {
         .await?;
 
         let result =
-            with_extra_columns(extra.clone(), self.inner.create_conversation(input)).await?;
+            with_hook_writes(writes.clone(), self.inner.create_conversation(input)).await?;
 
         let result_json = serde_json::to_value(&result).unwrap_or_default();
         run_after(
@@ -98,7 +98,7 @@ impl ConversationStorage for HookedConversationStorage {
             StorageOperation::CreateConversation,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -110,7 +110,7 @@ impl ConversationStorage for HookedConversationStorage {
         id: &ConversationId,
     ) -> ConversationResult<Option<Conversation>> {
         let payload = serde_json::to_value(id).unwrap_or_default();
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::GetConversation,
             &payload,
@@ -126,7 +126,7 @@ impl ConversationStorage for HookedConversationStorage {
             StorageOperation::GetConversation,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -139,7 +139,7 @@ impl ConversationStorage for HookedConversationStorage {
         metadata: Option<ConversationMetadata>,
     ) -> ConversationResult<Option<Conversation>> {
         let payload = serde_json::json!({ "id": id, "metadata": metadata });
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::UpdateConversation,
             &payload,
@@ -148,7 +148,7 @@ impl ConversationStorage for HookedConversationStorage {
         .await?;
 
         let result =
-            with_extra_columns(extra.clone(), self.inner.update_conversation(id, metadata)).await?;
+            with_hook_writes(writes.clone(), self.inner.update_conversation(id, metadata)).await?;
 
         let result_json = serde_json::to_value(&result).unwrap_or_default();
         run_after(
@@ -156,7 +156,7 @@ impl ConversationStorage for HookedConversationStorage {
             StorageOperation::UpdateConversation,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -165,7 +165,7 @@ impl ConversationStorage for HookedConversationStorage {
 
     async fn delete_conversation(&self, id: &ConversationId) -> ConversationResult<bool> {
         let payload = serde_json::to_value(id).unwrap_or_default();
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::DeleteConversation,
             &payload,
@@ -181,7 +181,7 @@ impl ConversationStorage for HookedConversationStorage {
             StorageOperation::DeleteConversation,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -211,7 +211,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         item: NewConversationItem,
     ) -> ConversationItemResult<ConversationItem> {
         let payload = serde_json::to_value(&item).unwrap_or_default();
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::CreateItem,
             &payload,
@@ -219,7 +219,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         )
         .await?;
 
-        let result = with_extra_columns(extra.clone(), self.inner.create_item(item)).await?;
+        let result = with_hook_writes(writes.clone(), self.inner.create_item(item)).await?;
 
         let result_json = serde_json::to_value(&result).unwrap_or_default();
         run_after(
@@ -227,7 +227,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
             StorageOperation::CreateItem,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -241,7 +241,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         added_at: DateTime<Utc>,
     ) -> ConversationItemResult<()> {
         let payload = serde_json::json!({ "conversation_id": conversation_id, "item_id": item_id, "added_at": added_at });
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::LinkItem,
             &payload,
@@ -249,8 +249,8 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         )
         .await?;
 
-        let result = with_extra_columns(
-            extra.clone(),
+        let result = with_hook_writes(
+            writes.clone(),
             self.inner.link_item(conversation_id, item_id, added_at),
         )
         .await?;
@@ -260,7 +260,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
             StorageOperation::LinkItem,
             &payload,
             &serde_json::Value::Null,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -274,7 +274,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
     ) -> ConversationItemResult<()> {
         let payload =
             serde_json::json!({ "conversation_id": conversation_id, "items_count": items.len() });
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::LinkItems,
             &payload,
@@ -283,7 +283,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         .await?;
 
         let result =
-            with_extra_columns(extra.clone(), self.inner.link_items(conversation_id, items))
+            with_hook_writes(writes.clone(), self.inner.link_items(conversation_id, items))
                 .await?;
 
         run_after(
@@ -291,7 +291,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
             StorageOperation::LinkItems,
             &payload,
             &serde_json::Value::Null,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -304,7 +304,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         params: ListParams,
     ) -> ConversationItemResult<Vec<ConversationItem>> {
         let payload = serde_json::json!({ "conversation_id": conversation_id, "params": params });
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::ListItems,
             &payload,
@@ -320,7 +320,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
             StorageOperation::ListItems,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -332,7 +332,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         item_id: &ConversationItemId,
     ) -> ConversationItemResult<Option<ConversationItem>> {
         let payload = serde_json::to_value(item_id).unwrap_or_default();
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::GetItem,
             &payload,
@@ -348,7 +348,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
             StorageOperation::GetItem,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -361,7 +361,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         item_id: &ConversationItemId,
     ) -> ConversationItemResult<bool> {
         let payload = serde_json::json!({ "conversation_id": conversation_id, "item_id": item_id });
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::IsItemLinked,
             &payload,
@@ -377,7 +377,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
             StorageOperation::IsItemLinked,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -390,7 +390,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         item_id: &ConversationItemId,
     ) -> ConversationItemResult<()> {
         let payload = serde_json::json!({ "conversation_id": conversation_id, "item_id": item_id });
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::DeleteItem,
             &payload,
@@ -405,7 +405,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
             StorageOperation::DeleteItem,
             &payload,
             &serde_json::Value::Null,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -432,7 +432,7 @@ impl HookedResponseStorage {
 impl ResponseStorage for HookedResponseStorage {
     async fn store_response(&self, response: StoredResponse) -> ResponseResult<ResponseId> {
         let payload = serde_json::to_value(&response).unwrap_or_default();
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::StoreResponse,
             &payload,
@@ -440,7 +440,7 @@ impl ResponseStorage for HookedResponseStorage {
         )
         .await?;
 
-        let result = with_extra_columns(extra.clone(), self.inner.store_response(response)).await?;
+        let result = with_hook_writes(writes.clone(), self.inner.store_response(response)).await?;
 
         let result_json = serde_json::to_value(&result).unwrap_or_default();
         run_after(
@@ -448,7 +448,7 @@ impl ResponseStorage for HookedResponseStorage {
             StorageOperation::StoreResponse,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -460,7 +460,7 @@ impl ResponseStorage for HookedResponseStorage {
         response_id: &ResponseId,
     ) -> ResponseResult<Option<StoredResponse>> {
         let payload = serde_json::to_value(response_id).unwrap_or_default();
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::GetResponse,
             &payload,
@@ -476,7 +476,7 @@ impl ResponseStorage for HookedResponseStorage {
             StorageOperation::GetResponse,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -485,7 +485,7 @@ impl ResponseStorage for HookedResponseStorage {
 
     async fn delete_response(&self, response_id: &ResponseId) -> ResponseResult<()> {
         let payload = serde_json::to_value(response_id).unwrap_or_default();
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::DeleteResponse,
             &payload,
@@ -500,7 +500,7 @@ impl ResponseStorage for HookedResponseStorage {
             StorageOperation::DeleteResponse,
             &payload,
             &serde_json::Value::Null,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -513,7 +513,7 @@ impl ResponseStorage for HookedResponseStorage {
         max_depth: Option<usize>,
     ) -> ResponseResult<ResponseChain> {
         let payload = serde_json::json!({ "response_id": response_id, "max_depth": max_depth });
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::GetResponseChain,
             &payload,
@@ -532,7 +532,7 @@ impl ResponseStorage for HookedResponseStorage {
             StorageOperation::GetResponseChain,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -545,7 +545,7 @@ impl ResponseStorage for HookedResponseStorage {
         limit: Option<usize>,
     ) -> ResponseResult<Vec<StoredResponse>> {
         let payload = serde_json::json!({ "identifier": identifier, "limit": limit });
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::ListIdentifierResponses,
             &payload,
@@ -564,7 +564,7 @@ impl ResponseStorage for HookedResponseStorage {
             StorageOperation::ListIdentifierResponses,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -573,7 +573,7 @@ impl ResponseStorage for HookedResponseStorage {
 
     async fn delete_identifier_responses(&self, identifier: &str) -> ResponseResult<usize> {
         let payload = serde_json::json!({ "identifier": identifier });
-        let extra = run_before(
+        let writes = run_before(
             &*self.hook,
             StorageOperation::DeleteIdentifierResponses,
             &payload,
@@ -589,7 +589,7 @@ impl ResponseStorage for HookedResponseStorage {
             StorageOperation::DeleteIdentifierResponses,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await;
 
@@ -610,7 +610,7 @@ mod tests {
     use super::*;
     use crate::{
         context::{with_request_context, RequestContext},
-        hooks::HookError,
+        hooks::{ExtraColumns, HookError},
         memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage},
     };
 
@@ -657,7 +657,7 @@ mod tests {
             if let Some(msg) = self.reject_before.lock().as_ref() {
                 return Ok(BeforeHookResult::Reject(msg.clone()));
             }
-            Ok(BeforeHookResult::Continue(ExtraColumns::new()))
+            Ok(BeforeHookResult::Continue(HookWrites::default()))
         }
 
         async fn after(
@@ -666,10 +666,10 @@ mod tests {
             _context: Option<&RequestContext>,
             _payload: &serde_json::Value,
             _result: &serde_json::Value,
-            extra: &ExtraColumns,
-        ) -> Result<ExtraColumns, HookError> {
+            writes: &HookWrites,
+        ) -> Result<HookWrites, HookError> {
             self.after_count.fetch_add(1, Ordering::SeqCst);
-            Ok(extra.clone())
+            Ok(writes.clone())
         }
     }
 
@@ -848,9 +848,9 @@ mod tests {
                 _ctx: Option<&RequestContext>,
                 _payload: &serde_json::Value,
                 _result: &serde_json::Value,
-                extra: &ExtraColumns,
-            ) -> Result<ExtraColumns, HookError> {
-                Ok(extra.clone())
+                writes: &HookWrites,
+            ) -> Result<HookWrites, HookError> {
+                Ok(writes.clone())
             }
         }
 
@@ -896,7 +896,7 @@ mod tests {
                     "tenant_id".to_string(),
                     serde_json::Value::String("hook-tenant".to_string()),
                 );
-                Ok(BeforeHookResult::Continue(extra))
+                Ok(BeforeHookResult::Continue(extra.into()))
             }
 
             async fn after(
@@ -905,9 +905,9 @@ mod tests {
                 _ctx: Option<&RequestContext>,
                 _payload: &serde_json::Value,
                 _result: &serde_json::Value,
-                extra: &ExtraColumns,
-            ) -> Result<ExtraColumns, HookError> {
-                Ok(extra.clone())
+                writes: &HookWrites,
+            ) -> Result<HookWrites, HookError> {
+                Ok(writes.clone())
             }
         }
 
@@ -1001,7 +1001,7 @@ mod tests {
                     "TENANT_ID".to_string(),
                     serde_json::Value::String("acme-corp".to_string()),
                 );
-                Ok(BeforeHookResult::Continue(extra))
+                Ok(BeforeHookResult::Continue(extra.into()))
             }
 
             async fn after(
@@ -1010,9 +1010,9 @@ mod tests {
                 _ctx: Option<&RequestContext>,
                 _payload: &serde_json::Value,
                 _result: &serde_json::Value,
-                extra: &ExtraColumns,
-            ) -> Result<ExtraColumns, HookError> {
-                Ok(extra.clone())
+                writes: &HookWrites,
+            ) -> Result<HookWrites, HookError> {
+                Ok(writes.clone())
             }
         }
 
@@ -1118,7 +1118,7 @@ mod tests {
                         );
                     }
                 }
-                Ok(BeforeHookResult::Continue(extra))
+                Ok(BeforeHookResult::Continue(extra.into()))
             }
 
             async fn after(
@@ -1127,9 +1127,9 @@ mod tests {
                 _ctx: Option<&RequestContext>,
                 _payload: &serde_json::Value,
                 _result: &serde_json::Value,
-                extra: &ExtraColumns,
-            ) -> Result<ExtraColumns, HookError> {
-                Ok(extra.clone())
+                writes: &HookWrites,
+            ) -> Result<HookWrites, HookError> {
+                Ok(writes.clone())
             }
         }
 
@@ -1225,9 +1225,9 @@ mod tests {
                 _ctx: Option<&RequestContext>,
                 _payload: &serde_json::Value,
                 _result: &serde_json::Value,
-                extra: &ExtraColumns,
-            ) -> Result<ExtraColumns, HookError> {
-                Ok(extra.clone())
+                writes: &HookWrites,
+            ) -> Result<HookWrites, HookError> {
+                Ok(writes.clone())
             }
         }
 

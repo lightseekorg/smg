@@ -43,6 +43,10 @@ pub struct SchemaConfig {
     pub responses: TableConfig,
     pub conversation_items: TableConfig,
     pub conversation_item_links: TableConfig,
+
+    /// Extra side tables that hooks may insert into.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra_tables: HashMap<String, ExtraTableConfig>,
 }
 
 /// Per-table schema configuration.
@@ -68,6 +72,28 @@ pub struct TableConfig {
     /// (e.g. a team's RESPONSES table has no `safety_identifier`).
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub skip_columns: HashSet<String>,
+}
+
+/// Declarative config for an extra side table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ExtraTableConfig {
+    /// Physical table name.
+    pub table: String,
+
+    /// Declared physical columns for rows written by hooks.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub columns: HashMap<String, ColumnDef>,
+}
+
+impl ExtraTableConfig {
+    /// Fully qualified table name for extra side tables.
+    pub fn qualified_table(&self, owner: Option<&str>) -> String {
+        match owner {
+            Some(o) => format!("{o}.\"{}\"", self.table),
+            None => self.table.clone(),
+        }
+    }
 }
 
 /// Column definition for extra (user-defined) columns declared in schema config.
@@ -103,6 +129,7 @@ impl Default for SchemaConfig {
             responses: TableConfig::with_table("responses"),
             conversation_items: TableConfig::with_table("conversation_items"),
             conversation_item_links: TableConfig::with_table("conversation_item_links"),
+            extra_tables: HashMap::new(),
         }
     }
 }
@@ -185,6 +212,16 @@ impl SchemaConfig {
             // callers always pass lowercase literals (e.g. "safety_identifier").
             // Uppercasing them would break the case-sensitive HashSet lookup.
         }
+
+        for extra_table in self.extra_tables.values_mut() {
+            extra_table.table.make_ascii_uppercase();
+            let keys: Vec<String> = extra_table.columns.keys().cloned().collect();
+            for key in keys {
+                if let Some(def) = extra_table.columns.remove(&key) {
+                    extra_table.columns.insert(key.to_ascii_uppercase(), def);
+                }
+            }
+        }
     }
 
     /// Validate the entire schema config at startup. Rejects invalid identifiers.
@@ -199,6 +236,7 @@ impl SchemaConfig {
         Self::validate_table("responses", &self.responses)?;
         Self::validate_table("conversation_items", &self.conversation_items)?;
         Self::validate_table("conversation_item_links", &self.conversation_item_links)?;
+        Self::validate_extra_tables(&self.extra_tables)?;
 
         Ok(())
     }
@@ -268,6 +306,66 @@ impl SchemaConfig {
                     "{label}.skip_columns: '{name}' is not a recognized column \
                      (known: {core:?})"
                 ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_extra_tables(extra_tables: &HashMap<String, ExtraTableConfig>) -> Result<(), String> {
+        let mut folded_aliases: HashSet<String> = HashSet::new();
+        let mut folded_tables: HashSet<String> = HashSet::new();
+
+        for (alias, tc) in extra_tables {
+            validate_identifier(alias)
+                .map_err(|e| format!("extra_tables key '{alias}': {e}"))?;
+            if !folded_aliases.insert(alias.to_ascii_uppercase()) {
+                return Err(format!(
+                    "extra_tables: case-insensitive collision on '{alias}'"
+                ));
+            }
+
+            validate_identifier(&tc.table).map_err(|e| {
+                if tc.table.is_empty() {
+                    format!(
+                        "extra_tables['{alias}'].table: table name is required (got empty string)"
+                    )
+                } else {
+                    format!("extra_tables['{alias}'].table: {e}")
+                }
+            })?;
+
+            if !folded_tables.insert(tc.table.to_ascii_uppercase()) {
+                return Err(format!(
+                    "extra_tables: physical table collision on '{}'",
+                    tc.table
+                ));
+            }
+
+            if tc.columns.is_empty() {
+                return Err(format!(
+                    "extra_tables['{alias}'].columns: at least one column is required"
+                ));
+            }
+
+            let mut folded_cols: HashSet<String> = HashSet::new();
+            for (name, def) in &tc.columns {
+                validate_identifier(name).map_err(|e| {
+                    format!("extra_tables['{alias}'].columns key '{name}': {e}")
+                })?;
+                if !folded_cols.insert(name.to_ascii_uppercase()) {
+                    return Err(format!(
+                        "extra_tables['{alias}'].columns: case-insensitive collision on '{name}'"
+                    ));
+                }
+                if def.sql_type.is_empty() {
+                    return Err(format!(
+                        "extra_tables['{alias}'].columns['{name}']: sql_type must not be empty"
+                    ));
+                }
+                validate_sql_type(&def.sql_type).map_err(|e| {
+                    format!("extra_tables['{alias}'].columns['{name}'].sql_type: {e}")
+                })?;
             }
         }
 
