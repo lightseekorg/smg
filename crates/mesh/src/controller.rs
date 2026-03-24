@@ -30,6 +30,7 @@ use super::{
     sync::MeshSyncManager,
 };
 use crate::flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE};
+use crate::metrics;
 
 pub struct MeshController {
     state: ClusterState,
@@ -125,6 +126,13 @@ impl MeshController {
                 if removed > 0 {
                     log::info!("GC: removed {removed} tombstoned CRDT metadata entries");
                 }
+                // Record store sizes for monitoring
+                metrics::record_store_sizes(
+                    self.stores.worker.len(),
+                    self.stores.policy.len(),
+                    self.stores.membership.len(),
+                    self.stores.app.len(),
+                );
             }
 
             tokio::select! {
@@ -394,15 +402,33 @@ impl MeshController {
                         loop {
                             interval.tick().await;
 
+                            let round_start = std::time::Instant::now();
+
                             // Collect all incremental updates
                             let all_updates = collector.collect_all_updates();
 
+                            let collect_elapsed = round_start.elapsed();
+
                             if !all_updates.is_empty() {
-                                for (store_type, updates) in all_updates {
+                                for (store_type, updates) in &all_updates {
                                     let proto_store_type = store_type.to_proto();
 
                                     // Validate message size before sending
                                     let batch_size: usize = updates.iter().map(|u| u.value.len()).sum();
+
+                                    log::debug!(
+                                        peer = %peer_name_incremental,
+                                        store = ?store_type,
+                                        updates = updates.len(),
+                                        batch_bytes = batch_size,
+                                        "mesh sync store batch"
+                                    );
+                                    metrics::record_sync_batch_bytes(
+                                        &peer_name_incremental,
+                                        store_type.as_str(),
+                                        batch_size,
+                                    );
+
                                     if let Err(e) = size_validator.validate(batch_size) {
                                         log::warn!(
                                             "Incremental update too large, skipping store {:?}: {} (max: {} bytes)",
@@ -410,7 +436,7 @@ impl MeshController {
                                             e,
                                             size_validator.max_size()
                                         );
-                                        collector.mark_sent(store_type, &updates);
+                                        collector.mark_sent(*store_type, updates);
                                         continue;
                                     }
 
@@ -439,7 +465,7 @@ impl MeshController {
                                     match tx_incremental.try_send(incremental_update) {
                                         Ok(()) => {
                                             // Mark as sent after successful transmission
-                                            collector.mark_sent(store_type, &updates);
+                                            collector.mark_sent(*store_type, updates);
                                         }
                                         Err(mpsc::error::TrySendError::Full(_)) => {
                                             log::debug!(
@@ -455,6 +481,21 @@ impl MeshController {
                                         }
                                     }
                                 }
+                            }
+
+                            let round_elapsed = round_start.elapsed();
+                            metrics::record_sync_round_duration(
+                                &peer_name_incremental,
+                                round_elapsed,
+                            );
+                            if round_elapsed.as_millis() > 10 || !all_updates.is_empty() {
+                                log::info!(
+                                    peer = %peer_name_incremental,
+                                    round_ms = round_elapsed.as_millis(),
+                                    collect_ms = collect_elapsed.as_millis(),
+                                    stores_with_updates = all_updates.len(),
+                                    "mesh sync round"
+                                );
                             }
                         }
                     })
