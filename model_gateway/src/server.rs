@@ -673,16 +673,7 @@ pub fn build_app(
     );
 
     let protected_routes = Router::new()
-        .route("/generate", post(generate))
-        .route("/v1/chat/completions", post(v1_chat_completions))
-        .route("/v1/completions", post(v1_completions))
-        .route("/rerank", post(rerank))
-        .route("/v1/rerank", post(v1_rerank))
         .route("/v1/responses", post(v1_responses))
-        .route("/v1/embeddings", post(v1_embeddings))
-        .route("/v1/messages", post(v1_messages))
-        .route("/v1/interactions", post(v1_interactions))
-        .route("/v1/classify", post(v1_classify))
         .route("/v1/responses/{response_id}", get(v1_responses_get))
         .route(
             "/v1/responses/{response_id}/cancel",
@@ -708,6 +699,19 @@ pub fn build_app(
             "/v1/conversations/{conversation_id}/items/{item_id}",
             get(v1_conversations_get_item).delete(v1_conversations_delete_item),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::storage_context_middleware,
+        ))
+        .route("/generate", post(generate))
+        .route("/v1/chat/completions", post(v1_chat_completions))
+        .route("/v1/completions", post(v1_completions))
+        .route("/rerank", post(rerank))
+        .route("/v1/rerank", post(v1_rerank))
+        .route("/v1/embeddings", post(v1_embeddings))
+        .route("/v1/messages", post(v1_messages))
+        .route("/v1/interactions", post(v1_interactions))
+        .route("/v1/classify", post(v1_classify))
         // Tokenize / Detokenize endpoints
         .route("/v1/tokenize", post(v1_tokenize))
         .route("/v1/detokenize", post(v1_detokenize))
