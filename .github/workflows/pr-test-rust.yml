@@ -421,9 +421,9 @@ jobs:
       matrix:
         include:
           - engine: sglang
-            timeout: 30
+            timeout: 35
           - engine: vllm
-            timeout: 20
+            timeout: 35
           - engine: trtllm
             timeout: 90
     uses: ./.github/workflows/e2e-gpu-job.yml
@@ -452,16 +452,19 @@ jobs:
       matrix:
         include:
           - engine: sglang
-            timeout: 30
+            timeout: 15
+            runner: 1-gpu
           - engine: vllm
-            timeout: 30
+            timeout: 15
+            runner: 1-gpu
           - engine: trtllm
-            timeout: 40
+            timeout: 90
+            runner: 1-gpu-h100
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
       gpu_tier: "1"
-      runner: 1-gpu-h100
+      runner: ${{ matrix.runner }}
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/responses
       setup_agentic_deps: true
