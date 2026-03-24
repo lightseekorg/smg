@@ -4,13 +4,13 @@
 //! conversation store ID from HTTP headers) can reach hooks without threading
 //! it through every storage method signature.
 //!
-//! Also provides a task-local [`ExtraColumns`] bridge so that hooked storage
-//! wrappers can pass hook-provided extra column values to backends without
-//! changing any storage trait signatures.
+//! Also provides a task-local [`HookWrites`] bridge so that hooked storage
+//! wrappers can pass hook-provided extra column values and extra-table writes
+//! to backends without changing any storage trait signatures.
 
 use std::collections::HashMap;
 
-use crate::hooks::ExtraColumns;
+use crate::hooks::{ExtraColumns, ExtraTableWrite, HookWrites};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -57,7 +57,7 @@ impl RequestContext {
 
 tokio::task_local! {
     static REQUEST_CONTEXT: RequestContext;
-    static HOOK_EXTRA_COLUMNS: ExtraColumns;
+    static HOOK_WRITES: HookWrites;
 }
 
 /// Run an async block with the given [`RequestContext`] available via task-local.
@@ -78,23 +78,43 @@ pub fn current_request_context() -> Option<RequestContext> {
     REQUEST_CONTEXT.try_with(|ctx| ctx.clone()).ok()
 }
 
-/// Run an async block with the given [`ExtraColumns`] available via task-local.
+/// Run an async block with the given [`HookWrites`] available via task-local.
 ///
 /// Called by [`HookedStorage`](crate::hooked) wrappers to make hook-provided
-/// extra column values visible to the inner backend during write operations.
+/// write data visible to the inner backend during write operations.
+pub async fn with_hook_writes<F, T>(writes: HookWrites, f: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    HOOK_WRITES.scope(writes, f).await
+}
+
+/// Run an async block with the given [`ExtraColumns`] available via task-local.
+///
+/// Backward-compatible wrapper around [`with_hook_writes`].
 pub async fn with_extra_columns<F, T>(extra: ExtraColumns, f: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    HOOK_EXTRA_COLUMNS.scope(extra, f).await
+    with_hook_writes(HookWrites::from(extra), f).await
+}
+
+/// Read the current hook write payload, if set for this task.
+pub fn current_hook_writes() -> Option<HookWrites> {
+    HOOK_WRITES.try_with(|writes| writes.clone()).ok()
 }
 
 /// Read the current hook extra columns, if set for this task.
 ///
 /// Backends call this during INSERT to pick up values provided by hooks.
-/// Returns `None` when called outside a [`with_extra_columns`] scope.
+/// Returns `None` when called outside a [`with_hook_writes`] scope.
 pub fn current_extra_columns() -> Option<ExtraColumns> {
-    HOOK_EXTRA_COLUMNS.try_with(|ec| ec.clone()).ok()
+    current_hook_writes().map(|writes| writes.extra_columns)
+}
+
+/// Read the current hook extra-table writes, if set for this task.
+pub fn current_extra_table_writes() -> Option<Vec<ExtraTableWrite>> {
+    current_hook_writes().map(|writes| writes.extra_table_writes)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -183,5 +203,27 @@ mod tests {
         let extra = ExtraColumns::new();
         with_extra_columns(extra, async {}).await;
         assert!(current_extra_columns().is_none());
+    }
+
+    #[tokio::test]
+    async fn extra_table_writes_available_inside_scope() {
+        let writes = HookWrites {
+            extra_columns: ExtraColumns::new(),
+            extra_table_writes: vec![ExtraTableWrite {
+                table: "response_audit".to_string(),
+                row: HashMap::from([(
+                    "response_id".to_string(),
+                    serde_json::Value::String("resp_123".to_string()),
+                )]),
+            }],
+        };
+
+        let result = with_hook_writes(writes, async {
+            let rows = current_extra_table_writes().expect("should be set");
+            rows[0].table.clone()
+        })
+        .await;
+
+        assert_eq!(result, "response_audit");
     }
 }

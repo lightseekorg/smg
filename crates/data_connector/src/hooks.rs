@@ -4,7 +4,7 @@
 //! validation) before and after storage operations without forking the
 //! codebase.  A hook receives a [`StorageOperation`] discriminant plus a
 //! JSON-serialised payload and returns either a continuation signal (with
-//! optional [`ExtraColumns`]) or a rejection.
+//! optional [`HookWrites`]) or a rejection.
 //!
 //! The hook trait is intentionally coarse-grained: a single `before`/`after`
 //! pair dispatched by operation enum, rather than one method per storage
@@ -29,6 +29,33 @@ use crate::context::RequestContext;
 /// On reads, the backend fills the bag from stored extra column values so the
 /// hook can inspect them.
 pub type ExtraColumns = HashMap<String, Value>;
+
+/// A single insert row targeting a configured extra table.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExtraTableWrite {
+    /// Logical extra-table name from `SchemaConfig.extra_tables`.
+    pub table: String,
+    /// Column values for a single inserted row.
+    pub row: HashMap<String, Value>,
+}
+
+/// Hook-produced write data forwarded to storage backends.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HookWrites {
+    /// Extra columns to persist on the main storage table.
+    pub extra_columns: ExtraColumns,
+    /// Additional rows to insert into configured side tables.
+    pub extra_table_writes: Vec<ExtraTableWrite>,
+}
+
+impl From<ExtraColumns> for HookWrites {
+    fn from(extra_columns: ExtraColumns) -> Self {
+        Self {
+            extra_columns,
+            extra_table_writes: Vec::new(),
+        }
+    }
+}
 
 /// Identifies which storage operation is being hooked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -60,9 +87,9 @@ pub enum StorageOperation {
 /// Result from a before-hook. Controls whether the backend operation proceeds.
 #[derive(Debug)]
 pub enum BeforeHookResult {
-    /// Proceed with the operation.  The [`ExtraColumns`] bag is forwarded to
+    /// Proceed with the operation.  The [`HookWrites`] payload is forwarded to
     /// the backend so it can persist hook-provided values alongside core data.
-    Continue(ExtraColumns),
+    Continue(HookWrites),
 
     /// Abort the operation and return an error to the caller.
     Reject(String),
@@ -70,7 +97,7 @@ pub enum BeforeHookResult {
 
 impl Default for BeforeHookResult {
     fn default() -> Self {
-        Self::Continue(ExtraColumns::new())
+        Self::Continue(HookWrites::default())
     }
 }
 
@@ -119,17 +146,20 @@ pub trait StorageHook: Send + Sync + 'static {
     /// Called after a storage operation completes successfully.
     ///
     /// `payload` is the same JSON from `before`.  `result` is the
-    /// JSON-serialised operation result.  `extra` contains any extra column
-    /// values from `before`.  The returned `ExtraColumns` can be used by the
-    /// caller (e.g. to surface hook-produced data in API responses).
+    /// JSON-serialised operation result.  `writes` contains the hook writes
+    /// from `before`.  The returned [`HookWrites`] can be used by the caller
+    /// (e.g. to surface hook-produced data in API responses).
+    ///
+    /// Note: only `extra_columns` from the returned `HookWrites` are used;
+    /// `extra_table_writes` are executed exclusively during the before phase.
     async fn after(
         &self,
         operation: StorageOperation,
         context: Option<&RequestContext>,
         payload: &Value,
         result: &Value,
-        extra: &ExtraColumns,
-    ) -> Result<ExtraColumns, HookError>;
+        writes: &HookWrites,
+    ) -> Result<HookWrites, HookError>;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -144,7 +174,10 @@ mod tests {
     fn before_hook_result_default_is_continue_with_empty_extra() {
         let result = BeforeHookResult::default();
         match result {
-            BeforeHookResult::Continue(extra) => assert!(extra.is_empty()),
+            BeforeHookResult::Continue(writes) => {
+                assert!(writes.extra_columns.is_empty());
+                assert!(writes.extra_table_writes.is_empty());
+            }
             BeforeHookResult::Reject(_) => panic!("expected Continue"),
         }
     }
