@@ -289,6 +289,19 @@ impl WorkerService {
                 worker_id: worker_id_raw.to_string(),
             })?;
 
+        // Validate that the URL in the request body matches the existing worker.
+        // URL changes are not supported via replace — use DELETE + POST instead.
+        if config.url != url {
+            return Err(WorkerServiceError::InvalidId {
+                raw: worker_id_raw.to_string(),
+                message: format!(
+                    "URL mismatch: worker has URL '{}' but request body has '{}'. \
+                    URL changes are not supported via PUT. Use DELETE + POST instead.",
+                    url, config.url
+                ),
+            });
+        }
+
         // Re-run the full registration workflow (model discovery, etc.)
         // The workflow uses register_or_replace() which does overwrite-then-diff.
         let job = Job::AddWorker {
