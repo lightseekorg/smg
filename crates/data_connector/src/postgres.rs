@@ -16,11 +16,11 @@ use tokio_postgres::{NoTls, Row};
 
 use crate::{
     common::{
-        build_response_select_base, extra_column_defs, parse_json_value, parse_raw_response,
-        resolve_extra_column_values,
+        build_response_select_base, extra_column_defs, extra_table_column_defs, parse_json_value,
+        parse_raw_response, resolve_extra_column_values, resolve_extra_table_writes,
     },
     config::PostgresConfig,
-    context::current_extra_columns,
+    context::{current_extra_columns, current_extra_table_writes},
     core::{
         make_item_id, Conversation, ConversationId, ConversationItem, ConversationItemId,
         ConversationItemResult, ConversationItemStorage, ConversationItemStorageError,
@@ -28,6 +28,7 @@ use crate::{
         ListParams, NewConversation, NewConversationItem, ResponseId, ResponseResult,
         ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
     },
+    hooks::ExtraTableWrite,
     postgres_migrations::POSTGRES_MIGRATIONS,
     schema::SchemaConfig,
 };
@@ -98,6 +99,66 @@ impl PostgresStore {
             .map_err(|e| format!("failed to create response index: {e}"))?;
         Ok(())
     }
+
+    pub(crate) async fn ensure_extra_tables(&self) -> Result<(), String> {
+        if self.schema.extra_tables.is_empty() {
+            return Ok(());
+        }
+
+        let ddl = self
+            .schema
+            .extra_tables
+            .values()
+            .map(|table| {
+                format!(
+                    "CREATE TABLE IF NOT EXISTS {} ({});",
+                    table.qualified_table(self.schema.owner.as_deref()),
+                    extra_table_column_defs(table).join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| format!("failed to get connection for extra table creation: {e}"))?;
+        client
+            .batch_execute(&ddl)
+            .await
+            .map_err(|e| format!("failed to create extra tables: {e}"))?;
+        Ok(())
+    }
+}
+
+async fn insert_extra_table_writes(
+    client: &tokio_postgres::Client,
+    schema: &SchemaConfig,
+    writes: &[ExtraTableWrite],
+) -> Result<(), String> {
+    let resolved = resolve_extra_table_writes(schema, writes)?;
+
+    for write in resolved {
+        let col_names: Vec<&str> = write.columns.iter().map(|(name, _)| name.as_str()).collect();
+        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            write.columns.iter().map(|(_, value)| value as _).collect();
+        let placeholders = (1..=params.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({placeholders})",
+            write.table_name,
+            col_names.join(", ")
+        );
+        client
+            .execute(&sql, &params)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }
 
 impl Clone for PostgresStore {
@@ -208,6 +269,13 @@ impl ConversationStorage for PostgresConversationStorage {
             .execute(&sql, &params)
             .await
             .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+        insert_extra_table_writes(
+            &**client,
+            &self.store.schema,
+            &current_extra_table_writes().unwrap_or_default(),
+        )
+        .await
+        .map_err(ConversationStorageError::StorageError)?;
         Ok(conversation)
     }
 
@@ -498,6 +566,13 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             .execute(&sql, &params)
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
+        insert_extra_table_writes(
+            &**client,
+            &self.store.schema,
+            &current_extra_table_writes().unwrap_or_default(),
+        )
+        .await
+        .map_err(ConversationItemStorageError::StorageError)?;
         Ok(ConversationItem {
             id,
             response_id,
@@ -553,6 +628,13 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             .execute(&sql, &params)
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
+        insert_extra_table_writes(
+            &**client,
+            &self.store.schema,
+            &current_extra_table_writes().unwrap_or_default(),
+        )
+        .await
+        .map_err(ConversationItemStorageError::StorageError)?;
         Ok(())
     }
 
@@ -1022,6 +1104,13 @@ impl ResponseStorage for PostgresResponseStorage {
             .execute(&sql, &params)
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+        insert_extra_table_writes(
+            &**client,
+            &self.store.schema,
+            &current_extra_table_writes().unwrap_or_default(),
+        )
+        .await
+        .map_err(ResponseStorageError::StorageError)?;
         tracing::debug!(rows_affected = insert_count, "Response stored in Postgres");
         Ok(response_id)
     }

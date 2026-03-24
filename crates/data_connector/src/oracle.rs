@@ -26,11 +26,12 @@ use super::core::{
 };
 use crate::{
     common::{
-        build_response_select_base, extra_column_defs, parse_json_value, parse_raw_response,
-        resolve_extra_column_values,
+        build_response_select_base, extra_column_defs, extra_table_column_defs, parse_json_value,
+        parse_raw_response, resolve_extra_column_values, resolve_extra_table_writes,
     },
     config::OracleConfig,
-    context::current_extra_columns,
+    context::{current_extra_columns, current_extra_table_writes},
+    hooks::ExtraTableWrite,
     oracle_migrations::ORACLE_MIGRATIONS,
     schema::SchemaConfig,
 };
@@ -49,6 +50,57 @@ pub(crate) type SchemaInitFn = fn(&Connection, &SchemaConfig) -> Result<(), Stri
 pub(crate) struct OracleStore {
     pool: Pool<OracleConnectionManager>,
     pub(crate) schema: Arc<SchemaConfig>,
+}
+
+pub(crate) fn init_extra_tables(conn: &Connection, schema: &SchemaConfig) -> Result<(), String> {
+    for extra_table in schema.extra_tables.values() {
+        let exists: i64 = conn
+            .query_row_as(
+                &format!(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = '{}'",
+                    extra_table.table
+                ),
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+
+        if exists == 0 {
+            conn.execute(
+                &format!(
+                    "CREATE TABLE {} ({})",
+                    extra_table.qualified_table(schema.owner.as_deref()),
+                    extra_table_column_defs(extra_table).join(", ")
+                ),
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn insert_extra_table_writes(
+    conn: &Connection,
+    schema: &SchemaConfig,
+    hook_table_writes: &[ExtraTableWrite],
+) -> Result<(), String> {
+    let resolved = resolve_extra_table_writes(schema, hook_table_writes)?;
+
+    for write in resolved {
+        let col_names: Vec<&str> = write.columns.iter().map(|(name, _)| name.as_str()).collect();
+        let params: Vec<&dyn ToSql> = write.columns.iter().map(|(_, value)| value as _).collect();
+        let placeholders: Vec<String> = (1..=params.len()).map(|i| format!(":{i}")).collect();
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            write.table_name,
+            col_names.join(", "),
+            placeholders.join(", ")
+        );
+        conn.execute(&sql, &params[..]).map_err(map_oracle_error)?;
+    }
+
+    Ok(())
 }
 
 impl OracleStore {
@@ -363,6 +415,7 @@ impl ConversationStorage for OracleConversationStorage {
         let schema = self.store.schema.clone();
         // Capture extra columns before spawn_blocking (task-locals don't propagate)
         let hook_extra = current_extra_columns().unwrap_or_default();
+        let hook_table_writes = current_extra_table_writes().unwrap_or_default();
 
         self.store
             .execute(move |conn| {
@@ -395,9 +448,9 @@ impl ConversationStorage for OracleConversationStorage {
                     columns.join(", "),
                     placeholders.join(", ")
                 );
-                conn.execute(&sql, &params[..])
-                    .map(|_| ())
-                    .map_err(map_oracle_error)
+                conn.execute(&sql, &params[..]).map_err(map_oracle_error)?;
+                insert_extra_table_writes(conn, &schema, &hook_table_writes)?;
+                Ok(())
             })
             .await
             .map_err(ConversationStorageError::StorageError)?;
@@ -701,6 +754,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
         let cl_status = status.clone();
         let schema = self.store.schema.clone();
         let hook_extra = current_extra_columns().unwrap_or_default();
+        let hook_table_writes = current_extra_table_writes().unwrap_or_default();
 
         self.store
             .execute(move |conn| {
@@ -750,6 +804,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     placeholders.join(", ")
                 );
                 conn.execute(&sql, &params[..]).map_err(map_oracle_error)?;
+                insert_extra_table_writes(conn, &schema, &hook_table_writes)?;
                 Ok(())
             })
             .await
@@ -776,6 +831,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
         let iid = item_id.0.clone();
         let schema = self.store.schema.clone();
         let hook_extra = current_extra_columns().unwrap_or_default();
+        let hook_table_writes = current_extra_table_writes().unwrap_or_default();
 
         self.store
             .execute(move |conn| {
@@ -804,6 +860,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     placeholders.join(", ")
                 );
                 conn.execute(&sql, &params[..]).map_err(map_oracle_error)?;
+                insert_extra_table_writes(conn, &schema, &hook_table_writes)?;
                 Ok(())
             })
             .await
@@ -822,6 +879,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
         let cid = conversation_id.0.clone();
         let schema = self.store.schema.clone();
         let hook_extra = current_extra_columns().unwrap_or_default();
+        let hook_table_writes = current_extra_table_writes().unwrap_or_default();
         let owned_items: Vec<(String, DateTime<Utc>)> =
             items.iter().map(|(id, ts)| (id.0.clone(), *ts)).collect();
 
@@ -882,6 +940,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
 
                 conn.execute_named(&sql, &params_vec)
                     .map_err(map_oracle_error)?;
+                insert_extra_table_writes(conn, &schema, &hook_table_writes)?;
                 Ok(())
             })
             .await
@@ -1316,6 +1375,7 @@ impl ResponseStorage for OracleResponseStorage {
         let schema = self.store.schema.clone();
         // Capture extra columns before spawn_blocking (task-locals don't propagate)
         let hook_extra = current_extra_columns().unwrap_or_default();
+        let hook_table_writes = current_extra_table_writes().unwrap_or_default();
 
         self.store
             .execute(move |conn| {
@@ -1360,9 +1420,9 @@ impl ResponseStorage for OracleResponseStorage {
                     columns.join(", "),
                     placeholders.join(", ")
                 );
-                conn.execute(&sql, &params[..])
-                    .map(|_| ())
-                    .map_err(map_oracle_error)
+                conn.execute(&sql, &params[..]).map_err(map_oracle_error)?;
+                insert_extra_table_writes(conn, &schema, &hook_table_writes)?;
+                Ok(())
             })
             .await
             .map_err(ResponseStorageError::StorageError)?;
