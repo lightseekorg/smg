@@ -7,9 +7,13 @@ to AsyncLLM.check_health() from the vLLM EngineClient protocol.
 
 import logging
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
+
+if TYPE_CHECKING:
+    from vllm.v1.engine.async_llm import AsyncLLM
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +35,7 @@ class VllmHealthServicer(health_pb2_grpc.HealthServicer):
     OVERALL_SERVER = ""
     VLLM_SERVICE = "vllm.grpc.engine.VllmEngine"
 
-    def __init__(self, async_llm):
+    def __init__(self, async_llm: "AsyncLLM"):
         """
         Initialize health servicer.
 
@@ -117,6 +121,11 @@ class VllmHealthServicer(health_pb2_grpc.HealthServicer):
                 await self.async_llm.check_health()
                 status = health_pb2.HealthCheckResponse.SERVING
             except Exception:
+                logger.debug(
+                    "Health watch check failed for service '%s'",
+                    service_name,
+                    exc_info=True,
+                )
                 status = health_pb2.HealthCheckResponse.NOT_SERVING
 
         yield health_pb2.HealthCheckResponse(status=status)
