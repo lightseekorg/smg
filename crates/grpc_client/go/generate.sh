@@ -55,11 +55,11 @@ generate_service() {
     --proto_path=. \
     --go_out="$output_dir" \
     --go_opt=paths=source_relative \
-    $MAPPINGS \
+    "$MAPPINGS" \
     --go_opt=M${proto_file}=github.com/lightseek/smg/crates/grpc_client/go/generated/${service_name} \
     --go-grpc_out="$output_dir" \
     --go-grpc_opt=paths=source_relative \
-    $MAPPINGS_GRPC \
+    "$MAPPINGS_GRPC" \
     --go-grpc_opt=M${proto_file}=github.com/lightseek/smg/crates/grpc_client/go/generated/${service_name} \
     "$proto_file"
 }
