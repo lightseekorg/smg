@@ -153,7 +153,7 @@ MODEL_SPECS: dict[str, dict] = {
         "features": ["chat", "streaming", "function_calling"],
         "worker_args": [
             "--trust-remote-code",
-            "--mem-frac=0.9",
+            "--mem-fraction-static=0.9",
         ],
         "vllm_args": [
             "--trust-remote-code",
@@ -169,7 +169,7 @@ MODEL_SPECS: dict[str, dict] = {
         "features": ["chat", "streaming", "function_calling"],
         "worker_args": [
             "--trust-remote-code",
-            "--mem-frac=0.9",
+            "--mem-fraction-static=0.9",
         ],
         "vllm_args": [
             "--trust-remote-code",
