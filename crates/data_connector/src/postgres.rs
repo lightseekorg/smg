@@ -140,7 +140,11 @@ async fn insert_extra_table_writes(
     let resolved = resolve_extra_table_writes(schema, writes)?;
 
     for write in resolved {
-        let col_names: Vec<&str> = write.columns.iter().map(|(name, _)| name.as_str()).collect();
+        let col_names: Vec<&str> = write
+            .columns
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
         let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
             write.columns.iter().map(|(_, value)| value as _).collect();
         let placeholders = (1..=params.len())
@@ -270,7 +274,7 @@ impl ConversationStorage for PostgresConversationStorage {
             .await
             .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         insert_extra_table_writes(
-            &**client,
+            &client,
             &self.store.schema,
             &current_extra_table_writes().unwrap_or_default(),
         )
@@ -567,7 +571,7 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         insert_extra_table_writes(
-            &**client,
+            &client,
             &self.store.schema,
             &current_extra_table_writes().unwrap_or_default(),
         )
@@ -629,7 +633,7 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         insert_extra_table_writes(
-            &**client,
+            &client,
             &self.store.schema,
             &current_extra_table_writes().unwrap_or_default(),
         )
@@ -1105,7 +1109,7 @@ impl ResponseStorage for PostgresResponseStorage {
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         insert_extra_table_writes(
-            &**client,
+            &client,
             &self.store.schema,
             &current_extra_table_writes().unwrap_or_default(),
         )

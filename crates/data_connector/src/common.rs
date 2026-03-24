@@ -102,11 +102,7 @@ pub(super) fn resolve_extra_table_writes(
                 .ok_or_else(|| format!("hook requested unknown extra table '{}'", write.table))?;
 
             for key in write.row.keys() {
-                if !tc
-                    .columns
-                    .keys()
-                    .any(|c| c.eq_ignore_ascii_case(key))
-                {
+                if !tc.columns.keys().any(|c| c.eq_ignore_ascii_case(key)) {
                     return Err(format!(
                         "hook requested unknown column '{key}' for extra table '{alias}'"
                     ));

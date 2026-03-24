@@ -71,12 +71,18 @@ async fn store_response_with_tenant_id_continues_with_extra_columns() -> TestRes
     match result {
         BeforeHookResult::Continue(extra) => {
             assert_eq!(
-                extra.extra_columns.get("TENANT_ID").and_then(|v| v.as_str()),
+                extra
+                    .extra_columns
+                    .get("TENANT_ID")
+                    .and_then(|v| v.as_str()),
                 Some("acme-corp"),
                 "TENANT_ID should come from context"
             );
             assert_eq!(
-                extra.extra_columns.get("STORED_BY").and_then(|v| v.as_str()),
+                extra
+                    .extra_columns
+                    .get("STORED_BY")
+                    .and_then(|v| v.as_str()),
                 Some("user_42"),
                 "STORED_BY should come from user_id in context"
             );
@@ -130,11 +136,17 @@ async fn create_conversation_adds_created_by_from_context() -> TestResult {
     match result {
         BeforeHookResult::Continue(extra) => {
             assert_eq!(
-                extra.extra_columns.get("TENANT_ID").and_then(|v| v.as_str()),
+                extra
+                    .extra_columns
+                    .get("TENANT_ID")
+                    .and_then(|v| v.as_str()),
                 Some("acme-corp"),
             );
             assert_eq!(
-                extra.extra_columns.get("CREATED_BY").and_then(|v| v.as_str()),
+                extra
+                    .extra_columns
+                    .get("CREATED_BY")
+                    .and_then(|v| v.as_str()),
                 Some("admin"),
             );
         }
@@ -158,7 +170,10 @@ async fn get_response_passes_through_without_extra_columns() -> TestResult {
 
     match result {
         BeforeHookResult::Continue(extra) => {
-            assert!(extra.extra_columns.is_empty(), "read ops should not add extra columns");
+            assert!(
+                extra.extra_columns.is_empty(),
+                "read ops should not add extra columns"
+            );
         }
         BeforeHookResult::Reject(reason) => {
             panic!("read ops should not reject: {reason}");
@@ -196,7 +211,10 @@ async fn after_hook_passes_through_extra_columns() -> TestResult {
         .await?;
 
     assert_eq!(
-        updated.extra_columns.get("TENANT_ID").and_then(|v| v.as_str()),
+        updated
+            .extra_columns
+            .get("TENANT_ID")
+            .and_then(|v| v.as_str()),
         Some("acme-corp"),
         "after() should pass through extra columns"
     );
@@ -224,7 +242,8 @@ async fn wasm_hook_extra_columns_match_schema_config_declarations() -> TestResul
             // A typical SchemaConfig would declare these extra columns for
             // multi-tenant response storage.  Verify the hook output keys
             // align with what the schema config expects.
-            let extra_keys: std::collections::HashSet<&String> = extra.extra_columns.keys().collect();
+            let extra_keys: std::collections::HashSet<&String> =
+                extra.extra_columns.keys().collect();
             let expected_keys: std::collections::HashSet<String> = ["TENANT_ID", "STORED_BY"]
                 .iter()
                 .map(|s| (*s).to_string())
@@ -366,12 +385,18 @@ async fn wasm_hook_after_receives_before_extra_columns() -> TestResult {
 
     // Verify after() returns the extra columns unchanged
     assert_eq!(
-        after_writes.extra_columns.get("TENANT_ID").and_then(|v| v.as_str()),
+        after_writes
+            .extra_columns
+            .get("TENANT_ID")
+            .and_then(|v| v.as_str()),
         Some("acme-corp"),
         "after() should preserve TENANT_ID from before()"
     );
     assert_eq!(
-        after_writes.extra_columns.get("STORED_BY").and_then(|v| v.as_str()),
+        after_writes
+            .extra_columns
+            .get("STORED_BY")
+            .and_then(|v| v.as_str()),
         Some("user_42"),
         "after() should preserve STORED_BY from before()"
     );
