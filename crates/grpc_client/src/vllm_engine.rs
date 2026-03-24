@@ -340,17 +340,10 @@ impl VllmEngineClient {
         body: &ResponsesRequest,
         processed_text: String,
         token_ids: Vec<u32>,
-        harmony_stop_ids: Option<Vec<u32>>,
         constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
         // Build sampling params from ResponsesRequest
-        let mut sampling_params =
-            Self::build_grpc_sampling_params_from_responses(body, constraint)?;
-
-        // Inject Harmony stop token IDs if provided
-        if let Some(stop_ids) = harmony_stop_ids {
-            sampling_params.stop_token_ids = stop_ids;
-        }
+        let sampling_params = Self::build_grpc_sampling_params_from_responses(body, constraint)?;
 
         let grpc_request = proto::GenerateRequest {
             request_id,

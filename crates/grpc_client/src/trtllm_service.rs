@@ -410,7 +410,6 @@ impl TrtllmServiceClient {
         body: &ResponsesRequest,
         processed_text: String,
         token_ids: Vec<u32>,
-        _harmony_stop_ids: Option<Vec<u32>>,
         constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
         let sampling_config = Self::build_sampling_config_from_responses(body);
