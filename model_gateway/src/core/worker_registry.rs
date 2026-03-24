@@ -998,7 +998,10 @@ impl WorkerRegistry {
                                     "Removing unhealthy worker from registry"
                                 );
                                 next_check.remove(&url);
-                                if let Err(e) = job_queue.submit(Job::RemoveWorker { url: url.clone() }).await {
+                                if let Err(e) = job_queue
+                                    .submit(Job::RemoveWorker { url: url.clone() })
+                                    .await
+                                {
                                     tracing::error!(
                                         worker_url = %url,
                                         error = %e,
