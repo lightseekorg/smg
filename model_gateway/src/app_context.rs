@@ -287,11 +287,10 @@ impl AppContextBuilder {
             }
         }
         if let (Some(name), Some(factory)) = (&configured_tool_parser, &self.tool_parser_factory) {
-            let available = factory.list_parsers();
-            if !available.contains(name) {
+            if !factory.has_parser(name) {
                 tracing::error!(
                     parser = %name,
-                    available = %available.join(", "),
+                    available = %factory.list_parsers().join(", "),
                     "Unknown tool-call parser"
                 );
                 return Err(AppContextBuildError("tool_call_parser"));
