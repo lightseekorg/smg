@@ -103,8 +103,10 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
 
             let new_worker: Arc<dyn Worker> = Arc::new(builder.build());
 
-            // Re-register the worker (this replaces the old one)
-            app_context.worker_registry.register(new_worker.clone());
+            // Replace the worker in the registry (overwrite-then-diff)
+            app_context
+                .worker_registry
+                .register_or_replace(new_worker.clone());
 
             updated_workers.push(new_worker);
         }
