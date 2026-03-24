@@ -13,6 +13,9 @@ spec:
         - 4-gpu-h100
         - k8s-runner-gpu
       serviceAccountName: arc-runner-sa
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
 
       nodeSelector:
         nvidia.com/gpu: "true"
@@ -39,8 +42,9 @@ spec:
 
       volumes:
         - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
+          hostPath:
+            path: /raid/models
+            type: Directory
         - name: docker-sock
           emptyDir: {}
         - name: docker-storage
@@ -128,6 +132,9 @@ spec:
         - 4-gpu-a10
         - k8s-runner-gpu
       serviceAccountName: arc-runner-sa
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
 
       nodeSelector:
         nvidia.com/gpu: "true"
@@ -154,12 +161,15 @@ spec:
 
       volumes:
         - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
+          hostPath:
+            path: /raid/models
+            type: Directory
         - name: docker-sock
           emptyDir: {}
         - name: docker-storage
-          emptyDir: {}
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
         - name: dshm
           emptyDir:
             medium: Memory
@@ -229,6 +239,9 @@ spec:
         - 1-gpu-h100
         - 1-gpu
       serviceAccountName: arc-runner-sa
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
 
       nodeSelector:
         nvidia.com/gpu: "true"
@@ -255,8 +268,9 @@ spec:
 
       volumes:
         - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
+          hostPath:
+            path: /raid/models
+            type: Directory
         - name: docker-sock
           emptyDir: {}
         - name: docker-storage
@@ -343,6 +357,9 @@ spec:
       labels:
         - 1-gpu
       serviceAccountName: arc-runner-sa
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
 
       nodeSelector:
         nvidia.com/gpu: "true"
@@ -354,7 +371,7 @@ spec:
           effect: "NoSchedule"
 
       affinity:
-        podAffinity:
+        podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               podAffinityTerm:
@@ -368,8 +385,9 @@ spec:
 
       volumes:
         - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
+          hostPath:
+            path: /raid/models
+            type: Directory
         - name: docker-sock
           emptyDir: {}
         - name: docker-storage
@@ -456,6 +474,9 @@ spec:
       labels:
         - 2-gpu-h100
       serviceAccountName: arc-runner-sa
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
 
       nodeSelector:
         nvidia.com/gpu: "true"
@@ -482,8 +503,9 @@ spec:
 
       volumes:
         - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
+          hostPath:
+            path: /raid/models
+            type: Directory
         - name: docker-sock
           emptyDir: {}
         - name: docker-storage
