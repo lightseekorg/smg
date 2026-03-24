@@ -362,7 +362,7 @@ async fn execute_mcp_tool_loop_streaming(
                     ctx.response_storage.clone(),
                     &final_response,
                     original_request,
-                    None,
+                    ctx.request_context.clone(),
                 )
                 .await;
 
@@ -449,7 +449,7 @@ async fn execute_without_mcp_streaming(
         ctx.response_storage.clone(),
         &final_response,
         original_request,
-        None,
+        ctx.request_context.clone(),
     )
     .await;
 
