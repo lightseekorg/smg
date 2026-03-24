@@ -517,7 +517,7 @@ class TestWorkerAPIRestSemantics:
             stop_workers(http_workers)
 
     def test_patch_partial_update(self):
-        """PATCH /workers/{id} should do partial update (priority, cost, labels)."""
+        """PATCH /workers/{id} should do partial update and persist changes."""
         engine = os.environ.get("E2E_ENGINE", "sglang")
         http_workers = start_workers(
             "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.HTTP, count=1
@@ -534,16 +534,41 @@ class TestWorkerAPIRestSemantics:
                 success, worker_id = gateway.add_worker(http_worker.base_url)
                 assert success, f"Failed to add worker: {worker_id}"
 
-                # PATCH to update priority and labels
+                # PATCH to update priority, cost, and labels
                 resp = httpx.patch(
                     f"{gateway.base_url}/workers/{worker_id}",
-                    json={"priority": 100, "labels": {"env": "test"}},
+                    json={"priority": 100, "cost": 2.5, "labels": {"env": "test"}},
                     timeout=10,
                 )
                 assert resp.status_code in (200, 202), (
                     f"PATCH should succeed, got {resp.status_code}: {resp.text}"
                 )
                 logger.info("PATCH succeeded: %s", resp.json())
+
+                # Poll until the update is applied (async 202)
+                deadline = time.perf_counter() + 15
+                verified = False
+                while time.perf_counter() < deadline:
+                    resp = httpx.get(
+                        f"{gateway.base_url}/workers/{worker_id}",
+                        timeout=10,
+                    )
+                    if resp.status_code == 200:
+                        worker_data = resp.json()
+                        if (
+                            worker_data.get("priority") == 100
+                            and worker_data.get("cost") == 2.5
+                            and worker_data.get("labels", {}).get("env") == "test"
+                        ):
+                            verified = True
+                            break
+                    time.sleep(1.0)
+
+                assert verified, (
+                    f"PATCH changes not persisted within timeout. "
+                    f"Last worker state: {resp.json() if resp.status_code == 200 else resp.text}"
+                )
+                logger.info("PATCH changes verified: priority=100, cost=2.5, labels={env: test}")
             finally:
                 gateway.shutdown()
         finally:
