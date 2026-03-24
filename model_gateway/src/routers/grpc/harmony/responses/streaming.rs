@@ -6,7 +6,6 @@ use axum::response::Response;
 use bytes::Bytes;
 use openai_protocol::responses::ResponsesRequest;
 use serde_json::json;
-use smg_data_connector::{current_request_context, with_request_context};
 use smg_mcp::{McpServerBinding, McpToolSession};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -76,42 +75,33 @@ pub(crate) async fn serve_harmony_responses_stream(
 
     // Clone context for spawned task
     let ctx_clone = ctx.clone();
-    let request_ctx = current_request_context();
 
     // Spawn async task to handle streaming
     tokio::spawn(async move {
-        let run = async move {
-            let ctx = &ctx_clone;
+        let ctx = &ctx_clone;
 
-            // Emit initial response.created and response.in_progress events
-            let event = emitter.emit_created();
-            if emitter.send_event(&event, &tx).is_err() {
-                return;
-            }
-            let event = emitter.emit_in_progress();
-            if emitter.send_event(&event, &tx).is_err() {
-                return;
-            }
+        // Emit initial response.created and response.in_progress events
+        let event = emitter.emit_created();
+        if emitter.send_event(&event, &tx).is_err() {
+            return;
+        }
+        let event = emitter.emit_in_progress();
+        if emitter.send_event(&event, &tx).is_err() {
+            return;
+        }
 
-            if has_mcp_tools {
-                execute_mcp_tool_loop_streaming(
-                    ctx,
-                    current_request,
-                    &request,
-                    mcp_servers,
-                    &mut emitter,
-                    &tx,
-                )
-                .await;
-            } else {
-                execute_without_mcp_streaming(ctx, &current_request, &request, &mut emitter, &tx)
-                    .await;
-            }
-        };
-
-        match request_ctx {
-            Some(ctx) => Box::pin(with_request_context(ctx, run)).await,
-            None => run.await,
+        if has_mcp_tools {
+            execute_mcp_tool_loop_streaming(
+                ctx,
+                current_request,
+                &request,
+                mcp_servers,
+                &mut emitter,
+                &tx,
+            )
+            .await;
+        } else {
+            execute_without_mcp_streaming(ctx, &current_request, &request, &mut emitter, &tx).await;
         }
     });
 
@@ -372,6 +362,7 @@ async fn execute_mcp_tool_loop_streaming(
                     ctx.response_storage.clone(),
                     &final_response,
                     original_request,
+                    None,
                 )
                 .await;
 
@@ -458,6 +449,7 @@ async fn execute_without_mcp_streaming(
         ctx.response_storage.clone(),
         &final_response,
         original_request,
+        None,
     )
     .await;
 

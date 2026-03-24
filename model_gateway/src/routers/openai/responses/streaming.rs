@@ -24,7 +24,6 @@ use openai_protocol::{
     responses::{ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, Value};
-use smg_data_connector::{current_request_context, with_request_context};
 use smg_mcp::{McpOrchestrator, McpServerBinding, McpToolSession, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -565,47 +564,40 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let persist_needed = original_request.conversation.is_some();
     let previous_response_id = req.previous_response_id;
     let storage = req.storage;
-    let request_ctx = current_request_context();
 
     #[expect(
         clippy::disallowed_methods,
         reason = "fire-and-forget stream processing; gateway shutdown need not wait for individual response streams"
     )]
     tokio::spawn(async move {
-        let run = async move {
-            let mut accumulator = StreamingResponseAccumulator::new();
-            let mut upstream_failed = false;
-            let mut receiver_connected = true;
-            let mut chunk_processor = ChunkProcessor::new();
+        let mut accumulator = StreamingResponseAccumulator::new();
+        let mut upstream_failed = false;
+        let mut receiver_connected = true;
+        let mut chunk_processor = ChunkProcessor::new();
 
-            while let Some(chunk_result) = upstream_stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        chunk_processor.push_chunk(&chunk);
+        while let Some(chunk_result) = upstream_stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    chunk_processor.push_chunk(&chunk);
 
-                        while let Some(raw_block) = chunk_processor.next_block() {
-                            let block_cow = match rewrite_streaming_block(
-                                &raw_block,
-                                &original_request,
-                                previous_response_id.as_deref(),
-                            ) {
-                                Some(modified) => Cow::Owned(modified),
-                                None => Cow::Borrowed(raw_block.as_str()),
-                            };
+                    while let Some(raw_block) = chunk_processor.next_block() {
+                        let block_cow = match rewrite_streaming_block(
+                            &raw_block,
+                            &original_request,
+                            previous_response_id.as_deref(),
+                        ) {
+                            Some(modified) => Cow::Owned(modified),
+                            None => Cow::Borrowed(raw_block.as_str()),
+                        };
 
-                            if should_store || persist_needed {
-                                accumulator.ingest_block(&block_cow);
-                            }
+                        if should_store || persist_needed {
+                            accumulator.ingest_block(&block_cow);
+                        }
 
-                            if receiver_connected {
-                                let chunk_to_send = format!("{block_cow}\n\n");
-                                if tx.send(Ok(Bytes::from(chunk_to_send))).is_err() {
-                                    receiver_connected = false;
-                                }
-                            }
-
-                            if !receiver_connected && !should_store {
-                                break;
+                        if receiver_connected {
+                            let chunk_to_send = format!("{block_cow}\n\n");
+                            if tx.send(Ok(Bytes::from(chunk_to_send))).is_err() {
+                                receiver_connected = false;
                             }
                         }
 
@@ -613,50 +605,50 @@ pub(super) async fn handle_simple_streaming_passthrough(
                             break;
                         }
                     }
-                    Err(err) => {
-                        upstream_failed = true;
-                        let io_err = io::Error::other(err);
-                        let _ = tx.send(Err(io_err));
+
+                    if !receiver_connected && !should_store {
                         break;
                     }
                 }
-            }
-
-            if (should_store || persist_needed) && !upstream_failed {
-                if chunk_processor.has_remaining() {
-                    accumulator.ingest_block(&chunk_processor.take_remaining());
-                }
-                let encountered_error = accumulator.encountered_error().cloned();
-                if let Some(mut response_json) = accumulator.into_final_response() {
-                    patch_response_with_request_metadata(
-                        &mut response_json,
-                        &original_request,
-                        previous_response_id.as_deref(),
-                    );
-
-                    // Always persist conversation items and response (even without conversation)
-                    if let Err(err) = persist_conversation_items(
-                        storage.conversation.clone(),
-                        storage.conversation_item.clone(),
-                        storage.response.clone(),
-                        &response_json,
-                        &original_request,
-                    )
-                    .await
-                    {
-                        warn!("Failed to persist conversation items (stream): {}", err);
-                    }
-                } else if let Some(error_payload) = encountered_error {
-                    warn!("Upstream streaming error payload: {}", error_payload);
-                } else {
-                    warn!("Streaming completed without a final response payload");
+                Err(err) => {
+                    upstream_failed = true;
+                    let io_err = io::Error::other(err);
+                    let _ = tx.send(Err(io_err));
+                    break;
                 }
             }
-        };
+        }
 
-        match request_ctx {
-            Some(ctx) => Box::pin(with_request_context(ctx, run)).await,
-            None => run.await,
+        if (should_store || persist_needed) && !upstream_failed {
+            if chunk_processor.has_remaining() {
+                accumulator.ingest_block(&chunk_processor.take_remaining());
+            }
+            let encountered_error = accumulator.encountered_error().cloned();
+            if let Some(mut response_json) = accumulator.into_final_response() {
+                patch_response_with_request_metadata(
+                    &mut response_json,
+                    &original_request,
+                    previous_response_id.as_deref(),
+                );
+
+                // Always persist conversation items and response (even without conversation)
+                if let Err(err) = persist_conversation_items(
+                    storage.conversation.clone(),
+                    storage.conversation_item.clone(),
+                    storage.response.clone(),
+                    &response_json,
+                    &original_request,
+                    storage.request_context.clone(),
+                )
+                .await
+                {
+                    warn!("Failed to persist conversation items (stream): {}", err);
+                }
+            } else if let Some(error_payload) = encountered_error {
+                warn!("Upstream streaming error payload: {}", error_payload);
+            } else {
+                warn!("Streaming completed without a final response payload");
+            }
         }
     });
 
@@ -699,173 +691,125 @@ pub(super) fn handle_streaming_with_tool_interception(
     let headers_opt = headers.cloned();
     let payload_clone = payload.clone();
     let orchestrator_clone = Arc::clone(orchestrator);
-    let request_ctx = current_request_context();
 
     #[expect(
         clippy::disallowed_methods,
         reason = "fire-and-forget MCP tool loop; gateway shutdown need not wait for individual tool loops"
     )]
     tokio::spawn(async move {
-        let run = async move {
-            let mut state = ToolLoopState::new(original_request.input.clone());
-            let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
+        let mut state = ToolLoopState::new(original_request.input.clone());
+        let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
-            // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
-            let session_request_id = format!("resp_{}", uuid::Uuid::now_v7());
-            let session = McpToolSession::new(
-                &orchestrator_clone,
-                mcp_servers.clone(),
-                &session_request_id,
-            );
-            let mut current_payload = payload_clone;
-            prepare_mcp_tools_as_functions(&mut current_payload, &session);
-            let tools_json = current_payload.get("tools").cloned().unwrap_or(json!([]));
-            let base_payload = current_payload.clone();
-            let mut mcp_list_tools_sent = false;
-            let mut is_first_iteration = true;
-            let mut sequence_number: u64 = 0;
-            let mut next_output_index: usize = 0;
-            let mut preserved_response_id: Option<String> = None;
+        // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
+        let session_request_id = format!("resp_{}", uuid::Uuid::now_v7());
+        let session = McpToolSession::new(
+            &orchestrator_clone,
+            mcp_servers.clone(),
+            &session_request_id,
+        );
+        let mut current_payload = payload_clone;
+        prepare_mcp_tools_as_functions(&mut current_payload, &session);
+        let tools_json = current_payload.get("tools").cloned().unwrap_or(json!([]));
+        let base_payload = current_payload.clone();
+        let mut mcp_list_tools_sent = false;
+        let mut is_first_iteration = true;
+        let mut sequence_number: u64 = 0;
+        let mut next_output_index: usize = 0;
+        let mut preserved_response_id: Option<String> = None;
 
-            let streaming_ctx = StreamingEventContext {
-                original_request: &original_request,
-                previous_response_id: previous_response_id.as_deref(),
-                session: Some(&session),
-            };
+        let streaming_ctx = StreamingEventContext {
+            original_request: &original_request,
+            previous_response_id: previous_response_id.as_deref(),
+            session: Some(&session),
+        };
 
-            loop {
-                // Make streaming request
-                let mut request_builder = client_clone.post(&url_clone).json(&current_payload);
-                if let Some(ref h) = headers_opt {
-                    request_builder = apply_request_headers(h, request_builder, true);
-                }
-                request_builder = request_builder.header("Accept", "text/event-stream");
+        loop {
+            // Make streaming request
+            let mut request_builder = client_clone.post(&url_clone).json(&current_payload);
+            if let Some(ref h) = headers_opt {
+                request_builder = apply_request_headers(h, request_builder, true);
+            }
+            request_builder = request_builder.header("Accept", "text/event-stream");
 
-                let response = match request_builder.send().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = send_sse_event(
-                            &tx,
-                            "error",
-                            &json!({"error": {"message": e.to_string()}}),
-                        );
-                        return;
-                    }
-                };
-
-                if !response.status().is_success() {
-                    let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
-                    let body = error::sanitize_error_body(&body);
-                    let _ = send_sse_event(
-                        &tx,
-                        "error",
-                        &json!({"error": {"message": format!("Upstream error {}: {}", status, body)}}),
-                    );
+            let response = match request_builder.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ =
+                        send_sse_event(&tx, "error", &json!({"error": {"message": e.to_string()}}));
                     return;
                 }
+            };
 
-                let mut upstream_stream = response.bytes_stream();
-                let mut handler = StreamingToolHandler::with_starting_index(next_output_index);
-                if let Some(ref id) = preserved_response_id {
-                    handler.original_response_id = Some(id.clone());
-                }
-                let mut chunk_processor = ChunkProcessor::new();
-                let mut tool_calls_detected = false;
-                let mut seen_in_progress = false;
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                let body = error::sanitize_error_body(&body);
+                let _ = send_sse_event(
+                    &tx,
+                    "error",
+                    &json!({"error": {"message": format!("Upstream error {}: {}", status, body)}}),
+                );
+                return;
+            }
 
-                while let Some(chunk_result) = upstream_stream.next().await {
-                    match chunk_result {
-                        Ok(chunk) => {
-                            chunk_processor.push_chunk(&chunk);
+            let mut upstream_stream = response.bytes_stream();
+            let mut handler = StreamingToolHandler::with_starting_index(next_output_index);
+            if let Some(ref id) = preserved_response_id {
+                handler.original_response_id = Some(id.clone());
+            }
+            let mut chunk_processor = ChunkProcessor::new();
+            let mut tool_calls_detected = false;
+            let mut seen_in_progress = false;
 
-                            while let Some(raw_block) = chunk_processor.next_block() {
-                                // Parse event
-                                let (event_name, data) = parse_sse_block(&raw_block);
+            while let Some(chunk_result) = upstream_stream.next().await {
+                match chunk_result {
+                    Ok(chunk) => {
+                        chunk_processor.push_chunk(&chunk);
 
-                                if data.is_empty() {
-                                    continue;
-                                }
+                        while let Some(raw_block) = chunk_processor.next_block() {
+                            // Parse event
+                            let (event_name, data) = parse_sse_block(&raw_block);
 
-                                // Process through handler
-                                let action = handler.process_event(event_name, data.as_ref());
+                            if data.is_empty() {
+                                continue;
+                            }
 
-                                match action {
-                                    StreamAction::Forward => {
-                                        // Parse data once and reuse for skip check, forwarding, and in_progress check
-                                        let parsed =
-                                            serde_json::from_str::<Value>(data.as_ref()).ok();
+                            // Process through handler
+                            let action = handler.process_event(event_name, data.as_ref());
 
-                                        // Skip response.created and response.in_progress on subsequent iterations
-                                        let should_skip = if is_first_iteration {
-                                            false
-                                        } else {
-                                            parsed.as_ref().is_some_and(|v| {
-                                                matches!(
-                                                    v.get("type").and_then(|t| t.as_str()),
-                                                    Some(ResponseEvent::CREATED)
-                                                        | Some(ResponseEvent::IN_PROGRESS)
-                                                )
-                                            })
-                                        };
+                            match action {
+                                StreamAction::Forward => {
+                                    // Parse data once and reuse for skip check, forwarding, and in_progress check
+                                    let parsed = serde_json::from_str::<Value>(data.as_ref()).ok();
 
-                                        // Check in_progress before moving parsed into SseEventData
-                                        let is_in_progress = !seen_in_progress
-                                            && parsed.as_ref().is_some_and(|v| {
-                                                v.get("type").and_then(|t| t.as_str())
-                                                    == Some(ResponseEvent::IN_PROGRESS)
-                                            });
+                                    // Skip response.created and response.in_progress on subsequent iterations
+                                    let should_skip = if is_first_iteration {
+                                        false
+                                    } else {
+                                        parsed.as_ref().is_some_and(|v| {
+                                            matches!(
+                                                v.get("type").and_then(|t| t.as_str()),
+                                                Some(ResponseEvent::CREATED)
+                                                    | Some(ResponseEvent::IN_PROGRESS)
+                                            )
+                                        })
+                                    };
 
-                                        if !should_skip {
-                                            // Forward the event with pre-parsed value (moved, not cloned)
-                                            if !forward_streaming_event(
-                                                SseEventData {
-                                                    raw_block: &raw_block,
-                                                    event_name,
-                                                    data: data.as_ref(),
-                                                    pre_parsed: parsed,
-                                                },
-                                                &mut handler,
-                                                &tx,
-                                                &streaming_ctx,
-                                                &mut sequence_number,
-                                            ) {
-                                                return;
-                                            }
-                                        }
+                                    // Check in_progress before moving parsed into SseEventData
+                                    let is_in_progress = !seen_in_progress
+                                        && parsed.as_ref().is_some_and(|v| {
+                                            v.get("type").and_then(|t| t.as_str())
+                                                == Some(ResponseEvent::IN_PROGRESS)
+                                        });
 
-                                        if is_in_progress {
-                                            seen_in_progress = true;
-                                            if !mcp_list_tools_sent {
-                                                for binding in session.mcp_servers() {
-                                                    let list_tools_index =
-                                                        handler.allocate_synthetic_output_index();
-                                                    if !send_mcp_list_tools_events(
-                                                        &tx,
-                                                        &session,
-                                                        &binding.label,
-                                                        list_tools_index,
-                                                        &mut sequence_number,
-                                                        &binding.server_key,
-                                                    ) {
-                                                        // Client disconnected
-                                                        return;
-                                                    }
-                                                }
-                                                mcp_list_tools_sent = true;
-                                            }
-                                        }
-                                    }
-                                    StreamAction::Buffer => {
-                                        // Don't forward, just buffer
-                                    }
-                                    StreamAction::ExecuteTools => {
+                                    if !should_skip {
+                                        // Forward the event with pre-parsed value (moved, not cloned)
                                         if !forward_streaming_event(
                                             SseEventData {
                                                 raw_block: &raw_block,
                                                 event_name,
                                                 data: data.as_ref(),
-                                                pre_parsed: None,
+                                                pre_parsed: parsed,
                                             },
                                             &mut handler,
                                             &tx,
@@ -874,157 +818,194 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         ) {
                                             return;
                                         }
-                                        tool_calls_detected = true;
-                                        break; // Exit stream processing to execute tools
+                                    }
+
+                                    if is_in_progress {
+                                        seen_in_progress = true;
+                                        if !mcp_list_tools_sent {
+                                            for binding in session.mcp_servers() {
+                                                let list_tools_index =
+                                                    handler.allocate_synthetic_output_index();
+                                                if !send_mcp_list_tools_events(
+                                                    &tx,
+                                                    &session,
+                                                    &binding.label,
+                                                    list_tools_index,
+                                                    &mut sequence_number,
+                                                    &binding.server_key,
+                                                ) {
+                                                    // Client disconnected
+                                                    return;
+                                                }
+                                            }
+                                            mcp_list_tools_sent = true;
+                                        }
                                     }
                                 }
-                            }
-
-                            if tool_calls_detected {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            let _ = send_sse_event(
-                                &tx,
-                                "error",
-                                &json!({"error": {"message": format!("Stream error: {}", e)}}),
-                            );
-                            return;
-                        }
-                    }
-                }
-
-                next_output_index = handler.next_output_index();
-                if let Some(id) = handler.original_response_id().map(|s| s.to_string()) {
-                    preserved_response_id = Some(id);
-                }
-
-                // If no tool calls, we're done - stream is complete
-                if !tool_calls_detected {
-                    if !send_final_response_event(
-                        &handler,
-                        &tx,
-                        &mut sequence_number,
-                        &state,
-                        &streaming_ctx,
-                    ) {
-                        return;
-                    }
-
-                    let final_response_json = if should_store || persist_needed {
-                        handler.accumulator.into_final_response()
-                    } else {
-                        None
-                    };
-
-                    if let Some(mut response_json) = final_response_json {
-                        if let Some(ref id) = preserved_response_id {
-                            if let Some(obj) = response_json.as_object_mut() {
-                                obj.insert("id".to_string(), Value::String(id.clone()));
+                                StreamAction::Buffer => {
+                                    // Don't forward, just buffer
+                                }
+                                StreamAction::ExecuteTools => {
+                                    if !forward_streaming_event(
+                                        SseEventData {
+                                            raw_block: &raw_block,
+                                            event_name,
+                                            data: data.as_ref(),
+                                            pre_parsed: None,
+                                        },
+                                        &mut handler,
+                                        &tx,
+                                        &streaming_ctx,
+                                        &mut sequence_number,
+                                    ) {
+                                        return;
+                                    }
+                                    tool_calls_detected = true;
+                                    break; // Exit stream processing to execute tools
+                                }
                             }
                         }
-                        inject_mcp_metadata_streaming(&mut response_json, &state, &session);
 
-                        restore_original_tools(&mut response_json, &original_request);
-                        patch_response_with_request_metadata(
-                            &mut response_json,
-                            &original_request,
-                            previous_response_id.as_deref(),
-                        );
-
-                        // Always persist conversation items and response (even without conversation)
-                        if let Err(err) = persist_conversation_items(
-                            storage.conversation.clone(),
-                            storage.conversation_item.clone(),
-                            storage.response.clone(),
-                            &response_json,
-                            &original_request,
-                        )
-                        .await
-                        {
-                            warn!(
-                                "Failed to persist conversation items (stream + MCP): {}",
-                                err
-                            );
+                        if tool_calls_detected {
+                            break;
                         }
-                    }
-
-                    let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
-                    return;
-                }
-
-                // Execute tools
-                let pending_calls = handler.take_pending_calls();
-
-                // Check iteration limit
-                state.iteration += 1;
-                state.total_calls += pending_calls.len();
-
-                // Record tool loop iteration metric
-                Metrics::record_mcp_tool_iteration(&original_request.model);
-
-                let effective_limit = match max_tool_calls {
-                    Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
-                    None => DEFAULT_MAX_ITERATIONS,
-                };
-
-                if state.total_calls > effective_limit {
-                    warn!(
-                        "Reached tool call limit during streaming: {}",
-                        effective_limit
-                    );
-                    send_sse_event(
-                        &tx,
-                        "error",
-                        &json!({"error": {"message": "Exceeded max_tool_calls limit"}}),
-                    );
-                    let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
-                    return;
-                }
-
-                // Execute all pending tool calls
-                if !execute_streaming_tool_calls(
-                    pending_calls,
-                    &session,
-                    &tx,
-                    &mut state,
-                    &mut sequence_number,
-                    &original_request.model,
-                )
-                .await
-                {
-                    return;
-                }
-
-                // Build resume payload
-                match build_resume_payload(
-                    &base_payload,
-                    &state.conversation_history,
-                    &state.original_input,
-                    &tools_json,
-                    true, // is_streaming = true
-                ) {
-                    Ok(resume_payload) => {
-                        current_payload = resume_payload;
-                        is_first_iteration = false;
                     }
                     Err(e) => {
-                        send_sse_event(
+                        let _ = send_sse_event(
                             &tx,
                             "error",
-                            &json!({"error": {"message": format!("Failed to build resume payload: {}", e)}}),
+                            &json!({"error": {"message": format!("Stream error: {}", e)}}),
                         );
-                        let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
                         return;
                     }
                 }
             }
-        };
 
-        match request_ctx {
-            Some(ctx) => Box::pin(with_request_context(ctx, run)).await,
-            None => run.await,
+            next_output_index = handler.next_output_index();
+            if let Some(id) = handler.original_response_id().map(|s| s.to_string()) {
+                preserved_response_id = Some(id);
+            }
+
+            // If no tool calls, we're done - stream is complete
+            if !tool_calls_detected {
+                if !send_final_response_event(
+                    &handler,
+                    &tx,
+                    &mut sequence_number,
+                    &state,
+                    &streaming_ctx,
+                ) {
+                    return;
+                }
+
+                let final_response_json = if should_store || persist_needed {
+                    handler.accumulator.into_final_response()
+                } else {
+                    None
+                };
+
+                if let Some(mut response_json) = final_response_json {
+                    if let Some(ref id) = preserved_response_id {
+                        if let Some(obj) = response_json.as_object_mut() {
+                            obj.insert("id".to_string(), Value::String(id.clone()));
+                        }
+                    }
+                    inject_mcp_metadata_streaming(&mut response_json, &state, &session);
+
+                    restore_original_tools(&mut response_json, &original_request);
+                    patch_response_with_request_metadata(
+                        &mut response_json,
+                        &original_request,
+                        previous_response_id.as_deref(),
+                    );
+
+                    // Always persist conversation items and response (even without conversation)
+                    if let Err(err) = persist_conversation_items(
+                        storage.conversation.clone(),
+                        storage.conversation_item.clone(),
+                        storage.response.clone(),
+                        &response_json,
+                        &original_request,
+                        storage.request_context.clone(),
+                    )
+                    .await
+                    {
+                        warn!(
+                            "Failed to persist conversation items (stream + MCP): {}",
+                            err
+                        );
+                    }
+                }
+
+                let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
+                return;
+            }
+
+            // Execute tools
+            let pending_calls = handler.take_pending_calls();
+
+            // Check iteration limit
+            state.iteration += 1;
+            state.total_calls += pending_calls.len();
+
+            // Record tool loop iteration metric
+            Metrics::record_mcp_tool_iteration(&original_request.model);
+
+            let effective_limit = match max_tool_calls {
+                Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
+                None => DEFAULT_MAX_ITERATIONS,
+            };
+
+            if state.total_calls > effective_limit {
+                warn!(
+                    "Reached tool call limit during streaming: {}",
+                    effective_limit
+                );
+                send_sse_event(
+                    &tx,
+                    "error",
+                    &json!({"error": {"message": "Exceeded max_tool_calls limit"}}),
+                );
+                let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
+                return;
+            }
+
+            // Execute all pending tool calls
+            if !execute_streaming_tool_calls(
+                pending_calls,
+                &session,
+                &tx,
+                &mut state,
+                &mut sequence_number,
+                &original_request.model,
+            )
+            .await
+            {
+                return;
+            }
+
+            // Build resume payload
+            match build_resume_payload(
+                &base_payload,
+                &state.conversation_history,
+                &state.original_input,
+                &tools_json,
+                true, // is_streaming = true
+            ) {
+                Ok(resume_payload) => {
+                    current_payload = resume_payload;
+                    is_first_iteration = false;
+                }
+                Err(e) => {
+                    send_sse_event(
+                        &tx,
+                        "error",
+                        &json!({"error": {"message": format!("Failed to build resume payload: {}", e)}}),
+                    );
+                    let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
+                    return;
+                }
+            }
         }
     });
 

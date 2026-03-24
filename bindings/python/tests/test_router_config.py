@@ -275,19 +275,6 @@ class TestRouterConfigValidation:
             "x-correlation-id",
         ]
 
-    def test_storage_context_headers_validation(self):
-        """Test storage context header mapping validation."""
-        args = RouterArgs(
-            storage_context_headers={
-                "x-tenant-id": "tenant_id",
-                "x-user-id": "user_id",
-            }
-        )
-        assert args.storage_context_headers == {
-            "x-tenant-id": "tenant_id",
-            "x-user-id": "user_id",
-        }
-
     def test_policy_consistency_validation(self):
         """Test policy consistency validation in PD mode."""
         # Test with both prefill and decode policies specified
@@ -394,7 +381,6 @@ class TestRouterConfigValidation:
             prometheus_port=None,
             prometheus_host=None,
             request_id_headers=None,
-            storage_context_headers={},
             rate_limit_tokens_per_second=None,
             service_discovery_namespace=None,
         )
@@ -406,7 +392,6 @@ class TestRouterConfigValidation:
         assert args.prometheus_port is None
         assert args.prometheus_host is None
         assert args.request_id_headers is None
-        assert args.storage_context_headers == {}
         assert args.rate_limit_tokens_per_second is None
         assert args.service_discovery_namespace is None
 
@@ -422,12 +407,9 @@ class TestRouterConfigValidation:
 
     def test_config_with_empty_dicts(self):
         """Test configuration with empty dictionaries."""
-        args = RouterArgs(
-            selector={}, prefill_selector={}, decode_selector={}, storage_context_headers={}
-        )
+        args = RouterArgs(selector={}, prefill_selector={}, decode_selector={})
 
         # All empty dictionaries should be preserved
         assert args.selector == {}
         assert args.prefill_selector == {}
         assert args.decode_selector == {}
-        assert args.storage_context_headers == {}
