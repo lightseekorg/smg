@@ -312,6 +312,7 @@ impl TrtllmServiceClient {
             lookahead_config: None,
             cache_salt_id: None,
             arrival_time: None,
+            include_stop_token_in_output: false,
         };
 
         Ok(grpc_request)
@@ -394,6 +395,7 @@ impl TrtllmServiceClient {
             lookahead_config: None,
             cache_salt_id: None,
             arrival_time: None,
+            include_stop_token_in_output: false,
         };
 
         Ok(grpc_request)
@@ -453,6 +455,7 @@ impl TrtllmServiceClient {
             lookahead_config: None,
             cache_salt_id: None,
             arrival_time: None,
+            include_stop_token_in_output: false,
         };
 
         Ok(grpc_request)
@@ -678,6 +681,7 @@ impl TrtllmServiceClient {
             lookahead_config: None,
             cache_salt_id: None,
             arrival_time: None,
+            include_stop_token_in_output: false,
         };
 
         Ok(grpc_request)
