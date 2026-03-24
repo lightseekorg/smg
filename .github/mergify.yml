@@ -1,3 +1,4 @@
+# post_check rule 'Enforce branch naming convention (internal)' was removed without replacement (no success_conditions or neutral_conditions to migrate)
 pull_request_rules:
   - name: Enforce branch naming convention (internal)
     description: Auto-close PRs from internal branches that don't follow naming convention
@@ -17,10 +18,6 @@ pull_request_rules:
           Allowed types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`
 
           > **Note:** PRs with non-conforming branch names **will be auto-closed**. Please follow the naming convention for all branches.
-      post_check:
-        title: Branch naming convention
-        summary: |
-          Branch `{{head}}` does not match the required pattern: `<type>/<description>` or `<username>/<description>` (sub-paths like `a/b/c` are also allowed).
       close:
         message: |
           Closing this PR because the branch name `{{head}}` does not follow the naming convention.
