@@ -217,10 +217,8 @@ pub struct WorkerRegistry {
     /// Per-model retry config (last write wins).
     /// Updated when a worker with non-empty retry overrides registers.
     /// Cleaned up when the last worker for a model is removed.
+    /// When retries are disabled, max_retries is set to 1.
     model_retry_configs: Arc<DashMap<String, RetryConfig>>,
-
-    /// Per-model retry enabled flag (last write wins).
-    model_retry_enabled: Arc<DashMap<String, bool>>,
 }
 
 impl WorkerRegistry {
@@ -236,7 +234,6 @@ impl WorkerRegistry {
             worker_mutation_locks: Arc::new(DashMap::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
             model_retry_configs: Arc::new(DashMap::new()),
-            model_retry_enabled: Arc::new(DashMap::new()),
         }
     }
 
@@ -253,7 +250,6 @@ impl WorkerRegistry {
             worker_mutation_locks: self.worker_mutation_locks.clone(),
             mesh_sync: self.mesh_sync.clone(),
             model_retry_configs: self.model_retry_configs.clone(),
-            model_retry_enabled: self.model_retry_enabled.clone(),
         }
     }
 
@@ -280,27 +276,22 @@ impl WorkerRegistry {
     }
 
     /// Get the retry config for a model, if a worker group override exists.
+    /// When retries are disabled for the group, max_retries will be 1.
     pub fn get_retry_config(&self, model_id: &str) -> Option<RetryConfig> {
         self.model_retry_configs
             .get(model_id)
             .map(|entry| entry.value().clone())
     }
 
-    /// Check if retries are enabled for a model group.
-    /// Returns `None` if no worker has set a group-level override.
-    pub fn get_retry_enabled(&self, model_id: &str) -> Option<bool> {
-        self.model_retry_enabled
-            .get(model_id)
-            .map(|entry| *entry.value())
-    }
-
     /// Update the retry config for a model group (last write wins).
     /// Called during worker registration when the worker has non-empty retry overrides.
-    pub fn set_model_retry_config(&self, model_id: &str, config: RetryConfig, enabled: bool) {
+    /// If retries are disabled, max_retries is set to 1 before storing.
+    pub fn set_model_retry_config(&self, model_id: &str, mut config: RetryConfig, enabled: bool) {
+        if !enabled {
+            config.max_retries = 1;
+        }
         self.model_retry_configs
             .insert(model_id.to_string(), config);
-        self.model_retry_enabled
-            .insert(model_id.to_string(), enabled);
     }
 
     pub fn worker_model_ids(worker: &Arc<dyn Worker>) -> Vec<String> {
@@ -601,14 +592,9 @@ impl WorkerRegistry {
             for model_id in Self::worker_model_ids(&worker) {
                 self.remove_worker_from_model_index(&model_id, worker.url());
                 // Clean up per-model retry config when no workers remain for this model
-                if self.model_index.get(&model_id).is_none()
-                    || self
-                        .model_index
-                        .get(&model_id)
-                        .is_some_and(|w| w.is_empty())
-                {
+                let model_empty = self.model_index.get(&model_id).is_none_or(|w| w.is_empty());
+                if model_empty {
                     self.model_retry_configs.remove(&model_id);
-                    self.model_retry_enabled.remove(&model_id);
                 }
             }
 
@@ -1405,9 +1391,8 @@ mod tests {
 
         // No config initially
         assert!(registry.get_retry_config("llama-3").is_none());
-        assert!(registry.get_retry_enabled("llama-3").is_none());
 
-        // Set config for a model
+        // Set config for a model (retries enabled)
         let config1 = RetryConfig {
             max_retries: 3,
             ..RetryConfig::default()
@@ -1416,7 +1401,6 @@ mod tests {
 
         let stored = registry.get_retry_config("llama-3").unwrap();
         assert_eq!(stored.max_retries, 3);
-        assert_eq!(registry.get_retry_enabled("llama-3"), Some(true));
 
         // Last write wins — overwrite with different config
         let config2 = RetryConfig {
@@ -1424,12 +1408,21 @@ mod tests {
             initial_backoff_ms: 200,
             ..RetryConfig::default()
         };
-        registry.set_model_retry_config("llama-3", config2, false);
+        registry.set_model_retry_config("llama-3", config2, true);
 
         let stored = registry.get_retry_config("llama-3").unwrap();
         assert_eq!(stored.max_retries, 10);
         assert_eq!(stored.initial_backoff_ms, 200);
-        assert_eq!(registry.get_retry_enabled("llama-3"), Some(false));
+
+        // Disable retries — max_retries should be set to 1
+        let config3 = RetryConfig {
+            max_retries: 10,
+            ..RetryConfig::default()
+        };
+        registry.set_model_retry_config("llama-3", config3, false);
+
+        let stored = registry.get_retry_config("llama-3").unwrap();
+        assert_eq!(stored.max_retries, 1); // disabled → max_retries = 1
     }
 
     #[test]
@@ -1469,6 +1462,5 @@ mod tests {
         // Remove last worker — config should be cleaned up
         registry.remove(&id2);
         assert!(registry.get_retry_config("llama-3").is_none());
-        assert!(registry.get_retry_enabled("llama-3").is_none());
     }
 }
