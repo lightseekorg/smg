@@ -78,11 +78,12 @@ impl InFlightRequestTracker {
 
     /// Returns `true` if drain has been initiated.
     ///
-    /// Uses `Relaxed` ordering — safe for the hot-path guard drop check because
-    /// the flag is monotonic (false → true, never reset).
+    /// Uses `Acquire` ordering to synchronize with the `Release` store in
+    /// `begin_drain()`, ensuring the last guard drop sees the draining flag
+    /// and calls `notify_waiters`.
     #[inline]
     pub fn is_draining(&self) -> bool {
-        self.draining.load(Ordering::Relaxed)
+        self.draining.load(Ordering::Acquire)
     }
 
     /// Wait until all in-flight requests complete, or until `max_timeout` elapses.
@@ -135,7 +136,7 @@ impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.tracker.requests.remove(&self.request_id);
         // Notify drain waiters when we hit zero during shutdown.
-        // Hot-path cost: one Relaxed atomic load (~1ns) from is_empty().
+        // Hot-path cost: DashMap::is_empty() (shard iteration, fast for empty maps).
         // is_draining() is only checked when the map is empty (rare).
         if self.tracker.requests.is_empty() && self.tracker.is_draining() {
             self.tracker.drain_complete.notify_waiters();

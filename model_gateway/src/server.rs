@@ -1207,16 +1207,17 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         shutdown_signal().await;
 
         // Phase 1: Gate — stop accepting new connections, mark as draining
-        let in_flight = inflight_tracker.len();
         info!(
-            in_flight,
+            in_flight = inflight_tracker.len(),
             "Beginning graceful shutdown: gating new connections"
         );
         inflight_tracker.begin_drain();
-        handle_clone.graceful_shutdown(None);
+        handle_clone.graceful_shutdown(Some(drain_timeout));
 
         // Phase 2: Drain — wait for in-flight requests to complete
-        if in_flight > 0 {
+        // Re-check after gating to catch requests that arrived between the
+        // snapshot and graceful_shutdown stopping the accept loop.
+        if !inflight_tracker.is_empty() {
             let drained = inflight_tracker.wait_for_drain(drain_timeout).await;
             if drained {
                 info!("All in-flight requests drained");
