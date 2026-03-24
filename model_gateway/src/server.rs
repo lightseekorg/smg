@@ -36,7 +36,7 @@ use openai_protocol::{
 use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
+use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler, WorkerStateSubscriber};
 use tokio::{signal, spawn, sync::mpsc};
 use tracing::{debug, error, info, warn, Level};
 use wfaas::LoggingSubscriber;
@@ -1126,6 +1126,11 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         handle
             .sync_manager
             .register_worker_state_subscriber(app_context.worker_registry.clone());
+        // Replay workers already in the CRDT store — they arrived between
+        // mesh server start and subscriber registration above.
+        for state in handle.sync_manager.get_all_worker_states() {
+            app_context.worker_registry.on_remote_worker_state(&state);
+        }
         info!("Mesh sync manager set on worker registry");
 
         handle
