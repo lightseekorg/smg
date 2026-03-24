@@ -60,8 +60,9 @@ Commands
   :cost <id> <n>       Set worker cost
   :flush-cache <id>    Flush worker cache
   :toggle-health <id>  Toggle health check
+  :api-key <key>       Update API key
   :add-openai          Quick-add OpenAI worker
-  :quit            Quit the TUI
+  :quit                Quit the TUI
 
 Providers: openai, anthropic, gemini, xai
 Runtimes:  sglang (default), vllm, trtllm, external

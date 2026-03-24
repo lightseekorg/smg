@@ -161,12 +161,12 @@ Sub-tab system for viewing different log sources:
 |-----|---------------------------------|
 | `a` | Switch to TUI application logs  |
 | `b` | Switch to SMG gateway logs      |
-| `c` | Cycle through worker logs       |
+| `w` | Cycle through worker logs       |
 | `j`/`k` | Scroll up/down             |
 | `G` | Jump to bottom (auto-scroll)    |
 
 ```text
- a:TUI  b:SMG  c:Llama-37595  c:Qwen2-39223          j/k scroll  G bottom  c cycle
+ a:TUI  b:SMG  w:Llama-37595  w:Qwen2-39223          j/k scroll  G bottom  w worker
 ```
 
 - **TUI logs**: Application events (worker add/delete, status changes)
@@ -252,7 +252,7 @@ Press `:` for command mode:
 | `Enter`         | Chat       | Send message                     |
 | `Tab`           | Chat       | Cycle model                      |
 | `Shift+Tab`     | Chat       | Cycle endpoint                   |
-| `a`/`b`/`c`     | Logs       | Switch log sub-tab               |
+| `a`/`b`/`w`     | Logs       | Switch log sub-tab               |
 | `G`             | Logs       | Jump to bottom                   |
 
 ---

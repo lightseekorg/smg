@@ -90,7 +90,7 @@ impl LogSubTab {
         match self {
             Self::Tui => "a:TUI".to_string(),
             Self::Gateway => "b:SMG".to_string(),
-            Self::Worker(port) => format!("c:{port}"),
+            Self::Worker(port) => format!("w:{port}"),
         }
     }
 }
@@ -325,8 +325,11 @@ impl App {
             // Navigation
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.view == View::Logs {
+                    // If at auto-scroll bottom, don't move further down
+                    if self.log_auto_scroll {
+                        return;
+                    }
                     self.log_scroll = self.log_scroll.saturating_add(1);
-                    self.log_auto_scroll = false;
                 } else {
                     self.selected_index = self.selected_index.saturating_add(1);
                     self.clamp_selection();
@@ -354,7 +357,7 @@ impl App {
                 self.log_sub_tab = LogSubTab::Gateway;
                 self.log_scroll = u16::MAX;
             }
-            KeyCode::Char('c') if self.view == View::Logs => {
+            KeyCode::Char('w') if self.view == View::Logs => {
                 // Cycle through worker logs
                 let tabs = self.worker_log_tabs();
                 if tabs.is_empty() {
@@ -1114,12 +1117,17 @@ impl App {
                             let runtime = *runtime;
                             let grpc = *grpc;
                             self.add_menu_state = None;
-                            self.spawn_local_worker(runtime, model, grpc).await;
+                            self.spawn_local_worker_with_args(runtime, model, grpc, "")
+                                .await;
                         } else if idx == custom_idx {
-                            self.add_menu_state = None;
-                            self.input_mode = InputMode::Command;
-                            self.input_buffer =
-                                format!("add http://localhost:8000 --runtime {}", runtime.label());
+                            self.add_menu_state = Some(AddMenuState::EnterCustomModel {
+                                runtime: *runtime,
+                                grpc: *grpc,
+                                field: 0,
+                                model_id: String::new(),
+                                tp: "1".to_string(),
+                                extra_args: String::new(),
+                            });
                         }
                     }
                     _ => {}
@@ -1152,6 +1160,97 @@ impl App {
                 }
                 _ => {}
             },
+            Some(AddMenuState::EnterCustomModel {
+                runtime,
+                grpc,
+                field: _,
+                model_id,
+                tp,
+                extra_args,
+            }) => {
+                let runtime = *runtime;
+                let grpc = *grpc;
+                match key.code {
+                    KeyCode::Esc => {
+                        self.add_menu_state = Some(AddMenuState::SelectModel { runtime, grpc });
+                    }
+                    KeyCode::Tab => {
+                        // Cycle to next field
+                        if let Some(AddMenuState::EnterCustomModel { ref mut field, .. }) =
+                            self.add_menu_state
+                        {
+                            *field = (*field + 1) % 3;
+                        }
+                    }
+                    KeyCode::BackTab => {
+                        if let Some(AddMenuState::EnterCustomModel { ref mut field, .. }) =
+                            self.add_menu_state
+                        {
+                            *field = if *field == 0 { 2 } else { *field - 1 };
+                        }
+                    }
+                    KeyCode::Enter => {
+                        let model_id = model_id.clone();
+                        let tp_str = tp.clone();
+                        let extra = extra_args.clone();
+                        self.add_menu_state = None;
+                        if model_id.is_empty() {
+                            self.set_status("Model ID is required".to_string());
+                            return;
+                        }
+                        let tp_val: u32 = tp_str.parse().unwrap_or(1);
+                        let model = LocalModelPreset::Custom {
+                            model_id,
+                            tp: tp_val,
+                        };
+                        self.spawn_local_worker_with_args(runtime, model, grpc, &extra)
+                            .await;
+                    }
+                    KeyCode::Backspace => {
+                        if let Some(AddMenuState::EnterCustomModel {
+                            ref mut model_id,
+                            ref mut tp,
+                            ref mut extra_args,
+                            field,
+                            ..
+                        }) = self.add_menu_state
+                        {
+                            match field {
+                                0 => {
+                                    model_id.pop();
+                                }
+                                1 => {
+                                    tp.pop();
+                                }
+                                _ => {
+                                    extra_args.pop();
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        if let Some(AddMenuState::EnterCustomModel {
+                            ref mut model_id,
+                            ref mut tp,
+                            ref mut extra_args,
+                            field,
+                            ..
+                        }) = self.add_menu_state
+                        {
+                            match field {
+                                0 => model_id.push(c),
+                                1 => {
+                                    if c.is_ascii_digit() {
+                                        tp.push(c);
+                                    }
+                                }
+                                _ => extra_args.push(c),
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             None => {}
         }
     }
@@ -1197,11 +1296,12 @@ impl App {
         self.status_clear_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
     }
 
-    async fn spawn_local_worker(
+    async fn spawn_local_worker_with_args(
         &mut self,
         runtime: crate::types::LocalRuntime,
         model: crate::types::LocalModelPreset,
         grpc: bool,
+        extra_args: &str,
     ) {
         // Find an available port
         let port = match std::net::TcpListener::bind("127.0.0.1:0") {
@@ -1250,7 +1350,11 @@ impl App {
 
         let model_id = model.model_id().to_string();
         let conn_label = if grpc { "grpc" } else { "http" };
-        let (cmd, args) = runtime.launch_args(&model_id, tp, port, grpc);
+        let (cmd, mut args) = runtime.launch_args(&model_id, tp, port, grpc);
+        // Append user-provided extra arguments (e.g. --max-model-len 16384)
+        for arg in extra_args.split_whitespace() {
+            args.push(arg.to_string());
+        }
         let desc = format!(
             "{} {} {} (port {port})",
             runtime.label(),

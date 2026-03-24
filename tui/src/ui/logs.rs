@@ -48,7 +48,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|(label, port)| {
             let active = matches!(&app.log_sub_tab, LogSubTab::Worker(p) if p == port);
-            (format!("c:{label}"), active)
+            (format!("w:{label}"), active)
         })
         .collect();
     for (label, active) in &worker_labels {
@@ -64,8 +64,8 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(" scroll  ", theme::label()),
         Span::styled("G", Style::default().fg(theme::ACCENT)),
         Span::styled(" bottom  ", theme::label()),
-        Span::styled("c", Style::default().fg(theme::ACCENT)),
-        Span::styled(" cycle", theme::label()),
+        Span::styled("w", Style::default().fg(theme::ACCENT)),
+        Span::styled(" worker", theme::label()),
     ]);
     f.render_widget(
         Paragraph::new(hints).alignment(ratatui::layout::Alignment::Right),

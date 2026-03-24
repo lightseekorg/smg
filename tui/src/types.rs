@@ -98,6 +98,16 @@ pub enum AddMenuState {
     SelectConnection { runtime: LocalRuntime },
     /// Local: pick model preset
     SelectModel { runtime: LocalRuntime, grpc: bool },
+    /// Local: custom model — multi-field form
+    EnterCustomModel {
+        runtime: LocalRuntime,
+        grpc: bool,
+        /// 0=model_id, 1=tp, 2=extra_args
+        field: u8,
+        model_id: String,
+        tp: String,
+        extra_args: String,
+    },
     /// Custom: enter URL
     EnterCustomUrl { input: String },
 }
@@ -106,6 +116,20 @@ impl AddMenuState {
     pub fn get_input(&self) -> Option<String> {
         match self {
             Self::EnterApiKey { input, .. } | Self::EnterCustomUrl { input } => Some(input.clone()),
+            Self::EnterCustomModel {
+                field,
+                model_id,
+                tp,
+                extra_args,
+                ..
+            } => Some(
+                match field {
+                    0 => model_id,
+                    1 => tp,
+                    _ => extra_args,
+                }
+                .clone(),
+            ),
             _ => None,
         }
     }
