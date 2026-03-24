@@ -139,6 +139,11 @@ impl ParserRegistry {
         None
     }
 
+    /// List all registered parser names.
+    pub fn list_parsers(&self) -> Vec<String> {
+        self.creators.read().keys().cloned().collect()
+    }
+
     /// Clear the parser pool, forcing new instances to be created.
     /// Useful for testing or when parsers need to be reset globally.
     pub fn clear_pool(&self) {
@@ -283,6 +288,11 @@ impl ParserFactory {
     /// Get the internal registry for custom registration.
     pub fn registry(&self) -> &ParserRegistry {
         &self.registry
+    }
+
+    /// List all registered parser names.
+    pub fn list_parsers(&self) -> Vec<String> {
+        self.registry.list_parsers()
     }
 
     /// Clear the parser pool.

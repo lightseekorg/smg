@@ -1199,6 +1199,18 @@ fn get_available_tool_call_parsers() -> Vec<String> {
         .clone()
 }
 
+/// Get the list of available reasoning parsers from the Rust factory.
+#[pyfunction]
+fn get_available_reasoning_parsers() -> Vec<String> {
+    static PARSERS: OnceCell<Vec<String>> = OnceCell::new();
+    PARSERS
+        .get_or_init(|| {
+            let factory = reasoning_parser::ParserFactory::new();
+            factory.list_parsers()
+        })
+        .clone()
+}
+
 #[pymodule]
 fn smg_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PolicyType>()?;
@@ -1216,5 +1228,6 @@ fn smg_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_verbose_version_string, m)?)?;
     m.add_function(wrap_pyfunction!(print_banner, m)?)?;
     m.add_function(wrap_pyfunction!(get_available_tool_call_parsers, m)?)?;
+    m.add_function(wrap_pyfunction!(get_available_reasoning_parsers, m)?)?;
     Ok(())
 }

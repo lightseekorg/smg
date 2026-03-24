@@ -273,6 +273,31 @@ impl AppContextBuilder {
         let configured_reasoning_parser = router_config.reasoning_parser.clone();
         let configured_tool_parser = router_config.tool_call_parser.clone();
 
+        // Validate configured parser names against their registries at startup
+        if let (Some(name), Some(factory)) =
+            (&configured_reasoning_parser, &self.reasoning_parser_factory)
+        {
+            if !factory.registry().has_parser(name) {
+                tracing::error!(
+                    parser = %name,
+                    available = %factory.list_parsers().join(", "),
+                    "Unknown reasoning parser"
+                );
+                return Err(AppContextBuildError("reasoning_parser"));
+            }
+        }
+        if let (Some(name), Some(factory)) = (&configured_tool_parser, &self.tool_parser_factory) {
+            let available = factory.list_parsers();
+            if !available.contains(name) {
+                tracing::error!(
+                    parser = %name,
+                    available = %available.join(", "),
+                    "Unknown tool-call parser"
+                );
+                return Err(AppContextBuildError("tool_call_parser"));
+            }
+        }
+
         let worker_registry = self
             .worker_registry
             .ok_or(AppContextBuildError("worker_registry"))?;
