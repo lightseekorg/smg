@@ -278,6 +278,7 @@ pub enum ItemType {
 
 impl ItemType {
     pub const FUNCTION_CALL: &'static str = "function_call";
+    pub const FUNCTION_CALL_OUTPUT: &'static str = "function_call_output";
     pub const FUNCTION_TOOL_CALL: &'static str = "function_tool_call";
     pub const MCP_CALL: &'static str = "mcp_call";
     pub const FUNCTION: &'static str = "function";

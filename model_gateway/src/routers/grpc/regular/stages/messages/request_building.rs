@@ -10,6 +10,7 @@ use crate::routers::{
     grpc::{
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, RequestContext},
+        multimodal::assemble_multimodal_data,
         proto_wrapper::ProtoRequest,
     },
 };
@@ -74,13 +75,18 @@ impl PipelineStage for MessageRequestBuildingStage {
             )
         })?;
 
+        // Assemble backend-specific multimodal data now that the backend is known
+        let multimodal_data = processed_messages
+            .multimodal_intermediate
+            .map(|intermediate| assemble_multimodal_data(intermediate, builder_client));
+
         let mut proto_request = builder_client
             .build_messages_request(
                 request_id,
                 &messages_request,
                 processed_messages.text,
                 prep.token_ids,
-                None, // multimodal data — postponed
+                multimodal_data,
                 prep.tool_constraints,
             )
             .map_err(|e| {

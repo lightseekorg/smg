@@ -30,7 +30,10 @@ use openai_protocol::{
     },
 };
 use serde_json::{json, Value};
-use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
+use smg_data_connector::{
+    ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
+    ResponseStorage,
+};
 use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -101,6 +104,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
     let response_storage = ctx.response_storage.clone();
     let conversation_storage = ctx.conversation_storage.clone();
     let conversation_item_storage = ctx.conversation_item_storage.clone();
+    let request_context = ctx.request_context.clone();
 
     #[expect(
         clippy::disallowed_methods,
@@ -113,6 +117,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
             response_storage,
             conversation_storage,
             conversation_item_storage,
+            request_context,
             tx.clone(),
         )
         .await
@@ -136,6 +141,7 @@ async fn process_and_transform_sse_stream(
     response_storage: Arc<dyn ResponseStorage>,
     conversation_storage: Arc<dyn ConversationStorage>,
     conversation_item_storage: Arc<dyn ConversationItemStorage>,
+    request_context: Option<StorageRequestContext>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
     // Create accumulator for final response
@@ -229,6 +235,7 @@ async fn process_and_transform_sse_stream(
         response_storage,
         &final_response,
         &original_request,
+        request_context,
     )
     .await;
 

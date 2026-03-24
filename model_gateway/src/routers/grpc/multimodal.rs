@@ -1,23 +1,29 @@
-//! Multimodal processing integration for gRPC chat pipeline.
+//! Multimodal processing integration for gRPC pipeline (chat + messages).
 //!
 //! This module bridges the `llm-multimodal` crate with the gRPC router pipeline,
 //! handling the full processing chain: extract content parts → fetch images →
 //! preprocess pixels → expand placeholder tokens → build proto MultimodalInputs.
+//!
+//! Both the chat completion pipeline and the Messages API pipeline share the same
+//! processing core (`process_multimodal_parts`). Only the detection and extraction
+//! functions differ because they work with different input types (`ChatMessage` vs
+//! `InputMessage`).
 
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use llm_multimodal::{
-    AsyncMultiModalTracker, ChatContentPart, FieldLayout, ImageDetail, ImageFrame,
-    ImageProcessorRegistry, MediaConnector, MediaConnectorConfig, Modality, ModelMetadata,
-    ModelRegistry, ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
+    AsyncMultiModalTracker, FieldLayout, ImageDetail, ImageFrame, ImageProcessorRegistry,
+    MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelRegistry,
+    ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
     PromptReplacement, TrackedMedia, TrackerOutput,
 };
 use llm_tokenizer::TokenizerTrait;
 use openai_protocol::{
     chat::{ChatMessage, MessageContent},
     common::ContentPart,
+    messages::{ImageSource, InputContent, InputContentBlock, InputMessage, Role},
 };
 use tracing::{debug, warn};
 
@@ -165,8 +171,8 @@ pub(crate) fn has_multimodal_content(messages: &[ChatMessage]) -> bool {
 }
 
 /// Extract multimodal content parts from OpenAI chat messages,
-/// converting protocol `ContentPart` to multimodal crate `ChatContentPart`.
-fn extract_content_parts(messages: &[ChatMessage]) -> Vec<ChatContentPart> {
+/// converting protocol `ContentPart` to multimodal crate `MediaContentPart`.
+fn extract_content_parts(messages: &[ChatMessage]) -> Vec<MediaContentPart> {
     let mut parts = Vec::new();
 
     for msg in messages {
@@ -182,14 +188,14 @@ fn extract_content_parts(messages: &[ChatMessage]) -> Vec<ChatContentPart> {
                 match part {
                     ContentPart::ImageUrl { image_url } => {
                         let detail = image_url.detail.as_deref().and_then(parse_detail);
-                        parts.push(ChatContentPart::ImageUrl {
+                        parts.push(MediaContentPart::ImageUrl {
                             url: image_url.url.clone(),
                             detail,
                             uuid: None,
                         });
                     }
                     ContentPart::Text { text } => {
-                        parts.push(ChatContentPart::Text { text: text.clone() });
+                        parts.push(MediaContentPart::Text { text: text.clone() });
                     }
                     ContentPart::VideoUrl { .. } => {} // Skip VideoUrl for now
                 }
@@ -210,6 +216,96 @@ fn parse_detail(detail: &str) -> Option<ImageDetail> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Messages API multimodal detection and extraction
+// ---------------------------------------------------------------------------
+
+/// Check if any messages in a Messages API request contain multimodal content.
+pub(crate) fn has_multimodal_content_messages(messages: &[InputMessage]) -> bool {
+    messages.iter().any(|msg| {
+        if msg.role != Role::User {
+            return false;
+        }
+        match &msg.content {
+            InputContent::Blocks(blocks) => blocks
+                .iter()
+                .any(|block| matches!(block, InputContentBlock::Image(_))),
+            InputContent::String(_) => false,
+        }
+    })
+}
+
+/// Extract multimodal content parts from Messages API input messages,
+/// converting `InputContentBlock::Image` to multimodal crate `MediaContentPart`.
+fn extract_content_parts_messages(messages: &[InputMessage]) -> Vec<MediaContentPart> {
+    let mut parts = Vec::new();
+
+    for msg in messages {
+        if msg.role != Role::User {
+            continue;
+        }
+        let blocks = match &msg.content {
+            InputContent::Blocks(blocks) => blocks,
+            InputContent::String(_) => continue,
+        };
+
+        for block in blocks {
+            match block {
+                InputContentBlock::Image(image_block) => match &image_block.source {
+                    ImageSource::Base64 { media_type, data } => {
+                        // Convert base64 to data URL for the media connector
+                        let data_url = format!("data:{media_type};base64,{data}");
+                        parts.push(MediaContentPart::ImageUrl {
+                            url: data_url,
+                            detail: None,
+                            uuid: None,
+                        });
+                    }
+                    ImageSource::Url { url } => {
+                        parts.push(MediaContentPart::ImageUrl {
+                            url: url.clone(),
+                            detail: None,
+                            uuid: None,
+                        });
+                    }
+                },
+                InputContentBlock::Text(text_block) => {
+                    parts.push(MediaContentPart::Text {
+                        text: text_block.text.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    parts
+}
+
+/// Process multimodal content from Messages API input messages.
+///
+/// Entry point for the messages preparation stage. Extracts image content parts
+/// from `InputMessage`, then delegates to the shared processing core.
+pub(crate) async fn process_multimodal_messages(
+    messages: &[InputMessage],
+    model_id: &str,
+    tokenizer: &dyn TokenizerTrait,
+    token_ids: Vec<u32>,
+    components: &MultimodalComponents,
+    tokenizer_source: &str,
+) -> Result<MultimodalOutput> {
+    let content_parts = extract_content_parts_messages(messages);
+    process_multimodal_parts(
+        content_parts,
+        model_id,
+        tokenizer,
+        token_ids,
+        components,
+        tokenizer_source,
+    )
+    .await
+}
+
 /// Process multimodal content: fetch images, preprocess pixels, expand tokens, collect hashes.
 ///
 /// Single entry point called from preparation.rs. Handles the full pipeline:
@@ -222,8 +318,30 @@ pub(crate) async fn process_multimodal(
     components: &MultimodalComponents,
     tokenizer_source: &str,
 ) -> Result<MultimodalOutput> {
-    // Step 1: Fetch images
     let content_parts = extract_content_parts(messages);
+    process_multimodal_parts(
+        content_parts,
+        model_id,
+        tokenizer,
+        token_ids,
+        components,
+        tokenizer_source,
+    )
+    .await
+}
+
+/// Shared multimodal processing core.
+///
+/// Takes pre-extracted `MediaContentPart`s (from either chat or messages pipeline)
+/// and runs the full processing chain: fetch → preprocess → expand → build intermediate.
+async fn process_multimodal_parts(
+    content_parts: Vec<MediaContentPart>,
+    model_id: &str,
+    tokenizer: &dyn TokenizerTrait,
+    token_ids: Vec<u32>,
+    components: &MultimodalComponents,
+    tokenizer_source: &str,
+) -> Result<MultimodalOutput> {
     let mut tracker = AsyncMultiModalTracker::new(components.media_connector.clone());
 
     for part in content_parts {
@@ -674,12 +792,12 @@ mod tests {
         assert_eq!(parts.len(), 2);
 
         match &parts[0] {
-            ChatContentPart::Text { text } => assert_eq!(text, "Describe this:"),
+            MediaContentPart::Text { text } => assert_eq!(text, "Describe this:"),
             _ => panic!("Expected Text part"),
         }
 
         match &parts[1] {
-            ChatContentPart::ImageUrl { url, detail, .. } => {
+            MediaContentPart::ImageUrl { url, detail, .. } => {
                 assert_eq!(url, "https://example.com/image.jpg");
                 assert_eq!(*detail, Some(ImageDetail::High));
             }

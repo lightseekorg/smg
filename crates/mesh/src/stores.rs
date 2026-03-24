@@ -26,17 +26,31 @@ use super::{
 // Type-Safe Serialization Layer - Transparent T ↔ Vec<u8> Conversion
 // ============================================================================
 
-/// Trait for CRDT-compatible value types
-/// Provides transparent serialization/deserialization
+/// Trait for CRDT-compatible value types.
+/// Uses bincode for compact binary serialization. This is critical for
+/// PolicyState which contains TreeState with token payloads — JSON
+/// serialization of Vec<u8> is ~4x larger than binary.
 trait CrdtValue: Serialize + DeserializeOwned + Clone {
-    fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(self)
+    fn to_bytes(&self) -> Result<Vec<u8>, CrdtSerError> {
+        bincode::serialize(self).map_err(CrdtSerError)
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
+    fn from_bytes(bytes: &[u8]) -> Result<Self, CrdtSerError> {
+        bincode::deserialize(bytes).map_err(CrdtSerError)
     }
 }
+
+/// Serialization error wrapper for CRDT values.
+#[derive(Debug)]
+pub struct CrdtSerError(Box<bincode::ErrorKind>);
+
+impl std::fmt::Display for CrdtSerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CRDT serialization error: {}", self.0)
+    }
+}
+
+impl std::error::Error for CrdtSerError {}
 
 // Blanket implementation for all types that satisfy the bounds
 impl<T> CrdtValue for T where T: Serialize + DeserializeOwned + Clone {}
@@ -68,6 +82,11 @@ impl<T: CrdtValue> CrdtStore<T> {
         }
     }
 
+    /// Mutation generation counter. Cheap check to skip unchanged stores.
+    fn generation(&self) -> u64 {
+        self.inner.generation()
+    }
+
     fn get(&self, key: &str) -> Option<T> {
         self.inner.get(key).and_then(|bytes| {
             T::from_bytes(&bytes)
@@ -78,7 +97,7 @@ impl<T: CrdtValue> CrdtStore<T> {
         })
     }
 
-    fn insert(&self, key: String, value: T) -> Result<Option<T>, serde_json::Error> {
+    fn insert(&self, key: String, value: T) -> Result<Option<T>, CrdtSerError> {
         let bytes = value.to_bytes().map_err(|err| {
             debug!(error = %err, %key, "Failed to serialize CRDT value");
             err
@@ -103,7 +122,7 @@ impl<T: CrdtValue> CrdtStore<T> {
         })
     }
 
-    fn update<F>(&self, key: String, updater: F) -> Result<Option<T>, serde_json::Error>
+    fn update<F>(&self, key: String, updater: F) -> Result<Option<T>, CrdtSerError>
     where
         F: FnOnce(Option<T>) -> T,
     {
@@ -128,7 +147,7 @@ impl<T: CrdtValue> CrdtStore<T> {
             .ok())
     }
 
-    fn update_if<F>(&self, key: String, updater: F) -> Result<(Option<T>, bool), serde_json::Error>
+    fn update_if<F>(&self, key: String, updater: F) -> Result<(Option<T>, bool), CrdtSerError>
     where
         F: FnOnce(Option<T>) -> Option<T>,
     {
@@ -189,6 +208,11 @@ impl<T: CrdtValue> CrdtStore<T> {
                     .ok()
             })
             .collect()
+    }
+
+    /// Remove tombstoned keys from CRDT metadata maps.
+    fn gc_tombstones(&self) -> usize {
+        self.inner.gc_tombstones()
     }
 }
 
@@ -339,6 +363,11 @@ macro_rules! define_state_store {
                 }
             }
 
+            /// Mutation generation counter. Cheap check to skip unchanged stores.
+            pub fn generation(&self) -> u64 {
+                self.inner.generation()
+            }
+
             pub fn get(&self, key: &str) -> Option<$value_type> {
                 self.inner.get(key)
             }
@@ -347,7 +376,7 @@ macro_rules! define_state_store {
                 &self,
                 key: String,
                 value: $value_type,
-            ) -> Result<Option<$value_type>, serde_json::Error> {
+            ) -> Result<Option<$value_type>, CrdtSerError> {
                 self.inner.insert(key, value)
             }
 
@@ -367,7 +396,7 @@ macro_rules! define_state_store {
                 &self,
                 key: String,
                 updater: F,
-            ) -> Result<Option<$value_type>, serde_json::Error>
+            ) -> Result<Option<$value_type>, CrdtSerError>
             where
                 F: FnOnce(Option<$value_type>) -> $value_type,
             {
@@ -378,7 +407,7 @@ macro_rules! define_state_store {
                 &self,
                 key: String,
                 updater: F,
-            ) -> Result<(Option<$value_type>, bool), serde_json::Error>
+            ) -> Result<(Option<$value_type>, bool), CrdtSerError>
             where
                 F: FnOnce(Option<$value_type>) -> Option<$value_type>,
             {
@@ -395,6 +424,11 @@ macro_rules! define_state_store {
 
             pub fn all(&self) -> BTreeMap<String, $value_type> {
                 self.inner.all()
+            }
+
+            /// Remove tombstoned keys from CRDT metadata to bound memory growth.
+            pub fn gc_tombstones(&self) -> usize {
+                self.inner.gc_tombstones()
             }
         }
 
@@ -701,6 +735,15 @@ impl StateStores {
             policy: PolicyStore::new(),
             rate_limit: RateLimitStore::new(self_name),
         }
+    }
+
+    /// Run garbage collection across all stores, removing tombstoned CRDT
+    /// metadata entries. Returns the total number of entries removed.
+    pub fn gc_tombstones(&self) -> usize {
+        self.membership.gc_tombstones()
+            + self.app.gc_tombstones()
+            + self.worker.gc_tombstones()
+            + self.policy.gc_tombstones()
     }
 }
 

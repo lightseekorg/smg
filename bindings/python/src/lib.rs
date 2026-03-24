@@ -399,6 +399,7 @@ struct Router {
     request_timeout_secs: u64,
     shutdown_grace_period_secs: u64,
     request_id_headers: Option<Vec<String>>,
+    storage_context_headers: HashMap<String, String>,
     pd_disaggregation: bool,
     bucket_adjust_interval_secs: usize,
     prefill_urls: Option<Vec<(String, Option<u16>)>>,
@@ -456,6 +457,12 @@ struct Router {
     otlp_traces_endpoint: String,
     control_plane_auth: Option<PyControlPlaneAuthConfig>,
     schema_config: Option<String>,
+    // Mesh server
+    enable_mesh: bool,
+    mesh_server_name: Option<String>,
+    mesh_host: String,
+    mesh_port: u16,
+    mesh_peer_urls: Vec<String>,
 }
 
 impl Router {
@@ -690,6 +697,10 @@ impl Router {
             .maybe_log_dir(self.log_dir.as_ref())
             .maybe_log_level(self.log_level.as_ref())
             .maybe_request_id_headers(self.request_id_headers.clone())
+            .maybe_storage_context_headers(
+                (!self.storage_context_headers.is_empty())
+                    .then(|| self.storage_context_headers.clone()),
+            )
             .maybe_rate_limit_tokens_per_second(self.rate_limit_tokens_per_second)
             .maybe_model_path(self.model_path.as_ref())
             .maybe_tokenizer_path(self.tokenizer_path.as_ref())
@@ -758,6 +769,7 @@ impl Router {
         request_timeout_secs = 1800,
         shutdown_grace_period_secs = 180,
         request_id_headers = None,
+        storage_context_headers = HashMap::new(),
         pd_disaggregation = false,
         bucket_adjust_interval_secs = 5,
         prefill_urls = None,
@@ -814,6 +826,11 @@ impl Router {
         control_plane_auth = None,
         schema_config = None,
         disable_tokenizer_autoload = false,
+        enable_mesh = false,
+        mesh_server_name = None,
+        mesh_host = String::from("0.0.0.0"),
+        mesh_port = 39527u16,
+        mesh_peer_urls = vec![],
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -857,6 +874,7 @@ impl Router {
         request_timeout_secs: u64,
         shutdown_grace_period_secs: u64,
         request_id_headers: Option<Vec<String>>,
+        storage_context_headers: HashMap<String, String>,
         pd_disaggregation: bool,
         bucket_adjust_interval_secs: usize,
         prefill_urls: Option<Vec<(String, Option<u16>)>>,
@@ -913,6 +931,11 @@ impl Router {
         control_plane_auth: Option<PyControlPlaneAuthConfig>,
         schema_config: Option<String>,
         disable_tokenizer_autoload: bool,
+        enable_mesh: bool,
+        mesh_server_name: Option<String>,
+        mesh_host: String,
+        mesh_port: u16,
+        mesh_peer_urls: Vec<String>,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -965,6 +988,7 @@ impl Router {
             request_timeout_secs,
             shutdown_grace_period_secs,
             request_id_headers,
+            storage_context_headers,
             pd_disaggregation,
             bucket_adjust_interval_secs,
             prefill_urls,
@@ -1022,6 +1046,11 @@ impl Router {
             otlp_traces_endpoint,
             control_plane_auth,
             schema_config,
+            enable_mesh,
+            mesh_server_name,
+            mesh_host,
+            mesh_port,
+            mesh_peer_urls,
         })
     }
 
@@ -1097,7 +1126,40 @@ impl Router {
                     .control_plane_auth
                     .as_ref()
                     .map(|c| c.to_auth_control_plane_config()),
-                mesh_server_config: None,
+                mesh_server_config: if self.enable_mesh {
+                    let self_name = self.mesh_server_name.clone().unwrap_or_else(|| {
+                        use rand::{distr::Alphanumeric, Rng};
+                        let random_string: String = (0..4)
+                            .map(|_| rand::rng().sample(Alphanumeric) as char)
+                            .collect();
+                        format!("Mesh_{random_string}")
+                    });
+                    let peer = self
+                        .mesh_peer_urls
+                        .first()
+                        .map(|url| {
+                            url.parse::<std::net::SocketAddr>().map_err(|e| {
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "Invalid mesh peer URL '{url}': {e}"
+                                ))
+                            })
+                        })
+                        .transpose()?;
+                    let self_addr_str = format!("{}:{}", self.mesh_host, self.mesh_port);
+                    let self_addr = self_addr_str.parse::<std::net::SocketAddr>().map_err(|e| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "Invalid mesh address '{self_addr_str}': {e}"
+                        ))
+                    })?;
+                    Some(smg_mesh::MeshServerConfig {
+                        self_name,
+                        self_addr,
+                        init_peer: peer,
+                        mtls_config: None,
+                    })
+                } else {
+                    None
+                },
                 webrtc_bind_addr: None,
                 webrtc_stun_server: None,
             })

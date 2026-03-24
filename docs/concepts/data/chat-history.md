@@ -252,6 +252,7 @@ Enterprise-grade storage using Oracle Autonomous Database.
 | `--oracle-dsn` | `ATP_DSN` | - | Direct connection descriptor |
 | `--oracle-user` | `ATP_USER` | - | Database username |
 | `--oracle-password` | `ATP_PASSWORD` | - | Database password |
+| `--oracle-external-auth` | `ATP_EXTERNAL_AUTH` | `false` | Use external (OS) authentication instead of username/password |
 | `--oracle-pool-min` | `ATP_POOL_MIN` | `1` | Minimum connection pool size |
 | `--oracle-pool-max` | `ATP_POOL_MAX` | `16` | Maximum connection pool size |
 | `--oracle-pool-timeout-secs` | `ATP_POOL_TIMEOUT_SECS` | `30` | Connection timeout in seconds |

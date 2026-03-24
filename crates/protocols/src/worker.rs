@@ -116,8 +116,10 @@ impl std::fmt::Display for WorkerGroupKey {
 )]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeType {
-    /// SGLang runtime (default).
+    /// No runtime type specified — the backend will be auto-detected.
     #[default]
+    Unspecified,
+    /// SGLang runtime.
     Sglang,
     /// vLLM runtime.
     Vllm,
@@ -127,9 +129,17 @@ pub enum RuntimeType {
     External,
 }
 
+impl RuntimeType {
+    /// Returns `true` when the caller supplied an explicit runtime type.
+    pub fn is_specified(self) -> bool {
+        !matches!(self, RuntimeType::Unspecified)
+    }
+}
+
 impl std::fmt::Display for RuntimeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RuntimeType::Unspecified => write!(f, "unspecified"),
             RuntimeType::Sglang => write!(f, "sglang"),
             RuntimeType::Vllm => write!(f, "vllm"),
             RuntimeType::Trtllm => write!(f, "trtllm"),
@@ -142,7 +152,9 @@ impl std::str::FromStr for RuntimeType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.eq_ignore_ascii_case("sglang") {
+        if s.eq_ignore_ascii_case("unspecified") {
+            Ok(RuntimeType::Unspecified)
+        } else if s.eq_ignore_ascii_case("sglang") {
             Ok(RuntimeType::Sglang)
         } else if s.eq_ignore_ascii_case("vllm") {
             Ok(RuntimeType::Vllm)
@@ -526,6 +538,14 @@ pub struct WorkerSpec {
     #[serde(default, skip_serializing_if = "HealthCheckUpdate::is_empty")]
     pub health: HealthCheckUpdate,
 
+    /// Per-worker HTTP connection pool overrides.
+    #[serde(default, skip_serializing_if = "HttpPoolConfig::is_empty")]
+    pub http_pool: HttpPoolConfig,
+
+    /// Per-worker resilience overrides (retry + circuit breaker).
+    #[serde(default, skip_serializing_if = "ResilienceUpdate::is_empty")]
+    pub resilience: ResilienceUpdate,
+
     /// Maximum connection attempts during worker registration (default: 20).
     #[serde(default = "default_max_connection_attempts")]
     pub max_connection_attempts: u32,
@@ -560,6 +580,8 @@ impl WorkerSpec {
             kv_role: None,
             kv_block_size: None,
             health: HealthCheckUpdate::default(),
+            http_pool: HttpPoolConfig::default(),
+            resilience: ResilienceUpdate::default(),
             max_connection_attempts: default_max_connection_attempts(),
             load_monitor_interval_secs: None,
         }
@@ -574,6 +596,11 @@ impl WorkerSpec {
 pub struct WorkerInfo {
     /// Worker unique identifier.
     pub id: String,
+
+    /// Primary model ID for backwards compatibility.
+    /// Computed from `models[0].id` (single/multi) or `null` (wildcard).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
 
     /// Worker identity and configuration.
     #[serde(flatten)]
@@ -594,6 +621,7 @@ impl WorkerInfo {
     pub fn pending(worker_id: &str, url: String, job_status: Option<JobStatus>) -> Self {
         Self {
             id: worker_id.to_string(),
+            model_id: None,
             spec: WorkerSpec::new(url),
             is_healthy: false,
             load: 0,
@@ -725,6 +753,87 @@ impl HealthCheckUpdate {
                 .disable_health_check
                 .unwrap_or(existing.disable_health_check),
         }
+    }
+}
+
+/// Per-worker HTTP connection pool configuration.
+/// All fields optional — `None` means "use router/global default".
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HttpPoolConfig {
+    /// Max idle connections per host (default: 8).
+    pub pool_max_idle_per_host: Option<usize>,
+    /// Idle connection timeout in seconds (default: 50).
+    pub pool_idle_timeout_secs: Option<u64>,
+    /// Request timeout in seconds (default: 30).
+    pub timeout_secs: Option<u64>,
+    /// Connect timeout in seconds (default: 10).
+    pub connect_timeout_secs: Option<u64>,
+}
+
+impl HttpPoolConfig {
+    /// Returns `true` if all fields are `None` (no overrides).
+    pub fn is_empty(&self) -> bool {
+        self.pool_max_idle_per_host.is_none()
+            && self.pool_idle_timeout_secs.is_none()
+            && self.timeout_secs.is_none()
+            && self.connect_timeout_secs.is_none()
+    }
+}
+
+/// Per-worker resilience overrides (retry + circuit breaker).
+/// All fields optional — `None` means "use router default".
+/// Mirrors `HealthCheckUpdate` pattern for PATCH-style config.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ResilienceUpdate {
+    // ── Retry overrides ──
+    /// Max retry attempts (includes first attempt). 1 = no retries.
+    pub max_retries: Option<u32>,
+    /// Initial backoff delay in milliseconds.
+    pub initial_backoff_ms: Option<u64>,
+    /// Maximum backoff delay in milliseconds.
+    pub max_backoff_ms: Option<u64>,
+    /// Backoff multiplier for exponential backoff.
+    pub backoff_multiplier: Option<f32>,
+    /// Jitter factor (0.0–1.0) applied to backoff delay.
+    pub jitter_factor: Option<f32>,
+    /// Disable retries entirely for this worker.
+    pub disable_retry: Option<bool>,
+
+    // ── Circuit breaker overrides ──
+    /// Consecutive failures to open the circuit.
+    pub cb_failure_threshold: Option<u32>,
+    /// Consecutive successes to close the circuit from half-open.
+    pub cb_success_threshold: Option<u32>,
+    /// Seconds to wait before attempting half-open.
+    pub cb_timeout_secs: Option<u64>,
+    /// Time window in seconds for failure counting.
+    pub cb_window_secs: Option<u64>,
+    /// Disable circuit breaker entirely for this worker.
+    pub disable_circuit_breaker: Option<bool>,
+
+    // ── Retryable status codes ──
+    /// Custom retryable HTTP status codes.
+    /// When set, replaces the default set (408, 429, 500, 502, 503, 504).
+    pub retryable_status_codes: Option<Vec<u16>>,
+}
+
+impl ResilienceUpdate {
+    /// Returns `true` if all fields are `None` (no overrides).
+    pub fn is_empty(&self) -> bool {
+        self.max_retries.is_none()
+            && self.initial_backoff_ms.is_none()
+            && self.max_backoff_ms.is_none()
+            && self.backoff_multiplier.is_none()
+            && self.jitter_factor.is_none()
+            && self.disable_retry.is_none()
+            && self.cb_failure_threshold.is_none()
+            && self.cb_success_threshold.is_none()
+            && self.cb_timeout_secs.is_none()
+            && self.cb_window_secs.is_none()
+            && self.disable_circuit_breaker.is_none()
+            && self.retryable_status_codes.is_none()
     }
 }
 

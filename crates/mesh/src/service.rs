@@ -15,6 +15,8 @@ use tonic::{
 };
 use tracing as log;
 
+use crate::flow_control::MAX_MESSAGE_SIZE;
+
 pub mod gossip {
     #![allow(unused_qualifications, clippy::absolute_paths)]
     #![allow(clippy::trivially_copy_pass_by_ref, clippy::allow_attributes)]
@@ -598,7 +600,9 @@ pub async fn try_ping(
         );
         tonic::Status::unavailable("Failed to connect to peer")
     })?;
-    let mut client = gossip_client::GossipClient::new(channel);
+    let mut client = gossip_client::GossipClient::new(channel)
+        .max_decoding_message_size(MAX_MESSAGE_SIZE)
+        .max_encoding_message_size(MAX_MESSAGE_SIZE);
 
     let ping_message = GossipMessage { payload };
     let response = client.ping_server(Request::new(ping_message)).await?;

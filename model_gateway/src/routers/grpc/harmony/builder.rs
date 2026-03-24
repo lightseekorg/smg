@@ -437,8 +437,8 @@ impl HarmonyBuilder {
             let sys_msg = self.build_system_message_from_responses(request, with_custom_tools);
             all_messages.push(sys_msg);
 
-            // Add developer message only if we have custom tools
-            if with_custom_tools {
+            // Add developer message if we have custom tools or instructions
+            if with_custom_tools || request.instructions.is_some() {
                 let dev_msg = self.build_developer_message_from_responses(
                     request.instructions.as_deref(),
                     request.tools.as_ref(),

@@ -51,7 +51,7 @@ pub(crate) async fn route_responses(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
     headers: Option<http::HeaderMap>,
-    model_id: Option<String>,
+    model_id: String,
 ) -> Response {
     // 1. Reject background mode (no longer supported)
     let is_background = request.background.unwrap_or(false);

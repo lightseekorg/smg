@@ -296,8 +296,8 @@ sum by (model) (rate(smg_router_tokens_total[5m]))
 histogram_quantile(0.5, sum by (model, le) (rate(smg_router_ttft_seconds_bucket[5m])))
 
 # Input/output token ratio
-sum(rate(smg_router_tokens_total{type="output"}[5m]))
-/ sum(rate(smg_router_tokens_total{type="input"}[5m]))
+sum(rate(smg_router_tokens_total{token_type="output"}[5m]))
+/ sum(rate(smg_router_tokens_total{token_type="input"}[5m]))
 ```
 
 ### Worker analysis
