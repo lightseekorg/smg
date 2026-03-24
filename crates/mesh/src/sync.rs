@@ -13,7 +13,7 @@ use super::{
         policy_key, tree_state_key, PolicyState, RateLimitConfig, StateStores, WorkerState,
         GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
     },
-    tree_ops::{TreeOperation, TreeState},
+    tree_ops::{TreeOperation, TreeState, TreeStateDelta},
 };
 
 pub trait TreeStateSubscriber: Send + Sync + Debug {
@@ -423,7 +423,7 @@ impl MeshSyncManager {
         };
 
         // Add the new operation
-        tree_state.add_operation(operation);
+        tree_state.add_operation(operation.clone());
 
         // Serialize with bincode (compact binary, ~3-5x smaller than JSON for token arrays)
         let serialized = tree_state.to_bytes()?;
@@ -438,6 +438,13 @@ impl MeshSyncManager {
             config: serialized,
             version: new_version,
         };
+
+        // Record the operation for delta sync before storing
+        self.stores
+            .tree_ops_pending
+            .entry(key.clone())
+            .or_default()
+            .push(operation);
 
         if let Err(err) = self.stores.policy.insert(key, state) {
             return Err(format!("Failed to persist tree state: {err}"));
@@ -535,6 +542,77 @@ impl MeshSyncManager {
                 debug!(error = %err, model_id = %model_id, actor = %actor, "Failed to apply remote tree state update");
             }
         }
+    }
+
+    /// Apply a delta (incremental operations) from a remote node.
+    /// Merges the delta operations into the existing local tree state,
+    /// avoiding the cost of replacing the entire tree state on every sync.
+    pub fn apply_remote_tree_delta(&self, delta: TreeStateDelta, actor: Option<String>) {
+        let key = tree_state_key(&delta.model_id);
+        let actor = actor.unwrap_or_else(|| "remote".to_string());
+
+        // Get or create local tree state
+        let mut tree_state = if let Some(policy_state) = self.stores.policy.get(&key) {
+            TreeState::from_bytes(&policy_state.config)
+                .unwrap_or_else(|_| TreeState::new(delta.model_id.clone()))
+        } else {
+            TreeState::new(delta.model_id.clone())
+        };
+
+        let old_version = tree_state.version;
+
+        // Skip if we already have a version >= the delta's new_version
+        if old_version >= delta.new_version {
+            debug!(
+                "Skipped remote tree delta: model={} (delta new_version {} <= current {})",
+                delta.model_id, delta.new_version, old_version
+            );
+            return;
+        }
+
+        // Apply delta operations
+        for op in &delta.operations {
+            tree_state.add_operation(op.clone());
+        }
+
+        // Store updated state
+        let serialized = match tree_state.to_bytes() {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                debug!(
+                    error = %err,
+                    model_id = %delta.model_id,
+                    "Failed to serialize tree state after delta apply"
+                );
+                return;
+            }
+        };
+
+        let new_version = tree_state.version;
+        let model_id = delta.model_id.clone();
+
+        if let Err(err) = self.stores.policy.insert(
+            key,
+            PolicyState {
+                model_id: delta.model_id,
+                policy_type: "tree_state".to_string(),
+                config: serialized,
+                version: new_version,
+            },
+        ) {
+            debug!(error = %err, actor = %actor, "Failed to store tree state after delta apply");
+            return;
+        }
+
+        debug!(
+            "Applied remote tree delta: model={} (version: {} -> {}, {} ops)",
+            model_id,
+            old_version,
+            new_version,
+            delta.operations.len()
+        );
+
+        self.notify_tree_state_subscribers(&model_id, &tree_state);
     }
 }
 

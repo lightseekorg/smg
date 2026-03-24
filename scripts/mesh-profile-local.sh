@@ -27,7 +27,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="${REPO_ROOT}/target/mesh-profile"
-SMG_BIN="${REPO_ROOT}/target/release/smg"
+# Resolve cargo target directory (may be a shared location)
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null || echo "${REPO_ROOT}/target")}"
+SMG_BIN="${CARGO_TARGET_DIR}/release/smg"
 NUM_WORKERS=20
 NUM_GATEWAYS=3
 WORKER_BASE_PORT=9000
@@ -55,12 +57,6 @@ start_gateways() {
 
     echo "Starting $NUM_GATEWAYS SMG gateway replicas with mesh..."
 
-    # Build worker URLs
-    WORKER_URLS=""
-    for i in $(seq 0 $((NUM_WORKERS - 1))); do
-        WORKER_URLS="$WORKER_URLS http://127.0.0.1:$((WORKER_BASE_PORT + i))"
-    done
-
     for i in $(seq 0 $((NUM_GATEWAYS - 1))); do
         port=$((GATEWAY_BASE_PORT + i))
         mesh_port=$((MESH_BASE_PORT + i))
@@ -70,16 +66,16 @@ start_gateways() {
         MESH_PEERS=""
         for j in $(seq 0 $((NUM_GATEWAYS - 1))); do
             if [ "$i" != "$j" ]; then
-                MESH_PEERS="$MESH_PEERS http://127.0.0.1:$((MESH_BASE_PORT + j))"
+                MESH_PEERS="$MESH_PEERS 127.0.0.1:$((MESH_BASE_PORT + j))"
             fi
         done
 
         echo "  Gateway $i: port=$port mesh=$mesh_port metrics=$metrics_port"
 
+        # No --worker-urls: workers are registered via API so they flow through mesh
         "$SMG_BIN" \
             --host 127.0.0.1 \
             --port "$port" \
-            --worker-urls $WORKER_URLS \
             --policy cache_aware \
             --enable-mesh \
             --mesh-host 127.0.0.1 \
@@ -88,13 +84,39 @@ start_gateways() {
             --mesh-peer-urls $MESH_PEERS \
             --prometheus-port "$metrics_port" \
             --prometheus-host 127.0.0.1 \
-            --log-level info \
-            --disable-health-check \
+            --log-level debug \
             > "$LOG_DIR/gateway-$i.log" 2>&1 &
 
         echo $! >> "$LOG_DIR/gateway_pids.txt"
     done
     echo "Gateways started. Logs: $LOG_DIR/gateway-*.log"
+}
+
+register_workers() {
+    # Register workers via the admin API on gateway-0.
+    # The mesh syncs worker state to the other gateways.
+    local gw_port=$GATEWAY_BASE_PORT
+    echo "Registering $NUM_WORKERS workers via API on gateway-0 (port $gw_port)..."
+
+    local registered=0
+    for i in $(seq 0 $((NUM_WORKERS - 1))); do
+        local worker_port=$((WORKER_BASE_PORT + i))
+        local resp
+        resp=$(curl -sf -X POST "http://127.0.0.1:$gw_port/workers" \
+            -H "Content-Type: application/json" \
+            -d "{\"url\": \"http://127.0.0.1:$worker_port\"}" 2>&1) && registered=$((registered + 1))
+    done
+    echo "Registered $registered/$NUM_WORKERS workers"
+
+    # Verify workers synced to other gateways
+    echo "Waiting 3s for mesh sync..."
+    sleep 3
+    for i in $(seq 0 $((NUM_GATEWAYS - 1))); do
+        local port=$((GATEWAY_BASE_PORT + i))
+        local count
+        count=$(curl -sf "http://127.0.0.1:$port/workers" 2>/dev/null | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('data',[])))" 2>/dev/null || echo "?")
+        echo "  Gateway $i: $count workers"
+    done
 }
 
 run_load() {
@@ -166,6 +188,8 @@ case "${1:-help}" in
         echo ""
         echo "Waiting 5s for mesh to converge..."
         sleep 5
+        register_workers
+        echo ""
         show_status
         echo ""
         echo "Next: $0 load [rps] [duration_secs]"

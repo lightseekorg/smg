@@ -30,6 +30,31 @@ pub enum TreeOperation {
     Remove(TreeRemoveOp),
 }
 
+/// Delta encoding for tree state synchronization.
+/// Contains only the new operations since the last successful sync, rather than the full tree state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TreeStateDelta {
+    pub model_id: String,
+    pub operations: Vec<TreeOperation>,
+    /// Tree state version before these operations were applied.
+    pub base_version: u64,
+    /// Tree state version after these operations are applied.
+    pub new_version: u64,
+}
+
+impl TreeStateDelta {
+    /// Serialize to bincode.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        bincode::serialize(self).map_err(|e| format!("Failed to serialize TreeStateDelta: {e}"))
+    }
+
+    /// Deserialize from bincode bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        bincode::deserialize(bytes)
+            .map_err(|e| format!("Failed to deserialize TreeStateDelta: {e}"))
+    }
+}
+
 /// Maximum number of operations stored in a TreeState before compaction.
 /// Prevents unbounded growth of the operation log, especially with token payloads.
 const MAX_TREE_OPERATIONS: usize = 2048;

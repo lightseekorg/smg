@@ -14,6 +14,7 @@ use tracing::{debug, trace};
 use super::{
     service::gossip::StateUpdate,
     stores::{AppState, MembershipState, PolicyState, StateStores, StoreType, WorkerState},
+    tree_ops::TreeStateDelta,
 };
 
 /// Trait for extracting version from state types
@@ -164,12 +165,76 @@ impl IncrementalUpdateCollector {
                     return vec![];
                 }
                 let all_policies = self.stores.policy.all();
-                updates = self.collect_serializable_updates(
-                    all_policies,
-                    &last_sent.policy,
-                    "policy",
-                    |state: &PolicyState| state.model_id.clone(),
-                );
+                let timestamp = Self::current_timestamp();
+
+                for (key, state) in &all_policies {
+                    let current_version = state.version();
+                    let last_sent_version =
+                        last_sent.policy.get(key.as_str()).copied().unwrap_or(0);
+
+                    if current_version <= last_sent_version {
+                        continue;
+                    }
+
+                    // For tree keys, send a delta with only the pending operations
+                    if key.starts_with("tree:") {
+                        if let Some(pending) = self.stores.tree_ops_pending.get(key) {
+                            if !pending.is_empty() {
+                                let model_id = key
+                                    .strip_prefix("tree:")
+                                    .unwrap_or(key)
+                                    .to_string();
+                                let delta = TreeStateDelta {
+                                    model_id: model_id.clone(),
+                                    operations: pending.clone(),
+                                    base_version: current_version
+                                        .saturating_sub(pending.len() as u64),
+                                    new_version: current_version,
+                                };
+                                if let Ok(delta_bytes) = delta.to_bytes() {
+                                    // Wrap in PolicyState with distinct policy_type
+                                    let delta_policy = PolicyState {
+                                        model_id,
+                                        policy_type: "tree_state_delta".to_string(),
+                                        config: delta_bytes,
+                                        version: current_version,
+                                    };
+                                    if let Ok(serialized) = bincode::serialize(&delta_policy) {
+                                        updates.push(StateUpdate {
+                                            key: key.clone(),
+                                            value: serialized,
+                                            version: current_version,
+                                            actor: self.self_name.clone(),
+                                            timestamp,
+                                        });
+                                        debug!(
+                                            "Collected tree delta update: {} ({} ops, version: {})",
+                                            key,
+                                            pending.len(),
+                                            current_version
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Non-tree policy keys: send full state as before
+                    if let Ok(serialized) = bincode::serialize(state) {
+                        updates.push(StateUpdate {
+                            key: key.clone(),
+                            value: serialized,
+                            version: current_version,
+                            actor: self.self_name.clone(),
+                            timestamp,
+                        });
+                        debug!(
+                            "Collected policy update: {} (version: {})",
+                            state.model_id, current_version
+                        );
+                    }
+                }
             }
             StoreType::App => {
                 let gen = self.stores.app.generation();
@@ -286,6 +351,10 @@ impl IncrementalUpdateCollector {
                 }
                 StoreType::Policy => {
                     last_sent.policy.insert(update.key.clone(), update.version);
+                    // Clear pending tree ops that were successfully sent
+                    if update.key.starts_with("tree:") {
+                        self.stores.tree_ops_pending.remove(&update.key);
+                    }
                 }
                 StoreType::App => {
                     last_sent.app.insert(update.key.clone(), update.version);

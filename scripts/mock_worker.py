@@ -30,6 +30,7 @@ class MockWorkerHandler(http.server.BaseHTTPRequestHandler):
                             "object": "model",
                             "root": "mock-model",
                             "max_model_len": 4096,
+                            "owned_by": "vllm",
                         }
                     ]
                 }
