@@ -1518,12 +1518,11 @@ impl App {
     }
 }
 
-/// Check how many GPUs are available via nvidia-smi. Returns 0 if not available.
-/// Find GPUs with enough free memory (>2GB) and return their indices.
+/// Find GPUs with <10% VRAM utilization via nvidia-smi. Returns empty if unavailable.
 async fn find_free_gpus() -> Vec<u32> {
     let output = tokio::process::Command::new("nvidia-smi")
         .args([
-            "--query-gpu=index,memory.free",
+            "--query-gpu=index,memory.used,memory.total",
             "--format=csv,noheader,nounits",
         ])
         .output()
@@ -1535,11 +1534,12 @@ async fn find_free_gpus() -> Vec<u32> {
                 .filter(|l| !l.trim().is_empty())
                 .filter_map(|line| {
                     let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-                    if parts.len() >= 2 {
+                    if parts.len() >= 3 {
                         let idx = parts[0].parse::<u32>().ok()?;
-                        let free_mb = parts[1].parse::<u64>().ok()?;
-                        // Only consider GPUs with >2GB free
-                        if free_mb > 2048 {
+                        let used_mb = parts[1].parse::<f64>().ok()?;
+                        let total_mb = parts[2].parse::<f64>().ok()?;
+                        // Only consider GPUs with <10% VRAM utilization
+                        if total_mb > 0.0 && (used_mb / total_mb) < 0.10 {
                             Some(idx)
                         } else {
                             None
