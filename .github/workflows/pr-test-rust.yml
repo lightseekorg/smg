@@ -579,6 +579,19 @@ jobs:
       test_dirs: e2e_test/chat_completions
     secrets: inherit
 
+  e2e-4gpu-gateway:
+    name: e2e-4gpu-gateway
+    needs: [e2e-1gpu-gateway]
+    uses: ./.github/workflows/e2e-gpu-job.yml
+    with:
+      engine: sglang
+      gpu_tier: "4"
+      runner: 4-gpu-h100
+      timeout: 25
+      test_dirs: e2e_test/router
+      test_filter: "-k TestIGWMixedWorkerClassification"
+    secrets: inherit
+
   # --- Vendor E2E: CPU-only cloud backend tests ---
 
   e2e-vendor:
@@ -858,7 +871,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-2gpu-chat, e2e-2gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-vendor, go-unit-tests, go-bindings-e2e]
+    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-2gpu-chat, e2e-2gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-4gpu-gateway, e2e-vendor, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -879,6 +892,7 @@ jobs:
                 "${{ needs.e2e-2gpu-responses.result }}" == "failure" || \
                 "${{ needs.e2e-2gpu-pd.result }}" == "failure" || \
                 "${{ needs.e2e-4gpu-chat.result }}" == "failure" || \
+                "${{ needs.e2e-4gpu-gateway.result }}" == "failure" || \
                 "${{ needs.e2e-vendor.result }}" == "failure" || \
                 "${{ needs.go-unit-tests.result }}" == "failure" || \
                 "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then

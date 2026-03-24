@@ -498,6 +498,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             sglang_version=sglang.__version__,
             server_type="grpc",
             start_time=start_timestamp,
+            max_total_num_tokens=self.scheduler_info.get("max_total_num_tokens", 0),
         )
 
     async def GetLoads(

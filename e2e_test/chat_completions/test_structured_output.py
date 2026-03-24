@@ -17,9 +17,8 @@ import pytest
 class _TestStructuredOutputBase:
     """Base class for structured output tests. Not collected by pytest."""
 
-    def test_response_format_json_schema(self, setup_backend, smg):
+    def test_response_format_json_schema(self, model, api_client):
         """Test response_format with json_schema produces valid constrained JSON."""
-        _, model, client, gateway = setup_backend
 
         schema = {
             "type": "object",
@@ -35,7 +34,7 @@ class _TestStructuredOutputBase:
             "additionalProperties": False,
         }
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "user", "content": "List exactly 2 fruits."},
@@ -65,9 +64,8 @@ class _TestStructuredOutputBase:
         assert "<|constrain|>" not in content
         assert "<|message|>" not in content
 
-    def test_response_format_json_schema_stream(self, setup_backend, smg):
+    def test_response_format_json_schema_stream(self, model, api_client):
         """Test response_format with json_schema in streaming mode."""
-        _, model, client, gateway = setup_backend
 
         schema = {
             "type": "object",
@@ -84,7 +82,7 @@ class _TestStructuredOutputBase:
         }
 
         chunks = list(
-            client.chat.completions.create(
+            api_client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "user", "content": "List exactly 2 fruits."},
@@ -131,6 +129,7 @@ class _TestStructuredOutputBase:
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestStructuredOutputRegular(_TestStructuredOutputBase):
     """Structured output tests for regular models (Llama)."""
 
@@ -145,6 +144,7 @@ class TestStructuredOutputRegular(_TestStructuredOutputBase):
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestStructuredOutputHarmony(_TestStructuredOutputBase):
     """Structured output tests for Harmony models (GPT-OSS).
 

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "router": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "type": "string",
+          "enum": ["cache_aware", "round_robin", "power_of_two", "manual", "random", "prefix_hash"]
+        },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "replicas": { "type": "integer", "minimum": 1 },
+        "service": {
+          "type": "object",
+          "properties": {
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "autoscaling": {
+          "type": "object",
+          "properties": {
+            "minReplicas": { "type": "integer", "minimum": 1 },
+            "maxReplicas": { "type": "integer", "minimum": 1 },
+            "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "rateLimitTokensPerSecond": { "type": "integer" }
+      }
+    },
+    "history": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["none", "memory", "postgres", "redis", "oracle"]
+        },
+        "postgres": {
+          "type": "object",
+          "properties": {
+            "poolMax": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "redis": {
+          "type": "object",
+          "properties": {
+            "poolMax": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "oracle": {
+          "type": "object",
+          "properties": {
+            "poolMax": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    }
+  }
+}

@@ -42,10 +42,10 @@ pub(super) async fn route_chat(
     deps: &ChatRouterContext<'_>,
     headers: Option<&HeaderMap>,
     body: &ChatCompletionRequest,
-    model_id: Option<&str>,
+    model_id: &str,
 ) -> Response {
     let start = Instant::now();
-    let model = model_id.unwrap_or(body.model.as_str());
+    let model = model_id;
     let streaming = body.stream;
 
     Metrics::record_router_request(
@@ -99,11 +99,8 @@ pub(super) async fn route_chat(
         }
     };
 
-    // When model_id overrides the body model, patch the serialized payload
-    // so the upstream request uses the effective model consistently.
-    if model_id.is_some() {
-        payload["model"] = serde_json::Value::String(model.to_owned());
-    }
+    // Patch the serialized payload to use the effective model consistently.
+    payload["model"] = serde_json::Value::String(model.to_owned());
 
     let provider = resolve_provider(deps.provider_registry, worker.as_ref(), model);
     if let Err(e) = provider.transform_request(&mut payload, Endpoint::Chat) {
@@ -121,7 +118,7 @@ pub(super) async fn route_chat(
     let mut ctx = RequestContext::for_chat(
         Arc::new(body.clone()),
         headers.cloned(),
-        model_id.map(String::from),
+        Some(model_id.to_string()),
         ComponentRefs::Shared(Arc::clone(deps.shared_components)),
     );
 

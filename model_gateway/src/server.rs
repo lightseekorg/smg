@@ -180,10 +180,9 @@ async fn generate(
     headers: http::HeaderMap,
     Json(body): Json<GenerateRequest>,
 ) -> Response {
-    let model_id = body.model.as_deref();
     state
         .router
-        .route_generate(Some(&headers), &body, model_id)
+        .route_generate(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -194,7 +193,7 @@ async fn v1_chat_completions(
 ) -> Response {
     state
         .router
-        .route_chat(Some(&headers), &body, Some(&body.model))
+        .route_chat(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -205,7 +204,7 @@ async fn v1_completions(
 ) -> Response {
     state
         .router
-        .route_completion(Some(&headers), &body, Some(&body.model))
+        .route_completion(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -216,7 +215,7 @@ async fn rerank(
 ) -> Response {
     state
         .router
-        .route_rerank(Some(&headers), &body, Some(&body.model))
+        .route_rerank(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -225,10 +224,10 @@ async fn v1_rerank(
     headers: http::HeaderMap,
     Json(body): Json<V1RerankReqInput>,
 ) -> Response {
-    let rerank_body = &body.into();
+    let rerank_body: RerankRequest = body.into();
     state
         .router
-        .route_rerank(Some(&headers), rerank_body, Some(&rerank_body.model))
+        .route_rerank(Some(&headers), &rerank_body, &rerank_body.model)
         .await
 }
 
@@ -239,7 +238,7 @@ async fn v1_responses(
 ) -> Response {
     state
         .router
-        .route_responses(Some(&headers), &body, Some(&body.model))
+        .route_responses(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -262,7 +261,7 @@ async fn v1_embeddings(
 ) -> Response {
     state
         .router
-        .route_embeddings(Some(&headers), &body, Some(&body.model))
+        .route_embeddings(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -284,7 +283,7 @@ async fn v1_classify(
 ) -> Response {
     state
         .router
-        .route_classify(Some(&headers), &body, Some(&body.model))
+        .route_classify(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -567,6 +566,22 @@ async fn update_worker(
     }
 }
 
+async fn replace_worker(
+    State(state): State<Arc<AppState>>,
+    Path(worker_id_raw): Path<String>,
+    Json(config): Json<WorkerSpec>,
+) -> Response {
+    match state
+        .context
+        .worker_service
+        .replace_worker(&worker_id_raw, config)
+        .await
+    {
+        Ok(result) => result.into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
 // ============================================================================
 // Tokenize / Detokenize Handlers
 // ============================================================================
@@ -772,7 +787,10 @@ pub fn build_app(
         .route("/workers", post(create_worker).get(list_workers_rest))
         .route(
             "/workers/{worker_id}",
-            get(get_worker).put(update_worker).delete(delete_worker),
+            get(get_worker)
+                .put(replace_worker)
+                .patch(update_worker)
+                .delete(delete_worker),
         );
 
     // Apply authentication middleware to control plane routes

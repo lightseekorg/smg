@@ -218,6 +218,7 @@ jobs:
           file: docker/engine.Dockerfile
           push: false
           load: true
+          no-cache: true
           build-args: |
             BASE_IMAGE_REF=${{ steps.resolve.outputs.base_image_ref }}
             ENGINE=${{ inputs.engine }}

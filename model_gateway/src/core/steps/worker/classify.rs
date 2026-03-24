@@ -1,13 +1,15 @@
 //! Worker type classification step.
 //!
-//! Classifies a worker as Local or External based on the `runtime_type` field.
-//! Only `RuntimeType::External` yields an external worker; all other explicit
-//! runtime types (Sglang, Vllm, Trtllm) are local. When `Unspecified`
-//! (the default), the step auto-detects by probing the endpoint.
+//! Classifies a worker as Local or External based on the `runtime_type` field
+//! and URL-based heuristics. Only `RuntimeType::External` or known cloud
+//! provider URLs (OpenAI, Anthropic, xAI, Gemini) yield an external worker.
+//! When `Unspecified` (the default) and the URL is not a known provider,
+//! the step probes the endpoint and defaults to Local.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
+use openai_protocol::worker::ProviderType;
 use reqwest::Client;
 use tracing::debug;
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
@@ -22,16 +24,19 @@ use crate::core::{
 /// connection timeout is applied later by `DetectConnectionModeStep`.
 const CLASSIFY_PROBE_TIMEOUT_SECS: u64 = 2;
 
-/// Check if `/v1/models` responds with a non-5xx status.
-///
-/// Any non-server-error response (2xx, 401, 403, 429, etc.) proves the endpoint
-/// is a real API. 5xx is excluded — a starting local backend may return 503.
-async fn is_models_endpoint_reachable(
+/// Known local backend `owned_by` values returned by `/v1/models`.
+const LOCAL_OWNED_BY: &[&str] = &["sglang", "vllm", "trtllm"];
+
+/// Fetch `/v1/models` and check the `owned_by` field of the first model.
+/// Returns `Some("sglang")`, `Some("vllm")`, etc. if recognized as a local
+/// backend, or `None` if the response is missing, not parsable, or the
+/// `owned_by` value does not match a known local backend.
+async fn probe_models_owned_by(
     url: &str,
     timeout_secs: u64,
     client: &Client,
     api_key: Option<&str>,
-) -> bool {
+) -> Option<String> {
     let base = http_base_url(url);
     let models_url = format!("{base}/v1/models");
     let mut req = client
@@ -40,22 +45,37 @@ async fn is_models_endpoint_reachable(
     if let Some(key) = api_key {
         req = req.bearer_auth(key);
     }
-    match req.send().await {
-        Ok(resp) => !resp.status().is_server_error(),
-        Err(_) => false,
+    let resp = req.send().await.ok()?;
+    if resp.status().is_server_error() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let owned_by = body
+        .get("data")?
+        .as_array()?
+        .first()?
+        .get("owned_by")?
+        .as_str()?
+        .to_lowercase();
+    if LOCAL_OWNED_BY.iter().any(|&local| owned_by == local) {
+        Some(owned_by)
+    } else {
+        None
     }
 }
 
 /// Step 0: Classify the worker as Local or External.
 ///
 /// Detection logic:
-/// 1. Explicit `RuntimeType::External` → External
-/// 2. Explicit local runtime (Sglang, Vllm, Trtllm) → Local
-/// 3. `Unspecified` (default) → auto-detect via endpoint probes:
-///    a. `/health` responds → Local (only local backends expose `/health`)
-///    b. gRPC health responds → Local (external APIs never use gRPC)
-///    c. `/v1/models` returns non-5xx → External (5xx ignored — could be starting local)
-///    d. Nothing reachable → default Local (backend may still be starting)
+/// 1. Any explicit runtime → classify immediately (External or Local)
+/// 2. URL matches known cloud provider (OpenAI, Anthropic, xAI, Gemini) → External
+/// 3. `/health` responds → Local (only local backends expose `/health`)
+/// 4. gRPC health responds → Local (external APIs never use gRPC)
+/// 5. `/v1/models` responds with `owned_by` matching a local backend → Local
+/// 6. Nothing conclusive → default Local (backend may still be starting)
+///
+/// Note: external providers on private IPs (e.g., a proxy to OpenAI) must set
+/// `runtime_type: external` explicitly — URL-based detection cannot identify them.
 pub struct ClassifyWorkerTypeStep;
 
 #[async_trait]
@@ -66,24 +86,32 @@ impl StepExecutor<WorkerWorkflowData> for ClassifyWorkerTypeStep {
     ) -> WorkflowResult<StepResult> {
         let config = &context.data.config;
 
-        // Explicit External → External
-        if config.runtime_type == RuntimeType::External {
-            debug!("Worker {} explicitly configured as External", config.url);
+        // 1. Any explicit runtime → classify immediately, no probing needed
+        if config.runtime_type.is_specified() {
+            let kind = if config.runtime_type == RuntimeType::External {
+                WorkerKind::External
+            } else {
+                WorkerKind::Local
+            };
+            debug!(
+                "Worker {} explicitly configured as {} → {:?}",
+                config.url, config.runtime_type, kind
+            );
+            context.data.worker_kind = Some(kind);
+            return Ok(StepResult::Success);
+        }
+
+        // 3. URL matches known cloud provider → External (no probing needed)
+        if let Some(provider) = ProviderType::from_url(&config.url) {
+            debug!(
+                "Worker {} URL matches known provider ({}) → External",
+                config.url, provider
+            );
             context.data.worker_kind = Some(WorkerKind::External);
             return Ok(StepResult::Success);
         }
 
-        // Explicit local runtime (Sglang, Vllm, Trtllm) → Local
-        if config.runtime_type.is_specified() {
-            debug!(
-                "Worker {} explicitly configured as {} → Local",
-                config.url, config.runtime_type
-            );
-            context.data.worker_kind = Some(WorkerKind::Local);
-            return Ok(StepResult::Success);
-        }
-
-        // Unspecified — auto-detect with quick probes
+        // Unspecified + unknown URL — probe the endpoint
         let app_context = context
             .data
             .app_context
@@ -92,7 +120,7 @@ impl StepExecutor<WorkerWorkflowData> for ClassifyWorkerTypeStep {
         let timeout = CLASSIFY_PROBE_TIMEOUT_SECS;
         let client = &app_context.client;
 
-        // Try /health — only local backends expose this
+        // 4. /health → Local (only local backends expose this)
         if try_http_reachable(&config.url, timeout, client)
             .await
             .is_ok()
@@ -102,29 +130,27 @@ impl StepExecutor<WorkerWorkflowData> for ClassifyWorkerTypeStep {
             return Ok(StepResult::Success);
         }
 
-        // Try gRPC — external APIs never use gRPC
+        // 5. gRPC health → Local (external APIs never use gRPC)
         if try_grpc_reachable(&config.url, timeout).await.is_ok() {
             debug!("Worker {} responded to gRPC health → Local", config.url);
             context.data.worker_kind = Some(WorkerKind::Local);
             return Ok(StepResult::Success);
         }
 
-        // /health and gRPC both failed.
-        // Try /v1/models — any non-5xx response proves the endpoint is a cloud
-        // API. 5xx is excluded (starting local backend may return 503).
-        if is_models_endpoint_reachable(&config.url, timeout, client, config.api_key.as_deref())
-            .await
+        // 6. /v1/models with recognized local owned_by → Local
+        if let Some(owned_by) =
+            probe_models_owned_by(&config.url, timeout, client, config.api_key.as_deref()).await
         {
             debug!(
-                "Worker {} responded to /v1/models (no /health) → External",
-                config.url
+                "Worker {} /v1/models owned_by={} → Local",
+                config.url, owned_by
             );
-            context.data.worker_kind = Some(WorkerKind::External);
+            context.data.worker_kind = Some(WorkerKind::Local);
             return Ok(StepResult::Success);
         }
 
-        // Nothing responded — assume Local (backend may still be starting;
-        // detect_connection_mode will retry with the full timeout).
+        // 7. Nothing conclusive — assume Local (backend may still be starting;
+        // detect_connection_mode will retry with the full startup timeout).
         debug!(
             "Worker {} not reachable on any probe → defaulting to Local",
             config.url

@@ -2,9 +2,10 @@ name: Release SMG+SGLang Docker Image
 
 run-name: >-
   SMG+SGLang |
-  base=${{ inputs.base_image_ref || 'lmsysorg/sglang:v0.5.9' }} |
+  ${{ github.event_name == 'push' && '3-version matrix' || format('base={0}', inputs.base_image_ref || 'lmsysorg/sglang:v0.5.9') }} |
   engine=${{ inputs.sglang_commit || 'latest' }} |
-  smg=${{ inputs.smg_commit || 'v1.3.2' }} |
+  smg=${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.3.3' }} |
+  ${{ github.event_name == 'pull_request' && 'dry-run |' || '' }}
   by @${{ github.actor }}
 
 on:
@@ -43,10 +44,10 @@ on:
       smg_commit:
         description: 'SMG commit/ref ("latest" for HEAD)'
         required: false
-        default: 'v1.3.2'
+        default: 'v1.3.3'
         type: string
       tag:
-        description: 'Override image tag (e.g. v1.3.2-sglang-v0.5.9)'
+        description: 'Override image tag (e.g. v1.3.3-sglang-v0.5.9)'
         required: false
         type: string
 
@@ -56,14 +57,18 @@ permissions:
 
 jobs:
   build:
+    strategy:
+      fail-fast: false
+      matrix:
+        base_image: ${{ github.event_name == 'push' && fromJSON('["lmsysorg/sglang:v0.5.9","lmsysorg/sglang:v0.5.8","lmsysorg/sglang:v0.5.7"]') || fromJSON(format('["{0}"]', inputs.base_image_ref || 'lmsysorg/sglang:v0.5.9')) }}
     uses: ./.github/workflows/_build-engine-image.yml
     with:
       engine: sglang
-      base_image_ref: ${{ inputs.base_image_ref || 'lmsysorg/sglang:v0.5.9' }}
+      base_image_ref: ${{ matrix.base_image }}
       engine_repo: ${{ inputs.sglang_repo }}
       engine_commit: ${{ inputs.sglang_commit || 'latest' }}
       smg_repo: ${{ inputs.smg_repo || 'https://github.com/lightseekorg/smg' }}
-      smg_commit: ${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.3.2' }}
+      smg_commit: ${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.3.3' }}
       tag: ${{ inputs.tag }}
       dry_run: ${{ github.event_name == 'pull_request' }}
     secrets: inherit
