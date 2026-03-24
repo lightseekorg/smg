@@ -206,7 +206,7 @@ pub struct WorkerRegistry {
 
     /// Per-worker-ID locks for serializing replace() operations.
     /// Only held during the in-memory model index diff (no I/O, microseconds).
-    replace_locks: Arc<DashMap<WorkerId, Arc<parking_lot::Mutex<()>>>>,
+    worker_mutation_locks: Arc<DashMap<WorkerId, Arc<parking_lot::Mutex<()>>>>,
 
     /// Optional mesh sync manager for state synchronization
     /// When None, the registry works independently without mesh synchronization
@@ -224,7 +224,7 @@ impl WorkerRegistry {
             type_workers: Arc::new(DashMap::new()),
             connection_workers: Arc::new(DashMap::new()),
             url_to_id: Arc::new(DashMap::new()),
-            replace_locks: Arc::new(DashMap::new()),
+            worker_mutation_locks: Arc::new(DashMap::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
         }
     }
@@ -239,7 +239,7 @@ impl WorkerRegistry {
             type_workers: self.type_workers.clone(),
             connection_workers: self.connection_workers.clone(),
             url_to_id: self.url_to_id.clone(),
-            replace_locks: self.replace_locks.clone(),
+            worker_mutation_locks: self.worker_mutation_locks.clone(),
             mesh_sync: self.mesh_sync.clone(),
         }
     }
@@ -333,11 +333,13 @@ impl WorkerRegistry {
         // Atomic check-and-insert via entry API to avoid TOCTOU races.
         // If URL already has an ID AND a worker object, it's a duplicate.
         // If URL has a reserved ID but no worker, it's a pre-reserved slot.
+        // Atomic check-and-insert: reject if URL already has an active worker.
+        // A pre-reserved ID (from reserve_id_for_url) with no worker is allowed.
         let worker_id = match self.url_to_id.entry(worker.url().to_string()) {
             Entry::Occupied(entry) => {
                 let existing_id = entry.get().clone();
                 if self.workers.contains_key(&existing_id) {
-                    // URL already has an active worker — reject
+                    // URL has an active worker — reject
                     return None;
                 }
                 // Pre-reserved ID with no worker yet — use it
@@ -400,7 +402,7 @@ impl WorkerRegistry {
         // Serialize concurrent replacements for the same worker ID.
         // Lock is held only during the in-memory diff (no I/O, microseconds).
         let lock = self
-            .replace_locks
+            .worker_mutation_locks
             .entry(worker_id.clone())
             .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
             .clone();
@@ -497,7 +499,14 @@ impl WorkerRegistry {
 
         // URL exists with an active worker — replace it
         if let Some(existing_id) = self.url_to_id.get(worker.url()).map(|e| e.clone()) {
-            self.replace(&existing_id, worker);
+            if !self.replace(&existing_id, worker) {
+                // replace() returned false — worker was removed concurrently.
+                // The mutation lock prevents stale indexes, so this is safe to ignore.
+                tracing::warn!(
+                    "register_or_replace: worker {} was removed during replace",
+                    existing_id.as_str()
+                );
+            }
             return existing_id;
         }
 
@@ -514,7 +523,14 @@ impl WorkerRegistry {
     }
 
     /// Reserve (or retrieve) a stable UUID for a worker URL.
-    /// Uses atomic entry API to avoid race conditions between check and insert.
+    ///
+    /// Used by `WorkerService::create_worker()` to return a worker ID in
+    /// the 202 response before the async workflow runs. The workflow's
+    /// `register_or_replace()` call will find the pre-reserved entry and
+    /// create the worker under this ID.
+    ///
+    /// TODO: Remove once REST API is updated to separate POST (create) from
+    /// PUT (replace). The 409 check will happen in the service layer instead.
     pub fn reserve_id_for_url(&self, url: &str) -> WorkerId {
         self.url_to_id.entry(url.to_string()).or_default().clone()
     }
@@ -531,11 +547,22 @@ impl WorkerRegistry {
 
     /// Remove a worker by ID
     pub fn remove(&self, worker_id: &WorkerId) -> Option<Arc<dyn Worker>> {
+        // Acquire the same per-worker lock used by replace() to prevent
+        // remove racing with a concurrent replace that has already snapshot
+        // the old worker and is about to re-insert.
+        let lock = self
+            .worker_mutation_locks
+            .entry(worker_id.clone())
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
+
         if let Some((_, worker)) = self.workers.remove(worker_id) {
             // Remove from URL mapping
             self.url_to_id.remove(worker.url());
-            // Clean up replace lock
-            self.replace_locks.remove(worker_id);
+            // Clean up replace lock (after we release it)
+            // Note: we hold _guard, so drop the DashMap entry but the Mutex stays alive via Arc
+            self.worker_mutation_locks.remove(worker_id);
 
             for model_id in Self::worker_model_ids(&worker) {
                 self.remove_worker_from_model_index(&model_id, worker.url());
