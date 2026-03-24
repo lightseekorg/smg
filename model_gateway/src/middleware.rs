@@ -1,9 +1,6 @@
 use std::{
     pin::Pin,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
     task::{Context, Poll},
     time::{Duration, Instant},
 };
@@ -590,9 +587,6 @@ pub async fn concurrency_limit_middleware(
 // HTTP Metrics Layer (Layer 1: SMG metrics)
 // ============================================================================
 
-/// Global counter for active HTTP connections (handlers currently executing)
-static ACTIVE_HTTP_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
-
 /// Tower Layer for HTTP metrics collection (SMG Layer 1 metrics)
 #[derive(Clone)]
 pub struct HttpMetricsLayer {
@@ -647,20 +641,14 @@ where
         let in_flight_request_tracker = self.in_flight_request_tracker.clone();
 
         Box::pin(async move {
-            // Increment inside async block - ensures no leak if future is dropped before polling
-            let active = ACTIVE_HTTP_CONNECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
-            Metrics::set_http_connections_active(active as usize);
-
             let guard = in_flight_request_tracker.track();
+            Metrics::set_http_connections_active(in_flight_request_tracker.len());
 
-            // Capture result before decrementing to ensure decrement happens on error too
+            // Capture result before dropping guard to ensure decrement happens on error too
             let result = inner.call(req).await;
 
             drop(guard);
-
-            // Always decrement, regardless of success or failure
-            let active = ACTIVE_HTTP_CONNECTIONS.fetch_sub(1, Ordering::Relaxed) - 1;
-            Metrics::set_http_connections_active(active as usize);
+            Metrics::set_http_connections_active(in_flight_request_tracker.len());
 
             let response = result?;
 
