@@ -139,9 +139,11 @@ impl ParserRegistry {
         None
     }
 
-    /// List all registered parser names.
+    /// List all registered parser names in sorted order.
     pub fn list_parsers(&self) -> Vec<String> {
-        self.creators.read().keys().cloned().collect()
+        let mut parsers: Vec<_> = self.creators.read().keys().cloned().collect();
+        parsers.sort_unstable();
+        parsers
     }
 
     /// Clear the parser pool, forcing new instances to be created.
