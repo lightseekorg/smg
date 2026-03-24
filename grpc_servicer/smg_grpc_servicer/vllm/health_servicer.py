@@ -106,5 +106,17 @@ class VllmHealthServicer(health_pb2_grpc.HealthServicer):
         service_name = request.service
         logger.debug(f"Health watch request for service: '{service_name}'")
 
-        response = await self.Check(request, context)
-        yield response
+        # Inline status computation to avoid Check()'s context.set_code()
+        # side effect, which would incorrectly set the RPC status on the
+        # streaming response for unknown services.
+        status = health_pb2.HealthCheckResponse.SERVICE_UNKNOWN
+        if self._shutting_down:
+            status = health_pb2.HealthCheckResponse.NOT_SERVING
+        elif service_name in (self.OVERALL_SERVER, self.VLLM_SERVICE):
+            try:
+                await self.async_llm.check_health()
+                status = health_pb2.HealthCheckResponse.SERVING
+            except Exception:
+                status = health_pb2.HealthCheckResponse.NOT_SERVING
+
+        yield health_pb2.HealthCheckResponse(status=status)
