@@ -27,6 +27,8 @@ pub enum WorkerServiceError {
     NotFound { worker_id: String },
     /// Invalid worker ID format (expected UUID)
     InvalidId { raw: String, message: String },
+    /// Bad request (e.g., URL mismatch in PUT)
+    BadRequest { message: String },
     /// Worker with this URL already exists (duplicate POST)
     Conflict { url: String, worker_id: WorkerId },
     /// Job queue not initialized
@@ -40,6 +42,7 @@ impl WorkerServiceError {
         match self {
             Self::NotFound { .. } => "WORKER_NOT_FOUND",
             Self::InvalidId { .. } => "BAD_REQUEST",
+            Self::BadRequest { .. } => "BAD_REQUEST",
             Self::Conflict { .. } => "WORKER_ALREADY_EXISTS",
             Self::QueueNotInitialized => "INTERNAL_SERVER_ERROR",
             Self::QueueSubmitFailed { .. } => "INTERNAL_SERVER_ERROR",
@@ -50,6 +53,7 @@ impl WorkerServiceError {
         match self {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::InvalidId { .. } => StatusCode::BAD_REQUEST,
+            Self::BadRequest { .. } => StatusCode::BAD_REQUEST,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::QueueNotInitialized => StatusCode::INTERNAL_SERVER_ERROR,
             Self::QueueSubmitFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
@@ -67,6 +71,7 @@ impl std::fmt::Display for WorkerServiceError {
                     "Invalid worker_id '{raw}' (expected UUID). Error: {message}"
                 )
             }
+            Self::BadRequest { message } => write!(f, "{message}"),
             Self::Conflict { url, worker_id } => {
                 let id = worker_id.as_str();
                 write!(
@@ -292,12 +297,11 @@ impl WorkerService {
         // Validate that the URL in the request body matches the existing worker.
         // URL changes are not supported via replace — use DELETE + POST instead.
         if config.url != url {
-            return Err(WorkerServiceError::InvalidId {
-                raw: worker_id_raw.to_string(),
+            return Err(WorkerServiceError::BadRequest {
                 message: format!(
-                    "URL mismatch: worker has URL '{}' but request body has '{}'. \
+                    "URL mismatch: worker has URL '{url}' but request body has '{}'. \
                     URL changes are not supported via PUT. Use DELETE + POST instead.",
-                    url, config.url
+                    config.url
                 ),
             });
         }
