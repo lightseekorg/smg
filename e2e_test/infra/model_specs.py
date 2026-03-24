@@ -127,6 +127,57 @@ MODEL_SPECS: dict[str, dict] = {
             "--attention-backend=FLASHINFER",  # FLASHINFER attention backend
         ],
     },
+    # Llama-4-Scout (17B with 16 experts) - Nightly benchmarks
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
+        "model": _resolve_model_path("meta-llama/Llama-4-Scout-17B-16E-Instruct"),
+        "tp": 4,
+        "features": ["chat", "streaming", "function_calling", "moe"],
+        "worker_args": [
+            "--trust-remote-code",
+            "--context-length=196608",
+            "--attention-backend=fa3",
+            "--cuda-graph-max-bs=256",
+            "--max-running-requests=300",
+            "--mem-fraction-static=0.85",
+        ],
+        "vllm_args": [
+            "--trust-remote-code",
+            "--max-model-len=196608",
+            "--attention-backend=FLASHINFER",
+        ],
+    },
+    # Llama-3.3-70B - Nightly benchmarks
+    "meta-llama/Llama-3.3-70B-Instruct": {
+        "model": _resolve_model_path("meta-llama/Llama-3.3-70B-Instruct"),
+        "tp": 4,
+        "features": ["chat", "streaming", "function_calling"],
+        "worker_args": [
+            "--trust-remote-code",
+            "--mem-frac=0.9",
+        ],
+        "vllm_args": [
+            "--trust-remote-code",
+            "--max-model-len=131072",
+            "--gpu-memory-utilization=0.9",
+            "--enable-chunked-prefill",
+        ],
+    },
+    # Llama-3.3-70B FP8 - Nightly benchmarks
+    "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic": {
+        "model": _resolve_model_path("RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"),
+        "tp": 4,
+        "features": ["chat", "streaming", "function_calling"],
+        "worker_args": [
+            "--trust-remote-code",
+            "--mem-frac=0.9",
+        ],
+        "vllm_args": [
+            "--trust-remote-code",
+            "--max-model-len=131072",
+            "--gpu-memory-utilization=0.9",
+            "--enable-chunked-prefill",
+        ],
+    },
 }
 
 
