@@ -392,6 +392,14 @@ class TestConfigurationValidation:
             args = RouterArgs(request_id_headers=headers)
             assert args.request_id_headers == headers
 
+    def test_storage_context_headers_validation(self):
+        """Test storage context header mapping validation."""
+        headers = {"x-tenant-id": "tenant_id", "x-user-id": "user_id"}
+
+        args = RouterArgs(storage_context_headers=headers)
+
+        assert args.storage_context_headers == headers
+
 
 class TestLaunchValidation:
     """Test launch-time validation logic."""
