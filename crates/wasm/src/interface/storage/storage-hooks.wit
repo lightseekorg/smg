@@ -35,10 +35,23 @@ interface storage-hook-types {
         value: string,
     }
 
+    /// A row to insert into an extra side table.
+    record extra-table-write {
+        table: string,
+        row: list<extra-column>,
+    }
+
+    /// Aggregated write data from a hook: extra columns for the main table
+    /// and optional extra-table writes for side tables.
+    record hook-writes {
+        extra-columns: list<extra-column>,
+        extra-table-writes: list<extra-table-write>,
+    }
+
     /// Result from a before-hook.
     variant before-result {
-        /// Continue with the operation, optionally providing extra columns.
-        do-continue(list<extra-column>),
+        /// Continue with the operation, optionally providing hook writes.
+        do-continue(hook-writes),
         /// Reject the operation with a reason.
         reject(string),
     }
@@ -65,7 +78,7 @@ interface storage-hook-before {
 
 /// After-hook interface: called after a storage operation succeeds.
 interface storage-hook-after {
-    use storage-hook-types.{context-entry, operation, extra-column};
+    use storage-hook-types.{context-entry, operation, hook-writes};
 
     /// Called after a storage operation completes successfully.
     ///
@@ -73,16 +86,17 @@ interface storage-hook-after {
     /// `context` contains request-scoped key-value pairs.
     /// `payload` is the original JSON arguments.
     /// `result-json` is the JSON-serialised operation result.
-    /// `extra` contains extra columns from the before-hook.
+    /// `writes` contains hook writes from the before-hook.
     ///
-    /// Returns (possibly modified) extra columns.
+    /// Returns (possibly modified) hook writes.
+    /// Note: `extra-table-writes` in the return value are ignored (before-only).
     after: func(
         op: operation,
         context: list<context-entry>,
         payload: string,
         result-json: string,
-        extra: list<extra-column>,
-    ) -> list<extra-column>;
+        writes: hook-writes,
+    ) -> hook-writes;
 }
 
 world storage-hook {

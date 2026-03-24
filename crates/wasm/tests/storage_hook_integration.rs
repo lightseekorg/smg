@@ -13,7 +13,7 @@ use std::{collections::HashMap, path::Path};
 use serde_json::json;
 use smg_data_connector::{
     context::RequestContext,
-    hooks::{BeforeHookResult, ExtraColumns, StorageHook, StorageOperation},
+    hooks::{BeforeHookResult, HookWrites, StorageHook, StorageOperation},
 };
 use smg_wasm::WasmStorageHook;
 
@@ -71,12 +71,12 @@ async fn store_response_with_tenant_id_continues_with_extra_columns() -> TestRes
     match result {
         BeforeHookResult::Continue(extra) => {
             assert_eq!(
-                extra.get("TENANT_ID").and_then(|v| v.as_str()),
+                extra.extra_columns.get("TENANT_ID").and_then(|v| v.as_str()),
                 Some("acme-corp"),
                 "TENANT_ID should come from context"
             );
             assert_eq!(
-                extra.get("STORED_BY").and_then(|v| v.as_str()),
+                extra.extra_columns.get("STORED_BY").and_then(|v| v.as_str()),
                 Some("user_42"),
                 "STORED_BY should come from user_id in context"
             );
@@ -130,11 +130,11 @@ async fn create_conversation_adds_created_by_from_context() -> TestResult {
     match result {
         BeforeHookResult::Continue(extra) => {
             assert_eq!(
-                extra.get("TENANT_ID").and_then(|v| v.as_str()),
+                extra.extra_columns.get("TENANT_ID").and_then(|v| v.as_str()),
                 Some("acme-corp"),
             );
             assert_eq!(
-                extra.get("CREATED_BY").and_then(|v| v.as_str()),
+                extra.extra_columns.get("CREATED_BY").and_then(|v| v.as_str()),
                 Some("admin"),
             );
         }
@@ -158,7 +158,7 @@ async fn get_response_passes_through_without_extra_columns() -> TestResult {
 
     match result {
         BeforeHookResult::Continue(extra) => {
-            assert!(extra.is_empty(), "read ops should not add extra columns");
+            assert!(extra.extra_columns.is_empty(), "read ops should not add extra columns");
         }
         BeforeHookResult::Reject(reason) => {
             panic!("read ops should not reject: {reason}");
@@ -173,8 +173,14 @@ async fn get_response_passes_through_without_extra_columns() -> TestResult {
 async fn after_hook_passes_through_extra_columns() -> TestResult {
     let hook = require_hook!();
 
-    let mut extra = ExtraColumns::new();
-    extra.insert("TENANT_ID".into(), json!("acme-corp"));
+    let writes = HookWrites {
+        extra_columns: {
+            let mut ec = HashMap::new();
+            ec.insert("TENANT_ID".into(), json!("acme-corp"));
+            ec
+        },
+        extra_table_writes: vec![],
+    };
 
     let payload = json!({"id": "resp_123"});
     let result_json = json!({"stored": true});
@@ -185,12 +191,12 @@ async fn after_hook_passes_through_extra_columns() -> TestResult {
             None,
             &payload,
             &result_json,
-            &extra,
+            &writes,
         )
         .await?;
 
     assert_eq!(
-        updated.get("TENANT_ID").and_then(|v| v.as_str()),
+        updated.extra_columns.get("TENANT_ID").and_then(|v| v.as_str()),
         Some("acme-corp"),
         "after() should pass through extra columns"
     );
@@ -218,7 +224,7 @@ async fn wasm_hook_extra_columns_match_schema_config_declarations() -> TestResul
             // A typical SchemaConfig would declare these extra columns for
             // multi-tenant response storage.  Verify the hook output keys
             // align with what the schema config expects.
-            let extra_keys: std::collections::HashSet<&String> = extra.keys().collect();
+            let extra_keys: std::collections::HashSet<&String> = extra.extra_columns.keys().collect();
             let expected_keys: std::collections::HashSet<String> = ["TENANT_ID", "STORED_BY"]
                 .iter()
                 .map(|s| (*s).to_string())
@@ -261,11 +267,11 @@ async fn wasm_hook_works_across_multiple_operation_types() -> TestResult {
     match &store_result {
         BeforeHookResult::Continue(extra) => {
             assert!(
-                extra.contains_key("TENANT_ID"),
+                extra.extra_columns.contains_key("TENANT_ID"),
                 "StoreResponse should include TENANT_ID"
             );
             assert!(
-                extra.contains_key("STORED_BY"),
+                extra.extra_columns.contains_key("STORED_BY"),
                 "StoreResponse should include STORED_BY"
             );
         }
@@ -292,7 +298,7 @@ async fn wasm_hook_works_across_multiple_operation_types() -> TestResult {
     match &conv_result {
         BeforeHookResult::Continue(extra) => {
             assert!(
-                extra.contains_key("CREATED_BY"),
+                extra.extra_columns.contains_key("CREATED_BY"),
                 "CreateConversation should include CREATED_BY"
             );
         }
@@ -310,7 +316,7 @@ async fn wasm_hook_works_across_multiple_operation_types() -> TestResult {
     match &get_result {
         BeforeHookResult::Continue(extra) => {
             assert!(
-                extra.is_empty(),
+                extra.extra_columns.is_empty(),
                 "GetResponse should return empty extra columns"
             );
         }
@@ -339,39 +345,39 @@ async fn wasm_hook_after_receives_before_extra_columns() -> TestResult {
         .before(StorageOperation::StoreResponse, Some(&ctx), &payload)
         .await?;
 
-    let before_extra = match before_result {
-        BeforeHookResult::Continue(extra) => extra,
+    let before_writes = match before_result {
+        BeforeHookResult::Continue(writes) => writes,
         BeforeHookResult::Reject(reason) => {
             panic!("expected Continue from before(), got Reject: {reason}");
         }
     };
 
-    // Pass before() extra columns into after()
+    // Pass before() hook writes into after()
     let result_json = json!({"stored": true});
-    let after_extra = hook
+    let after_writes = hook
         .after(
             StorageOperation::StoreResponse,
             Some(&ctx),
             &payload,
             &result_json,
-            &before_extra,
+            &before_writes,
         )
         .await?;
 
     // Verify after() returns the extra columns unchanged
     assert_eq!(
-        after_extra.get("TENANT_ID").and_then(|v| v.as_str()),
+        after_writes.extra_columns.get("TENANT_ID").and_then(|v| v.as_str()),
         Some("acme-corp"),
         "after() should preserve TENANT_ID from before()"
     );
     assert_eq!(
-        after_extra.get("STORED_BY").and_then(|v| v.as_str()),
+        after_writes.extra_columns.get("STORED_BY").and_then(|v| v.as_str()),
         Some("user_42"),
         "after() should preserve STORED_BY from before()"
     );
     assert_eq!(
-        before_extra.len(),
-        after_extra.len(),
+        before_writes.extra_columns.len(),
+        after_writes.extra_columns.len(),
         "after() should return the same number of extra columns as before()"
     );
 

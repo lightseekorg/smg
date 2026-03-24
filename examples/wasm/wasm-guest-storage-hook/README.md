@@ -18,7 +18,7 @@ A WebAssembly Component Model storage hook for Shepherd Model Gateway that demon
 
 ## After Hook Behavior
 
-Passes through extra columns unchanged. A production hook might log operations, update metrics, or enrich columns with post-operation data.
+Passes through hook writes unchanged. A production hook might log operations, update metrics, or enrich extra columns with post-operation data. Note: `extra_table_writes` in the after-hook return are ignored — side-table writes only execute from the before-hook.
 
 ## Prerequisites
 
@@ -87,5 +87,5 @@ schema:
 
 The storage hook world is defined in `crates/wasm/src/interface/storage/storage-hooks.wit` and exports:
 
-- `storage-hook-before`: Called before storage operations to provide extra columns or reject
-- `storage-hook-after`: Called after successful operations with the result and extra columns
+- `storage-hook-before`: Called before storage operations to provide hook writes (extra columns + extra table writes) or reject
+- `storage-hook-after`: Called after successful operations with the result and hook writes

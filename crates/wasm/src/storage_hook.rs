@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 use smg_data_connector::{
     context::RequestContext,
-    hooks::{BeforeHookResult, ExtraColumns, HookError, StorageHook, StorageOperation},
+    hooks::{
+        BeforeHookResult, ExtraColumns, ExtraTableWrite, HookError, HookWrites, StorageHook,
+        StorageOperation,
+    },
 };
 use wasmtime::{
     component::{Component, Linker, ResourceTable},
@@ -18,7 +21,9 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::storage_spec::{
     smg::storage::storage_hook_types::{
-        BeforeResult as WitBeforeResult, ContextEntry, ExtraColumn, Operation as WitOperation,
+        BeforeResult as WitBeforeResult, ContextEntry, ExtraColumn,
+        ExtraTableWrite as WitExtraTableWrite, HookWrites as WitHookWrites,
+        Operation as WitOperation,
     },
     StorageHook as StorageHookBindings,
 };
@@ -154,6 +159,45 @@ fn from_wit_extra_columns(cols: Vec<ExtraColumn>) -> ExtraColumns {
         .collect()
 }
 
+fn to_wit_hook_writes(writes: &HookWrites) -> WitHookWrites {
+    WitHookWrites {
+        extra_columns: to_wit_extra_columns(&writes.extra_columns),
+        extra_table_writes: writes
+            .extra_table_writes
+            .iter()
+            .map(|w| WitExtraTableWrite {
+                table: w.table.clone(),
+                row: w
+                    .row
+                    .iter()
+                    .map(|(k, v)| ExtraColumn {
+                        name: k.clone(),
+                        value: value_to_string(v),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn from_wit_hook_writes(wit: WitHookWrites) -> HookWrites {
+    HookWrites {
+        extra_columns: from_wit_extra_columns(wit.extra_columns),
+        extra_table_writes: wit
+            .extra_table_writes
+            .into_iter()
+            .map(|w| ExtraTableWrite {
+                table: w.table,
+                row: w
+                    .row
+                    .into_iter()
+                    .map(|ec| (ec.name, Value::String(ec.value)))
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
 fn value_to_string(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -206,9 +250,9 @@ impl StorageHook for WasmStorageHook {
             result.map_err(|e| HookError::Internal(format!("WASM before() call failed: {e}")))?;
 
         match result {
-            WitBeforeResult::DoContinue(extra_cols) => Ok(BeforeHookResult::Continue(
-                from_wit_extra_columns(extra_cols),
-            )),
+            WitBeforeResult::DoContinue(wit_writes) => {
+                Ok(BeforeHookResult::Continue(from_wit_hook_writes(wit_writes)))
+            }
             WitBeforeResult::Reject(reason) => Ok(BeforeHookResult::Reject(reason)),
         }
     }
@@ -219,8 +263,8 @@ impl StorageHook for WasmStorageHook {
         context: Option<&RequestContext>,
         payload: &Value,
         result: &Value,
-        extra: &ExtraColumns,
-    ) -> Result<ExtraColumns, HookError> {
+        writes: &HookWrites,
+    ) -> Result<HookWrites, HookError> {
         let mut store = self.new_store();
 
         let bindings =
@@ -232,7 +276,7 @@ impl StorageHook for WasmStorageHook {
         let wit_ctx = to_wit_context(context);
         let payload_str = payload.to_string();
         let result_str = result.to_string();
-        let wit_extra = to_wit_extra_columns(extra);
+        let wit_writes = to_wit_hook_writes(writes);
 
         // Spawn epoch ticker to enforce a 5-second execution budget.
         // The task is aborted immediately after the WASM call completes,
@@ -255,7 +299,7 @@ impl StorageHook for WasmStorageHook {
                 &wit_ctx,
                 &payload_str,
                 &result_str,
-                &wit_extra,
+                &wit_writes,
             )
             .await;
 
@@ -264,7 +308,7 @@ impl StorageHook for WasmStorageHook {
         let updated =
             updated.map_err(|e| HookError::Internal(format!("WASM after() call failed: {e}")))?;
 
-        Ok(from_wit_extra_columns(updated))
+        Ok(from_wit_hook_writes(updated))
     }
 }
 

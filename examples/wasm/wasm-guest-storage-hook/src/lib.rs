@@ -16,7 +16,7 @@ use exports::smg::storage::{
     storage_hook_before::Guest as BeforeGuest,
 };
 use smg::storage::storage_hook_types::{
-    BeforeResult, ContextEntry, ExtraColumn, Operation,
+    BeforeResult, ContextEntry, ExtraColumn, HookWrites, Operation,
 };
 
 struct StorageHookImpl;
@@ -28,6 +28,13 @@ fn find_context_value(context: &[ContextEntry], key: &str) -> Option<String> {
         .iter()
         .find(|e| e.key == key)
         .map(|e| e.value.clone())
+}
+
+fn columns_only(extra: Vec<ExtraColumn>) -> HookWrites {
+    HookWrites {
+        extra_columns: extra,
+        extra_table_writes: Vec::new(),
+    }
 }
 
 // ── Before hook ──────────────────────────────────────────────────────────
@@ -51,7 +58,7 @@ impl BeforeGuest for StorageHookImpl {
                             value: user,
                         });
                     }
-                    BeforeResult::DoContinue(extra)
+                    BeforeResult::DoContinue(columns_only(extra))
                 }
                 None => BeforeResult::Reject(
                     "tenant_id is required in request context for StoreResponse".to_string(),
@@ -73,7 +80,7 @@ impl BeforeGuest for StorageHookImpl {
                         value: user,
                     });
                 }
-                BeforeResult::DoContinue(extra)
+                BeforeResult::DoContinue(columns_only(extra))
             }
 
             // For CreateItem, pass through tenant_id if available
@@ -85,11 +92,11 @@ impl BeforeGuest for StorageHookImpl {
                     }],
                     None => Vec::new(),
                 };
-                BeforeResult::DoContinue(extra)
+                BeforeResult::DoContinue(columns_only(extra))
             }
 
             // All other operations: continue without extra columns
-            _ => BeforeResult::DoContinue(Vec::new()),
+            _ => BeforeResult::DoContinue(columns_only(Vec::new())),
         }
     }
 }
@@ -102,12 +109,12 @@ impl AfterGuest for StorageHookImpl {
         _context: Vec<ContextEntry>,
         _payload: String,
         _result_json: String,
-        extra: Vec<ExtraColumn>,
-    ) -> Vec<ExtraColumn> {
-        // Pass through the extra columns unchanged.
+        writes: HookWrites,
+    ) -> HookWrites {
+        // Pass through the hook writes unchanged.
         // A real implementation might log the operation, update metrics,
         // or enrich the extra columns with post-operation data.
-        extra
+        writes
     }
 }
 

@@ -14,7 +14,7 @@ use exports::smg::storage::{
     storage_hook_before::Guest as BeforeGuest,
 };
 use smg::storage::storage_hook_types::{
-    BeforeResult, ContextEntry, ExtraColumn, Operation,
+    BeforeResult, ContextEntry, ExtraColumn, HookWrites, Operation,
 };
 
 struct PassthroughHook;
@@ -36,7 +36,10 @@ impl BeforeGuest for PassthroughHook {
             // Read/delete operations: pass through without extra columns
             _ => Vec::new(),
         };
-        BeforeResult::DoContinue(extra)
+        BeforeResult::DoContinue(HookWrites {
+            extra_columns: extra,
+            extra_table_writes: Vec::new(),
+        })
     }
 }
 
@@ -46,9 +49,9 @@ impl AfterGuest for PassthroughHook {
         _context: Vec<ContextEntry>,
         _payload: String,
         _result_json: String,
-        extra: Vec<ExtraColumn>,
-    ) -> Vec<ExtraColumn> {
-        extra
+        writes: HookWrites,
+    ) -> HookWrites {
+        writes
     }
 }
 
