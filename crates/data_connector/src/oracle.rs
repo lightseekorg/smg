@@ -88,7 +88,11 @@ fn insert_extra_table_writes(
     let resolved = resolve_extra_table_writes(schema, hook_table_writes)?;
 
     for write in resolved {
-        let col_names: Vec<&str> = write.columns.iter().map(|(name, _)| name.as_str()).collect();
+        let col_names: Vec<&str> = write
+            .columns
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
         let params: Vec<&dyn ToSql> = write.columns.iter().map(|(_, value)| value as _).collect();
         let placeholders: Vec<String> = (1..=params.len()).map(|i| format!(":{i}")).collect();
         let sql = format!(

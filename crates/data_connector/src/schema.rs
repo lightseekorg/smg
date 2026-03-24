@@ -312,13 +312,14 @@ impl SchemaConfig {
         Ok(())
     }
 
-    fn validate_extra_tables(extra_tables: &HashMap<String, ExtraTableConfig>) -> Result<(), String> {
+    fn validate_extra_tables(
+        extra_tables: &HashMap<String, ExtraTableConfig>,
+    ) -> Result<(), String> {
         let mut folded_aliases: HashSet<String> = HashSet::new();
         let mut folded_tables: HashSet<String> = HashSet::new();
 
         for (alias, tc) in extra_tables {
-            validate_identifier(alias)
-                .map_err(|e| format!("extra_tables key '{alias}': {e}"))?;
+            validate_identifier(alias).map_err(|e| format!("extra_tables key '{alias}': {e}"))?;
             if !folded_aliases.insert(alias.to_ascii_uppercase()) {
                 return Err(format!(
                     "extra_tables: case-insensitive collision on '{alias}'"
@@ -350,9 +351,8 @@ impl SchemaConfig {
 
             let mut folded_cols: HashSet<String> = HashSet::new();
             for (name, def) in &tc.columns {
-                validate_identifier(name).map_err(|e| {
-                    format!("extra_tables['{alias}'].columns key '{name}': {e}")
-                })?;
+                validate_identifier(name)
+                    .map_err(|e| format!("extra_tables['{alias}'].columns key '{name}': {e}"))?;
                 if !folded_cols.insert(name.to_ascii_uppercase()) {
                     return Err(format!(
                         "extra_tables['{alias}'].columns: case-insensitive collision on '{name}'"
