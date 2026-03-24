@@ -1,12 +1,26 @@
 #!/bin/bash
 # Local mesh profiling test
-# Spins up 3 SMG gateway replicas with mock workers for mesh profiling.
+#
+# Spins up mock workers + SMG gateway replicas with mesh enabled.
+# Then use the load generator to build up the radix tree and observe
+# mesh sync behavior under load.
 #
 # Prerequisites:
 #   cargo build --release -p smg
+#   pip install aiohttp  (for load generator)
 #
 # Usage:
-#   ./scripts/mesh-profile-local.sh [start|stop|status]
+#   ./scripts/mesh-profile-local.sh start       # Start workers + gateways
+#   ./scripts/mesh-profile-local.sh load         # Run load generator (200 req/s, 60s)
+#   ./scripts/mesh-profile-local.sh status       # Show health + mesh metrics
+#   ./scripts/mesh-profile-local.sh stop         # Stop everything
+#
+# Typical flow:
+#   1. ./scripts/mesh-profile-local.sh start
+#   2. ./scripts/mesh-profile-local.sh load
+#   3. # In another terminal: tail -f target/mesh-profile/gateway-0.log | grep "mesh sync"
+#   4. # Or: curl http://127.0.0.1:29000/metrics | grep router_mesh
+#   5. ./scripts/mesh-profile-local.sh stop
 
 set -euo pipefail
 
@@ -27,48 +41,18 @@ start_mock_workers() {
     echo "Starting $NUM_WORKERS mock workers..."
     for i in $(seq 0 $((NUM_WORKERS - 1))); do
         port=$((WORKER_BASE_PORT + i))
-        # Use python http.server as a minimal mock
-        python3 -c "
-import http.server, json, threading
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(b'{\"status\":\"healthy\"}')
-        elif self.path == '/v1/models':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            resp = json.dumps({'data': [{'id': 'mock-model', 'object': 'model', 'root': 'mock-model', 'max_model_len': 4096}]})
-            self.wfile.write(resp.encode())
-        elif self.path == '/get_model_info':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            resp = json.dumps({'model_path': 'mock-model', 'is_generation': True, 'max_total_num_tokens': 4096})
-            self.wfile.write(resp.encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
-    def do_POST(self):
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(b'{\"choices\":[{\"message\":{\"content\":\"hello\"}}]}')
-    def log_message(self, format, *args):
-        pass  # Suppress logs
-
-http.server.HTTPServer(('127.0.0.1', $port), Handler).serve_forever()
-" &
+        python3 "$SCRIPT_DIR/mock_worker.py" "$port" &
         echo $! >> "$LOG_DIR/worker_pids.txt"
     done
     echo "Mock workers started on ports $WORKER_BASE_PORT-$((WORKER_BASE_PORT + NUM_WORKERS - 1))"
 }
 
 start_gateways() {
+    if [ ! -f "$SMG_BIN" ]; then
+        echo "ERROR: $SMG_BIN not found. Run: cargo build --release -p smg"
+        exit 1
+    fi
+
     echo "Starting $NUM_GATEWAYS SMG gateway replicas with mesh..."
 
     # Build worker URLs
@@ -77,7 +61,6 @@ start_gateways() {
         WORKER_URLS="$WORKER_URLS http://127.0.0.1:$((WORKER_BASE_PORT + i))"
     done
 
-    # Build peer URLs for mesh (each gateway knows about the others)
     for i in $(seq 0 $((NUM_GATEWAYS - 1))); do
         port=$((GATEWAY_BASE_PORT + i))
         mesh_port=$((MESH_BASE_PORT + i))
@@ -91,7 +74,7 @@ start_gateways() {
             fi
         done
 
-        echo "Starting gateway $i on port $port (mesh: $mesh_port, metrics: $metrics_port)"
+        echo "  Gateway $i: port=$port mesh=$mesh_port metrics=$metrics_port"
 
         "$SMG_BIN" \
             --host 127.0.0.1 \
@@ -111,7 +94,22 @@ start_gateways() {
 
         echo $! >> "$LOG_DIR/gateway_pids.txt"
     done
-    echo "Gateways started"
+    echo "Gateways started. Logs: $LOG_DIR/gateway-*.log"
+}
+
+run_load() {
+    local rps="${1:-200}"
+    local duration="${2:-60}"
+    local ports=""
+    for i in $(seq 0 $((NUM_GATEWAYS - 1))); do
+        [ -n "$ports" ] && ports="$ports,"
+        ports="$ports$((GATEWAY_BASE_PORT + i))"
+    done
+    echo "Running load: ${rps} req/s for ${duration}s across $NUM_GATEWAYS gateways"
+    python3 "$SCRIPT_DIR/mesh_load_gen.py" \
+        --rps "$rps" \
+        --duration "$duration" \
+        --gateway-ports "$ports"
 }
 
 stop_all() {
@@ -124,32 +122,31 @@ stop_all() {
             rm "$pidfile"
         fi
     done
-    echo "All processes stopped"
+    echo "Stopped."
 }
 
 show_status() {
-    echo "=== Gateway Status ==="
+    echo "=== Gateways ==="
     for i in $(seq 0 $((NUM_GATEWAYS - 1))); do
         port=$((GATEWAY_BASE_PORT + i))
         metrics_port=$((METRICS_BASE_PORT + i))
-        echo -n "Gateway $i (port $port): "
+        echo -n "  Gateway $i (port $port): "
         if curl -sf "http://127.0.0.1:$port/health" > /dev/null 2>&1; then
             echo "UP"
         else
             echo "DOWN"
         fi
 
-        # Show mesh metrics
-        echo "  Mesh sync metrics:"
+        # Mesh sync round duration
         curl -sf "http://127.0.0.1:$metrics_port/metrics" 2>/dev/null \
-            | grep -E 'router_mesh_sync|router_mesh_store|router_mesh_peer' \
-            | head -10 || echo "  (no metrics available)"
+            | grep -E 'router_mesh_sync_round_duration|router_mesh_sync_batch_bytes|router_mesh_store_' \
+            | grep -v '^#' \
+            | sed 's/^/    /' || true
         echo ""
     done
 
-    echo "=== Worker Status ==="
-    up=0
-    down=0
+    echo "=== Workers ==="
+    up=0; down=0
     for i in $(seq 0 $((NUM_WORKERS - 1))); do
         port=$((WORKER_BASE_PORT + i))
         if curl -sf "http://127.0.0.1:$port/health" > /dev/null 2>&1; then
@@ -158,10 +155,10 @@ show_status() {
             down=$((down + 1))
         fi
     done
-    echo "$up workers UP, $down workers DOWN"
+    echo "  $up UP, $down DOWN (of $NUM_WORKERS)"
 }
 
-case "${1:-status}" in
+case "${1:-help}" in
     start)
         start_mock_workers
         sleep 1
@@ -171,8 +168,10 @@ case "${1:-status}" in
         sleep 5
         show_status
         echo ""
-        echo "Logs: $LOG_DIR/gateway-*.log"
-        echo "Stop: $0 stop"
+        echo "Next: $0 load [rps] [duration_secs]"
+        ;;
+    load)
+        run_load "${2:-200}" "${3:-60}"
         ;;
     stop)
         stop_all
@@ -181,7 +180,11 @@ case "${1:-status}" in
         show_status
         ;;
     *)
-        echo "Usage: $0 [start|stop|status]"
-        exit 1
+        echo "Usage: $0 {start|load [rps] [duration]|status|stop}"
+        echo ""
+        echo "  start              Start 20 mock workers + 3 mesh gateways"
+        echo "  load [rps] [dur]   Send load (default: 200 req/s for 60s)"
+        echo "  status             Show health + mesh metrics"
+        echo "  stop               Stop everything"
         ;;
 esac
