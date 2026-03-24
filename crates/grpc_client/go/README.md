@@ -7,7 +7,7 @@ This module contains auto-generated Go gRPC code for Shepherd Model Gateway serv
 To use this module in your Go project:
 
 ```bash
-go get github.com/lightseek/smg/crates/grpc_client/go
+go get github.com/lightseekorg/smg/crates/grpc_client/go
 ```
 
 ## Package Structure

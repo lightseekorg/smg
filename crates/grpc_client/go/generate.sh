@@ -35,8 +35,8 @@ if [ ! -x "$PROTOC_GEN_GO_GRPC" ]; then
 fi
 
 # Common mappings for imports
-MAPPINGS="--go_opt=Mcommon.proto=github.com/lightseek/smg/crates/grpc_client/go/generated/common"
-MAPPINGS_GRPC="--go-grpc_opt=Mcommon.proto=github.com/lightseek/smg/crates/grpc_client/go/generated/common"
+MAPPINGS="--go_opt=Mcommon.proto=github.com/lightseekorg/smg/crates/grpc_client/go/generated/common"
+MAPPINGS_GRPC="--go-grpc_opt=Mcommon.proto=github.com/lightseekorg/smg/crates/grpc_client/go/generated/common"
 
 echo "Generating Go code..."
 
@@ -56,11 +56,11 @@ generate_service() {
     --go_out="$output_dir" \
     --go_opt=paths=source_relative \
     "$MAPPINGS" \
-    --go_opt=M${proto_file}=github.com/lightseek/smg/crates/grpc_client/go/generated/${service_name} \
+    --go_opt=M${proto_file}=github.com/lightseekorg/smg/crates/grpc_client/go/generated/${service_name} \
     --go-grpc_out="$output_dir" \
     --go-grpc_opt=paths=source_relative \
     "$MAPPINGS_GRPC" \
-    --go-grpc_opt=M${proto_file}=github.com/lightseek/smg/crates/grpc_client/go/generated/${service_name} \
+    --go-grpc_opt=M${proto_file}=github.com/lightseekorg/smg/crates/grpc_client/go/generated/${service_name} \
     "$proto_file"
 }
 
