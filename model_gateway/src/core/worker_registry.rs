@@ -389,19 +389,19 @@ impl WorkerRegistry {
             self.rebuild_hash_ring(&model_id);
         }
 
-        // Update type index
+        // Update type index (clone needed for DashMap key ownership)
         self.type_workers
             .entry(*worker.worker_type())
             .or_default()
             .push(worker_id.clone());
 
-        // Update connection mode index
+        // Update connection mode index (clone needed for DashMap key ownership)
         self.connection_workers
             .entry(*worker.connection_mode())
             .or_default()
             .push(worker_id.clone());
 
-        // Sync to mesh if enabled
+        // Sync to mesh if enabled (no-op if mesh is not enabled)
         {
             let guard = self.mesh_sync.read();
             if let Some(ref mesh_sync) = *guard {
@@ -496,7 +496,7 @@ impl WorkerRegistry {
                 .push(worker_id.clone());
         }
 
-        // Sync to mesh if enabled
+        // Sync to mesh if enabled (no-op if mesh is not enabled)
         {
             let guard = self.mesh_sync.read();
             if let Some(ref mesh_sync) = *guard {
