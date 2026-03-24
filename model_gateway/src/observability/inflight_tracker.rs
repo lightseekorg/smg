@@ -77,10 +77,6 @@ impl InFlightRequestTracker {
     }
 
     /// Returns `true` if drain has been initiated.
-    ///
-    /// Uses `Acquire` ordering to synchronize with the `Release` store in
-    /// `begin_drain()`, ensuring the last guard drop sees the draining flag
-    /// and calls `notify_waiters`.
     #[inline]
     pub fn is_draining(&self) -> bool {
         self.draining.load(Ordering::Acquire)
