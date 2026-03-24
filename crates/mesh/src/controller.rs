@@ -29,7 +29,7 @@ use super::{
     stores::StateStores,
     sync::MeshSyncManager,
 };
-use crate::flow_control::MessageSizeValidator;
+use crate::flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE};
 
 pub struct MeshController {
     state: ClusterState,
@@ -817,7 +817,9 @@ impl MeshController {
             );
             anyhow::anyhow!("Connection failed: {e}")
         })?;
-        let mut client = GossipClient::new(channel);
+        let mut client = GossipClient::new(channel)
+            .max_decoding_message_size(MAX_MESSAGE_SIZE)
+            .max_encoding_message_size(MAX_MESSAGE_SIZE);
 
         // Create bidirectional stream
         let (tx, rx) = mpsc::channel::<StreamMessage>(128);

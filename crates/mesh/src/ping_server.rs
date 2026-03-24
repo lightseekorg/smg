@@ -17,7 +17,7 @@ use tracing as log;
 use tracing::instrument;
 
 use super::{
-    flow_control::MessageSizeValidator,
+    flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
     incremental::IncrementalUpdateCollector,
     metrics::{
         record_ack, record_batch_sent, record_nack, record_peer_reconnect, record_snapshot_bytes,
@@ -278,11 +278,10 @@ impl GossipService {
         signal: F,
     ) -> Result<()> {
         let listen_addr = self.self_addr;
-        let service = GossipServer::new(self);
+        let service = GossipServer::new(self)
+            .max_decoding_message_size(MAX_MESSAGE_SIZE)
+            .max_encoding_message_size(MAX_MESSAGE_SIZE);
 
-        // For now, start without TLS support
-        // TODO: Implement TLS support using tonic's transport layer
-        // The mTLS manager is available but needs proper integration with tonic's transport
         Server::builder()
             .add_service(service)
             .serve_with_shutdown(listen_addr, signal)
@@ -296,7 +295,9 @@ impl GossipService {
         signal: F,
     ) -> Result<()> {
         let incoming = TcpIncoming::from(listener);
-        let service = GossipServer::new(self);
+        let service = GossipServer::new(self)
+            .max_decoding_message_size(MAX_MESSAGE_SIZE)
+            .max_encoding_message_size(MAX_MESSAGE_SIZE);
         Server::builder()
             .add_service(service)
             .serve_with_incoming_shutdown(incoming, signal)
