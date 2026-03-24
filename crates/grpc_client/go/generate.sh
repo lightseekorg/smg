@@ -31,7 +31,7 @@ fi
 
 if [ ! -x "$PROTOC_GEN_GO_GRPC" ]; then
   echo "Error: protoc-gen-go-grpc not found. Please install with: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest" >&2
-    exit 1
+  exit 1
 fi
 
 # Common mappings for imports
@@ -56,11 +56,11 @@ generate_service() {
     --go_out="$output_dir" \
     --go_opt=paths=source_relative \
     "$MAPPINGS" \
-    --go_opt=M${proto_file}=github.com/lightseekorg/smg/crates/grpc_client/go/generated/${service_name} \
+    --go_opt="M${proto_file}=github.com/lightseekorg/smg/crates/grpc_client/go/generated/${service_name}" \
     --go-grpc_out="$output_dir" \
     --go-grpc_opt=paths=source_relative \
     "$MAPPINGS_GRPC" \
-    --go-grpc_opt=M${proto_file}=github.com/lightseekorg/smg/crates/grpc_client/go/generated/${service_name} \
+    --go-grpc_opt="M${proto_file}=github.com/lightseekorg/smg/crates/grpc_client/go/generated/${service_name}" \
     "$proto_file"
 }
 

@@ -119,5 +119,6 @@ jobs:
           TAG="crates/grpc_client/go/v${{ steps.version.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git push origin HEAD:main
           git tag "$TAG"
           git push origin "$TAG"
