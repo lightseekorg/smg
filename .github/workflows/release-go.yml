@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -35,8 +35,8 @@ jobs:
 
       - name: Install protoc-gen-go
         run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.1
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 
       - name: Generate Code
         run: bash crates/grpc_client/go/generate.sh
@@ -50,6 +50,8 @@ jobs:
     name: Tag Release
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -94,16 +96,16 @@ jobs:
             exit 1
           fi
           VERSION=$(cat crates/grpc_client/go/VERSION | tr -d '[:space:]')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Check if tag exists
         id: check_tag
         run: |
           TAG="crates/grpc_client/go/v${{ steps.version.outputs.version }}"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create and Push Tag

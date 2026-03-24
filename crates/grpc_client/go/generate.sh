@@ -8,8 +8,8 @@ GO_PROTO_DIR="$SCRIPT_DIR/proto"
 OUTPUT_DIR="$SCRIPT_DIR/generated"
 
 # Ensure directories exist
+rm -rf "$GO_PROTO_DIR" "$OUTPUT_DIR"
 mkdir -p "$GO_PROTO_DIR"
-rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR/common"
 mkdir -p "$OUTPUT_DIR/sglang_encoder"
 mkdir -p "$OUTPUT_DIR/sglang_scheduler"
