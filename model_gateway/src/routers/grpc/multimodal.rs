@@ -382,6 +382,10 @@ async fn process_multimodal_parts(
 
     // Step 2: Resolve model spec and preprocess images
     let model_config = components.get_or_load_config(model_id, tokenizer_source)?;
+    let model_type = model_config
+        .config
+        .get("model_type")
+        .and_then(|v| v.as_str());
     let metadata = ModelMetadata {
         model_id,
         tokenizer,
@@ -394,7 +398,7 @@ async fn process_multimodal_parts(
 
     let image_processor = components
         .image_processor_registry
-        .find(model_id)
+        .find(model_id, model_type)
         .ok_or_else(|| anyhow::anyhow!("No image processor found for model: {model_id}"))?;
 
     // ImagePreProcessor::preprocess takes &[DynamicImage]; images are behind Arc<ImageFrame>.
