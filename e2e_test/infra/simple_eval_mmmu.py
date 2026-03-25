@@ -75,11 +75,11 @@ def _build_content_parts(
             image = row.get(f"image_{idx}")
             if image is not None:
                 b64 = _image_to_base64(image)
-                parts.append(sampler._handle_image(b64, encoding="base64", format="png"))
+                parts.append(sampler._handle_image(b64, encoding="base64", format="png"))  # type: ignore[attr-defined]
             else:
-                parts.append(sampler._handle_text(segment))
+                parts.append(sampler._handle_text(segment))  # type: ignore[attr-defined]
         elif segment.strip():
-            parts.append(sampler._handle_text(segment))
+            parts.append(sampler._handle_text(segment))  # type: ignore[attr-defined]
     return parts
 
 
@@ -115,7 +115,7 @@ class MMMUEval(Eval):
             # Build multimodal content parts (text + images)
             content_parts = _build_content_parts(sampler, prompt_text, row)
 
-            prompt_messages = [sampler._pack_message(role="user", content=content_parts)]
+            prompt_messages = [sampler._pack_message(role="user", content=content_parts)]  # type: ignore[attr-defined]
             response_text = sampler(prompt_messages)
             response_text = response_text or ""
 
