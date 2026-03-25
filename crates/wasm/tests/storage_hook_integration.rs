@@ -231,6 +231,14 @@ async fn after_hook_passes_through_extra_columns() -> TestResult {
         "event_outbox",
         "after() should pass through side-write table name"
     );
+    assert_eq!(
+        updated.extra_table_writes[0]
+            .row
+            .get("entity_id")
+            .and_then(|v| v.as_str()),
+        Some("resp_123"),
+        "after() should pass through side-write row payload values"
+    );
     Ok(())
 }
 

@@ -230,10 +230,11 @@ pub trait StorageHook: Send + Sync + 'static {
   configured side tables on supported write operations).
 - `before()` returning `Reject(reason)` aborts the operation with an error.
 - `before()` returning `Err(_)` logs a warning and **continues** (non-fatal).
-- `after()` receives the result and hook writes from `before()`. It can
-  return modified extra columns for the caller. Note: `extra_table_writes`
-  in the `after()` return are ignored — side-table writes only execute from
-  the before-hook in the current implementation.
+- `after()` receives the result and hook writes from `before()`, but is
+  observe-only in the hooked storage path: `run_after` discards any
+  `HookWrites` returned by `after()`. In practice, `after()` return values do
+  not modify caller-visible writes or storage behavior. Only writes produced by
+  `before()` and applied by the wrapper/backend affect persistence.
 
 ### Wiring a Hook
 
