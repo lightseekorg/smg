@@ -17,7 +17,7 @@ use tokio::{
     sync::{watch, Mutex},
     task::JoinHandle,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
     core::{
@@ -83,6 +83,36 @@ impl IntoResponse for EngineMetricsResult {
             Self::Err(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
         }
     }
+}
+
+/// Collect gRPC worker metrics by aggregating `PROMETHEUS_MULTIPROC_DIR` via a python3 subprocess.
+async fn collect_prometheus_multiproc_metrics() -> Result<String, String> {
+    let dir = std::env::var("PROMETHEUS_MULTIPROC_DIR").map_err(|_| {
+        "PROMETHEUS_MULTIPROC_DIR not set; cannot collect metrics from gRPC workers".to_string()
+    })?;
+
+    let output = tokio::process::Command::new("python3")
+        .args([
+            "-c",
+            "import sys\n\
+             from prometheus_client import CollectorRegistry, generate_latest\n\
+             from prometheus_client.multiprocess import MultiProcessCollector\n\
+             registry = CollectorRegistry()\n\
+             MultiProcessCollector(registry)\n\
+             sys.stdout.buffer.write(generate_latest(registry))\n",
+        ])
+        .env("PROMETHEUS_MULTIPROC_DIR", &dir)
+        .output()
+        .await
+        .map_err(|e| format!("failed to run python3 prometheus collector: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("python3 prometheus collector failed: {stderr}"));
+    }
+
+    String::from_utf8(output.stdout)
+        .map_err(|e| format!("prometheus collector output is not valid UTF-8: {e}"))
 }
 
 pub struct WorkerManager;
@@ -273,18 +303,44 @@ impl WorkerManager {
             return EngineMetricsResult::Err("No available workers".to_string());
         }
 
-        let responses = fan_out(&workers, client, "metrics", reqwest::Method::GET).await;
-
         let mut metric_packs = Vec::new();
-        for resp in responses {
-            if let Ok(r) = resp.result {
-                if r.status().is_success() {
-                    if let Ok(text) = r.text().await {
-                        metric_packs.push(MetricPack {
-                            labels: vec![("worker_addr".into(), resp.url)],
-                            metrics_text: text,
-                        });
+
+        let http_workers: Vec<_> = workers
+            .iter()
+            .filter(|w| matches!(w.connection_mode(), ConnectionMode::Http))
+            .cloned()
+            .collect();
+        let has_grpc = workers
+            .iter()
+            .any(|w| matches!(w.connection_mode(), ConnectionMode::Grpc));
+
+        if !http_workers.is_empty() {
+            let responses =
+                fan_out(&http_workers, client, "metrics", reqwest::Method::GET).await;
+            for resp in responses {
+                if let Ok(r) = resp.result {
+                    if r.status().is_success() {
+                        if let Ok(text) = r.text().await {
+                            metric_packs.push(MetricPack {
+                                labels: vec![("worker_addr".into(), resp.url)],
+                                metrics_text: text,
+                            });
+                        }
                     }
+                }
+            }
+        }
+
+        if has_grpc {
+            match collect_prometheus_multiproc_metrics().await {
+                Ok(text) => {
+                    metric_packs.push(MetricPack {
+                        labels: vec![],
+                        metrics_text: text,
+                    });
+                }
+                Err(e) => {
+                    warn!("Failed to collect gRPC worker metrics from PROMETHEUS_MULTIPROC_DIR: {e}");
                 }
             }
         }
