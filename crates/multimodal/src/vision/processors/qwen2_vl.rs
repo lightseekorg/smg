@@ -326,12 +326,15 @@ mod tests {
     }
 
     #[test]
-    fn test_smart_resize_too_small_dimension_error() {
+    fn test_smart_resize_small_dimension_clamps_to_factor() {
         let processor = Qwen2VLProcessor::new();
 
-        // Dimension smaller than factor
-        let result = processor.smart_resize(10, 100);
-        assert!(result.is_err());
+        // Dimension smaller than factor (28) should be clamped up, not rejected
+        let (h, w) = processor.smart_resize(10, 100).unwrap();
+        assert!(h >= 28);
+        assert!(w >= 28);
+        assert_eq!(h % 28, 0);
+        assert_eq!(w % 28, 0);
     }
 
     #[test]
