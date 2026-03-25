@@ -139,7 +139,7 @@ impl Phi3VisionProcessor {
         // HuggingFace uses torchvision.transforms.functional.resize with
         // BILINEAR interpolation and antialias=True. PIL's BILINEAR includes
         // implicit antialiasing that closely matches torchvision.
-        let resized = img.resize_exact(new_w, new_h, FilterType::Triangle);
+        let resized = transforms::resize(&img, new_w, new_h, FilterType::Triangle);
 
         // Pad height to multiple of 336
         let padded = self.padding_336(&resized);

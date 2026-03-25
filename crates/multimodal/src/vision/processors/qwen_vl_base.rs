@@ -27,7 +27,7 @@ use ndarray::{Array2, Array3};
 use crate::vision::{
     image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
-    transforms::{normalize, pil_to_filter, resize, to_tensor, TransformError},
+    transforms::{pil_to_filter, resize, to_tensor, to_tensor_and_normalize, TransformError},
 };
 
 /// Python-compatible rounding (banker's rounding / round half to even).
@@ -225,36 +225,83 @@ impl QwenVLProcessorBase {
         (grid_t * grid_h * grid_w) / (self.config.merge_size * self.config.merge_size)
     }
 
-    /// Reshape pixel values from [C, H, W] to flattened patches format.
-    ///
-    /// This matches the HuggingFace Qwen2VLImageProcessor output format:
-    /// `(num_patches, patch_features)` where:
-    /// - num_patches = grid_t * grid_h * grid_w
-    /// - patch_features = C * temporal_patch_size * patch_size * patch_size
-    ///
-    /// The transformation follows these steps (matching HuggingFace exactly):
-    /// 1. Start with [C, H, W] tensor, expand to [temporal, C, H, W]
-    /// 2. Reshape to [grid_t, temporal, C, grid_h/merge, merge, patch, grid_w/merge, merge, patch]
-    /// 3. Permute to [grid_t, grid_h/merge, grid_w/merge, merge, merge, C, temporal, patch, patch]
-    /// 4. Flatten to [num_patches, patch_features]
-    ///
-    /// # Arguments
-    /// * `tensor` - Input tensor of shape [C, H, W]
-    /// * `grid_t` - Temporal grid size (1 for images)
-    /// * `grid_h` - Height grid size (H / patch_size)
-    /// * `grid_w` - Width grid size (W / patch_size)
-    ///
-    /// # Returns
-    /// Flattened patches as Vec<f32> with shape semantics (num_patches, patch_features)
+    /// Patchify tensor directly into an output buffer (avoids intermediate Vec allocation).
+    #[expect(
+        clippy::expect_used,
+        reason = "as_standard_layout guarantees contiguous memory"
+    )]
+    pub fn patchify_into(
+        &self,
+        tensor: &Array3<f32>,
+        grid_t: usize,
+        grid_h: usize,
+        grid_w: usize,
+        output: &mut Vec<f32>,
+    ) {
+        let channel = tensor.shape()[0];
+        let height = tensor.shape()[1];
+        let width = tensor.shape()[2];
+        let patch_size = self.config.patch_size;
+        let merge_size = self.config.merge_size;
+        let temporal_patch_size = self.config.temporal_patch_size;
+
+        debug_assert_eq!(height, grid_h * patch_size);
+        debug_assert_eq!(width, grid_w * patch_size);
+
+        let grid_h_m = grid_h / merge_size;
+        let grid_w_m = grid_w / merge_size;
+        let num_patches = grid_t * grid_h * grid_w;
+        let patch_features = channel * temporal_patch_size * patch_size * patch_size;
+
+        output.reserve(num_patches * patch_features);
+        let base_idx = output.len();
+        output.resize(base_idx + num_patches * patch_features, 0.0);
+
+        let data = tensor.as_standard_layout();
+        let flat = data
+            .as_slice()
+            .expect("standard layout tensor must be contiguous");
+        let planes: Vec<&[f32]> = (0..channel)
+            .map(|c| &flat[c * height * width..(c + 1) * height * width])
+            .collect();
+
+        let mut out_idx = base_idx;
+        for _gt in 0..grid_t {
+            for gh_m in 0..grid_h_m {
+                for gw_m in 0..grid_w_m {
+                    for mh in 0..merge_size {
+                        for mw in 0..merge_size {
+                            let y_base = (gh_m * merge_size + mh) * patch_size;
+                            let x_base = (gw_m * merge_size + mw) * patch_size;
+                            for plane in &planes {
+                                for _tp in 0..temporal_patch_size {
+                                    for ph in 0..patch_size {
+                                        let row_start = (y_base + ph) * width + x_base;
+                                        output[out_idx..out_idx + patch_size].copy_from_slice(
+                                            &plane[row_start..row_start + patch_size],
+                                        );
+                                        out_idx += patch_size;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "as_standard_layout guarantees contiguous memory"
+    )]
     pub fn reshape_to_patches(
         &self,
         tensor: &Array3<f32>,
         grid_t: usize,
         grid_h: usize,
         grid_w: usize,
-    ) -> Result<Vec<f32>, TransformError> {
-        use ndarray::IxDyn;
-
+    ) -> Vec<f32> {
         let channel = tensor.shape()[0];
         let height = tensor.shape()[1];
         let width = tensor.shape()[2];
@@ -263,74 +310,60 @@ impl QwenVLProcessorBase {
         let merge_size = self.config.merge_size;
         let temporal_patch_size = self.config.temporal_patch_size;
 
-        // Verify dimensions match expected grid
-        debug_assert_eq!(
-            height,
-            grid_h * patch_size,
-            "Height must match grid_h * patch_size"
-        );
-        debug_assert_eq!(
-            width,
-            grid_w * patch_size,
-            "Width must match grid_w * patch_size"
-        );
+        debug_assert_eq!(height, grid_h * patch_size);
+        debug_assert_eq!(width, grid_w * patch_size);
 
-        // Step 1: Expand temporal dimension by replicating the frame
-        // [C, H, W] -> [temporal_patch_size, C, H, W]
-        let expanded = tensor
-            .view()
-            .insert_axis(ndarray::Axis(0))
-            .broadcast((temporal_patch_size, channel, height, width))
-            .ok_or_else(|| TransformError::ShapeError(
-                format!("Broadcast failed: cannot broadcast [1, {channel}, {height}, {width}] to [{temporal_patch_size}, {channel}, {height}, {width}]")
-            ))?
-            .to_owned();
+        // Direct index computation: write output in the permuted order without
+        // materializing intermediate arrays. This replaces the 9D reshape +
+        // permute + as_standard_layout() chain which caused two full copies.
+        //
+        // Output layout (flattened):
+        //   [grid_t, grid_h/merge, grid_w/merge, merge, merge, C, temporal, patch_h, patch_w]
+        // For images: grid_t=1, temporal=1, so the outer two loops are trivial.
 
-        // Step 2: Reshape to split spatial dimensions into grid and patch components
-        // [temporal, C, H, W] -> [grid_t, temporal, C, grid_h/merge, merge, patch, grid_w/merge, merge, patch]
-        let grid_h_merged = grid_h / merge_size;
-        let grid_w_merged = grid_w / merge_size;
-
-        // Use IxDyn for 9-dimensional reshape (ndarray only supports up to Ix6 for fixed dims)
-        let shape_9d = IxDyn(&[
-            grid_t,
-            temporal_patch_size,
-            channel,
-            grid_h_merged,
-            merge_size,
-            patch_size,
-            grid_w_merged,
-            merge_size,
-            patch_size,
-        ]);
-
-        let reshaped = expanded
-            .into_shape_with_order(shape_9d)
-            .map_err(|e| TransformError::ShapeError(format!("Reshape to 9D failed: {e}")))?;
-
-        // Step 3: Permute axes to match HuggingFace output order
-        // From: [grid_t, temporal, C, grid_h/merge, merge, patch, grid_w/merge, merge, patch]
-        //       [  0   ,    1    , 2,      3      ,   4  ,   5  ,      6      ,   7  ,   8  ]
-        // To:   [grid_t, grid_h/merge, grid_w/merge, merge, merge, C, temporal, patch, patch]
-        //       [  0   ,      3      ,      6      ,   4  ,   7  , 2,    1    ,   5  ,   8  ]
-        let permuted = reshaped.permuted_axes(&[0, 3, 6, 4, 7, 2, 1, 5, 8][..]);
-
-        // Step 4: Flatten to [num_patches, patch_features]
+        let grid_h_m = grid_h / merge_size;
+        let grid_w_m = grid_w / merge_size;
         let num_patches = grid_t * grid_h * grid_w;
         let patch_features = channel * temporal_patch_size * patch_size * patch_size;
 
-        // Make contiguous and flatten
-        let contiguous = permuted.as_standard_layout().into_owned();
-        let flat = contiguous
-            .into_shape_with_order(IxDyn(&[num_patches, patch_features]))
-            .map_err(|e| {
-                TransformError::ShapeError(format!(
-                    "Final reshape to [{num_patches}, {patch_features}] failed: {e}"
-                ))
-            })?;
+        let mut output = vec![0.0f32; num_patches * patch_features];
+        // tensor is [C, H, W] in row-major order.
+        let data = tensor.as_standard_layout();
+        let flat = data
+            .as_slice()
+            .expect("standard layout tensor must be contiguous");
 
-        let (vec, _offset) = flat.into_raw_vec_and_offset();
-        Ok(vec)
+        // Pre-compute channel plane pointers for fast access
+        let planes: Vec<&[f32]> = (0..channel)
+            .map(|c| &flat[c * height * width..(c + 1) * height * width])
+            .collect();
+
+        let mut out_idx = 0;
+        for _gt in 0..grid_t {
+            for gh_m in 0..grid_h_m {
+                for gw_m in 0..grid_w_m {
+                    for mh in 0..merge_size {
+                        for mw in 0..merge_size {
+                            let y_base = (gh_m * merge_size + mh) * patch_size;
+                            let x_base = (gw_m * merge_size + mw) * patch_size;
+                            for plane in &planes {
+                                for _tp in 0..temporal_patch_size {
+                                    for ph in 0..patch_size {
+                                        let row_start = (y_base + ph) * width + x_base;
+                                        output[out_idx..out_idx + patch_size].copy_from_slice(
+                                            &plane[row_start..row_start + patch_size],
+                                        );
+                                        out_idx += patch_size;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        output
     }
 }
 
@@ -363,7 +396,17 @@ impl ImagePreProcessor for QwenVLProcessorBase {
         let temporal_patch_size = self.config.temporal_patch_size;
         let patch_features = 3 * temporal_patch_size * patch_size * patch_size;
 
-        let mut all_patches: Vec<f32> = Vec::new();
+        // Pre-allocate based on total pixel count to avoid repeated Vec growth
+        let estimated_total: usize = images
+            .iter()
+            .map(|img| {
+                let (w, h) = img.dimensions();
+                (w as usize * h as usize) / (self.config.merge_size * self.config.merge_size)
+                    * patch_features
+                    / (patch_size * patch_size)
+            })
+            .sum();
+        let mut all_patches: Vec<f32> = Vec::with_capacity(estimated_total);
         let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
         let mut grid_thw_data = Vec::with_capacity(images.len() * 3);
         let mut num_img_tokens = Vec::with_capacity(images.len());
@@ -372,20 +415,16 @@ impl ImagePreProcessor for QwenVLProcessorBase {
             let (w, h) = image.dimensions();
             let (target_h, target_w) = self.smart_resize(h as usize, w as usize)?;
 
-            // Resize to the image's own target size
-            let resized = if config.do_resize.unwrap_or(true) {
-                resize(image, target_w as u32, target_h as u32, filter)
+            // Resize to the image's own target size (skip if dimensions match)
+            let (tw32, th32) = (target_w as u32, target_h as u32);
+            let needs_resize = config.do_resize.unwrap_or(true) && (w != tw32 || h != th32);
+            let resized;
+            let img_ref = if needs_resize {
+                resized = resize(image, tw32, th32, filter);
+                &resized
             } else {
-                image.clone()
+                image
             };
-
-            // Convert to tensor [C, H, W]
-            let mut tensor = to_tensor(&resized);
-
-            // Normalize
-            if config.do_normalize.unwrap_or(true) {
-                normalize(&mut tensor, &mean, &std);
-            }
 
             // Grid dimensions based on the target size
             let (grid_t, grid_h, grid_w) = self.calculate_grid_thw(target_h, target_w, 1);
@@ -397,9 +436,15 @@ impl ImagePreProcessor for QwenVLProcessorBase {
             let tokens = self.calculate_tokens_from_grid(grid_t, grid_h, grid_w);
             num_img_tokens.push(tokens);
 
-            // Patchify: [C, H, W] → flat Vec<f32> of (num_patches, patch_features)
-            let patches = self.reshape_to_patches(&tensor, grid_t, grid_h, grid_w)?;
-            all_patches.extend(patches);
+            // Convert to tensor [C, H, W] and normalize in one fused pass
+            let tensor = if config.do_normalize.unwrap_or(true) {
+                to_tensor_and_normalize(img_ref, &mean, &std)
+            } else {
+                to_tensor(img_ref)
+            };
+
+            // Patchify directly into all_patches to avoid intermediate Vec + copy
+            self.patchify_into(&tensor, grid_t, grid_h, grid_w, &mut all_patches);
             patches_per_image.push(num_patches as i64);
         }
 

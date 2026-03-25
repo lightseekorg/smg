@@ -197,7 +197,7 @@ impl Qwen3VLProcessor {
         grid_t: usize,
         grid_h: usize,
         grid_w: usize,
-    ) -> Result<Vec<f32>, TransformError> {
+    ) -> Vec<f32> {
         self.inner
             .reshape_to_patches(tensor, grid_t, grid_h, grid_w)
     }
