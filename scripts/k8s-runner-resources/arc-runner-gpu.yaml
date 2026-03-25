@@ -75,6 +75,8 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: HF_HOME
+              value: /models
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -191,6 +193,8 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: HF_HOME
+              value: /models
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -301,6 +305,8 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: HF_HOME
+              value: /models
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -418,6 +424,8 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: HF_HOME
+              value: /models
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -536,6 +544,8 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: HF_HOME
+              value: /models
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
