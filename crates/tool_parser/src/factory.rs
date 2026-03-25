@@ -388,6 +388,11 @@ impl ParserFactory {
         })
     }
 
+    /// Check if a parser with the given name is registered.
+    pub fn has_parser(&self, name: &str) -> bool {
+        self.registry.creators.read().contains_key(name)
+    }
+
     /// List all registered parsers (for compatibility with old API).
     pub fn list_parsers(&self) -> Vec<String> {
         self.registry.creators.read().keys().cloned().collect()

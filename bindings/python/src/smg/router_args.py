@@ -5,7 +5,7 @@ import dataclasses
 import logging
 import os
 
-from smg.smg_rs import get_available_tool_call_parsers
+from smg.smg_rs import get_available_reasoning_parsers, get_available_tool_call_parsers
 
 logger = logging.getLogger(__name__)
 
@@ -784,11 +784,13 @@ class RouterArgs:
         )
 
         # Parser configuration
+        reasoning_parser_choices = get_available_reasoning_parsers()
         parser_group.add_argument(
             f"--{prefix}reasoning-parser",
             type=str,
             default=None,
-            help="Specify the parser for reasoning models (e.g., deepseek-r1, qwen3)",
+            choices=reasoning_parser_choices,
+            help="Specify the parser for reasoning models (e.g., deepseek_r1, qwen3)",
         )
         tool_call_parser_choices = get_available_tool_call_parsers()
         parser_group.add_argument(
