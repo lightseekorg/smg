@@ -104,9 +104,18 @@ def make_prompt(pad_to: int = 0) -> str:
     if pad_to > len(prompt):
         # Add realistic-looking filler text
         filler_words = [
-            "furthermore", "additionally", "specifically", "considering",
-            "implementation", "architecture", "optimization", "performance",
-            "distributed", "scalability", "reliability", "deployment",
+            "furthermore",
+            "additionally",
+            "specifically",
+            "considering",
+            "implementation",
+            "architecture",
+            "optimization",
+            "performance",
+            "distributed",
+            "scalability",
+            "reliability",
+            "deployment",
         ]
         while len(prompt) < pad_to:
             prompt += " " + random.choice(filler_words)
@@ -114,6 +123,7 @@ def make_prompt(pad_to: int = 0) -> str:
 
 
 _prompt_pad_size = 0
+
 
 async def send_request(session: aiohttp.ClientSession, url: str, stats: dict):
     prompt = make_prompt(pad_to=_prompt_pad_size)
