@@ -10,10 +10,15 @@ dependencies = [
   "grpcio",
   "grpcio-health-checking",
   "httpx",
+  "jinja2",
+  "numpy",
   "openai",
+  "pandas",
   "pillow",
   "pytest",
   "pytest-rerunfailures",
+  "requests",
+  "tqdm",
   "websockets",
 ]
 
