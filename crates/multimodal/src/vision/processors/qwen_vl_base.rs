@@ -137,7 +137,7 @@ impl QwenVLProcessorBase {
     /// (new_height, new_width) or error if aspect ratio is too extreme
     ///
     /// # Errors
-    /// - If height or width is smaller than the factor
+    /// - If height or width is zero
     /// - If aspect ratio exceeds 200:1
     pub fn smart_resize(
         &self,
@@ -146,10 +146,10 @@ impl QwenVLProcessorBase {
     ) -> Result<(usize, usize), TransformError> {
         let factor = self.get_factor();
 
-        // Validate minimum dimensions
-        if height < factor || width < factor {
+        // Validate non-zero dimensions
+        if height == 0 || width == 0 {
             return Err(TransformError::InvalidShape {
-                expected: format!("dimensions >= {factor} (patch_size * merge_size)"),
+                expected: "non-zero dimensions".to_string(),
                 actual: vec![height, width],
             });
         }

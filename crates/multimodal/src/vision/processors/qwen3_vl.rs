@@ -301,12 +301,15 @@ mod tests {
     }
 
     #[test]
-    fn test_smart_resize_too_small_dimension_error() {
+    fn test_smart_resize_small_dimension_clamps_to_factor() {
         let processor = Qwen3VLProcessor::new();
 
-        // Dimension smaller than factor (32)
-        let result = processor.smart_resize(10, 100);
-        assert!(result.is_err());
+        // Dimension smaller than factor (32) should be clamped up, not rejected
+        let (h, w) = processor.smart_resize(10, 100).unwrap();
+        assert!(h >= 32);
+        assert!(w >= 32);
+        assert_eq!(h % 32, 0);
+        assert_eq!(w % 32, 0);
     }
 
     #[test]
