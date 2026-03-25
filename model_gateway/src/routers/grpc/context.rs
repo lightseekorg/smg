@@ -426,10 +426,6 @@ impl RequestContext {
 
     /// Get Arc clone of completion request (panics if not completion)
     #[expect(
-        dead_code,
-        reason = "Arc accessor is introduced before later stacked PRs use it from completion stages"
-    )]
-    #[expect(
         clippy::panic,
         reason = "typed accessor: caller guarantees variant via RequestType construction"
     )]
