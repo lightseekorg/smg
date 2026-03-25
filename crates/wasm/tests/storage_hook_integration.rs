@@ -13,7 +13,7 @@ use std::{collections::HashMap, path::Path};
 use serde_json::json;
 use smg_data_connector::{
     context::RequestContext,
-    hooks::{BeforeHookResult, HookWrites, StorageHook, StorageOperation},
+    hooks::{BeforeHookResult, ExtraTableWrite, HookWrites, StorageHook, StorageOperation},
 };
 use smg_wasm::WasmStorageHook;
 
@@ -194,7 +194,10 @@ async fn after_hook_passes_through_extra_columns() -> TestResult {
             ec.insert("TENANT_ID".into(), json!("acme-corp"));
             ec
         },
-        extra_table_writes: vec![],
+        extra_table_writes: vec![ExtraTableWrite {
+            table: "event_outbox".into(),
+            row: HashMap::from([("entity_id".into(), json!("resp_123"))]),
+        }],
     };
 
     let payload = json!({"id": "resp_123"});
@@ -217,6 +220,16 @@ async fn after_hook_passes_through_extra_columns() -> TestResult {
             .and_then(|v| v.as_str()),
         Some("acme-corp"),
         "after() should pass through extra columns"
+    );
+    assert_eq!(
+        updated.extra_table_writes.len(),
+        1,
+        "after() should preserve non-empty extra_table_writes"
+    );
+    assert_eq!(
+        updated.extra_table_writes[0].table,
+        "event_outbox",
+        "after() should pass through side-write table name"
     );
     Ok(())
 }
@@ -371,7 +384,15 @@ async fn wasm_hook_after_receives_before_extra_columns() -> TestResult {
         }
     };
 
-    // Pass before() hook writes into after()
+    // Pass before() hook writes into after(). Add a side-write intent to
+    // exercise non-empty `after().extra_table_writes` round-trip behavior.
+    let mut writes_for_after = before_writes.clone();
+    writes_for_after.extra_table_writes.push(ExtraTableWrite {
+        table: "event_outbox".into(),
+        row: HashMap::from([("entity_id".into(), json!("resp_789"))]),
+    });
+
+    // Pass hook writes into after()
     let result_json = json!({"stored": true});
     let after_writes = hook
         .after(
@@ -379,7 +400,7 @@ async fn wasm_hook_after_receives_before_extra_columns() -> TestResult {
             Some(&ctx),
             &payload,
             &result_json,
-            &before_writes,
+            &writes_for_after,
         )
         .await?;
 
@@ -401,9 +422,14 @@ async fn wasm_hook_after_receives_before_extra_columns() -> TestResult {
         "after() should preserve STORED_BY from before()"
     );
     assert_eq!(
-        before_writes.extra_columns.len(),
+        writes_for_after.extra_columns.len(),
         after_writes.extra_columns.len(),
         "after() should return the same number of extra columns as before()"
+    );
+    assert_eq!(
+        after_writes.extra_table_writes.len(),
+        writes_for_after.extra_table_writes.len(),
+        "after() should preserve non-empty extra_table_writes"
     );
 
     Ok(())

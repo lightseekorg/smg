@@ -306,6 +306,9 @@ Extra table writes let hooks insert rows into additional side tables in the
 main write flow on supported operations. This is useful for outbox/event
 patterns, audit records, and similar side effects.
 
+Backend support: `extra_table_writes` is currently supported on PostgreSQL and
+Oracle backends. Memory/Redis/NoOp backends reject non-empty side writes.
+
 Use the storage factory to wire hook wrappers so backend capabilities are
 configured correctly for side writes.
 
@@ -324,6 +327,10 @@ schema:
         payload:
           sql_type: "JSON"
 ```
+
+Configured extra tables are created during backend initialization, similar to
+core storage tables. The column definitions in `SchemaConfig.extra_tables`
+drive the DDL for each declared side table.
 
 A before-hook populates extra table writes via `HookWrites`:
 
@@ -386,7 +393,7 @@ let hook = WasmStorageHook::new(&wasm_bytes)?;
 ```
 
 See `examples/wasm/wasm-guest-storage-hook/` for a complete guest example
-demonstrating multi-tenancy and audit trail extra columns.
+demonstrating multi-tenancy, audit trail extra columns, and extra table writes.
 
 ## Data Model
 
