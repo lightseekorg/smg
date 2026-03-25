@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 MMMU_THRESHOLD = 0.65
 
 
-@pytest.mark.engine("sglang")
+@pytest.mark.engine("vllm")
 @pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.model("Qwen/Qwen3-VL-8B-Instruct")
