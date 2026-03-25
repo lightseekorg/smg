@@ -416,8 +416,19 @@ impl MeshSyncManager {
 
         // Get current tree state or create new one
         let mut tree_state = if let Some(policy_state) = self.stores.policy.get(&key) {
-            TreeState::from_bytes(&policy_state.config)
-                .unwrap_or_else(|_| TreeState::new(model_id.clone()))
+            match TreeState::from_bytes(&policy_state.config) {
+                Ok(state) => state,
+                Err(err) => {
+                    warn!(
+                        model_id = %model_id,
+                        error = %err,
+                        "Corrupted tree state in policy store — refusing to overwrite with empty state"
+                    );
+                    return Err(format!(
+                        "Tree state for model {model_id} is corrupted and cannot be deserialized: {err}"
+                    ));
+                }
+            }
         } else {
             TreeState::new(model_id.clone())
         };
@@ -574,8 +585,17 @@ impl MeshSyncManager {
                     return None;
                 }
 
-                TreeState::from_bytes(&existing.config)
-                    .unwrap_or_else(|_| TreeState::new(delta.model_id.clone()))
+                match TreeState::from_bytes(&existing.config) {
+                    Ok(state) => state,
+                    Err(err) => {
+                        warn!(
+                            model_id = %delta.model_id,
+                            error = %err,
+                            "Corrupted tree state — rejecting delta to avoid data loss"
+                        );
+                        return None;
+                    }
+                }
             } else {
                 TreeState::new(delta.model_id.clone())
             };

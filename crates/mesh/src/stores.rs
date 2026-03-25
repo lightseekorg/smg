@@ -183,10 +183,6 @@ impl<T: CrdtValue> CrdtStore<T> {
         self.len() == 0
     }
 
-    // fn contains_key(&self, key: &str) -> bool {
-    //     self.inner.contains_key(key)
-    // }
-
     fn merge(&self, log: &OperationLog) {
         self.inner.merge(log);
     }
