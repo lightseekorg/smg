@@ -1,7 +1,6 @@
 //! Completion preparation stage: resolve prompt, tokenize, create stop decoder.
 //!
-//! This is the `/v1/completions` Stage 1 equivalent to `MessagePreparationStage`
-//! from the Messages pipeline rollout, and it intentionally builds on top of
+//! This is the `/v1/completions` Stage 1 equivalent. It intentionally builds on top of
 //! the native completion pipeline typing introduced in PR #840. It keeps
 //! `CompletionRequest` native in the request context instead of laundering it
 //! through `GenerateRequest`.
@@ -21,12 +20,6 @@ use crate::routers::{
 };
 
 pub(crate) struct CompletionPreparationStage;
-
-impl CompletionPreparationStage {
-    pub fn new() -> Self {
-        Self
-    }
-}
 
 #[async_trait]
 impl PipelineStage for CompletionPreparationStage {

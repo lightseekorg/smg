@@ -31,7 +31,7 @@ impl PreparationStage {
         Self {
             chat_stage: ChatPreparationStage,
             generate_stage: GeneratePreparationStage,
-            completion_stage: CompletionPreparationStage::new(),
+            completion_stage: CompletionPreparationStage,
         }
     }
 }
