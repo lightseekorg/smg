@@ -1,12 +1,13 @@
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, LazyLock, OnceLock,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use dashmap::DashMap;
+use tokio::sync::Notify;
 
 use super::gauge_histogram::{BucketBounds, GaugeHistogramHandle, GaugeHistogramVec};
 use crate::policies::utils::PeriodicTask;
@@ -22,6 +23,10 @@ pub struct InFlightRequestTracker {
     requests: DashMap<u64, Instant>,
     next_id: AtomicU64,
     sampler: OnceLock<PeriodicTask>,
+    /// Monotonic flag: false → true. Never reset.
+    draining: AtomicBool,
+    /// Signaled when requests drain to zero during shutdown.
+    drain_complete: Notify,
 }
 
 impl InFlightRequestTracker {
@@ -30,6 +35,8 @@ impl InFlightRequestTracker {
             requests: DashMap::new(),
             next_id: AtomicU64::new(0),
             sampler: OnceLock::new(),
+            draining: AtomicBool::new(false),
+            drain_complete: Notify::new(),
         })
     }
 
@@ -64,6 +71,39 @@ impl InFlightRequestTracker {
         self.requests.is_empty()
     }
 
+    /// Begin graceful shutdown: mark as draining. Idempotent.
+    pub fn begin_drain(&self) {
+        self.draining.store(true, Ordering::Release);
+    }
+
+    /// Returns `true` if drain has been initiated.
+    #[inline]
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Acquire)
+    }
+
+    /// Wait until all in-flight requests complete, or until `max_timeout` elapses.
+    ///
+    /// Returns `true` if all requests drained, `false` if timed out.
+    pub async fn wait_for_drain(&self, max_timeout: Duration) -> bool {
+        if self.requests.is_empty() {
+            return true;
+        }
+        tokio::time::timeout(max_timeout, async {
+            loop {
+                // Create the notified future BEFORE checking the condition
+                // to avoid TOCTOU race where a guard drops between check and wait.
+                let notified = self.drain_complete.notified();
+                if self.requests.is_empty() {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     pub fn compute_bucket_counts(&self) -> Vec<usize> {
         let ages = self.collect_ages();
         INFLIGHT_AGE_BOUNDS.compute_counts(&ages)
@@ -91,6 +131,14 @@ pub struct InFlightGuard {
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.tracker.requests.remove(&self.request_id);
+        // Notify drain waiters when we hit zero. `wait_for_drain()` re-checks
+        // the condition after waking, so spurious wakeups are harmless.
+        // We unconditionally notify (without checking is_draining()) to avoid a
+        // race where the last guard drops before begin_drain()'s Release store
+        // is visible, which would skip the notification entirely.
+        if self.tracker.requests.is_empty() {
+            self.tracker.drain_complete.notify_waiters();
+        }
     }
 }
 
@@ -197,5 +245,66 @@ mod tests {
         assert_ne!(g1.request_id, g2.request_id);
         assert_ne!(g2.request_id, g3.request_id);
         assert_eq!(tracker.len(), 3);
+    }
+
+    #[test]
+    fn test_draining_flag() {
+        let tracker = InFlightRequestTracker::new();
+        assert!(!tracker.is_draining());
+        tracker.begin_drain();
+        assert!(tracker.is_draining());
+        // Idempotent
+        tracker.begin_drain();
+        assert!(tracker.is_draining());
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_drain_already_empty() {
+        let tracker = InFlightRequestTracker::new();
+        tracker.begin_drain();
+        let drained = tracker.wait_for_drain(Duration::from_secs(1)).await;
+        assert!(drained);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_drain_completes_when_guards_drop() {
+        let tracker = InFlightRequestTracker::new();
+        let guard1 = tracker.track();
+        let guard2 = tracker.track();
+        assert_eq!(tracker.len(), 2);
+
+        tracker.begin_drain();
+
+        let tracker_clone = tracker.clone();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test needs a concurrent task to exercise drain notification"
+        )]
+        let drain_handle =
+            tokio::spawn(async move { tracker_clone.wait_for_drain(Duration::from_secs(5)).await });
+
+        // Give the drain task a moment to start waiting
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        drop(guard1);
+        assert_eq!(tracker.len(), 1);
+
+        drop(guard2);
+        assert_eq!(tracker.len(), 0);
+
+        let drained = drain_handle.await.unwrap();
+        assert!(drained);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_drain_times_out() {
+        let tracker = InFlightRequestTracker::new();
+        let _guard = tracker.track();
+
+        tracker.begin_drain();
+
+        let drained = tracker.wait_for_drain(Duration::from_millis(50)).await;
+        assert!(!drained);
+        assert_eq!(tracker.len(), 1);
     }
 }

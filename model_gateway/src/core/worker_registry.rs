@@ -22,6 +22,7 @@ use smg_mesh::OptionalMeshSyncManager;
 use uuid::Uuid;
 
 use crate::{
+    config::types::RetryConfig,
     core::{
         circuit_breaker::CircuitState,
         worker::{HealthChecker, RuntimeType, WorkerType},
@@ -212,6 +213,12 @@ pub struct WorkerRegistry {
     /// When None, the registry works independently without mesh synchronization
     /// Uses RwLock for thread-safe access when setting mesh_sync after initialization
     mesh_sync: Arc<RwLock<OptionalMeshSyncManager>>,
+
+    /// Per-model retry config (last write wins).
+    /// Updated when a worker with non-empty retry overrides registers.
+    /// Cleaned up when the last worker for a model is removed.
+    /// When retries are disabled, max_retries is set to 1.
+    model_retry_configs: Arc<DashMap<String, RetryConfig>>,
 }
 
 impl WorkerRegistry {
@@ -226,6 +233,7 @@ impl WorkerRegistry {
             url_to_id: Arc::new(DashMap::new()),
             worker_mutation_locks: Arc::new(DashMap::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
+            model_retry_configs: Arc::new(DashMap::new()),
         }
     }
 
@@ -241,6 +249,7 @@ impl WorkerRegistry {
             url_to_id: self.url_to_id.clone(),
             worker_mutation_locks: self.worker_mutation_locks.clone(),
             mesh_sync: self.mesh_sync.clone(),
+            model_retry_configs: self.model_retry_configs.clone(),
         }
     }
 
@@ -266,7 +275,26 @@ impl WorkerRegistry {
         *guard = mesh_sync;
     }
 
-    fn worker_model_ids(worker: &Arc<dyn Worker>) -> Vec<String> {
+    /// Get the retry config for a model, if a worker group override exists.
+    /// When retries are disabled for the group, max_retries will be 1.
+    pub fn get_retry_config(&self, model_id: &str) -> Option<RetryConfig> {
+        self.model_retry_configs
+            .get(model_id)
+            .map(|entry| entry.value().clone())
+    }
+
+    /// Update the retry config for a model group (last write wins).
+    /// Called during worker registration when the worker has non-empty retry overrides.
+    /// If retries are disabled, max_retries is set to 1 before storing.
+    pub fn set_model_retry_config(&self, model_id: &str, mut config: RetryConfig, enabled: bool) {
+        if !enabled {
+            config.max_retries = 1;
+        }
+        self.model_retry_configs
+            .insert(model_id.to_string(), config);
+    }
+
+    pub fn worker_model_ids(worker: &Arc<dyn Worker>) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut model_ids: Vec<String> = worker
             .models()
@@ -361,19 +389,19 @@ impl WorkerRegistry {
             self.rebuild_hash_ring(&model_id);
         }
 
-        // Update type index
+        // Update type index (clone needed for DashMap key ownership)
         self.type_workers
             .entry(*worker.worker_type())
             .or_default()
             .push(worker_id.clone());
 
-        // Update connection mode index
+        // Update connection mode index (clone needed for DashMap key ownership)
         self.connection_workers
             .entry(*worker.connection_mode())
             .or_default()
             .push(worker_id.clone());
 
-        // Sync to mesh if enabled
+        // Sync to mesh if enabled (no-op if mesh is not enabled)
         {
             let guard = self.mesh_sync.read();
             if let Some(ref mesh_sync) = *guard {
@@ -468,7 +496,7 @@ impl WorkerRegistry {
                 .push(worker_id.clone());
         }
 
-        // Sync to mesh if enabled
+        // Sync to mesh if enabled (no-op if mesh is not enabled)
         {
             let guard = self.mesh_sync.read();
             if let Some(ref mesh_sync) = *guard {
@@ -563,6 +591,11 @@ impl WorkerRegistry {
 
             for model_id in Self::worker_model_ids(&worker) {
                 self.remove_worker_from_model_index(&model_id, worker.url());
+                // Clean up per-model retry config when no workers remain for this model
+                let model_empty = self.model_index.get(&model_id).is_none_or(|w| w.is_empty());
+                if model_empty {
+                    self.model_retry_configs.remove(&model_id);
+                }
             }
 
             // Remove from type index
@@ -1350,5 +1383,84 @@ mod tests {
         assert!(registry.register(first).is_some());
         assert!(registry.register(second).is_none());
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn test_model_retry_config_last_write_wins() {
+        let registry = WorkerRegistry::new();
+
+        // No config initially
+        assert!(registry.get_retry_config("llama-3").is_none());
+
+        // Set config for a model (retries enabled)
+        let config1 = RetryConfig {
+            max_retries: 3,
+            ..RetryConfig::default()
+        };
+        registry.set_model_retry_config("llama-3", config1, true);
+
+        let stored = registry.get_retry_config("llama-3").unwrap();
+        assert_eq!(stored.max_retries, 3);
+
+        // Last write wins — overwrite with different config
+        let config2 = RetryConfig {
+            max_retries: 10,
+            initial_backoff_ms: 200,
+            ..RetryConfig::default()
+        };
+        registry.set_model_retry_config("llama-3", config2, true);
+
+        let stored = registry.get_retry_config("llama-3").unwrap();
+        assert_eq!(stored.max_retries, 10);
+        assert_eq!(stored.initial_backoff_ms, 200);
+
+        // Disable retries — max_retries should be set to 1
+        let config3 = RetryConfig {
+            max_retries: 10,
+            ..RetryConfig::default()
+        };
+        registry.set_model_retry_config("llama-3", config3, false);
+
+        let stored = registry.get_retry_config("llama-3").unwrap();
+        assert_eq!(stored.max_retries, 1); // disabled → max_retries = 1
+    }
+
+    #[test]
+    fn test_model_retry_config_cleanup_on_last_worker_removal() {
+        let registry = WorkerRegistry::new();
+
+        let worker1 = Arc::new(
+            BasicWorkerBuilder::new("http://worker1:8080")
+                .model(ModelCard::new("llama-3"))
+                .build(),
+        ) as Arc<dyn Worker>;
+
+        let worker2 = Arc::new(
+            BasicWorkerBuilder::new("http://worker2:8080")
+                .model(ModelCard::new("llama-3"))
+                .build(),
+        ) as Arc<dyn Worker>;
+
+        let id1 = registry.register(worker1).unwrap();
+        let id2 = registry.register(worker2).unwrap();
+
+        // Set retry config for the model
+        registry.set_model_retry_config(
+            "llama-3",
+            RetryConfig {
+                max_retries: 5,
+                ..RetryConfig::default()
+            },
+            true,
+        );
+        assert!(registry.get_retry_config("llama-3").is_some());
+
+        // Remove first worker — config should still exist
+        registry.remove(&id1);
+        assert!(registry.get_retry_config("llama-3").is_some());
+
+        // Remove last worker — config should be cleaned up
+        registry.remove(&id2);
+        assert!(registry.get_retry_config("llama-3").is_none());
     }
 }

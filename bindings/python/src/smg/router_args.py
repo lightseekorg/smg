@@ -5,7 +5,7 @@ import dataclasses
 import logging
 import os
 
-from smg.smg_rs import get_available_tool_call_parsers
+from smg.smg_rs import get_available_reasoning_parsers, get_available_tool_call_parsers
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,8 @@ class RouterArgs:
     prometheus_duration_buckets: list[float] | None = None
     # Request ID headers configuration
     request_id_headers: list[str] | None = None
+    # HTTP header to storage hook context mapping
+    storage_context_headers: dict[str, str] = dataclasses.field(default_factory=dict)
     # Request timeout in seconds
     request_timeout_secs: int = 1800
     # Grace period in seconds to wait for in-flight requests during shutdown
@@ -552,6 +554,16 @@ class RouterArgs:
             ),
         )
         request_group.add_argument(
+            f"--{prefix}storage-context-headers",
+            type=str,
+            nargs="*",
+            default=[],
+            help=(
+                "Map HTTP headers into storage hook request context using HEADER=CONTEXT_KEY "
+                "entries, for example x-tenant-id=tenant_id"
+            ),
+        )
+        request_group.add_argument(
             f"--{prefix}request-timeout-secs",
             type=int,
             default=RouterArgs.request_timeout_secs,
@@ -772,11 +784,13 @@ class RouterArgs:
         )
 
         # Parser configuration
+        reasoning_parser_choices = get_available_reasoning_parsers()
         parser_group.add_argument(
             f"--{prefix}reasoning-parser",
             type=str,
             default=None,
-            help="Specify the parser for reasoning models (e.g., deepseek-r1, qwen3)",
+            choices=reasoning_parser_choices,
+            help="Specify the parser for reasoning models (e.g., deepseek_r1, qwen3)",
         )
         tool_call_parser_choices = get_available_tool_call_parsers()
         parser_group.add_argument(
@@ -1119,6 +1133,9 @@ class RouterArgs:
         )
         args_dict["router_selector"] = cls._parse_selector(
             cli_args_dict.get(f"{prefix}router_selector", None)
+        )
+        args_dict["storage_context_headers"] = cls._parse_selector(
+            cli_args_dict.get(f"{prefix}storage_context_headers", None)
         )
 
         # Mooncake-specific annotation

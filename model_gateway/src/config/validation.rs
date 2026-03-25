@@ -8,6 +8,7 @@ impl ConfigValidator {
         Self::validate_mode(&config.mode)?;
         Self::validate_policy(&config.policy)?;
         Self::validate_server_settings(config)?;
+        Self::validate_storage_context_headers(config)?;
 
         if let Some(discovery) = &config.discovery {
             Self::validate_discovery(discovery, &config.mode)?;
@@ -40,6 +41,39 @@ impl ConfigValidator {
         }
 
         Self::validate_tokenizer_cache(&config.tokenizer_cache)?;
+
+        Ok(())
+    }
+
+    fn validate_storage_context_headers(config: &RouterConfig) -> ConfigResult<()> {
+        let mut seen_context_keys = std::collections::HashSet::new();
+
+        for (header_name, context_key) in &config.storage_context_headers {
+            let header_name = header_name.trim();
+            let context_key = context_key.trim();
+
+            if header_name.is_empty() {
+                return Err(ConfigError::ValidationFailed {
+                    reason: "storage_context_headers must not contain empty header names"
+                        .to_string(),
+                });
+            }
+
+            if context_key.is_empty() {
+                return Err(ConfigError::ValidationFailed {
+                    reason: "storage_context_headers must not contain empty context keys"
+                        .to_string(),
+                });
+            }
+
+            if !seen_context_keys.insert(context_key.to_string()) {
+                return Err(ConfigError::ValidationFailed {
+                    reason: format!(
+                        "storage_context_headers must not map multiple headers to the same context key: '{context_key}'"
+                    ),
+                });
+            }
+        }
 
         Ok(())
     }
@@ -1049,5 +1083,55 @@ mod tests {
 
         let result = ConfigValidator::validate(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_reject_duplicate_storage_context_keys() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker1:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+
+        config.storage_context_headers = std::collections::HashMap::from([
+            ("x-tenant-id".to_string(), "tenant_id".to_string()),
+            ("x-org-id".to_string(), "tenant_id".to_string()),
+        ]);
+
+        let result = ConfigValidator::validate(&config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reject_empty_storage_context_key() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker1:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+
+        config.storage_context_headers =
+            std::collections::HashMap::from([("x-tenant-id".to_string(), " ".to_string())]);
+
+        let result = ConfigValidator::validate(&config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reject_empty_storage_context_header_name() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker1:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+
+        config.storage_context_headers =
+            std::collections::HashMap::from([(" ".to_string(), "tenant_id".to_string())]);
+
+        let result = ConfigValidator::validate(&config);
+        assert!(result.is_err());
     }
 }
