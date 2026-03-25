@@ -139,6 +139,7 @@ impl PipelineStage for HarmonyResponseProcessingStage {
                 Ok(None)
             }
             request_type @ (RequestType::Generate(_)
+            | RequestType::Completion(_)
             | RequestType::Embedding(_)
             | RequestType::Classify(_)
             | RequestType::Messages(_)) => {

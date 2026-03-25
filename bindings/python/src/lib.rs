@@ -399,6 +399,7 @@ struct Router {
     request_timeout_secs: u64,
     shutdown_grace_period_secs: u64,
     request_id_headers: Option<Vec<String>>,
+    storage_context_headers: HashMap<String, String>,
     pd_disaggregation: bool,
     bucket_adjust_interval_secs: usize,
     prefill_urls: Option<Vec<(String, Option<u16>)>>,
@@ -696,6 +697,10 @@ impl Router {
             .maybe_log_dir(self.log_dir.as_ref())
             .maybe_log_level(self.log_level.as_ref())
             .maybe_request_id_headers(self.request_id_headers.clone())
+            .maybe_storage_context_headers(
+                (!self.storage_context_headers.is_empty())
+                    .then(|| self.storage_context_headers.clone()),
+            )
             .maybe_rate_limit_tokens_per_second(self.rate_limit_tokens_per_second)
             .maybe_model_path(self.model_path.as_ref())
             .maybe_tokenizer_path(self.tokenizer_path.as_ref())
@@ -764,6 +769,7 @@ impl Router {
         request_timeout_secs = 1800,
         shutdown_grace_period_secs = 180,
         request_id_headers = None,
+        storage_context_headers = HashMap::new(),
         pd_disaggregation = false,
         bucket_adjust_interval_secs = 5,
         prefill_urls = None,
@@ -868,6 +874,7 @@ impl Router {
         request_timeout_secs: u64,
         shutdown_grace_period_secs: u64,
         request_id_headers: Option<Vec<String>>,
+        storage_context_headers: HashMap<String, String>,
         pd_disaggregation: bool,
         bucket_adjust_interval_secs: usize,
         prefill_urls: Option<Vec<(String, Option<u16>)>>,
@@ -981,6 +988,7 @@ impl Router {
             request_timeout_secs,
             shutdown_grace_period_secs,
             request_id_headers,
+            storage_context_headers,
             pd_disaggregation,
             bucket_adjust_interval_secs,
             prefill_urls,
@@ -1191,6 +1199,18 @@ fn get_available_tool_call_parsers() -> Vec<String> {
         .clone()
 }
 
+/// Get the list of available reasoning parsers from the Rust factory.
+#[pyfunction]
+fn get_available_reasoning_parsers() -> Vec<String> {
+    static PARSERS: OnceCell<Vec<String>> = OnceCell::new();
+    PARSERS
+        .get_or_init(|| {
+            let factory = reasoning_parser::ParserFactory::new();
+            factory.list_parsers()
+        })
+        .clone()
+}
+
 #[pymodule]
 fn smg_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PolicyType>()?;
@@ -1208,5 +1228,6 @@ fn smg_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_verbose_version_string, m)?)?;
     m.add_function(wrap_pyfunction!(print_banner, m)?)?;
     m.add_function(wrap_pyfunction!(get_available_tool_call_parsers, m)?)?;
+    m.add_function(wrap_pyfunction!(get_available_reasoning_parsers, m)?)?;
     Ok(())
 }

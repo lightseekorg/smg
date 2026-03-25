@@ -26,6 +26,9 @@ impl ModelProcessorSpec for Phi3VisionSpec {
     fn matches(&self, metadata: &ModelMetadata) -> bool {
         let id = metadata.model_id.to_ascii_lowercase();
         id.contains("phi") && id.contains("vision")
+            || metadata
+                .config_model_type()
+                .is_some_and(|mt| mt == "phi3_v")
     }
 
     fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {
@@ -91,5 +94,22 @@ mod tests {
             .unwrap();
         assert_eq!(replacements[0].tokens.len(), 144);
         assert_eq!(replacements[0].tokens[0], 555);
+    }
+
+    #[test]
+    fn phi3_matches_alias_via_model_type() {
+        let tokenizer = TestTokenizer::new(&[("<image>", 555)]);
+        let config = json!({
+            "model_type": "phi3_v",
+            "img_processor": {"num_img_tokens": 144}
+        });
+        let metadata = ModelMetadata {
+            model_id: "custom-model",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("phi3 alias");
+        assert_eq!(spec.name(), "phi3_v");
     }
 }

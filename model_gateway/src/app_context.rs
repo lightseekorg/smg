@@ -29,11 +29,17 @@ use crate::{
 
 /// Error type for AppContext builder
 #[derive(Debug)]
-pub struct AppContextBuildError(&'static str);
+pub enum AppContextBuildError {
+    MissingField(&'static str),
+    InvalidConfig(String),
+}
 
 impl std::fmt::Display for AppContextBuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Missing required field: {}", self.0)
+        match self {
+            Self::MissingField(field) => write!(f, "Missing required field: {field}"),
+            Self::InvalidConfig(msg) => write!(f, "Invalid configuration: {msg}"),
+        }
     }
 }
 
@@ -269,16 +275,44 @@ impl AppContextBuilder {
     pub fn build(self) -> Result<AppContext, AppContextBuildError> {
         let router_config = self
             .router_config
-            .ok_or(AppContextBuildError("router_config"))?;
+            .ok_or(AppContextBuildError::MissingField("router_config"))?;
         let configured_reasoning_parser = router_config.reasoning_parser.clone();
         let configured_tool_parser = router_config.tool_call_parser.clone();
 
+        // Validate configured parser names against their registries at startup
+        if let (Some(name), Some(factory)) =
+            (&configured_reasoning_parser, &self.reasoning_parser_factory)
+        {
+            if !factory.registry().has_parser(name) {
+                tracing::error!(
+                    parser = %name,
+                    available = %factory.list_parsers().join(", "),
+                    "Unknown reasoning parser"
+                );
+                return Err(AppContextBuildError::InvalidConfig(format!(
+                    "unknown reasoning parser '{name}'"
+                )));
+            }
+        }
+        if let (Some(name), Some(factory)) = (&configured_tool_parser, &self.tool_parser_factory) {
+            if !factory.has_parser(name) {
+                tracing::error!(
+                    parser = %name,
+                    available = %factory.list_parsers().join(", "),
+                    "Unknown tool-call parser"
+                );
+                return Err(AppContextBuildError::InvalidConfig(format!(
+                    "unknown tool-call parser '{name}'"
+                )));
+            }
+        }
+
         let worker_registry = self
             .worker_registry
-            .ok_or(AppContextBuildError("worker_registry"))?;
+            .ok_or(AppContextBuildError::MissingField("worker_registry"))?;
         let worker_job_queue = self
             .worker_job_queue
-            .ok_or(AppContextBuildError("worker_job_queue"))?;
+            .ok_or(AppContextBuildError::MissingField("worker_job_queue"))?;
 
         // Create WorkerService from the already-built components
         let worker_service = Arc::new(WorkerService::new(
@@ -288,38 +322,40 @@ impl AppContextBuilder {
         ));
 
         Ok(AppContext {
-            client: self.client.ok_or(AppContextBuildError("client"))?,
+            client: self
+                .client
+                .ok_or(AppContextBuildError::MissingField("client"))?,
             router_config,
             rate_limiter: self.rate_limiter,
             tokenizer_registry: self
                 .tokenizer_registry
-                .ok_or(AppContextBuildError("tokenizer_registry"))?,
+                .ok_or(AppContextBuildError::MissingField("tokenizer_registry"))?,
             reasoning_parser_factory: self.reasoning_parser_factory,
             tool_parser_factory: self.tool_parser_factory,
             worker_registry,
             policy_registry: self
                 .policy_registry
-                .ok_or(AppContextBuildError("policy_registry"))?,
+                .ok_or(AppContextBuildError::MissingField("policy_registry"))?,
             router_manager: self.router_manager,
             response_storage: self
                 .response_storage
-                .ok_or(AppContextBuildError("response_storage"))?,
+                .ok_or(AppContextBuildError::MissingField("response_storage"))?,
             conversation_storage: self
                 .conversation_storage
-                .ok_or(AppContextBuildError("conversation_storage"))?,
-            conversation_item_storage: self
-                .conversation_item_storage
-                .ok_or(AppContextBuildError("conversation_item_storage"))?,
+                .ok_or(AppContextBuildError::MissingField("conversation_storage"))?,
+            conversation_item_storage: self.conversation_item_storage.ok_or(
+                AppContextBuildError::MissingField("conversation_item_storage"),
+            )?,
             load_monitor: self.load_monitor,
             configured_reasoning_parser,
             configured_tool_parser,
             worker_job_queue,
             workflow_engines: self
                 .workflow_engines
-                .ok_or(AppContextBuildError("workflow_engines"))?,
+                .ok_or(AppContextBuildError::MissingField("workflow_engines"))?,
             mcp_orchestrator: self
                 .mcp_orchestrator
-                .ok_or(AppContextBuildError("mcp_orchestrator"))?,
+                .ok_or(AppContextBuildError::MissingField("mcp_orchestrator"))?,
             wasm_manager: self.wasm_manager,
             worker_service,
             inflight_tracker: InFlightRequestTracker::new(),
