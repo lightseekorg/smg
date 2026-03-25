@@ -72,12 +72,16 @@ def _build_command(
         if os.path.isdir(local_tokenizer):
             tokenizer_path = local_tokenizer
 
+    # Map runtime to the correct genai-bench --api-backend value.
+    runtime = os.environ.get("E2E_RUNTIME", "").lower()
+    api_backend = {"sglang": "sglang", "vllm": "vllm"}.get(runtime, "openai")
+
     cmd.extend(
         [
             image,
             "benchmark",
             "--api-backend",
-            "openai",
+            api_backend,
             "--api-base",
             router_url,
             "--api-key",
