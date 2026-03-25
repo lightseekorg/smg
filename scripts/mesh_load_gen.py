@@ -93,17 +93,30 @@ EXTRAS = [
 ]
 
 
-def make_prompt() -> str:
+def make_prompt(pad_to: int = 0) -> str:
     topic = random.choice(TOPICS)
     subject = random.choice(SUBJECTS)
     extra = random.choice(EXTRAS)
     # Add some randomness to avoid exact duplicates
     suffix = f" (variant {random.randint(1, 10000)})"
-    return f"{topic} {subject} {extra}{suffix}"
+    prompt = f"{topic} {subject} {extra}{suffix}"
+    # Optionally pad to simulate longer prompts (production-like)
+    if pad_to > len(prompt):
+        # Add realistic-looking filler text
+        filler_words = [
+            "furthermore", "additionally", "specifically", "considering",
+            "implementation", "architecture", "optimization", "performance",
+            "distributed", "scalability", "reliability", "deployment",
+        ]
+        while len(prompt) < pad_to:
+            prompt += " " + random.choice(filler_words)
+    return prompt[:pad_to] if pad_to > 0 else prompt
 
+
+_prompt_pad_size = 0
 
 async def send_request(session: aiohttp.ClientSession, url: str, stats: dict):
-    prompt = make_prompt()
+    prompt = make_prompt(pad_to=_prompt_pad_size)
     payload = {
         "model": "mock-model",
         "messages": [{"role": "user", "content": prompt}],
@@ -190,9 +203,18 @@ def main():
         default="30000,30001,30002",
         help="Comma-separated gateway ports",
     )
+    parser.add_argument(
+        "--prompt-size",
+        type=int,
+        default=0,
+        help="Pad prompts to this many chars (0=no padding, 500=realistic, 2000=large)",
+    )
     args = parser.parse_args()
 
     ports = [int(p) for p in args.gateway_ports.split(",")]
+    # Set global prompt size for make_prompt
+    global _prompt_pad_size
+    _prompt_pad_size = args.prompt_size
     asyncio.run(run_load(ports, args.rps, args.duration))
 
 

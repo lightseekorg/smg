@@ -280,7 +280,9 @@ impl GossipService {
         let listen_addr = self.self_addr;
         let service = GossipServer::new(self)
             .max_decoding_message_size(MAX_MESSAGE_SIZE)
-            .max_encoding_message_size(MAX_MESSAGE_SIZE);
+            .max_encoding_message_size(MAX_MESSAGE_SIZE)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip);
 
         Server::builder()
             .add_service(service)
@@ -297,7 +299,9 @@ impl GossipService {
         let incoming = TcpIncoming::from(listener);
         let service = GossipServer::new(self)
             .max_decoding_message_size(MAX_MESSAGE_SIZE)
-            .max_encoding_message_size(MAX_MESSAGE_SIZE);
+            .max_encoding_message_size(MAX_MESSAGE_SIZE)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip);
         Server::builder()
             .add_service(service)
             .serve_with_incoming_shutdown(incoming, signal)

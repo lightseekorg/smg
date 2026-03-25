@@ -934,7 +934,9 @@ impl MeshController {
         })?;
         let mut client = GossipClient::new(channel)
             .max_decoding_message_size(MAX_MESSAGE_SIZE)
-            .max_encoding_message_size(MAX_MESSAGE_SIZE);
+            .max_encoding_message_size(MAX_MESSAGE_SIZE)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip);
 
         // Create bidirectional stream
         let (tx, rx) = mpsc::channel::<StreamMessage>(128);
