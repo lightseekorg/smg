@@ -41,7 +41,9 @@ impl PipelineStage for RequestBuildingStage {
             RequestType::Generate(_) => self.generate_stage.execute(ctx).await,
             RequestType::Embedding(_) => self.embedding_stage.execute(ctx).await,
             RequestType::Classify(_) => self.embedding_stage.execute(ctx).await,
-            request_type @ (RequestType::Responses(_) | RequestType::Messages(_)) => {
+            request_type @ (RequestType::Completion(_)
+            | RequestType::Responses(_)
+            | RequestType::Messages(_)) => {
                 error!(
                     function = "RequestBuildingStage::execute",
                     request_type = %request_type,
