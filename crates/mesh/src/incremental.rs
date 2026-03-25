@@ -181,52 +181,55 @@ impl IncrementalUpdateCollector {
                         let mut sent_delta = false;
                         if let Some(pending) = self.stores.tree_ops_pending.get(key) {
                             if !pending.is_empty() {
-                                // Only send the unsent tail of the pending buffer.
-                                // `pending` holds all ops since the buffer was last
-                                // trimmed.  `last_sent_version` records what the peer
-                                // has already seen, so we skip ops the peer already has.
                                 let total_pending = pending.len() as u64;
                                 let base_version = current_version.saturating_sub(total_pending);
-                                let already_sent =
-                                    last_sent_version.saturating_sub(base_version) as usize;
-                                let unsent_start = already_sent.min(pending.len());
-                                let unsent_ops = &pending[unsent_start..];
-                                if unsent_ops.is_empty() {
-                                    // Peer is up-to-date; skip this key
-                                    continue;
-                                }
-                                let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
-                                let delta = TreeStateDelta {
-                                    model_id: model_id.clone(),
-                                    operations: unsent_ops.to_vec(),
-                                    base_version: last_sent_version,
-                                    new_version: current_version,
-                                };
-                                if let Ok(delta_bytes) = delta.to_bytes() {
-                                    // Wrap in PolicyState with distinct policy_type
-                                    let delta_policy = PolicyState {
-                                        model_id,
-                                        policy_type: "tree_state_delta".to_string(),
-                                        config: delta_bytes,
-                                        version: current_version,
-                                    };
-                                    if let Ok(serialized) = bincode::serialize(&delta_policy) {
-                                        updates.push(StateUpdate {
-                                            key: key.clone(),
-                                            value: serialized,
-                                            version: current_version,
-                                            actor: self.self_name.clone(),
-                                            timestamp,
-                                        });
-                                        debug!(
-                                            "Collected tree delta update: {} ({} ops, version: {})",
-                                            key,
-                                            pending.len(),
-                                            current_version
-                                        );
-                                        sent_delta = true;
+
+                                // If the peer is behind what the buffer covers, we can't
+                                // construct a valid delta — fall back to full state.
+                                if last_sent_version >= base_version {
+                                    let already_sent =
+                                        last_sent_version.saturating_sub(base_version) as usize;
+                                    let unsent_start = already_sent.min(pending.len());
+                                    let unsent_ops = &pending[unsent_start..];
+                                    if !unsent_ops.is_empty() {
+                                        let model_id =
+                                            key.strip_prefix("tree:").unwrap_or(key).to_string();
+                                        let delta = TreeStateDelta {
+                                            model_id: model_id.clone(),
+                                            operations: unsent_ops.to_vec(),
+                                            base_version: last_sent_version,
+                                            new_version: current_version,
+                                        };
+                                        if let Ok(delta_bytes) = delta.to_bytes() {
+                                            let delta_policy = PolicyState {
+                                                model_id,
+                                                policy_type: "tree_state_delta".to_string(),
+                                                config: delta_bytes,
+                                                version: current_version,
+                                            };
+                                            if let Ok(serialized) =
+                                                bincode::serialize(&delta_policy)
+                                            {
+                                                updates.push(StateUpdate {
+                                                    key: key.clone(),
+                                                    value: serialized,
+                                                    version: current_version,
+                                                    actor: self.self_name.clone(),
+                                                    timestamp,
+                                                });
+                                                debug!(
+                                                    "Collected tree delta: {} ({} ops, version: {})",
+                                                    key,
+                                                    unsent_ops.len(),
+                                                    current_version
+                                                );
+                                                sent_delta = true;
+                                            }
+                                        }
                                     }
                                 }
+                                // else: peer is behind buffer range → sent_delta stays false
+                                // → falls through to full state below
                             }
                         }
 

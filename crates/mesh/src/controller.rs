@@ -396,6 +396,7 @@ impl MeshController {
                     let peer_name_incremental = peer_name.clone();
                     let shared_sequence = sequence.clone();
                     let size_validator = MessageSizeValidator::default();
+                    let stores_for_trim = stores.clone();
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
@@ -444,7 +445,20 @@ impl MeshController {
                                         // mark_sent prevents an infinite retry loop (PR #808).
                                         let is_tree_delta =
                                             updates.iter().any(|u| u.key.starts_with("tree:"));
-                                        if !is_tree_delta {
+                                        if is_tree_delta {
+                                            // Force trim the pending buffer to reduce size for next round.
+                                            for u in updates.iter() {
+                                                if u.key.starts_with("tree:") {
+                                                    if let Some(mut pending) = stores_for_trim.tree_ops_pending.get_mut(&u.key) {
+                                                        let len = pending.len();
+                                                        if len > 100 {
+                                                            pending.drain(..len / 2);
+                                                            log::info!("Force-trimmed oversized tree pending buffer for {}: {} -> {}", u.key, len, pending.len());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else {
                                             collector.mark_sent(*store_type, updates);
                                         }
                                         continue;
