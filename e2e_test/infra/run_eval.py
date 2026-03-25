@@ -103,9 +103,9 @@ def run_eval(args: Any) -> dict:
     model = getattr(args, "model", None)
 
     logger.info(
-        "Starting %s eval: %d examples, %d threads, temp=%.2f",
+        "Starting %s eval: %s examples, %d threads, temp=%.2f",
         eval_name,
-        num_examples,
+        num_examples if num_examples is not None else "all",
         num_threads,
         temperature,
     )
