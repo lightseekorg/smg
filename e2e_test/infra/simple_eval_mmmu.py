@@ -19,7 +19,6 @@ from datasets import load_dataset
 
 from . import simple_eval_common as common
 from .simple_eval_common import (
-    ANSWER_PATTERN_MULTICHOICE,
     HTML_JINJA,
     Eval,
     EvalResult,
@@ -119,8 +118,10 @@ class MMMUEval(Eval):
             response_text = sampler(prompt_messages)
             response_text = response_text or ""
 
-            match = re.search(ANSWER_PATTERN_MULTICHOICE, response_text)
-            extracted_answer = match.group(1) if match else None
+            # Use dynamic pattern to handle variable number of options (A-D, A-E, etc.)
+            answer_pattern = rf"(?i)Answer\s*:\s*([{''.join(letters)}])"
+            match = re.search(answer_pattern, response_text)
+            extracted_answer = match.group(1).upper() if match else None
             score = 1.0 if extracted_answer == row["answer"] else 0.0
 
             subject = row["_subject"]
