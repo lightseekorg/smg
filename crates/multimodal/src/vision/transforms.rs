@@ -34,82 +34,65 @@ pub enum TransformError {
 
 pub type Result<T> = std::result::Result<T, TransformError>;
 
-/// Convert image to tensor [C, H, W] normalized to [0, 1].
-///
-/// This matches the default behavior of `torchvision.transforms.ToTensor()`.
-/// Uses direct buffer access for performance (avoids per-pixel bounds checks).
-pub fn to_tensor(image: &DynamicImage) -> Array3<f32> {
-    let (w, h, raw_owned);
-    let raw: &[u8] = match image {
-        DynamicImage::ImageRgb8(rgb) => {
-            w = rgb.width() as usize;
-            h = rgb.height() as usize;
-            rgb.as_raw()
-        }
+/// Extract RGB pixel data from a DynamicImage, avoiding a copy when already RGB8.
+/// Returns (width, height, raw_bytes) where raw_bytes is interleaved R,G,B,R,G,B,...
+fn rgb_bytes(image: &DynamicImage) -> (usize, usize, std::borrow::Cow<'_, [u8]>) {
+    match image {
+        DynamicImage::ImageRgb8(rgb) => (
+            rgb.width() as usize,
+            rgb.height() as usize,
+            std::borrow::Cow::Borrowed(rgb.as_raw()),
+        ),
         _ => {
             let rgb = image.to_rgb8();
-            w = rgb.width() as usize;
-            h = rgb.height() as usize;
-            raw_owned = rgb.into_raw();
-            &raw_owned
+            let w = rgb.width() as usize;
+            let h = rgb.height() as usize;
+            (w, h, std::borrow::Cow::Owned(rgb.into_raw()))
         }
-    };
+    }
+}
 
-    // Pre-allocate flat vec, then reshape — avoids per-element index computation
+/// Build a [C, H, W] f32 tensor from interleaved RGB bytes with per-channel
+/// `scale` and `bias`: `output[c][i] = raw[i*3 + c] * scale[c] + bias[c]`.
+fn build_planar_tensor(
+    raw: &[u8],
+    w: usize,
+    h: usize,
+    scale: [f32; 3],
+    bias: [f32; 3],
+) -> Array3<f32> {
     let pixels = h * w;
     let mut data = vec![0.0f32; 3 * pixels];
     let (r_plane, rest) = data.split_at_mut(pixels);
     let (g_plane, b_plane) = rest.split_at_mut(pixels);
 
     for (i, chunk) in raw.chunks_exact(3).enumerate() {
-        r_plane[i] = chunk[0] as f32 * (1.0 / 255.0);
-        g_plane[i] = chunk[1] as f32 * (1.0 / 255.0);
-        b_plane[i] = chunk[2] as f32 * (1.0 / 255.0);
+        r_plane[i] = chunk[0] as f32 * scale[0] + bias[0];
+        g_plane[i] = chunk[1] as f32 * scale[1] + bias[1];
+        b_plane[i] = chunk[2] as f32 * scale[2] + bias[2];
     }
 
     #[expect(
         clippy::expect_used,
-        reason = "shape is (3, h, w) with exactly 3*h*w elements pre-allocated"
+        reason = "data has exactly 3*h*w elements by construction"
     )]
     Array3::from_shape_vec((3, h, w), data).expect("shape matches pre-allocated buffer")
 }
 
-/// Convert image to tensor [C, H, W] without normalization (keeps [0, 255]).
+/// Convert image to tensor [C, H, W] normalized to [0, 1].
 ///
-/// Some models expect unnormalized pixel values.
+/// This matches the default behavior of `torchvision.transforms.ToTensor()`.
+pub fn to_tensor(image: &DynamicImage) -> Array3<f32> {
+    let (w, h, raw) = rgb_bytes(image);
+    let s = 1.0 / 255.0;
+    build_planar_tensor(&raw, w, h, [s, s, s], [0.0, 0.0, 0.0])
+}
+
+/// Convert image to tensor [C, H, W] without normalization (keeps [0, 255]).
+#[cfg(test)]
 pub fn to_tensor_no_norm(image: &DynamicImage) -> Array3<f32> {
-    let (w, h, raw_owned);
-    let raw: &[u8] = match image {
-        DynamicImage::ImageRgb8(rgb) => {
-            w = rgb.width() as usize;
-            h = rgb.height() as usize;
-            rgb.as_raw()
-        }
-        _ => {
-            let rgb = image.to_rgb8();
-            w = rgb.width() as usize;
-            h = rgb.height() as usize;
-            raw_owned = rgb.into_raw();
-            &raw_owned
-        }
-    };
-
-    let pixels = h * w;
-    let mut data = vec![0.0f32; 3 * pixels];
-    let (r_plane, rest) = data.split_at_mut(pixels);
-    let (g_plane, b_plane) = rest.split_at_mut(pixels);
-
-    for (i, chunk) in raw.chunks_exact(3).enumerate() {
-        r_plane[i] = chunk[0] as f32;
-        g_plane[i] = chunk[1] as f32;
-        b_plane[i] = chunk[2] as f32;
-    }
-
-    #[expect(
-        clippy::expect_used,
-        reason = "shape is (3, h, w) with exactly 3*h*w elements pre-allocated"
-    )]
-    Array3::from_shape_vec((3, h, w), data).expect("shape matches pre-allocated buffer")
+    let (w, h, raw) = rgb_bytes(image);
+    build_planar_tensor(&raw, w, h, [1.0, 1.0, 1.0], [0.0, 0.0, 0.0])
 }
 
 /// Normalize tensor per channel: (x - mean) / std.
@@ -154,42 +137,11 @@ pub fn to_tensor_and_normalize(
     mean: &[f64; 3],
     std: &[f64; 3],
 ) -> Array3<f32> {
-    let (w, h, raw_owned);
-    let raw: &[u8] = match image {
-        DynamicImage::ImageRgb8(rgb) => {
-            w = rgb.width() as usize;
-            h = rgb.height() as usize;
-            rgb.as_raw()
-        }
-        _ => {
-            let rgb = image.to_rgb8();
-            w = rgb.width() as usize;
-            h = rgb.height() as usize;
-            raw_owned = rgb.into_raw();
-            &raw_owned
-        }
-    };
-    let pixels = h * w;
-
-    // Precompute fused scale: (pixel/255 - mean) / std = pixel * (1/(255*std)) - mean/std
+    let (w, h, raw) = rgb_bytes(image);
+    // Fused: (pixel/255 - mean) / std = pixel * (1/(255*std)) - mean/std
     let scale: [f32; 3] = std::array::from_fn(|c| 1.0 / (255.0 * std[c] as f32));
     let bias: [f32; 3] = std::array::from_fn(|c| -(mean[c] as f32) / (std[c] as f32));
-
-    let mut data = vec![0.0f32; 3 * pixels];
-    let (r_plane, rest) = data.split_at_mut(pixels);
-    let (g_plane, b_plane) = rest.split_at_mut(pixels);
-
-    for (i, chunk) in raw.chunks_exact(3).enumerate() {
-        r_plane[i] = chunk[0] as f32 * scale[0] + bias[0];
-        g_plane[i] = chunk[1] as f32 * scale[1] + bias[1];
-        b_plane[i] = chunk[2] as f32 * scale[2] + bias[2];
-    }
-
-    #[expect(
-        clippy::expect_used,
-        reason = "shape is (3, h, w) with exactly 3*h*w elements pre-allocated"
-    )]
-    Array3::from_shape_vec((3, h, w), data).expect("shape matches pre-allocated buffer")
+    build_planar_tensor(&raw, w, h, scale, bias)
 }
 
 /// Rescale tensor by a constant factor.

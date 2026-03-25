@@ -494,13 +494,9 @@ impl ImagePreProcessor for Llama4VisionProcessor {
 
         // Concatenate all tiles from all images into a single 4D tensor
         // [total_tiles, C, H, W] — no batch dimension, no zero-padding.
-        #[expect(
-            clippy::expect_used,
-            reason = "len == 1 is checked by the if-condition"
-        )]
         let pixel_values = if all_outputs.len() == 1 {
             // Single image: take ownership directly, no copy
-            all_outputs.pop().expect("just checked len == 1")
+            all_outputs.remove(0)
         } else {
             let tile_views: Vec<ndarray::ArrayView4<f32>> =
                 all_outputs.iter().map(|o| o.view()).collect();

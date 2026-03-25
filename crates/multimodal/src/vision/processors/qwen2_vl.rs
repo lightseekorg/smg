@@ -20,7 +20,6 @@
 use std::ops::Deref;
 
 use image::DynamicImage;
-use ndarray::Array3;
 
 use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
 use crate::vision::{
@@ -187,18 +186,6 @@ impl Qwen2VLProcessor {
     pub fn calculate_tokens_from_grid(&self, grid_t: usize, grid_h: usize, grid_w: usize) -> usize {
         self.inner
             .calculate_tokens_from_grid(grid_t, grid_h, grid_w)
-    }
-
-    /// Reshape pixel values from [C, H, W] to flattened patches format.
-    pub fn reshape_to_patches(
-        &self,
-        tensor: &Array3<f32>,
-        grid_t: usize,
-        grid_h: usize,
-        grid_w: usize,
-    ) -> Vec<f32> {
-        self.inner
-            .reshape_to_patches(tensor, grid_t, grid_h, grid_w)
     }
 }
 

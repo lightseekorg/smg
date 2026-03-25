@@ -226,10 +226,13 @@ impl QwenVLProcessorBase {
     }
 
     /// Patchify tensor directly into an output buffer (avoids intermediate Vec allocation).
-    #[expect(
-        clippy::expect_used,
-        reason = "as_standard_layout guarantees contiguous memory"
-    )]
+    /// Patchify a [C, H, W] tensor and append the patches to `output`.
+    ///
+    /// Output layout per image:
+    ///   `[grid_t, patch_rows, patch_cols, merge_h, merge_w, C, temporal, patch_h, patch_w]`
+    ///
+    /// Each "merged patch" covers a `(merge_size * patch_size)²` spatial region.
+    /// Within it, `merge_size²` sub-patches are emitted, each containing all channels.
     pub fn patchify_into(
         &self,
         tensor: &Array3<f32>,
@@ -237,7 +240,7 @@ impl QwenVLProcessorBase {
         grid_h: usize,
         grid_w: usize,
         output: &mut Vec<f32>,
-    ) {
+    ) -> Result<(), TransformError> {
         let channel = tensor.shape()[0];
         let height = tensor.shape()[1];
         let width = tensor.shape()[2];
@@ -248,111 +251,38 @@ impl QwenVLProcessorBase {
         debug_assert_eq!(height, grid_h * patch_size);
         debug_assert_eq!(width, grid_w * patch_size);
 
-        let grid_h_m = grid_h / merge_size;
-        let grid_w_m = grid_w / merge_size;
         let num_patches = grid_t * grid_h * grid_w;
         let patch_features = channel * temporal_patch_size * patch_size * patch_size;
-
-        output.reserve(num_patches * patch_features);
         let base_idx = output.len();
         output.resize(base_idx + num_patches * patch_features, 0.0);
 
         let data = tensor.as_standard_layout();
-        let flat = data
-            .as_slice()
-            .expect("standard layout tensor must be contiguous");
+        let flat = data.as_slice().ok_or_else(|| {
+            TransformError::ShapeError("tensor not contiguous after as_standard_layout".to_string())
+        })?;
         let planes: Vec<&[f32]> = (0..channel)
             .map(|c| &flat[c * height * width..(c + 1) * height * width])
             .collect();
 
+        let merged_patch = merge_size * patch_size;
         let mut out_idx = base_idx;
+
         for _gt in 0..grid_t {
-            for gh_m in 0..grid_h_m {
-                for gw_m in 0..grid_w_m {
+            for pr in 0..grid_h / merge_size {
+                for pc in 0..grid_w / merge_size {
+                    let y0 = pr * merged_patch;
+                    let x0 = pc * merged_patch;
+
                     for mh in 0..merge_size {
                         for mw in 0..merge_size {
-                            let y_base = (gh_m * merge_size + mh) * patch_size;
-                            let x_base = (gw_m * merge_size + mw) * patch_size;
                             for plane in &planes {
                                 for _tp in 0..temporal_patch_size {
-                                    for ph in 0..patch_size {
-                                        let row_start = (y_base + ph) * width + x_base;
-                                        output[out_idx..out_idx + patch_size].copy_from_slice(
-                                            &plane[row_start..row_start + patch_size],
-                                        );
-                                        out_idx += patch_size;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[expect(
-        clippy::expect_used,
-        reason = "as_standard_layout guarantees contiguous memory"
-    )]
-    pub fn reshape_to_patches(
-        &self,
-        tensor: &Array3<f32>,
-        grid_t: usize,
-        grid_h: usize,
-        grid_w: usize,
-    ) -> Vec<f32> {
-        let channel = tensor.shape()[0];
-        let height = tensor.shape()[1];
-        let width = tensor.shape()[2];
-
-        let patch_size = self.config.patch_size;
-        let merge_size = self.config.merge_size;
-        let temporal_patch_size = self.config.temporal_patch_size;
-
-        debug_assert_eq!(height, grid_h * patch_size);
-        debug_assert_eq!(width, grid_w * patch_size);
-
-        // Direct index computation: write output in the permuted order without
-        // materializing intermediate arrays. This replaces the 9D reshape +
-        // permute + as_standard_layout() chain which caused two full copies.
-        //
-        // Output layout (flattened):
-        //   [grid_t, grid_h/merge, grid_w/merge, merge, merge, C, temporal, patch_h, patch_w]
-        // For images: grid_t=1, temporal=1, so the outer two loops are trivial.
-
-        let grid_h_m = grid_h / merge_size;
-        let grid_w_m = grid_w / merge_size;
-        let num_patches = grid_t * grid_h * grid_w;
-        let patch_features = channel * temporal_patch_size * patch_size * patch_size;
-
-        let mut output = vec![0.0f32; num_patches * patch_features];
-        // tensor is [C, H, W] in row-major order.
-        let data = tensor.as_standard_layout();
-        let flat = data
-            .as_slice()
-            .expect("standard layout tensor must be contiguous");
-
-        // Pre-compute channel plane pointers for fast access
-        let planes: Vec<&[f32]> = (0..channel)
-            .map(|c| &flat[c * height * width..(c + 1) * height * width])
-            .collect();
-
-        let mut out_idx = 0;
-        for _gt in 0..grid_t {
-            for gh_m in 0..grid_h_m {
-                for gw_m in 0..grid_w_m {
-                    for mh in 0..merge_size {
-                        for mw in 0..merge_size {
-                            let y_base = (gh_m * merge_size + mh) * patch_size;
-                            let x_base = (gw_m * merge_size + mw) * patch_size;
-                            for plane in &planes {
-                                for _tp in 0..temporal_patch_size {
-                                    for ph in 0..patch_size {
-                                        let row_start = (y_base + ph) * width + x_base;
-                                        output[out_idx..out_idx + patch_size].copy_from_slice(
-                                            &plane[row_start..row_start + patch_size],
-                                        );
+                                    for py in 0..patch_size {
+                                        let row = (y0 + mh * patch_size + py) * width
+                                            + x0
+                                            + mw * patch_size;
+                                        output[out_idx..out_idx + patch_size]
+                                            .copy_from_slice(&plane[row..row + patch_size]);
                                         out_idx += patch_size;
                                     }
                                 }
@@ -363,7 +293,7 @@ impl QwenVLProcessorBase {
             }
         }
 
-        output
+        Ok(())
     }
 }
 
@@ -444,7 +374,7 @@ impl ImagePreProcessor for QwenVLProcessorBase {
             };
 
             // Patchify directly into all_patches to avoid intermediate Vec + copy
-            self.patchify_into(&tensor, grid_t, grid_h, grid_w, &mut all_patches);
+            self.patchify_into(&tensor, grid_t, grid_h, grid_w, &mut all_patches)?;
             patches_per_image.push(num_patches as i64);
         }
 

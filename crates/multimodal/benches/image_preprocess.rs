@@ -217,29 +217,6 @@ fn bench_individual_steps(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_patchify(c: &mut Criterion) {
-    let processor = Qwen3VLProcessor::new();
-    let sizes: &[(u32, u32)] = &[(640, 480), (1024, 768), (1920, 1080)];
-
-    let mut group = c.benchmark_group("step_patchify");
-    for &(w, h) in sizes {
-        // Create a tensor at the resized dimensions
-        let (th, tw) = processor.smart_resize(h as usize, w as usize).unwrap();
-        let image = make_test_image(tw as u32, th as u32);
-        let tensor = transforms::to_tensor(&image);
-        let (grid_t, grid_h, grid_w) = processor.calculate_grid_thw(th, tw, 1);
-
-        group.bench_with_input(
-            BenchmarkId::new("qwen3vl", format!("{w}x{h}")),
-            &(tensor, grid_t, grid_h, grid_w),
-            |b, (t, gt, gh, gw)| {
-                b.iter(|| processor.reshape_to_patches(t, *gt, *gh, *gw));
-            },
-        );
-    }
-    group.finish();
-}
-
 fn bench_llama4_steps(c: &mut Criterion) {
     let processor = Llama4VisionProcessor::new();
     let config =
@@ -299,11 +276,9 @@ criterion_group!(
     bench_llama4,
     bench_llama4_steps,
     bench_individual_steps,
-    bench_patchify,
     bench_fused_to_tensor_normalize,
     bench_to_rgb8,
     bench_resize_detailed,
-    bench_pipeline_breakdown,
 );
 criterion_main!(benches);
 
@@ -383,66 +358,6 @@ fn bench_resize_detailed(c: &mut Criterion) {
             &image,
             |b, img| {
                 b.iter(|| img.resize_exact(tw as u32, th as u32, FilterType::Triangle));
-            },
-        );
-    }
-    group.finish();
-}
-
-fn bench_pipeline_breakdown(c: &mut Criterion) {
-    let processor = Qwen3VLProcessor::new();
-    let config =
-        load_preprocessor_config("/raid/models/Qwen/Qwen3-VL-8B-Instruct").unwrap_or_else(|| {
-            PreProcessorConfig::from_json(
-                r#"{"do_resize": true, "size": {"shortest_edge": 3136, "longest_edge": 12845056}}"#,
-            )
-            .unwrap()
-        });
-
-    let sizes: &[(u32, u32)] = &[(640, 480), (1920, 1080)];
-    let mean = [0.5, 0.5, 0.5];
-    let std_val = [0.5, 0.5, 0.5];
-
-    let mut group = c.benchmark_group("pipeline_breakdown");
-    for &(w, h) in sizes {
-        let image = make_test_image(w, h);
-        let (th, tw) = processor.smart_resize(h as usize, w as usize).unwrap();
-
-        // Full preprocess() call
-        group.bench_with_input(
-            BenchmarkId::new("preprocess_api", format!("{w}x{h}")),
-            &image,
-            |b, img| {
-                let imgs = [img.clone()];
-                b.iter(|| processor.preprocess(&imgs, &config).unwrap());
-            },
-        );
-
-        // Entire manual pipeline
-        group.bench_with_input(
-            BenchmarkId::new("manual_full", format!("{w}x{h}")),
-            &image,
-            |b, img| {
-                b.iter(|| -> Vec<f32> {
-                    let resized =
-                        transforms::resize(img, tw as u32, th as u32, FilterType::Triangle);
-                    let tensor = transforms::to_tensor_and_normalize(&resized, &mean, &std_val);
-                    let (gt, gh, gw) = processor.calculate_grid_thw(th, tw, 1);
-                    processor.reshape_to_patches(&tensor, gt, gh, gw)
-                });
-            },
-        );
-
-        // Skip resize (when src==dst)
-        group.bench_with_input(
-            BenchmarkId::new("no_resize", format!("{w}x{h}")),
-            &image,
-            |b, img| {
-                b.iter(|| -> Vec<f32> {
-                    let tensor = transforms::to_tensor_and_normalize(img, &mean, &std_val);
-                    let (gt, gh, gw) = processor.calculate_grid_thw(h as usize, w as usize, 1);
-                    processor.reshape_to_patches(&tensor, gt, gh, gw)
-                });
             },
         );
     }
