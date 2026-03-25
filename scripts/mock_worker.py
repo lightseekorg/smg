@@ -77,8 +77,21 @@ class MockWorkerHandler(http.server.BaseHTTPRequestHandler):
         # Stream 10-20 token chunks
         num_chunks = 15
         words = [
-            "The", "quick", "brown", "fox", "jumps", "over", "the", "lazy",
-            "dog", "and", "then", "it", "runs", "away", "fast",
+            "The",
+            "quick",
+            "brown",
+            "fox",
+            "jumps",
+            "over",
+            "the",
+            "lazy",
+            "dog",
+            "and",
+            "then",
+            "it",
+            "runs",
+            "away",
+            "fast",
         ]
 
         for i, word in enumerate(words[:num_chunks]):
@@ -90,7 +103,9 @@ class MockWorkerHandler(http.server.BaseHTTPRequestHandler):
                 "choices": [
                     {
                         "index": 0,
-                        "delta": {"content": word + " "} if i > 0 else {"role": "assistant", "content": ""},
+                        "delta": {"content": word + " "}
+                        if i > 0
+                        else {"role": "assistant", "content": ""},
                         "finish_reason": None,
                     }
                 ],

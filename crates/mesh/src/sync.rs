@@ -439,16 +439,17 @@ impl MeshSyncManager {
             version: new_version,
         };
 
-        // Record the operation for delta sync before storing
-        self.stores
-            .tree_ops_pending
-            .entry(key.clone())
-            .or_default()
-            .push(operation);
-
-        if let Err(err) = self.stores.policy.insert(key, state) {
+        if let Err(err) = self.stores.policy.insert(key.clone(), state) {
             return Err(format!("Failed to persist tree state: {err}"));
         }
+
+        // Record the operation for delta sync AFTER successful insert so
+        // the pending buffer never contains ops that failed to persist.
+        self.stores
+            .tree_ops_pending
+            .entry(key)
+            .or_default()
+            .push(operation);
         debug!(
             "Synced tree operation to mesh: model={} (version: {})",
             model_id, new_version

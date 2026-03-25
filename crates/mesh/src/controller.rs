@@ -438,7 +438,15 @@ impl MeshController {
                                             e,
                                             size_validator.max_size()
                                         );
-                                        collector.mark_sent(*store_type, updates);
+                                        // For tree deltas, do NOT mark as sent — skip this
+                                        // round and let the pending buffer trim in mark_sent
+                                        // eventually reduce the size.  For other stores,
+                                        // mark_sent prevents an infinite retry loop (PR #808).
+                                        let is_tree_delta =
+                                            updates.iter().any(|u| u.key.starts_with("tree:"));
+                                        if !is_tree_delta {
+                                            collector.mark_sent(*store_type, updates);
+                                        }
                                         continue;
                                     }
 
@@ -598,33 +606,47 @@ impl MeshController {
                                                             == "tree_state_delta"
                                                         {
                                                             // Delta: apply only the new operations
-                                                            if let Ok(delta) =
-                                                                super::tree_ops::TreeStateDelta::from_bytes(
+                                                            match super::tree_ops::TreeStateDelta::from_bytes(
                                                                     &policy_state.config,
                                                                 )
                                                             {
-                                                                sync_manager
-                                                                    .apply_remote_tree_delta(
-                                                                        delta, actor,
+                                                                Ok(delta) => {
+                                                                    sync_manager
+                                                                        .apply_remote_tree_delta(
+                                                                            delta, actor,
+                                                                        );
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to deserialize tree state delta for model {}: {e}",
+                                                                        policy_state.model_id
                                                                     );
+                                                                }
                                                             }
                                                         } else if policy_state.policy_type
                                                             == "tree_state"
                                                         {
                                                             // Full state: replace (backward compatible)
-                                                            if let Ok(tree_state) =
-                                                                super::tree_ops::TreeState::from_bytes(
+                                                            match super::tree_ops::TreeState::from_bytes(
                                                                     &policy_state.config,
                                                                 )
                                                             {
-                                                                sync_manager
-                                                                    .apply_remote_tree_operation(
-                                                                        policy_state
-                                                                            .model_id
-                                                                            .clone(),
-                                                                        tree_state,
-                                                                        actor,
+                                                                Ok(tree_state) => {
+                                                                    sync_manager
+                                                                        .apply_remote_tree_operation(
+                                                                            policy_state
+                                                                                .model_id
+                                                                                .clone(),
+                                                                            tree_state,
+                                                                            actor,
+                                                                        );
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to deserialize tree state for model {}: {e}",
+                                                                        policy_state.model_id
                                                                     );
+                                                                }
                                                             }
                                                         } else {
                                                             // Regular policy state update

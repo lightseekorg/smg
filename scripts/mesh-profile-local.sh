@@ -40,6 +40,7 @@ METRICS_BASE_PORT=29000
 mkdir -p "$LOG_DIR"
 
 start_mock_workers() {
+    : > "$LOG_DIR/worker_pids.txt"
     echo "Starting $NUM_WORKERS mock workers..."
     for i in $(seq 0 $((NUM_WORKERS - 1))); do
         port=$((WORKER_BASE_PORT + i))
@@ -55,6 +56,7 @@ start_gateways() {
         exit 1
     fi
 
+    : > "$LOG_DIR/gateway_pids.txt"
     echo "Starting $NUM_GATEWAYS SMG gateway replicas with mesh..."
 
     for i in $(seq 0 $((NUM_GATEWAYS - 1))); do
@@ -107,6 +109,9 @@ register_workers() {
             -d "{\"url\": \"http://127.0.0.1:$worker_port\"}" 2>&1) && registered=$((registered + 1))
     done
     echo "Registered $registered/$NUM_WORKERS workers"
+    if [ "$registered" -ne "$NUM_WORKERS" ]; then
+        echo "WARNING: only $registered of $NUM_WORKERS workers registered — some may have failed to start"
+    fi
 
     # Verify workers synced to other gateways
     echo "Waiting 3s for mesh sync..."

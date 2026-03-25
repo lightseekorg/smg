@@ -69,12 +69,9 @@ pub fn init_mesh_metrics() {
     // Sync round profiling metrics
     describe_histogram!(
         "router_mesh_sync_round_duration_seconds",
-        "Duration of a mesh sync round in seconds"
+        "Duration of a mesh sync round"
     );
-    describe_histogram!(
-        "router_mesh_sync_batch_bytes",
-        "Size of mesh sync batch in bytes"
-    );
+    describe_histogram!("router_mesh_sync_batch_bytes", "Size of mesh sync batch");
     describe_gauge!(
         "router_mesh_store_workers",
         "Number of entries in worker store"

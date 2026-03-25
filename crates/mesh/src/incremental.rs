@@ -181,12 +181,25 @@ impl IncrementalUpdateCollector {
                         let mut sent_delta = false;
                         if let Some(pending) = self.stores.tree_ops_pending.get(key) {
                             if !pending.is_empty() {
+                                // Only send the unsent tail of the pending buffer.
+                                // `pending` holds all ops since the buffer was last
+                                // trimmed.  `last_sent_version` records what the peer
+                                // has already seen, so we skip ops the peer already has.
+                                let total_pending = pending.len() as u64;
+                                let base_version = current_version.saturating_sub(total_pending);
+                                let already_sent =
+                                    last_sent_version.saturating_sub(base_version) as usize;
+                                let unsent_start = already_sent.min(pending.len());
+                                let unsent_ops = &pending[unsent_start..];
+                                if unsent_ops.is_empty() {
+                                    // Peer is up-to-date; skip this key
+                                    continue;
+                                }
                                 let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
                                 let delta = TreeStateDelta {
                                     model_id: model_id.clone(),
-                                    operations: pending.clone(),
-                                    base_version: current_version
-                                        .saturating_sub(pending.len() as u64),
+                                    operations: unsent_ops.to_vec(),
+                                    base_version: last_sent_version,
                                     new_version: current_version,
                                 };
                                 if let Ok(delta_bytes) = delta.to_bytes() {

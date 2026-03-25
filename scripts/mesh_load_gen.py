@@ -5,7 +5,7 @@ Sends chat completion requests with varied prompts to build up the
 radix tree in cache-aware routing. Uses diverse prompt prefixes to
 create realistic tree branching.
 
-Usage: python3 scripts/mesh_load_gen.py [--rps 200] [--duration 60] [--gateway-port 30000]
+Usage: python3 scripts/mesh_load_gen.py [--rps 200] [--duration 60] [--gateway-ports 30000]
 """
 
 import argparse
@@ -30,18 +30,53 @@ TOPICS = [
 ]
 
 SUBJECTS = [
-    "machine learning", "neural networks", "transformers", "attention mechanisms",
-    "gradient descent", "backpropagation", "convolutional networks", "recurrent networks",
-    "reinforcement learning", "generative models", "diffusion models", "tokenization",
-    "embedding layers", "fine-tuning", "transfer learning", "data augmentation",
-    "batch normalization", "dropout regularization", "learning rate scheduling",
-    "distributed training", "model parallelism", "data parallelism", "pipeline parallelism",
-    "quantization", "pruning", "knowledge distillation", "mixture of experts",
-    "retrieval augmented generation", "chain of thought", "prompt engineering",
-    "RLHF", "DPO", "constitutional AI", "safety alignment", "red teaming",
-    "kubernetes deployment", "docker containers", "microservices", "load balancing",
-    "circuit breakers", "rate limiting", "health checks", "graceful shutdown",
-    "cache-aware routing", "prefix caching", "KV cache management", "radix trees",
+    "machine learning",
+    "neural networks",
+    "transformers",
+    "attention mechanisms",
+    "gradient descent",
+    "backpropagation",
+    "convolutional networks",
+    "recurrent networks",
+    "reinforcement learning",
+    "generative models",
+    "diffusion models",
+    "tokenization",
+    "embedding layers",
+    "fine-tuning",
+    "transfer learning",
+    "data augmentation",
+    "batch normalization",
+    "dropout regularization",
+    "learning rate scheduling",
+    "distributed training",
+    "model parallelism",
+    "data parallelism",
+    "pipeline parallelism",
+    "quantization",
+    "pruning",
+    "knowledge distillation",
+    "mixture of experts",
+    "retrieval augmented generation",
+    "chain of thought",
+    "prompt engineering",
+    "RLHF",
+    "DPO",
+    "constitutional AI",
+    "safety alignment",
+    "red teaming",
+    "kubernetes deployment",
+    "docker containers",
+    "microservices",
+    "load balancing",
+    "circuit breakers",
+    "rate limiting",
+    "health checks",
+    "graceful shutdown",
+    "cache-aware routing",
+    "prefix caching",
+    "KV cache management",
+    "radix trees",
 ]
 
 EXTRAS = [
@@ -122,16 +157,14 @@ async def run_load(
             if now - last_report >= report_interval:
                 recent_rps = (stats["success"] - last_success) / (now - last_report)
                 avg_latency = (
-                    stats["total_latency"] / stats["success"]
-                    if stats["success"] > 0
-                    else 0
+                    stats["total_latency"] / stats["success"] if stats["success"] > 0 else 0
                 )
                 print(
                     f"  [{int(now - end_time + duration)}s] "
                     f"rps={recent_rps:.0f} "
                     f"total={stats['success']} "
                     f"errors={stats['errors']} "
-                    f"avg_latency={avg_latency*1000:.0f}ms"
+                    f"avg_latency={avg_latency * 1000:.0f}ms"
                 )
                 last_report = now
                 last_success = stats["success"]
@@ -144,7 +177,7 @@ async def run_load(
 
     print(f"\nDone. {stats['success']} successful, {stats['errors']} errors")
     if stats["success"] > 0:
-        print(f"Avg latency: {stats['total_latency']/stats['success']*1000:.0f}ms")
+        print(f"Avg latency: {stats['total_latency'] / stats['success'] * 1000:.0f}ms")
 
 
 def main():
