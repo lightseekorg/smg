@@ -315,8 +315,7 @@ impl WorkerManager {
             .any(|w| matches!(w.connection_mode(), ConnectionMode::Grpc));
 
         if !http_workers.is_empty() {
-            let responses =
-                fan_out(&http_workers, client, "metrics", reqwest::Method::GET).await;
+            let responses = fan_out(&http_workers, client, "metrics", reqwest::Method::GET).await;
             for resp in responses {
                 if let Ok(r) = resp.result {
                     if r.status().is_success() {
@@ -340,7 +339,9 @@ impl WorkerManager {
                     });
                 }
                 Err(e) => {
-                    warn!("Failed to collect gRPC worker metrics from PROMETHEUS_MULTIPROC_DIR: {e}");
+                    warn!(
+                        "Failed to collect gRPC worker metrics from PROMETHEUS_MULTIPROC_DIR: {e}"
+                    );
                 }
             }
         }
