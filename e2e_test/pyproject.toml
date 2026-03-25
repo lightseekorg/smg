@@ -28,6 +28,12 @@ dev = [
   "ruff",
 ]
 
+[tool.setuptools]
+# No Python packages to build — this project is a test suite.
+# Dependencies are declared here so CI can `pip install e2e_test/`.
+py-modules = []
+packages = []
+
 [tool.pytest.ini_options]
 testpaths = ["."]
 markers = [
