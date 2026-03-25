@@ -126,6 +126,7 @@ MODEL_SPECS: dict[str, dict] = {
             "--max-model-len=163840",  # 160K context length (vLLM)
             "--attention-backend=FLASHINFER",  # FLASHINFER attention backend
         ],
+        "startup_timeout": 1200,  # Large MoE model may need extra download/load time
     },
     # Llama-4-Scout (17B with 16 experts) - Nightly benchmarks
     "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
@@ -145,6 +146,7 @@ MODEL_SPECS: dict[str, dict] = {
             "--max-model-len=196608",
             "--attention-backend=FLASHINFER",
         ],
+        "startup_timeout": 1200,  # Large MoE model may need extra download/load time
     },
     # Llama-3.3-70B - Nightly benchmarks
     "meta-llama/Llama-3.3-70B-Instruct": {
