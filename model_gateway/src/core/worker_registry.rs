@@ -1053,12 +1053,17 @@ impl smg_mesh::WorkerStateSubscriber for WorkerRegistry {
             .model(ModelCard::new(&state.model_id))
             .build();
 
+        // Mirror the originating node's health status rather than defaulting
+        // to healthy. The local health checker will update this once it runs.
+        worker.set_healthy(state.health);
+
         // register_inner skips mesh sync to avoid version-bump loop.
         if let Some(id) = self.register_inner(Arc::new(worker)) {
-            tracing::debug!(
+            tracing::info!(
                 worker_id = %id.as_str(),
                 url = %state.url,
                 model = %state.model_id,
+                healthy = state.health,
                 "Registered mesh-synced worker into local registry"
             );
         }
