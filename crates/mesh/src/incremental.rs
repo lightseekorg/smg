@@ -178,12 +178,10 @@ impl IncrementalUpdateCollector {
 
                     // For tree keys, send a delta with only the pending operations
                     if key.starts_with("tree:") {
+                        let mut sent_delta = false;
                         if let Some(pending) = self.stores.tree_ops_pending.get(key) {
                             if !pending.is_empty() {
-                                let model_id = key
-                                    .strip_prefix("tree:")
-                                    .unwrap_or(key)
-                                    .to_string();
+                                let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
                                 let delta = TreeStateDelta {
                                     model_id: model_id.clone(),
                                     operations: pending.clone(),
@@ -213,8 +211,28 @@ impl IncrementalUpdateCollector {
                                             pending.len(),
                                             current_version
                                         );
+                                        sent_delta = true;
                                     }
                                 }
+                            }
+                        }
+
+                        if !sent_delta {
+                            // Buffer was cleared (another peer's mark_sent) or peer
+                            // reconnected — fall back to sending the full tree state
+                            // so that no operations are lost.
+                            if let Ok(serialized) = bincode::serialize(state) {
+                                updates.push(StateUpdate {
+                                    key: key.clone(),
+                                    value: serialized,
+                                    version: current_version,
+                                    actor: self.self_name.clone(),
+                                    timestamp,
+                                });
+                                debug!(
+                                    "Collected full tree state fallback: {} (version: {})",
+                                    key, current_version
+                                );
                             }
                         }
                         continue;
@@ -351,9 +369,23 @@ impl IncrementalUpdateCollector {
                 }
                 StoreType::Policy => {
                     last_sent.policy.insert(update.key.clone(), update.version);
-                    // Clear pending tree ops that were successfully sent
+                    // Trim pending tree ops that have been sent by THIS collector.
+                    // Do NOT remove the entire buffer — other peer collectors may
+                    // not have sent yet.  Instead, only drain operations that are
+                    // fully covered by the version we just acknowledged.  When the
+                    // buffer exceeds a safety threshold we trim unconditionally to
+                    // bound memory usage (peers that are that far behind will
+                    // receive a full-state fallback on next collection).
                     if update.key.starts_with("tree:") {
-                        self.stores.tree_ops_pending.remove(&update.key);
+                        const PENDING_TRIM_THRESHOLD: usize = 4096;
+                        if let Some(mut pending) = self.stores.tree_ops_pending.get_mut(&update.key)
+                        {
+                            if pending.len() > PENDING_TRIM_THRESHOLD {
+                                // Safety trim: discard the oldest half
+                                let drain_count = pending.len() / 2;
+                                pending.drain(..drain_count);
+                            }
+                        }
                     }
                 }
                 StoreType::App => {

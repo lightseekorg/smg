@@ -29,8 +29,10 @@ use super::{
     stores::StateStores,
     sync::MeshSyncManager,
 };
-use crate::flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE};
-use crate::metrics;
+use crate::{
+    flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
+    metrics,
+};
 
 pub struct MeshController {
     state: ClusterState,
@@ -591,10 +593,46 @@ impl MeshController {
                                                         &state_update.value
                                                     ) {
                                                         let actor = Some(state_update.actor.clone());
-                                                        sync_manager.apply_remote_policy_state(
-                                                            policy_state,
-                                                            actor,
-                                                        );
+
+                                                        if policy_state.policy_type
+                                                            == "tree_state_delta"
+                                                        {
+                                                            // Delta: apply only the new operations
+                                                            if let Ok(delta) =
+                                                                super::tree_ops::TreeStateDelta::from_bytes(
+                                                                    &policy_state.config,
+                                                                )
+                                                            {
+                                                                sync_manager
+                                                                    .apply_remote_tree_delta(
+                                                                        delta, actor,
+                                                                    );
+                                                            }
+                                                        } else if policy_state.policy_type
+                                                            == "tree_state"
+                                                        {
+                                                            // Full state: replace (backward compatible)
+                                                            if let Ok(tree_state) =
+                                                                super::tree_ops::TreeState::from_bytes(
+                                                                    &policy_state.config,
+                                                                )
+                                                            {
+                                                                sync_manager
+                                                                    .apply_remote_tree_operation(
+                                                                        policy_state
+                                                                            .model_id
+                                                                            .clone(),
+                                                                        tree_state,
+                                                                        actor,
+                                                                    );
+                                                            }
+                                                        } else {
+                                                            // Regular policy state update
+                                                            sync_manager.apply_remote_policy_state(
+                                                                policy_state,
+                                                                actor,
+                                                            );
+                                                        }
                                                     }
                                                 }
                                                 LocalStoreType::RateLimit => {

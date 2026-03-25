@@ -87,10 +87,7 @@ pub fn init_mesh_metrics() {
         "router_mesh_store_memberships",
         "Number of entries in membership store"
     );
-    describe_gauge!(
-        "router_mesh_store_apps",
-        "Number of entries in app store"
-    );
+    describe_gauge!("router_mesh_store_apps", "Number of entries in app store");
 
     // Rate-limit and LB drift metrics
     describe_gauge!(
