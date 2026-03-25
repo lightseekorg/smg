@@ -303,24 +303,26 @@ structs on SELECT.
 ### Extra Table Writes
 
 Extra table writes let hooks insert rows into additional side tables in the
-main write flow on supported operations. This is useful for scheduling jobs,
-writing audit records, and similar side effects.
+main write flow on supported operations. This is useful for outbox/event
+patterns, audit records, and similar side effects.
+
+Use the storage factory to wire hook wrappers so backend capabilities are
+configured correctly for side writes.
 
 Configure side tables in `SchemaConfig`:
 
 ```yaml
 schema:
   extra_tables:
-    ltm_jobs:
-      table: "ltm_jobs"
+    event_outbox:
+      table: "event_outbox"
       columns:
-        response_id:
+        entity_id:
           sql_type: "VARCHAR(64)"
-        tenant_id:
-          sql_type: "VARCHAR(128)"
-        status:
-          sql_type: "VARCHAR(32)"
-          default_value: "pending"
+        event_type:
+          sql_type: "VARCHAR(64)"
+        payload:
+          sql_type: "JSON"
 ```
 
 A before-hook populates extra table writes via `HookWrites`:
@@ -329,10 +331,10 @@ A before-hook populates extra table writes via `HookWrites`:
 fn before(...) -> Result<BeforeHookResult, HookError> {
     let mut writes = HookWrites::default();
     writes.extra_table_writes.push(ExtraTableWrite {
-        table: "ltm_jobs".to_string(),
+        table: "event_outbox".to_string(),
         row: HashMap::from([
-            ("response_id".to_string(), json!("resp_123")),
-            ("tenant_id".to_string(), json!("acme-corp")),
+            ("entity_id".to_string(), json!("resp_123")),
+            ("event_type".to_string(), json!("response.stored")),
         ]),
     });
     Ok(BeforeHookResult::Continue(writes))
@@ -341,9 +343,11 @@ fn before(...) -> Result<BeforeHookResult, HookError> {
 
 The backend resolves each write against the `extra_tables` schema config:
 unknown columns are rejected, missing columns with `default_value` are filled
-in. The INSERT executes on the same connection as the main write (Oracle uses
-the same `Connection` inside `spawn_blocking`; Postgres uses the same pooled
-`Client`).
+in. The INSERT executes on the same backend connection used for the main write.
+
+Current operation scope: side-table writes are enabled for
+`CreateConversation`, `CreateItem`, `LinkItem`, and `StoreResponse`.
+`LinkItems` is intentionally rejected in the current implementation.
 
 Implementation note: explicit transaction semantics and atomicity guarantees
 are not provided by this change and are handled separately. This change

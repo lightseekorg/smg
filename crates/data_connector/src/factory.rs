@@ -42,6 +42,11 @@ pub struct StorageFactoryConfig<'a> {
     pub hook: Option<Arc<dyn StorageHook>>,
 }
 
+/// Whether the selected backend can persist side-table writes from hooks.
+fn backend_supports_side_writes(backend: &HistoryBackend) -> bool {
+    matches!(backend, HistoryBackend::Postgres | HistoryBackend::Oracle)
+}
+
 /// Create all three storage backends based on configuration.
 ///
 /// # Arguments
@@ -140,11 +145,30 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageT
     // Wrap backends in hooked storage when a hook is provided
     if let Some(hook) = config.hook {
         info!("Wrapping storage backends with hook");
-        Ok((
-            Arc::new(HookedResponseStorage::new(resp, hook.clone())),
-            Arc::new(HookedConversationStorage::new(conv, hook.clone())),
-            Arc::new(HookedConversationItemStorage::new(items, hook)),
-        ))
+        let side_writes_supported = backend_supports_side_writes(config.backend);
+        if side_writes_supported {
+            Ok((
+                Arc::new(HookedResponseStorage::with_side_writes(
+                    resp,
+                    hook.clone(),
+                    true,
+                )),
+                Arc::new(HookedConversationStorage::with_side_writes(
+                    conv,
+                    hook.clone(),
+                    true,
+                )),
+                Arc::new(HookedConversationItemStorage::with_side_writes(
+                    items, hook, true,
+                )),
+            ))
+        } else {
+            Ok((
+                Arc::new(HookedResponseStorage::new(resp, hook.clone())),
+                Arc::new(HookedConversationStorage::new(conv, hook.clone())),
+                Arc::new(HookedConversationItemStorage::new(items, hook)),
+            ))
+        }
     } else {
         Ok((resp, conv, items))
     }
@@ -171,6 +195,7 @@ fn create_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageTuple, Stri
     ))
 }
 
+/// Create Postgres storage backends and run startup migrations/initializers.
 async fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<StorageTuple, String> {
     let store = PostgresStore::new(postgres_cfg.clone())?;
     let postgres_resp = PostgresResponseStorage::new(store.clone())
@@ -202,6 +227,7 @@ async fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<Storag
     ))
 }
 
+/// Create Redis storage backends with a shared Redis connection manager.
 fn create_redis_storage(redis_cfg: &RedisConfig) -> Result<StorageTuple, String> {
     let store = RedisStore::new(redis_cfg.clone())?;
     let redis_resp = RedisResponseStorage::new(store.clone());

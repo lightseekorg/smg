@@ -31,13 +31,14 @@ use crate::{
 async fn run_before<E>(
     hook: &dyn StorageHook,
     op: StorageOperation,
+    side_writes_supported: bool,
     payload: &serde_json::Value,
     map_err: fn(String) -> E,
 ) -> Result<HookWrites, E> {
     let ctx = current_request_context();
     match hook.before(op, ctx.as_ref(), payload).await {
         Ok(BeforeHookResult::Continue(writes)) => {
-            reject_unsupported_side_writes(op, &writes, map_err)?;
+            reject_unsupported_side_writes(op, side_writes_supported, &writes, map_err)?;
             Ok(writes)
         }
         Ok(BeforeHookResult::Reject(msg)) => Err(map_err(msg)),
@@ -48,29 +49,44 @@ async fn run_before<E>(
     }
 }
 
-fn supports_side_writes(op: StorageOperation) -> bool {
+/// Whether the operation currently participates in side-table write flow.
+fn operation_supports_side_writes(op: StorageOperation) -> bool {
     matches!(
         op,
         StorageOperation::CreateConversation
             | StorageOperation::CreateItem
             | StorageOperation::LinkItem
-            | StorageOperation::LinkItems
             | StorageOperation::StoreResponse
     )
 }
 
+/// Validate side-table writes against backend capability and operation policy.
 fn reject_unsupported_side_writes<E>(
     op: StorageOperation,
+    side_writes_supported: bool,
     writes: &HookWrites,
     map_err: fn(String) -> E,
 ) -> Result<(), E> {
-    if writes.extra_table_writes.is_empty() || supports_side_writes(op) {
+    if writes.extra_table_writes.is_empty() {
+        return Ok(());
+    }
+
+    if !side_writes_supported {
+        return Err(map_err(
+            "current storage backend does not support extra_table_writes; \
+             side writes are available only on backends with configured \
+             extra-table persistence support"
+                .to_string(),
+        ));
+    }
+
+    if operation_supports_side_writes(op) {
         return Ok(());
     }
 
     Err(map_err(format!(
-        "operation '{op:?}' does not support extra_table_writes in the current implementation; \
-         side writes are supported only for create/store/link write operations"
+        "operation '{op:?}' does not currently support extra_table_writes; \
+         side writes are enabled for create/store/link single-item write operations"
     )))
 }
 
@@ -95,11 +111,31 @@ async fn run_after(
 pub struct HookedConversationStorage {
     inner: Arc<dyn ConversationStorage>,
     hook: Arc<dyn StorageHook>,
+    side_writes_supported: bool,
 }
 
 impl HookedConversationStorage {
+    /// Create a hooked conversation storage wrapper.
+    ///
+    /// This constructor keeps side-table writes disabled by default. Prefer
+    /// wiring through `StorageFactory` (or use `with_side_writes`) when the
+    /// backend supports `extra_table_writes`.
     pub fn new(inner: Arc<dyn ConversationStorage>, hook: Arc<dyn StorageHook>) -> Self {
-        Self { inner, hook }
+        Self::with_side_writes(inner, hook, false)
+    }
+
+    /// Create a hooked conversation storage wrapper with explicit side-write
+    /// capability flag provided by backend wiring.
+    pub fn with_side_writes(
+        inner: Arc<dyn ConversationStorage>,
+        hook: Arc<dyn StorageHook>,
+        side_writes_supported: bool,
+    ) -> Self {
+        Self {
+            inner,
+            hook,
+            side_writes_supported,
+        }
     }
 }
 
@@ -113,6 +149,7 @@ impl ConversationStorage for HookedConversationStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::CreateConversation,
+            self.side_writes_supported,
             &payload,
             ConversationStorageError::StorageError,
         )
@@ -142,6 +179,7 @@ impl ConversationStorage for HookedConversationStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::GetConversation,
+            self.side_writes_supported,
             &payload,
             ConversationStorageError::StorageError,
         )
@@ -171,6 +209,7 @@ impl ConversationStorage for HookedConversationStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::UpdateConversation,
+            self.side_writes_supported,
             &payload,
             ConversationStorageError::StorageError,
         )
@@ -197,6 +236,7 @@ impl ConversationStorage for HookedConversationStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::DeleteConversation,
+            self.side_writes_supported,
             &payload,
             ConversationStorageError::StorageError,
         )
@@ -225,11 +265,31 @@ impl ConversationStorage for HookedConversationStorage {
 pub struct HookedConversationItemStorage {
     inner: Arc<dyn ConversationItemStorage>,
     hook: Arc<dyn StorageHook>,
+    side_writes_supported: bool,
 }
 
 impl HookedConversationItemStorage {
+    /// Create a hooked conversation-item storage wrapper.
+    ///
+    /// This constructor keeps side-table writes disabled by default. Prefer
+    /// wiring through `StorageFactory` (or use `with_side_writes`) when the
+    /// backend supports `extra_table_writes`.
     pub fn new(inner: Arc<dyn ConversationItemStorage>, hook: Arc<dyn StorageHook>) -> Self {
-        Self { inner, hook }
+        Self::with_side_writes(inner, hook, false)
+    }
+
+    /// Create a hooked conversation-item storage wrapper with explicit
+    /// side-write capability flag provided by backend wiring.
+    pub fn with_side_writes(
+        inner: Arc<dyn ConversationItemStorage>,
+        hook: Arc<dyn StorageHook>,
+        side_writes_supported: bool,
+    ) -> Self {
+        Self {
+            inner,
+            hook,
+            side_writes_supported,
+        }
     }
 }
 
@@ -243,6 +303,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::CreateItem,
+            self.side_writes_supported,
             &payload,
             ConversationItemStorageError::StorageError,
         )
@@ -273,6 +334,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::LinkItem,
+            self.side_writes_supported,
             &payload,
             ConversationItemStorageError::StorageError,
         )
@@ -306,6 +368,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::LinkItems,
+            self.side_writes_supported,
             &payload,
             ConversationItemStorageError::StorageError,
         )
@@ -338,6 +401,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::ListItems,
+            self.side_writes_supported,
             &payload,
             ConversationItemStorageError::StorageError,
         )
@@ -366,6 +430,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::GetItem,
+            self.side_writes_supported,
             &payload,
             ConversationItemStorageError::StorageError,
         )
@@ -395,6 +460,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::IsItemLinked,
+            self.side_writes_supported,
             &payload,
             ConversationItemStorageError::StorageError,
         )
@@ -424,6 +490,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::DeleteItem,
+            self.side_writes_supported,
             &payload,
             ConversationItemStorageError::StorageError,
         )
@@ -451,11 +518,31 @@ impl ConversationItemStorage for HookedConversationItemStorage {
 pub struct HookedResponseStorage {
     inner: Arc<dyn ResponseStorage>,
     hook: Arc<dyn StorageHook>,
+    side_writes_supported: bool,
 }
 
 impl HookedResponseStorage {
+    /// Create a hooked response storage wrapper.
+    ///
+    /// This constructor keeps side-table writes disabled by default. Prefer
+    /// wiring through `StorageFactory` (or use `with_side_writes`) when the
+    /// backend supports `extra_table_writes`.
     pub fn new(inner: Arc<dyn ResponseStorage>, hook: Arc<dyn StorageHook>) -> Self {
-        Self { inner, hook }
+        Self::with_side_writes(inner, hook, false)
+    }
+
+    /// Create a hooked response storage wrapper with explicit side-write
+    /// capability flag provided by backend wiring.
+    pub fn with_side_writes(
+        inner: Arc<dyn ResponseStorage>,
+        hook: Arc<dyn StorageHook>,
+        side_writes_supported: bool,
+    ) -> Self {
+        Self {
+            inner,
+            hook,
+            side_writes_supported,
+        }
     }
 }
 
@@ -466,6 +553,7 @@ impl ResponseStorage for HookedResponseStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::StoreResponse,
+            self.side_writes_supported,
             &payload,
             ResponseStorageError::StorageError,
         )
@@ -494,6 +582,7 @@ impl ResponseStorage for HookedResponseStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::GetResponse,
+            self.side_writes_supported,
             &payload,
             ResponseStorageError::StorageError,
         )
@@ -519,6 +608,7 @@ impl ResponseStorage for HookedResponseStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::DeleteResponse,
+            self.side_writes_supported,
             &payload,
             ResponseStorageError::StorageError,
         )
@@ -547,6 +637,7 @@ impl ResponseStorage for HookedResponseStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::GetResponseChain,
+            self.side_writes_supported,
             &payload,
             ResponseStorageError::StorageError,
         )
@@ -579,6 +670,7 @@ impl ResponseStorage for HookedResponseStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::ListIdentifierResponses,
+            self.side_writes_supported,
             &payload,
             ResponseStorageError::StorageError,
         )
@@ -607,6 +699,7 @@ impl ResponseStorage for HookedResponseStorage {
         let writes = run_before(
             &*self.hook,
             StorageOperation::DeleteIdentifierResponses,
+            self.side_writes_supported,
             &payload,
             ResponseStorageError::StorageError,
         )
@@ -908,7 +1001,7 @@ mod tests {
         }
 
         let inner = Arc::new(MemoryResponseStorage::new());
-        let hooked = HookedResponseStorage::new(inner, Arc::new(SideWriteHook));
+        let hooked = HookedResponseStorage::with_side_writes(inner, Arc::new(SideWriteHook), true);
 
         let mut resp = StoredResponse::new(None);
         resp.input = json!("hello");
@@ -917,6 +1010,54 @@ mod tests {
             .await
             .expect("store should pass");
         assert!(!id.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn link_items_rejects_extra_table_writes_currently() {
+        struct SideWriteHook;
+
+        #[async_trait]
+        impl StorageHook for SideWriteHook {
+            async fn before(
+                &self,
+                _operation: StorageOperation,
+                _context: Option<&RequestContext>,
+                _payload: &serde_json::Value,
+            ) -> Result<BeforeHookResult, HookError> {
+                Ok(BeforeHookResult::Continue(HookWrites {
+                    extra_columns: ExtraColumns::new(),
+                    extra_table_writes: vec![ExtraTableWrite {
+                        table: "event_outbox".to_string(),
+                        row: HashMap::from([("event_type".to_string(), json!("item.linked"))]),
+                    }],
+                }))
+            }
+
+            async fn after(
+                &self,
+                _op: StorageOperation,
+                _ctx: Option<&RequestContext>,
+                _payload: &serde_json::Value,
+                _result: &serde_json::Value,
+                writes: &HookWrites,
+            ) -> Result<HookWrites, HookError> {
+                Ok(writes.clone())
+            }
+        }
+
+        let inner = Arc::new(MemoryConversationItemStorage::new());
+        let hooked =
+            HookedConversationItemStorage::with_side_writes(inner, Arc::new(SideWriteHook), true);
+
+        let err = hooked
+            .link_items(&ConversationId::from("conv_1"), &[])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not currently support extra_table_writes"),
+            "unexpected: {err}"
+        );
     }
 
     // ── Item tests ───────────────────────────────────────────────────────
