@@ -300,7 +300,12 @@ pub const GLOBAL_RATE_LIMIT_KEY: &str = "global_rate_limit";
 /// Key for global rate limit counter in RateLimitStore
 pub const GLOBAL_RATE_LIMIT_COUNTER_KEY: &str = "global";
 
-/// Worker state entry
+/// Worker state entry synced across mesh nodes.
+///
+/// Contains runtime state (`health`, `load`) plus an opaque `spec` blob
+/// carrying the full worker configuration. The mesh crate doesn't interpret
+/// `spec` — the gateway serializes `WorkerSpec` into it on the sending side
+/// and deserializes on the receiving side.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct WorkerState {
     pub worker_id: String,
@@ -309,6 +314,10 @@ pub struct WorkerState {
     pub health: bool,
     pub load: f64,
     pub version: u64,
+    /// Opaque worker specification (bincode-serialized WorkerSpec from the
+    /// gateway). Empty on old nodes that don't populate this field.
+    #[serde(default)]
+    pub spec: Vec<u8>,
 }
 
 // Implement Hash manually for WorkerState (excluding f64)
@@ -318,9 +327,9 @@ impl std::hash::Hash for WorkerState {
         self.model_id.hash(state);
         self.url.hash(state);
         self.health.hash(state);
-        // f64 cannot be hashed directly, use a workaround
         (self.load as i64).hash(state);
         self.version.hash(state);
+        self.spec.hash(state);
     }
 }
 
@@ -806,6 +815,7 @@ mod tests {
             health: true,
             load: 0.5,
             version: 1,
+            spec: vec![],
         };
 
         let _ = store.insert(key.clone(), state.clone());
