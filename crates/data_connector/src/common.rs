@@ -104,7 +104,9 @@ pub(super) fn resolve_extra_table_writes(
             for key in write.row.keys() {
                 if !tc.columns.keys().any(|c| c.eq_ignore_ascii_case(key)) {
                     return Err(format!(
-                        "hook requested unknown column '{key}' for extra table '{alias}'"
+                        "hook requested unknown column '{key}' for extra table alias '{alias}' \
+                         (physical table '{}')",
+                        tc.table
                     ));
                 }
             }
@@ -112,20 +114,16 @@ pub(super) fn resolve_extra_table_writes(
             let columns = sorted_extra_table_column_names(tc)
                 .into_iter()
                 .map(|name| {
-                    let val = write
-                        .row
-                        .iter()
-                        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-                        .map(|(_, value)| value)
-                        .filter(|v| !v.is_null())
-                        .map(value_to_sql_string)
-                        .or_else(|| {
-                            tc.columns
-                                .get(name)
-                                .and_then(|def| def.default_value.as_ref())
-                                .filter(|v| !v.is_null())
-                                .map(value_to_sql_string)
-                        });
+                    let val = resolve_cell_value(
+                        write
+                            .row
+                            .iter()
+                            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                            .map(|(_, value)| value),
+                        tc.columns
+                            .get(name)
+                            .and_then(|def| def.default_value.as_ref()),
+                    );
                     (name.to_string(), val)
                 })
                 .collect();
@@ -164,20 +162,22 @@ pub(super) fn resolve_extra_column_values<'a>(
     sorted_extra_column_names(tc)
         .into_iter()
         .map(|name| {
-            let val = hook_extra
-                .get(name)
-                .filter(|v| !v.is_null())
-                .map(value_to_sql_string)
-                .or_else(|| {
-                    tc.extra_columns
-                        .get(name)
-                        .and_then(|def| def.default_value.as_ref())
-                        .filter(|v| !v.is_null())
-                        .map(value_to_sql_string)
-                });
+            let val = resolve_cell_value(
+                hook_extra.get(name),
+                tc.extra_columns
+                    .get(name)
+                    .and_then(|def| def.default_value.as_ref()),
+            );
             (name, val)
         })
         .collect()
+}
+
+fn resolve_cell_value(primary: Option<&Value>, default: Option<&Value>) -> Option<String> {
+    primary
+        .filter(|v| !v.is_null())
+        .map(value_to_sql_string)
+        .or_else(|| default.filter(|v| !v.is_null()).map(value_to_sql_string))
 }
 
 /// Parse raw JSON string into `ConversationMetadata` (`JsonMap<String, Value>`).
@@ -221,6 +221,8 @@ pub(super) fn parse_json_value(raw: Option<String>) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use serde_json::json;
 
     use super::*;
@@ -807,5 +809,118 @@ mod tests {
         let result = value_to_sql_string(&obj);
         // serde_json::to_string produces compact JSON
         assert_eq!(result, r#"{"key":"value"}"#);
+    }
+
+    #[test]
+    fn resolve_extra_table_writes_prefers_hook_over_default() {
+        let schema = SchemaConfig {
+            extra_tables: HashMap::from([(
+                "ltm_jobs".to_string(),
+                ExtraTableConfig {
+                    table: "ltm_jobs".to_string(),
+                    columns: HashMap::from([
+                        (
+                            "status".to_string(),
+                            crate::schema::ColumnDef {
+                                sql_type: "VARCHAR(32)".to_string(),
+                                default_value: Some(json!("pending")),
+                            },
+                        ),
+                        (
+                            "job_type".to_string(),
+                            crate::schema::ColumnDef {
+                                sql_type: "VARCHAR(64)".to_string(),
+                                default_value: None,
+                            },
+                        ),
+                    ]),
+                },
+            )]),
+            ..SchemaConfig::default()
+        };
+
+        let writes = vec![ExtraTableWrite {
+            table: "ltm_jobs".to_string(),
+            row: HashMap::from([
+                ("status".to_string(), json!("ready")),
+                ("job_type".to_string(), json!("ondemand")),
+            ]),
+        }];
+
+        let resolved = resolve_extra_table_writes(&schema, &writes).expect("should resolve");
+        assert_eq!(resolved.len(), 1);
+        let cols = &resolved[0].columns;
+        assert_eq!(
+            cols.iter()
+                .find(|(k, _)| k == "status")
+                .and_then(|(_, v)| v.clone())
+                .as_deref(),
+            Some("ready")
+        );
+    }
+
+    #[test]
+    fn resolve_extra_table_writes_falls_back_to_default() {
+        let schema = SchemaConfig {
+            extra_tables: HashMap::from([(
+                "ltm_jobs".to_string(),
+                ExtraTableConfig {
+                    table: "ltm_jobs".to_string(),
+                    columns: HashMap::from([(
+                        "status".to_string(),
+                        crate::schema::ColumnDef {
+                            sql_type: "VARCHAR(32)".to_string(),
+                            default_value: Some(json!("pending")),
+                        },
+                    )]),
+                },
+            )]),
+            ..SchemaConfig::default()
+        };
+
+        let writes = vec![ExtraTableWrite {
+            table: "ltm_jobs".to_string(),
+            row: HashMap::new(),
+        }];
+
+        let resolved = resolve_extra_table_writes(&schema, &writes).expect("should resolve");
+        let status = resolved[0]
+            .columns
+            .iter()
+            .find(|(k, _)| k == "status")
+            .and_then(|(_, v)| v.clone());
+        assert_eq!(status.as_deref(), Some("pending"));
+    }
+
+    #[test]
+    fn resolve_extra_table_writes_unknown_column_has_contextual_error() {
+        let schema = SchemaConfig {
+            extra_tables: HashMap::from([(
+                "ltm_jobs".to_string(),
+                ExtraTableConfig {
+                    table: "ltm_jobs".to_string(),
+                    columns: HashMap::from([(
+                        "status".to_string(),
+                        crate::schema::ColumnDef {
+                            sql_type: "VARCHAR(32)".to_string(),
+                            default_value: None,
+                        },
+                    )]),
+                },
+            )]),
+            ..SchemaConfig::default()
+        };
+
+        let writes = vec![ExtraTableWrite {
+            table: "ltm_jobs".to_string(),
+            row: HashMap::from([("unknown".to_string(), json!("x"))]),
+        }];
+
+        let err = resolve_extra_table_writes(&schema, &writes).unwrap_err();
+        assert!(err.contains("alias 'ltm_jobs'"), "unexpected: {err}");
+        assert!(
+            err.contains("physical table 'ltm_jobs'"),
+            "unexpected: {err}"
+        );
     }
 }

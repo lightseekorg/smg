@@ -227,13 +227,13 @@ pub trait StorageHook: Send + Sync + 'static {
 - `before()` returning `Continue(hook_writes)` proceeds with the operation.
   `HookWrites` contains both `extra_columns` (forwarded to the backend for
   persistence in the main table) and `extra_table_writes` (inserted into
-  configured side tables in the same transaction).
+  configured side tables on supported write operations).
 - `before()` returning `Reject(reason)` aborts the operation with an error.
 - `before()` returning `Err(_)` logs a warning and **continues** (non-fatal).
 - `after()` receives the result and hook writes from `before()`. It can
   return modified extra columns for the caller. Note: `extra_table_writes`
   in the `after()` return are ignored — side-table writes only execute from
-  the before-hook to ensure atomicity with the main write.
+  the before-hook in the current implementation.
 
 ### Wiring a Hook
 
@@ -303,9 +303,8 @@ structs on SELECT.
 ### Extra Table Writes
 
 Extra table writes let hooks insert rows into additional side tables in the
-same transaction as the main storage operation. This is useful for scheduling
-jobs, writing audit records, or any case where atomicity with the main write
-is required.
+main write flow on supported operations. This is useful for scheduling jobs,
+writing audit records, and similar side effects.
 
 Configure side tables in `SchemaConfig`:
 
@@ -345,6 +344,10 @@ unknown columns are rejected, missing columns with `default_value` are filled
 in. The INSERT executes on the same connection as the main write (Oracle uses
 the same `Connection` inside `spawn_blocking`; Postgres uses the same pooled
 `Client`).
+
+Implementation note: explicit transaction semantics and atomicity guarantees
+are not provided by this change and are handled separately. This change
+introduces capability and validation boundaries.
 
 ### Skip Columns
 

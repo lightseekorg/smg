@@ -236,7 +236,15 @@ impl SchemaConfig {
         Self::validate_table("responses", &self.responses)?;
         Self::validate_table("conversation_items", &self.conversation_items)?;
         Self::validate_table("conversation_item_links", &self.conversation_item_links)?;
-        Self::validate_extra_tables(&self.extra_tables)?;
+        Self::validate_extra_tables(
+            &self.extra_tables,
+            &[
+                self.conversations.table.as_str(),
+                self.responses.table.as_str(),
+                self.conversation_items.table.as_str(),
+                self.conversation_item_links.table.as_str(),
+            ],
+        )?;
 
         Ok(())
     }
@@ -314,9 +322,14 @@ impl SchemaConfig {
 
     fn validate_extra_tables(
         extra_tables: &HashMap<String, ExtraTableConfig>,
+        core_tables: &[&str],
     ) -> Result<(), String> {
         let mut folded_aliases: HashSet<String> = HashSet::new();
         let mut folded_tables: HashSet<String> = HashSet::new();
+        let folded_core_tables: HashSet<String> = core_tables
+            .iter()
+            .map(|table| table.to_ascii_uppercase())
+            .collect();
 
         for (alias, tc) in extra_tables {
             validate_identifier(alias).map_err(|e| format!("extra_tables key '{alias}': {e}"))?;
@@ -339,6 +352,12 @@ impl SchemaConfig {
             if !folded_tables.insert(tc.table.to_ascii_uppercase()) {
                 return Err(format!(
                     "extra_tables: physical table collision on '{}'",
+                    tc.table
+                ));
+            }
+            if folded_core_tables.contains(&tc.table.to_ascii_uppercase()) {
+                return Err(format!(
+                    "extra_tables['{alias}'].table: '{}' collides with a core storage table name",
                     tc.table
                 ));
             }
@@ -459,6 +478,8 @@ fn validate_sql_type(sql_type: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     // ── Default config ────────────────────────────────────────────────────
@@ -957,6 +978,29 @@ mod tests {
         let err = cfg.validate().unwrap_err();
         assert!(
             err.contains("case-insensitive collision"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_extra_table_colliding_with_core_table_name() {
+        let mut cfg = SchemaConfig::default();
+        cfg.extra_tables.insert(
+            "job_table".to_string(),
+            ExtraTableConfig {
+                table: "responses".to_string(),
+                columns: HashMap::from([(
+                    "job_type".to_string(),
+                    ColumnDef {
+                        sql_type: "VARCHAR(32)".to_string(),
+                        default_value: None,
+                    },
+                )]),
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("collides with a core storage table name"),
             "unexpected: {err}"
         );
     }

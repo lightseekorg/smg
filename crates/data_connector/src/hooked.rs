@@ -36,13 +36,42 @@ async fn run_before<E>(
 ) -> Result<HookWrites, E> {
     let ctx = current_request_context();
     match hook.before(op, ctx.as_ref(), payload).await {
-        Ok(BeforeHookResult::Continue(writes)) => Ok(writes),
+        Ok(BeforeHookResult::Continue(writes)) => {
+            reject_unsupported_side_writes(op, &writes, map_err)?;
+            Ok(writes)
+        }
         Ok(BeforeHookResult::Reject(msg)) => Err(map_err(msg)),
         Err(e) => {
             warn!("before hook error for {op:?}, continuing: {e}");
             Ok(HookWrites::default())
         }
     }
+}
+
+fn supports_side_writes(op: StorageOperation) -> bool {
+    matches!(
+        op,
+        StorageOperation::CreateConversation
+            | StorageOperation::CreateItem
+            | StorageOperation::LinkItem
+            | StorageOperation::LinkItems
+            | StorageOperation::StoreResponse
+    )
+}
+
+fn reject_unsupported_side_writes<E>(
+    op: StorageOperation,
+    writes: &HookWrites,
+    map_err: fn(String) -> E,
+) -> Result<(), E> {
+    if writes.extra_table_writes.is_empty() || supports_side_writes(op) {
+        return Ok(());
+    }
+
+    Err(map_err(format!(
+        "operation '{op:?}' does not support extra_table_writes in the current implementation; \
+         side writes are supported only for create/store/link write operations"
+    )))
 }
 
 /// Run the after-hook, logging any errors (non-fatal).
@@ -605,14 +634,17 @@ impl ResponseStorage for HookedResponseStorage {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        collections::HashMap,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use serde_json::json;
 
     use super::*;
     use crate::{
         context::{with_request_context, RequestContext},
-        hooks::{ExtraColumns, HookError},
+        hooks::{ExtraColumns, ExtraTableWrite, HookError},
         memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage},
     };
 
@@ -744,6 +776,54 @@ mod tests {
         assert_eq!(hook.after_calls(), 1);
     }
 
+    #[tokio::test]
+    async fn unsupported_operation_rejects_non_empty_extra_table_writes() {
+        struct SideWriteHook;
+
+        #[async_trait]
+        impl StorageHook for SideWriteHook {
+            async fn before(
+                &self,
+                _operation: StorageOperation,
+                _context: Option<&RequestContext>,
+                _payload: &serde_json::Value,
+            ) -> Result<BeforeHookResult, HookError> {
+                Ok(BeforeHookResult::Continue(HookWrites {
+                    extra_columns: ExtraColumns::new(),
+                    extra_table_writes: vec![ExtraTableWrite {
+                        table: "ltm_jobs".to_string(),
+                        row: HashMap::from([("job_type".to_string(), json!("ondemand"))]),
+                    }],
+                }))
+            }
+
+            async fn after(
+                &self,
+                _op: StorageOperation,
+                _ctx: Option<&RequestContext>,
+                _payload: &serde_json::Value,
+                _result: &serde_json::Value,
+                writes: &HookWrites,
+            ) -> Result<HookWrites, HookError> {
+                Ok(writes.clone())
+            }
+        }
+
+        let inner = Arc::new(MemoryConversationStorage::new());
+        let conv = inner
+            .create_conversation(NewConversation::default())
+            .await
+            .unwrap();
+        let hooked = HookedConversationStorage::new(inner, Arc::new(SideWriteHook));
+
+        let err = hooked.get_conversation(&conv.id).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not support extra_table_writes"),
+            "unexpected: {err}"
+        );
+    }
+
     // ── Response tests ───────────────────────────────────────────────────
 
     #[tokio::test]
@@ -792,6 +872,51 @@ mod tests {
         assert!(found.is_some());
         assert_eq!(hook.before_calls(), 1);
         assert_eq!(hook.after_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn supported_store_operation_allows_extra_table_writes() {
+        struct SideWriteHook;
+
+        #[async_trait]
+        impl StorageHook for SideWriteHook {
+            async fn before(
+                &self,
+                _operation: StorageOperation,
+                _context: Option<&RequestContext>,
+                _payload: &serde_json::Value,
+            ) -> Result<BeforeHookResult, HookError> {
+                Ok(BeforeHookResult::Continue(HookWrites {
+                    extra_columns: ExtraColumns::new(),
+                    extra_table_writes: vec![ExtraTableWrite {
+                        table: "ltm_jobs".to_string(),
+                        row: HashMap::from([("job_type".to_string(), json!("ondemand"))]),
+                    }],
+                }))
+            }
+
+            async fn after(
+                &self,
+                _op: StorageOperation,
+                _ctx: Option<&RequestContext>,
+                _payload: &serde_json::Value,
+                _result: &serde_json::Value,
+                writes: &HookWrites,
+            ) -> Result<HookWrites, HookError> {
+                Ok(writes.clone())
+            }
+        }
+
+        let inner = Arc::new(MemoryResponseStorage::new());
+        let hooked = HookedResponseStorage::new(inner, Arc::new(SideWriteHook));
+
+        let mut resp = StoredResponse::new(None);
+        resp.input = json!("hello");
+        let id = hooked
+            .store_response(resp)
+            .await
+            .expect("store should pass");
+        assert!(!id.0.is_empty());
     }
 
     // ── Item tests ───────────────────────────────────────────────────────
