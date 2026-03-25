@@ -280,7 +280,9 @@ impl GossipService {
         let listen_addr = self.self_addr;
         let service = GossipServer::new(self)
             .max_decoding_message_size(MAX_MESSAGE_SIZE)
-            .max_encoding_message_size(MAX_MESSAGE_SIZE);
+            .max_encoding_message_size(MAX_MESSAGE_SIZE)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip);
 
         Server::builder()
             .add_service(service)
@@ -297,7 +299,9 @@ impl GossipService {
         let incoming = TcpIncoming::from(listener);
         let service = GossipServer::new(self)
             .max_decoding_message_size(MAX_MESSAGE_SIZE)
-            .max_encoding_message_size(MAX_MESSAGE_SIZE);
+            .max_encoding_message_size(MAX_MESSAGE_SIZE)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip);
         Server::builder()
             .add_service(service)
             .serve_with_incoming_shutdown(incoming, signal)
@@ -624,17 +628,30 @@ impl Gossip for GossipService {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        // Extract actor from StateUpdate
                                                         let actor =
                                                             Some(state_update.actor.clone());
 
-                                                        // Check if this is a tree state update
-                                                        if policy_state.policy_type == "tree_state"
+                                                        if policy_state.policy_type
+                                                            == "tree_state_delta"
                                                         {
-                                                            // Deserialize tree state
+                                                            // Delta: apply only the new operations
+                                                            if let Ok(delta) =
+                                                                super::tree_ops::TreeStateDelta::from_bytes(
+                                                                    &policy_state.config,
+                                                                )
+                                                            {
+                                                                sync_manager
+                                                                    .apply_remote_tree_delta(
+                                                                        delta, actor,
+                                                                    );
+                                                            }
+                                                        } else if policy_state.policy_type
+                                                            == "tree_state"
+                                                        {
+                                                            // Full state: replace (backward compatible)
                                                             if let Ok(tree_state) =
                                                                 super::tree_ops::TreeState::from_bytes(
-                                                                    &policy_state.config
+                                                                    &policy_state.config,
                                                                 )
                                                             {
                                                                 sync_manager

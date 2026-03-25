@@ -602,7 +602,9 @@ pub async fn try_ping(
     })?;
     let mut client = gossip_client::GossipClient::new(channel)
         .max_decoding_message_size(MAX_MESSAGE_SIZE)
-        .max_encoding_message_size(MAX_MESSAGE_SIZE);
+        .max_encoding_message_size(MAX_MESSAGE_SIZE)
+        .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+        .send_compressed(tonic::codec::CompressionEncoding::Gzip);
 
     let ping_message = GossipMessage { payload };
     let response = client.ping_server(Request::new(ping_message)).await?;

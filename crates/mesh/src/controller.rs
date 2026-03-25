@@ -29,7 +29,10 @@ use super::{
     stores::StateStores,
     sync::MeshSyncManager,
 };
-use crate::flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE};
+use crate::{
+    flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
+    metrics,
+};
 
 pub struct MeshController {
     state: ClusterState,
@@ -125,6 +128,13 @@ impl MeshController {
                 if removed > 0 {
                     log::info!("GC: removed {removed} tombstoned CRDT metadata entries");
                 }
+                // Record store sizes for monitoring
+                metrics::record_store_sizes(
+                    self.stores.worker.len(),
+                    self.stores.policy.len(),
+                    self.stores.membership.len(),
+                    self.stores.app.len(),
+                );
             }
 
             tokio::select! {
@@ -386,6 +396,7 @@ impl MeshController {
                     let peer_name_incremental = peer_name.clone();
                     let shared_sequence = sequence.clone();
                     let size_validator = MessageSizeValidator::default();
+                    let stores_for_trim = stores.clone();
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
@@ -394,15 +405,33 @@ impl MeshController {
                         loop {
                             interval.tick().await;
 
+                            let round_start = std::time::Instant::now();
+
                             // Collect all incremental updates
                             let all_updates = collector.collect_all_updates();
 
+                            let collect_elapsed = round_start.elapsed();
+
                             if !all_updates.is_empty() {
-                                for (store_type, updates) in all_updates {
+                                for (store_type, updates) in &all_updates {
                                     let proto_store_type = store_type.to_proto();
 
                                     // Validate message size before sending
                                     let batch_size: usize = updates.iter().map(|u| u.value.len()).sum();
+
+                                    log::debug!(
+                                        peer = %peer_name_incremental,
+                                        store = ?store_type,
+                                        updates = updates.len(),
+                                        batch_bytes = batch_size,
+                                        "mesh sync store batch"
+                                    );
+                                    metrics::record_sync_batch_bytes(
+                                        &peer_name_incremental,
+                                        store_type.as_str(),
+                                        batch_size,
+                                    );
+
                                     if let Err(e) = size_validator.validate(batch_size) {
                                         log::warn!(
                                             "Incremental update too large, skipping store {:?}: {} (max: {} bytes)",
@@ -410,7 +439,28 @@ impl MeshController {
                                             e,
                                             size_validator.max_size()
                                         );
-                                        collector.mark_sent(store_type, &updates);
+                                        // For tree deltas, do NOT mark as sent — skip this
+                                        // round and let the pending buffer trim in mark_sent
+                                        // eventually reduce the size.  For other stores,
+                                        // mark_sent prevents an infinite retry loop (PR #808).
+                                        let is_tree_delta =
+                                            updates.iter().any(|u| u.key.starts_with("tree:"));
+                                        if is_tree_delta {
+                                            // Force trim the pending buffer to reduce size for next round.
+                                            for u in updates {
+                                                if u.key.starts_with("tree:") {
+                                                    if let Some(mut pending) = stores_for_trim.tree_ops_pending.get_mut(&u.key) {
+                                                        let len = pending.len();
+                                                        if len > 100 {
+                                                            pending.drain(..len / 2);
+                                                            log::info!("Force-trimmed oversized tree pending buffer for {}: {} -> {}", u.key, len, pending.len());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            collector.mark_sent(*store_type, updates);
+                                        }
                                         continue;
                                     }
 
@@ -439,7 +489,7 @@ impl MeshController {
                                     match tx_incremental.try_send(incremental_update) {
                                         Ok(()) => {
                                             // Mark as sent after successful transmission
-                                            collector.mark_sent(store_type, &updates);
+                                            collector.mark_sent(*store_type, updates);
                                         }
                                         Err(mpsc::error::TrySendError::Full(_)) => {
                                             log::debug!(
@@ -455,6 +505,21 @@ impl MeshController {
                                         }
                                     }
                                 }
+                            }
+
+                            let round_elapsed = round_start.elapsed();
+                            metrics::record_sync_round_duration(
+                                &peer_name_incremental,
+                                round_elapsed,
+                            );
+                            if round_elapsed.as_millis() > 10 || !all_updates.is_empty() {
+                                log::info!(
+                                    peer = %peer_name_incremental,
+                                    round_ms = round_elapsed.as_millis(),
+                                    collect_ms = collect_elapsed.as_millis(),
+                                    stores_with_updates = all_updates.len(),
+                                    "mesh sync round"
+                                );
                             }
                         }
                     })
@@ -550,10 +615,60 @@ impl MeshController {
                                                         &state_update.value
                                                     ) {
                                                         let actor = Some(state_update.actor.clone());
-                                                        sync_manager.apply_remote_policy_state(
-                                                            policy_state,
-                                                            actor,
-                                                        );
+
+                                                        if policy_state.policy_type
+                                                            == "tree_state_delta"
+                                                        {
+                                                            // Delta: apply only the new operations
+                                                            match super::tree_ops::TreeStateDelta::from_bytes(
+                                                                    &policy_state.config,
+                                                                )
+                                                            {
+                                                                Ok(delta) => {
+                                                                    sync_manager
+                                                                        .apply_remote_tree_delta(
+                                                                            delta, actor,
+                                                                        );
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to deserialize tree state delta for model {}: {e}",
+                                                                        policy_state.model_id
+                                                                    );
+                                                                }
+                                                            }
+                                                        } else if policy_state.policy_type
+                                                            == "tree_state"
+                                                        {
+                                                            // Full state: replace (backward compatible)
+                                                            match super::tree_ops::TreeState::from_bytes(
+                                                                    &policy_state.config,
+                                                                )
+                                                            {
+                                                                Ok(tree_state) => {
+                                                                    sync_manager
+                                                                        .apply_remote_tree_operation(
+                                                                            policy_state
+                                                                                .model_id
+                                                                                .clone(),
+                                                                            tree_state,
+                                                                            actor,
+                                                                        );
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to deserialize tree state for model {}: {e}",
+                                                                        policy_state.model_id
+                                                                    );
+                                                                }
+                                                            }
+                                                        } else {
+                                                            // Regular policy state update
+                                                            sync_manager.apply_remote_policy_state(
+                                                                policy_state,
+                                                                actor,
+                                                            );
+                                                        }
                                                     }
                                                 }
                                                 LocalStoreType::RateLimit => {
@@ -819,7 +934,9 @@ impl MeshController {
         })?;
         let mut client = GossipClient::new(channel)
             .max_decoding_message_size(MAX_MESSAGE_SIZE)
-            .max_encoding_message_size(MAX_MESSAGE_SIZE);
+            .max_encoding_message_size(MAX_MESSAGE_SIZE)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip);
 
         // Create bidirectional stream
         let (tx, rx) = mpsc::channel::<StreamMessage>(128);

@@ -20,6 +20,7 @@ use tracing::debug;
 use super::{
     consistent_hash::ConsistentHashRing,
     crdt_kv::{CrdtOrMap, Operation, OperationLog, ReplicaId},
+    tree_ops::TreeOperation,
 };
 
 // ============================================================================
@@ -181,10 +182,6 @@ impl<T: CrdtValue> CrdtStore<T> {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
-    // fn contains_key(&self, key: &str) -> bool {
-    //     self.inner.contains_key(key)
-    // }
 
     fn merge(&self, log: &OperationLog) {
         self.inner.merge(log);
@@ -714,6 +711,9 @@ pub struct StateStores {
     pub worker: WorkerStore,
     pub policy: PolicyStore,
     pub rate_limit: RateLimitStore,
+    /// Pending tree operations for delta sync.
+    /// Key: tree key (e.g., "tree:model-name"), Value: operations since last successful send.
+    pub tree_ops_pending: DashMap<String, Vec<TreeOperation>>,
 }
 
 impl StateStores {
@@ -724,6 +724,7 @@ impl StateStores {
             worker: WorkerStore::new(),
             policy: PolicyStore::new(),
             rate_limit: RateLimitStore::new("default".to_string()),
+            tree_ops_pending: DashMap::new(),
         }
     }
 
@@ -734,6 +735,7 @@ impl StateStores {
             worker: WorkerStore::new(),
             policy: PolicyStore::new(),
             rate_limit: RateLimitStore::new(self_name),
+            tree_ops_pending: DashMap::new(),
         }
     }
 
