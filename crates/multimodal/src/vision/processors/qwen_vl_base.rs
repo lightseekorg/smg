@@ -338,14 +338,77 @@ impl ImagePreProcessor for QwenVLProcessorBase {
         let do_resize = config.do_resize.unwrap_or(true);
         let do_normalize = config.do_normalize.unwrap_or(true);
 
-        // Process each image in parallel: resize, normalize, patchify
-        let per_image_results: Vec<_> = images
-            .par_iter()
-            .map(|image| {
+        let (all_patches, patches_per_image, grid_thw_data, num_img_tokens) = if images.len() > 1 {
+            // Parallel path: process each image independently, then merge
+            let per_image_results: Vec<_> = images
+                .par_iter()
+                .map(|image| {
+                    let (w, h) = image.dimensions();
+                    let (target_h, target_w) = self.smart_resize(h as usize, w as usize)?;
+
+                    let (tw32, th32) = (target_w as u32, target_h as u32);
+                    let needs_resize = do_resize && (w != tw32 || h != th32);
+                    let resized;
+                    let img_ref = if needs_resize {
+                        resized = resize(image, tw32, th32, filter);
+                        &resized
+                    } else {
+                        image
+                    };
+
+                    let (grid_t, grid_h, grid_w) = self.calculate_grid_thw(target_h, target_w, 1);
+                    let num_patches = grid_t * grid_h * grid_w;
+                    let tokens = self.calculate_tokens_from_grid(grid_t, grid_h, grid_w);
+
+                    let tensor = if do_normalize {
+                        to_tensor_and_normalize(img_ref, &mean, &std)
+                    } else {
+                        to_tensor(img_ref)
+                    };
+
+                    let mut local_patches = Vec::new();
+                    self.patchify_into(&tensor, grid_t, grid_h, grid_w, &mut local_patches)?;
+
+                    Ok((local_patches, num_patches, [grid_t as i64, grid_h as i64, grid_w as i64], tokens))
+                })
+                .collect::<Result<Vec<_>, TransformError>>()?;
+
+            let total_patch_floats: usize =
+                per_image_results.iter().map(|(p, _, _, _)| p.len()).sum();
+            let mut all_patches: Vec<f32> = Vec::with_capacity(total_patch_floats);
+            let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
+            let mut grid_thw_data = Vec::with_capacity(images.len() * 3);
+            let mut num_img_tokens = Vec::with_capacity(images.len());
+
+            for (local_patches, num_patches, grid_thw, tokens) in per_image_results {
+                all_patches.extend(local_patches);
+                patches_per_image.push(num_patches as i64);
+                grid_thw_data.extend_from_slice(&grid_thw);
+                num_img_tokens.push(tokens);
+            }
+
+            (all_patches, patches_per_image, grid_thw_data, num_img_tokens)
+        } else {
+            // Sequential path: patchify directly into output buffer (zero-copy)
+            let estimated_total: usize = images
+                .iter()
+                .map(|img| {
+                    let (w, h) = img.dimensions();
+                    (w as usize * h as usize)
+                        / (self.config.merge_size * self.config.merge_size)
+                        * patch_features
+                        / (patch_size * patch_size)
+                })
+                .sum();
+            let mut all_patches: Vec<f32> = Vec::with_capacity(estimated_total);
+            let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
+            let mut grid_thw_data = Vec::with_capacity(images.len() * 3);
+            let mut num_img_tokens = Vec::with_capacity(images.len());
+
+            for image in images {
                 let (w, h) = image.dimensions();
                 let (target_h, target_w) = self.smart_resize(h as usize, w as usize)?;
 
-                // Resize to the image's own target size (skip if dimensions match)
                 let (tw32, th32) = (target_w as u32, target_h as u32);
                 let needs_resize = do_resize && (w != tw32 || h != th32);
                 let resized;
@@ -356,39 +419,28 @@ impl ImagePreProcessor for QwenVLProcessorBase {
                     image
                 };
 
-                // Grid dimensions based on the target size
                 let (grid_t, grid_h, grid_w) = self.calculate_grid_thw(target_h, target_w, 1);
+                grid_thw_data.push(grid_t as i64);
+                grid_thw_data.push(grid_h as i64);
+                grid_thw_data.push(grid_w as i64);
+
                 let num_patches = grid_t * grid_h * grid_w;
                 let tokens = self.calculate_tokens_from_grid(grid_t, grid_h, grid_w);
+                num_img_tokens.push(tokens);
 
-                // Convert to tensor [C, H, W] and normalize in one fused pass
                 let tensor = if do_normalize {
                     to_tensor_and_normalize(img_ref, &mean, &std)
                 } else {
                     to_tensor(img_ref)
                 };
 
-                // Patchify into a local buffer
-                let mut local_patches = Vec::new();
-                self.patchify_into(&tensor, grid_t, grid_h, grid_w, &mut local_patches)?;
+                // Patchify directly into all_patches to avoid intermediate Vec + copy
+                self.patchify_into(&tensor, grid_t, grid_h, grid_w, &mut all_patches)?;
+                patches_per_image.push(num_patches as i64);
+            }
 
-                Ok((local_patches, num_patches, [grid_t as i64, grid_h as i64, grid_w as i64], tokens))
-            })
-            .collect::<Result<Vec<_>, TransformError>>()?;
-
-        // Merge results sequentially to preserve image order
-        let total_patch_floats: usize = per_image_results.iter().map(|(p, _, _, _)| p.len()).sum();
-        let mut all_patches: Vec<f32> = Vec::with_capacity(total_patch_floats);
-        let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
-        let mut grid_thw_data = Vec::with_capacity(images.len() * 3);
-        let mut num_img_tokens = Vec::with_capacity(images.len());
-
-        for (local_patches, num_patches, grid_thw, tokens) in per_image_results {
-            all_patches.extend(local_patches);
-            patches_per_image.push(num_patches as i64);
-            grid_thw_data.extend_from_slice(&grid_thw);
-            num_img_tokens.push(tokens);
-        }
+            (all_patches, patches_per_image, grid_thw_data, num_img_tokens)
+        };
 
         let total_patches: usize = patches_per_image.iter().map(|&n| n as usize).sum();
         let pixel_values =
