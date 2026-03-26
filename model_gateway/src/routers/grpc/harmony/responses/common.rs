@@ -201,11 +201,18 @@ pub(super) async fn load_previous_messages(
                 error = %e,
                 "Failed to load previous response chain from storage"
             );
-            error::internal_error(
-                "load_previous_response_chain_failed",
-                format!("Failed to load previous response chain for {prev_id_str}: {e}"),
+            error::bad_request(
+                "previous_response_not_found",
+                format!("Previous response with id '{prev_id_str}' not found."),
             )
         })?;
+
+    if chain.responses.is_empty() {
+        return Err(error::bad_request(
+            "previous_response_not_found",
+            format!("Previous response with id '{prev_id_str}' not found."),
+        ));
+    }
 
     // Build conversation history from stored responses
     let mut history_items = Vec::new();

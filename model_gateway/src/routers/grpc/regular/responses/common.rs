@@ -168,7 +168,7 @@ pub(super) async fn load_conversation_history(
             .get_response_chain(&prev_id, None)
             .await
         {
-            Ok(chain) => {
+            Ok(chain) if !chain.responses.is_empty() => {
                 let mut items = Vec::new();
                 for stored in &chain.responses {
                     // Convert input items from stored input (which is now a JSON array)
@@ -210,11 +210,11 @@ pub(super) async fn load_conversation_history(
                 conversation_items = Some(items);
                 modified_request.previous_response_id = None;
             }
-            Err(e) => {
-                warn!(
-                    "Failed to load previous response chain for {}: {}",
-                    prev_id_str, e
-                );
+            Ok(_) | Err(_) => {
+                return Err(error::bad_request(
+                    "previous_response_not_found",
+                    format!("Previous response with id '{prev_id_str}' not found."),
+                ));
             }
         }
     }

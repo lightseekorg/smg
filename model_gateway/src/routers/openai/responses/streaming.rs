@@ -80,7 +80,7 @@ pub(super) fn apply_event_transformations_inplace(
             .get_mut("response")
             .and_then(|v| v.as_object_mut())
         {
-            let desired_store = Value::Bool(ctx.original_request.store.unwrap_or(false));
+            let desired_store = Value::Bool(ctx.original_request.store.unwrap_or(true));
             if response_obj.get("store") != Some(&desired_store) {
                 response_obj.insert("store".to_string(), desired_store);
                 changed = true;
@@ -559,9 +559,8 @@ pub(super) async fn handle_simple_streaming_passthrough(
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
 
-    let should_store = req.original_body.store.unwrap_or(false);
+    let should_store = req.original_body.store.unwrap_or(true);
     let original_request = req.original_body;
-    let persist_needed = original_request.conversation.is_some();
     let previous_response_id = req.previous_response_id;
     let storage = req.storage;
 
@@ -590,7 +589,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                             None => Cow::Borrowed(raw_block.as_str()),
                         };
 
-                        if should_store || persist_needed {
+                        if should_store {
                             accumulator.ingest_block(&block_cow);
                         }
 
@@ -619,7 +618,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
             }
         }
 
-        if (should_store || persist_needed) && !upstream_failed {
+        if should_store && !upstream_failed {
             if chunk_processor.has_remaining() {
                 accumulator.ingest_block(&chunk_processor.take_remaining());
             }
@@ -679,9 +678,8 @@ pub(super) fn handle_streaming_with_tool_interception(
     let payload = req.payload;
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
-    let should_store = req.original_body.store.unwrap_or(false);
+    let should_store = req.original_body.store.unwrap_or(true);
     let original_request = req.original_body;
-    let persist_needed = original_request.conversation.is_some();
     let previous_response_id = req.previous_response_id;
     let url = req.url;
     let storage = req.storage;
@@ -898,7 +896,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     return;
                 }
 
-                let final_response_json = if should_store || persist_needed {
+                let final_response_json = if should_store {
                     handler.accumulator.into_final_response()
                 } else {
                     None
