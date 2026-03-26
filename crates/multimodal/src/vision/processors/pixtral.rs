@@ -148,9 +148,9 @@ impl PixtralProcessor {
         // Step 2: Resize image using bicubic interpolation
         let resized = transforms::resize(image, target_w, target_h, FilterType::CatmullRom);
 
-        // Step 3: Convert to tensor (0-1 range) and normalize
-        let mut tensor = transforms::to_tensor(&resized);
-        transforms::normalize(&mut tensor, &self.image_mean, &self.image_std);
+        // Step 3: Convert to tensor (0-1 range) and normalize in a single pass
+        let tensor =
+            transforms::to_tensor_and_normalize(&resized, &self.image_mean, &self.image_std);
 
         // Step 4: Reshape to (1, C, H, W)
         let (c, h, w) = (tensor.shape()[0], tensor.shape()[1], tensor.shape()[2]);
