@@ -314,11 +314,18 @@ impl Llama4VisionProcessor {
 
         let resized = transforms::resize(image, new_w, new_h, FilterType::Triangle);
 
-        // Step 4-7: Fused pad + normalize + tile split in one pass
+        // Step 4: Pad to target_size
+        let padded = self.pad_image(&resized, target_w, target_h);
+
+        // Step 5: Convert to tensor and normalize
+        let tensor = transforms::to_tensor_and_normalize(&padded, &self.mean, &self.std);
+
+        // Step 6: Split into tiles
         let tile = self.tile_size as usize;
         let num_tiles_h = target_h as usize / tile;
         let num_tiles_w = target_w as usize / tile;
         let num_tiles = num_tiles_h * num_tiles_w;
+
         let total_tiles = if num_tiles > 1 {
             num_tiles + 1
         } else {
@@ -326,95 +333,16 @@ impl Llama4VisionProcessor {
         };
         let mut output = Array4::<f32>::zeros((total_tiles, 3, tile, tile));
 
-        // Fast path for single tile: pad + normalize directly into output
-        if num_tiles == 1 {
-            let padded = self.pad_image(&resized, target_w, target_h);
-            let tensor = transforms::to_tensor_and_normalize(&padded, &self.mean, &self.std);
-            output.slice_mut(s![0, .., .., ..]).assign(&tensor);
-            return (output, (num_tiles_h, num_tiles_w));
-        }
-
-        // Multi-tile: fused pad + normalize + tile split from RGB8 buffer
-        let rgb = match &resized {
-            DynamicImage::ImageRgb8(rgb) => std::borrow::Cow::Borrowed(rgb),
-            _ => std::borrow::Cow::Owned(resized.to_rgb8()),
-        };
-        let img_w = rgb.width() as usize;
-        let img_h = rgb.height() as usize;
-        let raw = rgb.as_raw();
-
-        // Precompute normalization: pixel * scale + bias
-        let scale: [f32; 3] = std::array::from_fn(|c| 1.0 / (255.0 * self.std[c] as f32));
-        let bias: [f32; 3] = std::array::from_fn(|c| -(self.mean[c] as f32) / (self.std[c] as f32));
-        // Normalized padding value (black = 0): 0 * scale + bias = bias
-        let pad_val: [f32; 3] = bias;
-
-        // Write tiles directly from resized RGB8 buffer — no intermediate padded
-        // image or full-size tensor. Padding regions get the normalized pad value.
-        // Output layout is [tile, C, H, W] (channel-first per tile).
-        if let Some(out_flat) = output.as_slice_mut() {
-            let tile_pixels = tile * tile;
-            let tile_stride = 3 * tile_pixels;
-
-            for th in 0..num_tiles_h {
-                for tw_idx in 0..num_tiles_w {
-                    let tile_idx = th * num_tiles_w + tw_idx;
-                    let tile_base = tile_idx * tile_stride;
-                    let r_base = tile_base;
-                    let g_base = tile_base + tile_pixels;
-                    let b_base = tile_base + 2 * tile_pixels;
-
-                    for py in 0..tile {
-                        let img_y = th * tile + py;
-                        let out_row = py * tile;
-
-                        if img_y < img_h {
-                            // Row has image data (possibly partial)
-                            let img_row_start = img_y * img_w;
-                            let img_x_start = tw_idx * tile;
-                            let valid_px = tile.min(img_w.saturating_sub(img_x_start));
-
-                            for px in 0..valid_px {
-                                let src = (img_row_start + img_x_start + px) * 3;
-                                let dst = out_row + px;
-                                out_flat[r_base + dst] = raw[src] as f32 * scale[0] + bias[0];
-                                out_flat[g_base + dst] = raw[src + 1] as f32 * scale[1] + bias[1];
-                                out_flat[b_base + dst] = raw[src + 2] as f32 * scale[2] + bias[2];
-                            }
-                            // Pad remaining columns
-                            for px in valid_px..tile {
-                                let dst = out_row + px;
-                                out_flat[r_base + dst] = pad_val[0];
-                                out_flat[g_base + dst] = pad_val[1];
-                                out_flat[b_base + dst] = pad_val[2];
-                            }
-                        } else {
-                            // Entire row is padding
-                            for px in 0..tile {
-                                let dst = out_row + px;
-                                out_flat[r_base + dst] = pad_val[0];
-                                out_flat[g_base + dst] = pad_val[1];
-                                out_flat[b_base + dst] = pad_val[2];
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Fallback: use the old pad + tensor + split path
-            let padded = self.pad_image(&resized, target_w, target_h);
-            let tensor = transforms::to_tensor_and_normalize(&padded, &self.mean, &self.std);
-            for h_idx in 0..num_tiles_h {
-                for w_idx in 0..num_tiles_w {
-                    let tile_idx = h_idx * num_tiles_w + w_idx;
-                    let y_start = h_idx * tile;
-                    let x_start = w_idx * tile;
-                    let tile_view =
-                        tensor.slice(s![.., y_start..y_start + tile, x_start..x_start + tile]);
-                    output
-                        .slice_mut(s![tile_idx, .., .., ..])
-                        .assign(&tile_view);
-                }
+        for h_idx in 0..num_tiles_h {
+            for w_idx in 0..num_tiles_w {
+                let tile_idx = h_idx * num_tiles_w + w_idx;
+                let y_start = h_idx * tile;
+                let x_start = w_idx * tile;
+                let tile_view =
+                    tensor.slice(s![.., y_start..y_start + tile, x_start..x_start + tile]);
+                output
+                    .slice_mut(s![tile_idx, .., .., ..])
+                    .assign(&tile_view);
             }
         }
 
