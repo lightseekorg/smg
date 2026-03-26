@@ -156,6 +156,13 @@ MODEL_SPECS: dict[str, dict] = {
         "worker_args": [
             "--trust-remote-code",
             "--mem-fraction-static=0.9",
+            "--enable-hierarchical-cache",
+            "--hicache-size=80",
+            "--enable-cache-report",
+            "--prefill-attention-backend=flashinfer",
+            "--decode-attention-backend=flashinfer",
+            "--hicache-io-backend=kernel",
+            "--hicache-mem-layout=layer_first",
         ],
         "vllm_args": [
             "--trust-remote-code",
@@ -172,6 +179,13 @@ MODEL_SPECS: dict[str, dict] = {
         "worker_args": [
             "--trust-remote-code",
             "--mem-fraction-static=0.9",
+            "--enable-hierarchical-cache",
+            "--hicache-size=80",
+            "--enable-cache-report",
+            "--prefill-attention-backend=flashinfer",
+            "--decode-attention-backend=flashinfer",
+            "--hicache-io-backend=kernel",
+            "--hicache-mem-layout=layer_first",
         ],
         "vllm_args": [
             "--trust-remote-code",

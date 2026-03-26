@@ -112,6 +112,11 @@ def _build_command(
         cmd.extend(["--server-gpu-type", gpu_type])
     if gpu_count:
         cmd.extend(["--server-gpu-count", str(gpu_count)])
+    # Disable ignore_eos for SGLang: its scheduler was specifically tuned for
+    # ignore_eos, so normal workloads (without it) are actually slower.
+    if api_backend == "sglang":
+        cmd.extend(["--additional-request-params", '{"ignore_eos": false}'])
+
     log_dir = os.environ.get("E2E_LOG_DIR")
     if log_dir:
         cmd.extend(["--log-dir", log_dir])
