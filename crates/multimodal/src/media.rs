@@ -197,15 +197,62 @@ impl MediaConnector {
     ) -> Result<Arc<ImageFrame>, MediaConnectorError> {
         let hash = crate::hasher::hash_image(&bytes);
 
-        let cursor = std::io::Cursor::new(bytes.clone());
-        let reader = image::ImageReader::new(cursor).with_guessed_format()?;
-
-        let image = task::spawn_blocking(move || reader.decode())
+        let decode_bytes = bytes.clone();
+        let image = task::spawn_blocking(move || Self::decode_bytes(decode_bytes))
             .await
             .map_err(MediaConnectorError::Blocking)??;
 
         Ok(Arc::new(ImageFrame::new(
             image, bytes, detail, source, hash,
         )))
+    }
+
+    /// Decode raw bytes into a [`DynamicImage`].
+    ///
+    /// When the `fast-jpeg` feature is enabled and the bytes start with the
+    /// JPEG magic bytes (0xFF 0xD8), [`zune_jpeg`] is used for decoding which
+    /// is significantly faster than the pure-Rust decoder bundled with the
+    /// `image` crate.  On failure, we fall back to the generic decoder.
+    fn decode_bytes(bytes: Bytes) -> Result<image::DynamicImage, image::ImageError> {
+        #[cfg(feature = "fast-jpeg")]
+        if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
+            if let Ok(img) = Self::decode_jpeg_fast(&bytes) {
+                return Ok(img);
+            }
+            // Fall through to generic decoder on failure.
+        }
+
+        let cursor = std::io::Cursor::new(bytes);
+        let reader = image::ImageReader::new(cursor).with_guessed_format()?;
+        reader.decode()
+    }
+
+    /// Fast JPEG decoding via `zune-jpeg`.
+    #[cfg(feature = "fast-jpeg")]
+    fn decode_jpeg_fast(bytes: &[u8]) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
+        use image::{DynamicImage, GrayImage, RgbImage};
+        use zune_jpeg::JpegDecoder;
+
+        let cursor = std::io::Cursor::new(bytes);
+        let mut decoder = JpegDecoder::new(cursor);
+        let pixels = decoder.decode()?;
+        let info = decoder.info().ok_or("missing JPEG header info")?;
+        let width = info.width as u32;
+        let height = info.height as u32;
+        let components = info.components as u32;
+
+        match components {
+            1 => {
+                let img = GrayImage::from_raw(width, height, pixels)
+                    .ok_or("gray buffer size mismatch")?;
+                Ok(DynamicImage::ImageLuma8(img))
+            }
+            3 => {
+                let img =
+                    RgbImage::from_raw(width, height, pixels).ok_or("RGB buffer size mismatch")?;
+                Ok(DynamicImage::ImageRgb8(img))
+            }
+            _ => Err(format!("unsupported JPEG component count: {components}").into()),
+        }
     }
 }

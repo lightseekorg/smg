@@ -15,7 +15,12 @@ categories = ["multimedia::images", "science"]
 [lib]
 name = "llm_multimodal"
 
+[features]
+default = []
+fast-jpeg = ["dep:zune-jpeg"]
+
 [dependencies]
+zune-jpeg = { version = "0.5", optional = true }
 base64 = "0.22"
 hf-hub = "0.5.0"
 bytes = { version = "1.8.0", features = ["serde"] }
