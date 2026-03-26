@@ -36,10 +36,14 @@ class HealthWatchMixin:
         Python 3.12+ removed the loop binding entirely.
         """
         self._watch_shutdown_event = asyncio.Event()
+        self._watch_notified_shutdown = False
 
     def _notify_shutdown(self) -> None:
         """Wake all Watch streams to detect shutdown immediately.
-        Must be called in subclass set_not_serving()."""
+        Must be called in subclass set_not_serving(). Sets
+        _watch_notified_shutdown so _is_shutting_down() implementations
+        can check it alongside their own shutdown flags."""
+        self._watch_notified_shutdown = True
         self._watch_shutdown_event.set()
 
     def _compute_watch_status(self, service_name: str) -> int:
