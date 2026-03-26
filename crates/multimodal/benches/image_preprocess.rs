@@ -209,8 +209,11 @@ fn bench_individual_steps(c: &mut Criterion) {
             BenchmarkId::new("f32", format!("{w}x{h}")),
             &tensor,
             |b, t| {
-                let mut t = t.clone();
-                b.iter(|| transforms::normalize(&mut t, &mean, &std));
+                b.iter_batched(
+                    || t.clone(),
+                    |mut fresh| transforms::normalize(&mut fresh, &mean, &std),
+                    criterion::BatchSize::SmallInput,
+                );
             },
         );
     }
