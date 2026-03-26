@@ -302,6 +302,10 @@ struct CliArgs {
     #[arg(long, num_args = 0.., help_heading = "Request Handling")]
     request_id_headers: Vec<String>,
 
+    /// Map HTTP headers into storage hook request context (format: header=context_key)
+    #[arg(long, num_args = 0.., help_heading = "Request Handling")]
+    storage_context_headers: Vec<String>,
+
     /// Request timeout in seconds
     #[arg(long, default_value_t = 1800, help_heading = "Request Handling")]
     request_timeout_secs: u64,
@@ -627,8 +631,14 @@ struct CliArgs {
     #[arg(long)]
     mesh_server_name: Option<String>,
 
+    /// Bind address for the mesh listener.
     #[arg(long, default_value = "0.0.0.0")]
     mesh_host: String,
+
+    /// Advertised address for this mesh node.
+    /// Required when `--mesh-host` is an unspecified bind address such as `0.0.0.0`.
+    #[arg(long)]
+    mesh_advertise_host: Option<String>,
 
     #[arg(long, default_value_t = 39527)]
     mesh_port: u16,
@@ -786,6 +796,74 @@ impl CliArgs {
             }
         }
         map
+    }
+
+    fn parse_mesh_socket_addr(
+        host: &str,
+        port: u16,
+        field: &str,
+    ) -> ConfigResult<std::net::SocketAddr> {
+        let addr = format!("{host}:{port}");
+        addr.parse::<std::net::SocketAddr>()
+            .map_err(|e| ConfigError::InvalidValue {
+                field: field.to_string(),
+                value: host.to_string(),
+                reason: format!("invalid mesh socket address '{addr}': {e}"),
+            })
+    }
+
+    fn build_mesh_server_config(&self) -> ConfigResult<Option<MeshServerConfig>> {
+        if !self.enable_mesh {
+            return Ok(None);
+        }
+
+        let self_name = if let Some(name) = &self.mesh_server_name {
+            name.to_string()
+        } else {
+            let mut rng = rand::rng();
+            let random_string: String = (0..4).map(|_| rng.sample(Alphanumeric) as char).collect();
+            format!("Mesh_{random_string}")
+        };
+
+        let peer = self
+            .mesh_peer_urls
+            .first()
+            .map(|url| {
+                url.parse::<std::net::SocketAddr>()
+                    .map_err(|e| ConfigError::InvalidValue {
+                        field: "mesh_peer_urls".to_string(),
+                        value: url.clone(),
+                        reason: format!("invalid socket address: {e}"),
+                    })
+            })
+            .transpose()?;
+
+        let bind_addr = Self::parse_mesh_socket_addr(&self.mesh_host, self.mesh_port, "mesh_host")?;
+        let (advertise_host, advertise_field) =
+            if let Some(host) = self.mesh_advertise_host.as_deref() {
+                (host, "mesh_advertise_host")
+            } else {
+                (self.mesh_host.as_str(), "mesh_host")
+            };
+        let advertise_addr =
+            Self::parse_mesh_socket_addr(advertise_host, self.mesh_port, advertise_field)?;
+
+        if advertise_addr.ip().is_unspecified() {
+            return Err(ConfigError::InvalidValue {
+                field: advertise_field.to_string(),
+                value: advertise_host.to_string(),
+                reason:
+                    "mesh advertise address cannot be unspecified; set --mesh-advertise-host to a routable node IP".to_string(),
+            });
+        }
+
+        Ok(Some(MeshServerConfig {
+            self_name,
+            bind_addr,
+            advertise_addr,
+            init_peer: peer,
+            mtls_config: None,
+        }))
     }
 
     #[expect(
@@ -1129,6 +1207,10 @@ impl CliArgs {
             .maybe_request_id_headers(
                 (!self.request_id_headers.is_empty()).then(|| self.request_id_headers.clone()),
             )
+            .maybe_storage_context_headers(
+                (!self.storage_context_headers.is_empty())
+                    .then(|| Self::parse_selector(&self.storage_context_headers)),
+            )
             .maybe_rate_limit_tokens_per_second(self.rate_limit_tokens_per_second)
             .maybe_model_path(self.model_path.as_ref())
             .maybe_tokenizer_path(self.tokenizer_path.as_ref())
@@ -1221,37 +1303,7 @@ impl CliArgs {
         };
 
         // ==================== Mesh Server ====================
-        let mesh_server_config = if self.enable_mesh {
-            let self_name = if let Some(name) = &self.mesh_server_name {
-                name.to_string()
-            } else {
-                // If name is not set, use a random name
-                let mut rng = rand::rng();
-                let random_string: String =
-                    (0..4).map(|_| rng.sample(Alphanumeric) as char).collect();
-                format!("Mesh_{random_string}")
-            };
-
-            let peer = self
-                .mesh_peer_urls
-                .first()
-                .and_then(|url| url.parse::<std::net::SocketAddr>().ok());
-            if let Ok(addr) =
-                format!("{}:{}", self.mesh_host, self.mesh_port).parse::<std::net::SocketAddr>()
-            {
-                Some(MeshServerConfig {
-                    self_name,
-                    self_addr: addr,
-                    init_peer: peer,
-                    mtls_config: None,
-                })
-            } else {
-                tracing::warn!("Invalid mesh server address, so mesh server will not be started");
-                None
-            }
-        } else {
-            None
-        };
+        let mesh_server_config = self.build_mesh_server_config()?;
 
         Ok(ServerConfig {
             host: self.host.clone(),

@@ -14,6 +14,7 @@ use tracing::{debug, trace};
 use super::{
     service::gossip::StateUpdate,
     stores::{AppState, MembershipState, PolicyState, StateStores, StoreType, WorkerState},
+    tree_ops::TreeStateDelta,
 };
 
 /// Trait for extracting version from state types
@@ -164,12 +165,110 @@ impl IncrementalUpdateCollector {
                     return vec![];
                 }
                 let all_policies = self.stores.policy.all();
-                updates = self.collect_serializable_updates(
-                    all_policies,
-                    &last_sent.policy,
-                    "policy",
-                    |state: &PolicyState| state.model_id.clone(),
-                );
+                let timestamp = Self::current_timestamp();
+
+                for (key, state) in &all_policies {
+                    let current_version = state.version();
+                    let last_sent_version =
+                        last_sent.policy.get(key.as_str()).copied().unwrap_or(0);
+
+                    if current_version <= last_sent_version {
+                        continue;
+                    }
+
+                    // For tree keys, send a delta with only the pending operations
+                    if key.starts_with("tree:") {
+                        let mut sent_delta = false;
+                        if let Some(pending) = self.stores.tree_ops_pending.get(key) {
+                            if !pending.is_empty() {
+                                let total_pending = pending.len() as u64;
+                                let base_version = current_version.saturating_sub(total_pending);
+
+                                // If the peer is behind what the buffer covers, we can't
+                                // construct a valid delta — fall back to full state.
+                                if last_sent_version >= base_version {
+                                    let already_sent =
+                                        last_sent_version.saturating_sub(base_version) as usize;
+                                    let unsent_start = already_sent.min(pending.len());
+                                    let unsent_ops = &pending[unsent_start..];
+                                    if !unsent_ops.is_empty() {
+                                        let model_id =
+                                            key.strip_prefix("tree:").unwrap_or(key).to_string();
+                                        let delta = TreeStateDelta {
+                                            model_id: model_id.clone(),
+                                            operations: unsent_ops.to_vec(),
+                                            base_version: last_sent_version,
+                                            new_version: current_version,
+                                        };
+                                        if let Ok(delta_bytes) = delta.to_bytes() {
+                                            let delta_policy = PolicyState {
+                                                model_id,
+                                                policy_type: "tree_state_delta".to_string(),
+                                                config: delta_bytes,
+                                                version: current_version,
+                                            };
+                                            if let Ok(serialized) =
+                                                bincode::serialize(&delta_policy)
+                                            {
+                                                updates.push(StateUpdate {
+                                                    key: key.clone(),
+                                                    value: serialized,
+                                                    version: current_version,
+                                                    actor: self.self_name.clone(),
+                                                    timestamp,
+                                                });
+                                                debug!(
+                                                    "Collected tree delta: {} ({} ops, version: {})",
+                                                    key,
+                                                    unsent_ops.len(),
+                                                    current_version
+                                                );
+                                                sent_delta = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                // else: peer is behind buffer range → sent_delta stays false
+                                // → falls through to full state below
+                            }
+                        }
+
+                        if !sent_delta {
+                            // Buffer was cleared (another peer's mark_sent) or peer
+                            // reconnected — fall back to sending the full tree state
+                            // so that no operations are lost.
+                            if let Ok(serialized) = bincode::serialize(state) {
+                                updates.push(StateUpdate {
+                                    key: key.clone(),
+                                    value: serialized,
+                                    version: current_version,
+                                    actor: self.self_name.clone(),
+                                    timestamp,
+                                });
+                                debug!(
+                                    "Collected full tree state fallback: {} (version: {})",
+                                    key, current_version
+                                );
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Non-tree policy keys: send full state as before
+                    if let Ok(serialized) = bincode::serialize(state) {
+                        updates.push(StateUpdate {
+                            key: key.clone(),
+                            value: serialized,
+                            version: current_version,
+                            actor: self.self_name.clone(),
+                            timestamp,
+                        });
+                        debug!(
+                            "Collected policy update: {} (version: {})",
+                            state.model_id, current_version
+                        );
+                    }
+                }
             }
             StoreType::App => {
                 let gen = self.stores.app.generation();
@@ -286,6 +385,24 @@ impl IncrementalUpdateCollector {
                 }
                 StoreType::Policy => {
                     last_sent.policy.insert(update.key.clone(), update.version);
+                    // Trim pending tree ops that have been sent by THIS collector.
+                    // Do NOT remove the entire buffer — other peer collectors may
+                    // not have sent yet.  Instead, only drain operations that are
+                    // fully covered by the version we just acknowledged.  When the
+                    // buffer exceeds a safety threshold we trim unconditionally to
+                    // bound memory usage (peers that are that far behind will
+                    // receive a full-state fallback on next collection).
+                    if update.key.starts_with("tree:") {
+                        const PENDING_TRIM_THRESHOLD: usize = 4096;
+                        if let Some(mut pending) = self.stores.tree_ops_pending.get_mut(&update.key)
+                        {
+                            if pending.len() > PENDING_TRIM_THRESHOLD {
+                                // Safety trim: discard the oldest half
+                                let drain_count = pending.len() / 2;
+                                pending.drain(..drain_count);
+                            }
+                        }
+                    }
                 }
                 StoreType::App => {
                     last_sent.app.insert(update.key.clone(), update.version);
@@ -330,6 +447,7 @@ mod tests {
             health: true,
             load: 0.5,
             version: 1,
+            spec: vec![],
         };
         let _ = stores.worker.insert(key, worker_state);
 
@@ -358,6 +476,7 @@ mod tests {
             health: false,
             load: 0.8,
             version: 2,
+            spec: vec![],
         };
         let _ = stores.worker.insert(key2, worker_state2);
 
@@ -440,6 +559,7 @@ mod tests {
                 health: true,
                 load: 0.5,
                 version: 1,
+                spec: vec![],
             },
         );
 
@@ -474,6 +594,7 @@ mod tests {
                 health: true,
                 load: 0.5,
                 version: 1,
+                spec: vec![],
             },
         );
 
@@ -538,6 +659,7 @@ mod tests {
                 health: true,
                 load: 0.5,
                 version: 1,
+                spec: vec![],
             },
         );
 
@@ -556,6 +678,7 @@ mod tests {
                 health: false,
                 load: 0.8,
                 version: 2,
+                spec: vec![],
             },
         );
 
@@ -574,6 +697,7 @@ mod tests {
                 health: true,
                 load: 0.3,
                 version: 3,
+                spec: vec![],
             },
         );
 

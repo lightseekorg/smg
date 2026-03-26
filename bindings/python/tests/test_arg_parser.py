@@ -43,6 +43,7 @@ class TestRouterArgs:
         assert args.cb_failure_threshold == 10
         assert args.disable_retries is False
         assert args.disable_circuit_breaker is False
+        assert args.mesh_advertise_host is None
 
     def test_parse_selector_valid(self):
         """Test parsing valid selector arguments."""
@@ -167,6 +168,7 @@ class TestRouterArgs:
             router_prometheus_port=29000,
             router_prometheus_host="0.0.0.0",
             router_request_id_headers=["x-request-id", "x-trace-id"],
+            router_storage_context_headers=["x-tenant-id=tenant_id", "x-user-id=user_id"],
             router_request_timeout_secs=1200,
             router_max_concurrent_requests=512,
             router_queue_size=200,
@@ -220,6 +222,10 @@ class TestRouterArgs:
         assert router_args.prometheus_port == 29000
         assert router_args.prometheus_host == "0.0.0.0"
         assert router_args.request_id_headers == ["x-request-id", "x-trace-id"]
+        assert router_args.storage_context_headers == {
+            "x-tenant-id": "tenant_id",
+            "x-user-id": "user_id",
+        }
         assert router_args.request_timeout_secs == 1200
         assert router_args.max_concurrent_requests == 512
         assert router_args.queue_size == 200
@@ -294,6 +300,7 @@ class TestRouterArgs:
             router_prometheus_port=None,
             router_prometheus_host=None,
             router_request_id_headers=None,
+            router_storage_context_headers=None,
             router_request_timeout_secs=1800,
             router_max_concurrent_requests=256,
             router_queue_size=100,
@@ -364,6 +371,7 @@ class TestRouterArgs:
             prometheus_port=None,
             prometheus_host=None,
             request_id_headers=None,
+            storage_context_headers=None,
             request_timeout_secs=1800,
             max_concurrent_requests=256,
             queue_size=100,
@@ -587,6 +595,28 @@ class TestParseRouterArgs:
         assert router_args.health_check_timeout_secs == 3
         assert router_args.health_check_interval_secs == 30
         assert router_args.health_check_endpoint == "/healthz"
+
+    def test_parse_mesh_advertise_host_args(self):
+        """Test parsing mesh advertise host arguments."""
+        args = [
+            "--enable-mesh",
+            "--mesh-host",
+            "0.0.0.0",
+            "--mesh-advertise-host",
+            "10.0.0.42",
+            "--mesh-port",
+            "39527",
+            "--mesh-peer-urls",
+            "10.0.0.43:39527",
+        ]
+
+        router_args = parse_router_args(args)
+
+        assert router_args.enable_mesh is True
+        assert router_args.mesh_host == "0.0.0.0"
+        assert router_args.mesh_advertise_host == "10.0.0.42"
+        assert router_args.mesh_port == 39527
+        assert router_args.mesh_peer_urls == ["10.0.0.43:39527"]
 
     def test_parse_cors_args(self):
         """Test parsing CORS arguments."""

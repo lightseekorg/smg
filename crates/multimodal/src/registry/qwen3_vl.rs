@@ -19,24 +19,6 @@ impl Qwen3VLVisionSpec {
                 field: "image_token_id".to_string(),
             })
     }
-
-    fn start_token_id(metadata: &ModelMetadata) -> RegistryResult<TokenId> {
-        metadata
-            .config_u32(&["vision_start_token_id"])
-            .map(|v| v as TokenId)
-            .ok_or_else(|| ModelRegistryError::MissingConfigField {
-                field: "vision_start_token_id".to_string(),
-            })
-    }
-
-    fn end_token_id(metadata: &ModelMetadata) -> RegistryResult<TokenId> {
-        metadata
-            .config_u32(&["vision_end_token_id"])
-            .map(|v| v as TokenId)
-            .ok_or_else(|| ModelRegistryError::MissingConfigField {
-                field: "vision_end_token_id".to_string(),
-            })
-    }
 }
 
 impl ModelProcessorSpec for Qwen3VLVisionSpec {
@@ -47,6 +29,9 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
     fn matches(&self, metadata: &ModelMetadata) -> bool {
         let id = metadata.model_id.to_ascii_lowercase();
         id.contains("qwen3") && id.contains("vl")
+            || metadata
+                .config_model_type()
+                .is_some_and(|mt| mt == "qwen3_vl")
     }
 
     fn placeholder_token(&self, metadata: &ModelMetadata) -> RegistryResult<String> {
@@ -79,18 +64,15 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
         metadata: &ModelMetadata,
         preprocessed: &PreprocessedImages,
     ) -> RegistryResult<Vec<PromptReplacement>> {
-        let start_token_id = Self::start_token_id(metadata)?;
         let pad_token_id = Self::pad_token_id(metadata)?;
-        let end_token_id = Self::end_token_id(metadata)?;
         let placeholder_token = self.placeholder_token(metadata)?;
+        // The chat template already wraps each image with <|vision_start|> ... <|vision_end|>,
+        // so we only expand the single <|image_pad|> placeholder to N pad tokens.
         Ok(preprocessed
             .num_img_tokens
             .iter()
             .map(|&num_tokens| {
-                let mut tokens = Vec::with_capacity(num_tokens + 2);
-                tokens.push(start_token_id);
-                tokens.extend(std::iter::repeat_n(pad_token_id, num_tokens));
-                tokens.push(end_token_id);
+                let tokens = vec![pad_token_id; num_tokens];
                 PromptReplacement::sequence(Modality::Image, &placeholder_token, tokens)
             })
             .collect())
@@ -125,7 +107,7 @@ mod tests {
     };
 
     #[test]
-    fn qwen3_vl_includes_end_token() {
+    fn qwen3_vl_pad_only_replacement() {
         let tokenizer = TestTokenizer::new(&[("<image>", 999), ("<|image_pad|>", 151655)]);
         let config = json!({
             "model_type": "qwen3_vl",
@@ -149,11 +131,10 @@ mod tests {
                 &test_preprocessed_with_tokens(&[ImageSize::new(448, 448)], &[196]),
             )
             .unwrap();
-        // 196 pad tokens + 1 start + 1 end = 198
-        assert_eq!(replacements[0].tokens.len(), 198);
-        assert_eq!(replacements[0].tokens[0], 151652); // start
-        assert_eq!(replacements[0].tokens[1], 151655); // pad (image_token_id)
-        assert_eq!(*replacements[0].tokens.last().unwrap(), 151653); // end
+        // Only pad tokens — vision_start/vision_end are already in the chat template
+        assert_eq!(replacements[0].tokens.len(), 196);
+        assert_eq!(replacements[0].tokens[0], 151655); // pad (image_token_id)
+        assert_eq!(*replacements[0].tokens.last().unwrap(), 151655); // pad
     }
 
     #[test]
@@ -174,6 +155,27 @@ mod tests {
         let registry = ModelRegistry::new();
         let spec = registry.lookup(&metadata).expect("should match qwen3");
         // Must match qwen3_vl spec, not qwen_vl
+        assert_eq!(spec.name(), "qwen3_vl");
+    }
+
+    #[test]
+    fn qwen3_vl_matches_alias_via_model_type() {
+        let tokenizer = TestTokenizer::new(&[("<|image_pad|>", 151655)]);
+        let config = json!({
+            "model_type": "qwen3_vl",
+            "vision_start_token_id": 151652,
+            "image_token_id": 151655,
+            "vision_end_token_id": 151653
+        });
+        let metadata = ModelMetadata {
+            model_id: "custom-model",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry
+            .lookup(&metadata)
+            .expect("should match qwen3 alias");
         assert_eq!(spec.name(), "qwen3_vl");
     }
 }

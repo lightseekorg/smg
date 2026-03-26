@@ -162,6 +162,7 @@ pub(in crate::routers::openai) async fn route_responses(
         Some(model_id.to_string()),
         ComponentRefs::Responses(Arc::clone(deps.responses_components)),
     );
+    ctx.storage_request_context = smg_data_connector::current_request_context();
 
     ctx.state.worker = Some(WorkerSelection {
         worker: Arc::clone(&worker),

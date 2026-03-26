@@ -673,7 +673,8 @@ fn resize_and_pad_image(image: &DynamicImage, target: (u32, u32)) -> DynamicImag
         )
     };
 
-    let resized = image.resize_exact(
+    let resized = resize(
+        image,
         new_width,
         new_height,
         image::imageops::FilterType::CatmullRom,

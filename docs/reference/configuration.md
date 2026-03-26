@@ -385,6 +385,7 @@ High-availability mesh networking for multi-router coordination.
 | `--enable-mesh` | Enable mesh server for HA multi-router coordination. Requires at least two SMG instances. | `false` |
 | `--mesh-server-name` | Name for this mesh node. If not set, a random name is generated (e.g., `Mesh_a1b2`). | Auto-generated |
 | `--mesh-host` | Bind address for the mesh server. | `0.0.0.0` |
+| `--mesh-advertise-host` | Routable address advertised to other mesh peers. Required when `--mesh-host` is an unspecified bind address such as `0.0.0.0`. | `--mesh-host` |
 | `--mesh-port` | Port for the mesh server. | `39527` |
 | `--mesh-peer-urls` | Peer mesh node addresses to join (format: `host:port`). Used for initial cluster formation. | (none) |
 
@@ -393,6 +394,7 @@ High-availability mesh networking for multi-router coordination.
 smg \
   --enable-mesh \
   --mesh-server-name router-1 \
+  --mesh-advertise-host 192.168.1.10 \
   --mesh-port 39527 \
   --mesh-peer-urls 192.168.1.10:39527
 ```
@@ -450,6 +452,27 @@ smg \
 ```bash
 --request-id-headers x-request-id x-trace-id x-correlation-id
 ```
+
+### Storage Context Headers
+
+| Option | `--storage-context-headers` |
+|--------|-----------------------------|
+| Environment | - |
+| Default | Empty |
+| Format | Space-separated `header=context_key` entries |
+| Description | Maps request headers into storage hook request context |
+
+**Example**:
+
+```bash
+--storage-context-headers x-tenant-id=tenant_id x-user-id=user_id
+```
+
+This lets storage hooks read values such as `tenant_id` and `user_id` from the
+request context without hard-coding specific headers in the gateway.
+
+Only map headers that are injected or sanitized by a trusted upstream. Client-supplied
+headers can otherwise spoof storage hook request context values.
 
 ---
 
@@ -744,6 +767,7 @@ smg \
 smg \
   --enable-mesh \
   --mesh-server-name router-1 \
+  --mesh-advertise-host 192.168.1.10 \
   --mesh-port 39527 \
   --mesh-peer-urls 192.168.1.11:39527 \
   --worker-urls http://worker1:8000
@@ -752,6 +776,7 @@ smg \
 smg \
   --enable-mesh \
   --mesh-server-name router-2 \
+  --mesh-advertise-host 192.168.1.11 \
   --mesh-port 39527 \
   --mesh-peer-urls 192.168.1.10:39527 \
   --worker-urls http://worker2:8000

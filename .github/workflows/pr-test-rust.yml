@@ -328,7 +328,7 @@ jobs:
 
       - name: Run benchmarks
         env:
-          ROUTER_LOCAL_MODEL_PATH: /home/ubuntu/models
+          ROUTER_LOCAL_MODEL_PATH: /models
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 pytest e2e_test/benchmarks \
@@ -690,7 +690,7 @@ jobs:
         env:
           BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
-          ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.test_path }} \
+          ROUTER_LOCAL_MODEL_PATH="/models" pytest ${{ matrix.test_path }} \
             -m "not external" \
             --reruns 2 --reruns-delay 5 \
             -s -vv
@@ -803,7 +803,7 @@ jobs:
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
           export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
-          SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+          SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/models" \
             pytest --reruns 2 --reruns-delay 5 e2e_test/bindings_go -s -vv
 
   go-bindings-benchmark:
@@ -860,7 +860,7 @@ jobs:
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
           export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
-          SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+          SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/models" \
             pytest e2e_test/benchmarks/test_go_bindings_perf.py -s -vv
 
       - name: Upload benchmark results

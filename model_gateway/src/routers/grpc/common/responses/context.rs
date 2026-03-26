@@ -4,7 +4,10 @@
 
 use std::sync::Arc;
 
-use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
+use smg_data_connector::{
+    ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
+    ResponseStorage,
+};
 use smg_mcp::McpOrchestrator;
 
 use crate::routers::grpc::{context::SharedComponents, pipeline::RequestPipeline};
@@ -35,6 +38,9 @@ pub(crate) struct ResponsesContext {
 
     /// Metrics store for piggybacked metrics
     pub metrics_store: Arc<metrics_service::MetricsStore>,
+
+    /// Storage hook request context extracted from HTTP headers by middleware.
+    pub request_context: Option<StorageRequestContext>,
 }
 
 impl ResponsesContext {
@@ -47,6 +53,7 @@ impl ResponsesContext {
         conversation_item_storage: Arc<dyn ConversationItemStorage>,
         mcp_orchestrator: Arc<McpOrchestrator>,
         metrics_store: Arc<metrics_service::MetricsStore>,
+        request_context: Option<StorageRequestContext>,
     ) -> Self {
         Self {
             pipeline,
@@ -56,6 +63,7 @@ impl ResponsesContext {
             conversation_item_storage,
             mcp_orchestrator,
             metrics_store,
+            request_context,
         }
     }
 }

@@ -76,6 +76,7 @@ pub(crate) async fn serve_harmony_responses(
         ctx.response_storage.clone(),
         &response,
         &original_request,
+        ctx.request_context.clone(),
     )
     .await;
 

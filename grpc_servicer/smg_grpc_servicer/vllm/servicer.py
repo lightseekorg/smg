@@ -264,6 +264,16 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             GetModelInfoResponse protobuf
         """
         model_config = self.async_llm.model_config
+        hf_config = model_config.hf_config
+
+        # eos_token_id can be int or list[int]
+        eos = getattr(hf_config, "eos_token_id", None)
+        if isinstance(eos, int):
+            eos_token_ids = [eos]
+        elif isinstance(eos, list):
+            eos_token_ids = eos
+        else:
+            eos_token_ids = []
 
         return vllm_engine_pb2.GetModelInfoResponse(
             model_path=model_config.model,
@@ -272,6 +282,13 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             vocab_size=model_config.get_vocab_size(),
             supports_vision=model_config.is_multimodal_model,
             served_model_name=model_config.served_model_name or model_config.model,
+            tokenizer_path=model_config.tokenizer or "",
+            model_type=getattr(hf_config, "model_type", "") or "",
+            architectures=model_config.architectures or [],
+            eos_token_ids=eos_token_ids,
+            pad_token_id=getattr(hf_config, "pad_token_id", None) or 0,
+            bos_token_id=getattr(hf_config, "bos_token_id", None) or 0,
+            max_req_input_len=model_config.max_model_len,
         )
 
     async def GetServerInfo(

@@ -464,3 +464,184 @@ class TestIGWMixedWorkerClassification:
                 gateway.shutdown()
         finally:
             stop_workers(all_local_workers)
+
+
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
+@pytest.mark.e2e
+class TestWorkerAPIRestSemantics:
+    """Tests for proper REST semantics on worker management endpoints.
+
+    Verifies:
+    - POST /workers returns 409 on duplicate URL
+    - PUT /workers/{id} does full replace
+    - PATCH /workers/{id} does partial update
+    """
+
+    def test_post_duplicate_url_returns_409(self):
+        """POST /workers with the same URL twice should return 409 Conflict."""
+        engine = os.environ.get("E2E_ENGINE", "sglang")
+        http_workers = start_workers(
+            "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.HTTP, count=1
+        )
+
+        try:
+            http_worker = http_workers[0]
+
+            gateway = Gateway()
+            gateway.start(igw_mode=True)
+
+            try:
+                # First POST — should succeed
+                success, worker_id = gateway.add_worker(http_worker.base_url)
+                assert success, f"First POST should succeed: {worker_id}"
+                logger.info("First POST succeeded: worker_id=%s", worker_id)
+
+                # Second POST with same URL — should return 409
+                resp = httpx.post(
+                    f"{gateway.base_url}/workers",
+                    json={"url": http_worker.base_url},
+                    timeout=10,
+                )
+                assert resp.status_code == 409, (
+                    f"Expected 409 Conflict on duplicate URL, got {resp.status_code}: {resp.text}"
+                )
+                error_data = resp.json()
+                assert "WORKER_ALREADY_EXISTS" in error_data.get("code", ""), (
+                    f"Expected WORKER_ALREADY_EXISTS error code, got: {error_data}"
+                )
+                logger.info("Duplicate POST correctly returned 409: %s", error_data)
+            finally:
+                gateway.shutdown()
+        finally:
+            stop_workers(http_workers)
+
+    def test_patch_partial_update(self):
+        """PATCH /workers/{id} should do partial update and persist changes."""
+        engine = os.environ.get("E2E_ENGINE", "sglang")
+        http_workers = start_workers(
+            "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.HTTP, count=1
+        )
+
+        try:
+            http_worker = http_workers[0]
+
+            gateway = Gateway()
+            gateway.start(igw_mode=True)
+
+            try:
+                # Add worker
+                success, worker_id = gateway.add_worker(http_worker.base_url)
+                assert success, f"Failed to add worker: {worker_id}"
+
+                # PATCH to update priority, cost, and labels
+                resp = httpx.patch(
+                    f"{gateway.base_url}/workers/{worker_id}",
+                    json={"priority": 100, "cost": 2.5, "labels": {"env": "test"}},
+                    timeout=10,
+                )
+                assert resp.status_code in (200, 202), (
+                    f"PATCH should succeed, got {resp.status_code}: {resp.text}"
+                )
+                logger.info("PATCH succeeded: %s", resp.json())
+
+                # Poll until the update is applied (async 202)
+                deadline = time.perf_counter() + 15
+                verified = False
+                while time.perf_counter() < deadline:
+                    resp = httpx.get(
+                        f"{gateway.base_url}/workers/{worker_id}",
+                        timeout=10,
+                    )
+                    if resp.status_code == 200:
+                        worker_data = resp.json()
+                        if (
+                            worker_data.get("priority") == 100
+                            and worker_data.get("cost") == 2.5
+                            and worker_data.get("labels", {}).get("env") == "test"
+                        ):
+                            verified = True
+                            break
+                    time.sleep(1.0)
+
+                assert verified, (
+                    f"PATCH changes not persisted within timeout. "
+                    f"Last worker state: {resp.json() if resp.status_code == 200 else resp.text}"
+                )
+                logger.info("PATCH changes verified: priority=100, cost=2.5, labels={env: test}")
+            finally:
+                gateway.shutdown()
+        finally:
+            stop_workers(http_workers)
+
+    def test_put_full_replace(self):
+        """PUT /workers/{id} should do full replace with model re-discovery."""
+        engine = os.environ.get("E2E_ENGINE", "sglang")
+        http_workers = start_workers(
+            "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.HTTP, count=1
+        )
+
+        try:
+            http_worker = http_workers[0]
+
+            gateway = Gateway()
+            gateway.start(igw_mode=True)
+
+            try:
+                # Add worker
+                success, worker_id = gateway.add_worker(http_worker.base_url)
+                assert success, f"Failed to add worker: {worker_id}"
+
+                # PUT full replace with same URL
+                resp = httpx.put(
+                    f"{gateway.base_url}/workers/{worker_id}",
+                    json={"url": http_worker.base_url},
+                    timeout=10,
+                )
+                assert resp.status_code in (200, 202), (
+                    f"PUT should succeed, got {resp.status_code}: {resp.text}"
+                )
+                logger.info("PUT full replace succeeded: %s", resp.json())
+
+                # Worker should still be registered
+                workers = gateway.list_workers()
+                assert any(w.id == worker_id for w in workers), (
+                    "Worker should still exist after PUT replace"
+                )
+            finally:
+                gateway.shutdown()
+        finally:
+            stop_workers(http_workers)
+
+    def test_put_url_mismatch_returns_400(self):
+        """PUT /workers/{id} with a different URL should return 400."""
+        engine = os.environ.get("E2E_ENGINE", "sglang")
+        http_workers = start_workers(
+            "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.HTTP, count=1
+        )
+
+        try:
+            http_worker = http_workers[0]
+
+            gateway = Gateway()
+            gateway.start(igw_mode=True)
+
+            try:
+                # Add worker
+                success, worker_id = gateway.add_worker(http_worker.base_url)
+                assert success, f"Failed to add worker: {worker_id}"
+
+                # PUT with different URL — should fail
+                resp = httpx.put(
+                    f"{gateway.base_url}/workers/{worker_id}",
+                    json={"url": "http://different-url:9999"},
+                    timeout=10,
+                )
+                assert resp.status_code == 400, (
+                    f"Expected 400 on URL mismatch, got {resp.status_code}: {resp.text}"
+                )
+                logger.info("URL mismatch correctly returned 400: %s", resp.json())
+            finally:
+                gateway.shutdown()
+        finally:
+            stop_workers(http_workers)

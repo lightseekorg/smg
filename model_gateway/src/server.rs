@@ -36,7 +36,7 @@ use openai_protocol::{
 use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
+use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler, WorkerStateSubscriber};
 use tokio::{signal, spawn, sync::mpsc};
 use tracing::{debug, error, info, warn, Level};
 use wfaas::LoggingSubscriber;
@@ -200,7 +200,7 @@ async fn v1_chat_completions(
 async fn v1_completions(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
-    Json(body): Json<CompletionRequest>,
+    ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Response {
     state
         .router
@@ -560,6 +560,22 @@ async fn update_worker(
     }
 }
 
+async fn replace_worker(
+    State(state): State<Arc<AppState>>,
+    Path(worker_id_raw): Path<String>,
+    Json(config): Json<WorkerSpec>,
+) -> Response {
+    match state
+        .context
+        .worker_service
+        .replace_worker(&worker_id_raw, config)
+        .await
+    {
+        Ok(result) => result.into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
 // ============================================================================
 // Tokenize / Detokenize Handlers
 // ============================================================================
@@ -651,16 +667,7 @@ pub fn build_app(
     );
 
     let protected_routes = Router::new()
-        .route("/generate", post(generate))
-        .route("/v1/chat/completions", post(v1_chat_completions))
-        .route("/v1/completions", post(v1_completions))
-        .route("/rerank", post(rerank))
-        .route("/v1/rerank", post(v1_rerank))
         .route("/v1/responses", post(v1_responses))
-        .route("/v1/embeddings", post(v1_embeddings))
-        .route("/v1/messages", post(v1_messages))
-        .route("/v1/interactions", post(v1_interactions))
-        .route("/v1/classify", post(v1_classify))
         .route("/v1/responses/{response_id}", get(v1_responses_get))
         .route(
             "/v1/responses/{response_id}/cancel",
@@ -686,6 +693,19 @@ pub fn build_app(
             "/v1/conversations/{conversation_id}/items/{item_id}",
             get(v1_conversations_get_item).delete(v1_conversations_delete_item),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::storage_context_middleware,
+        ))
+        .route("/generate", post(generate))
+        .route("/v1/chat/completions", post(v1_chat_completions))
+        .route("/v1/completions", post(v1_completions))
+        .route("/rerank", post(rerank))
+        .route("/v1/rerank", post(v1_rerank))
+        .route("/v1/embeddings", post(v1_embeddings))
+        .route("/v1/messages", post(v1_messages))
+        .route("/v1/interactions", post(v1_interactions))
+        .route("/v1/classify", post(v1_classify))
         // Tokenize / Detokenize endpoints
         .route("/v1/tokenize", post(v1_tokenize))
         .route("/v1/detokenize", post(v1_detokenize))
@@ -764,7 +784,10 @@ pub fn build_app(
         .route("/workers", post(create_worker).get(list_workers_rest))
         .route(
             "/workers/{worker_id}",
-            get(get_worker).put(update_worker).delete(delete_worker),
+            get(get_worker)
+                .put(replace_worker)
+                .patch(update_worker)
+                .delete(delete_worker),
         );
 
     // Apply authentication middleware to control plane routes
@@ -1089,6 +1112,14 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         app_context
             .worker_registry
             .set_mesh_sync(Some(handle.sync_manager.clone()));
+        handle
+            .sync_manager
+            .register_worker_state_subscriber(app_context.worker_registry.clone());
+        // Replay workers already in the CRDT store — they arrived between
+        // mesh server start and subscriber registration above.
+        for state in handle.sync_manager.get_all_worker_states() {
+            app_context.worker_registry.on_remote_worker_state(&state);
+        }
         info!("Mesh sync manager set on worker registry");
 
         handle
@@ -1105,7 +1136,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let mesh_port = config
         .mesh_server_config
         .as_ref()
-        .map(|c| c.self_addr.port());
+        .map(|c| c.advertise_addr.port());
 
     let app_state = Arc::new(AppState {
         router,
@@ -1186,14 +1217,39 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     let handle = axum_server::Handle::new();
     let handle_clone = handle.clone();
-    let grace_period = Duration::from_secs(config.shutdown_grace_period_secs);
+    let inflight_tracker = app_context.inflight_tracker.clone();
+    let drain_timeout = Duration::from_secs(config.shutdown_grace_period_secs);
     #[expect(
         clippy::disallowed_methods,
         reason = "shutdown signal handler must outlive the server to trigger graceful shutdown"
     )]
     spawn(async move {
         shutdown_signal().await;
-        handle_clone.graceful_shutdown(Some(grace_period));
+
+        // Phase 1: Gate — stop accepting new connections, mark as draining
+        info!(
+            in_flight = inflight_tracker.len(),
+            "Beginning graceful shutdown: gating new connections"
+        );
+        inflight_tracker.begin_drain();
+        handle_clone.graceful_shutdown(Some(drain_timeout));
+
+        // Phase 2: Drain — wait for in-flight requests to complete
+        // Re-check after gating to catch requests that arrived between the
+        // snapshot and graceful_shutdown stopping the accept loop.
+        if !inflight_tracker.is_empty() {
+            let drained = inflight_tracker.wait_for_drain(drain_timeout).await;
+            if drained {
+                info!("All in-flight requests drained");
+            } else {
+                warn!(
+                    remaining = inflight_tracker.len(),
+                    timeout_secs = drain_timeout.as_secs(),
+                    "Drain timed out, forcing shutdown with requests still in-flight"
+                );
+            }
+        }
+        // Phase 3: Teardown proceeds after axum server stops (in the main task)
     });
 
     let server_result = if let (Some(cert), Some(key)) = (

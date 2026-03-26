@@ -32,6 +32,9 @@ impl ModelProcessorSpec for LlavaSpec {
 
     fn matches(&self, metadata: &ModelMetadata) -> bool {
         metadata.model_id.to_ascii_lowercase().contains("llava")
+            || metadata
+                .config_model_type()
+                .is_some_and(|mt| mt == "llava" || mt == "llava_next")
     }
 
     fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {
@@ -102,5 +105,23 @@ mod tests {
             .prompt_replacements(&metadata, &test_preprocessed(&[ImageSize::new(336, 336)]))
             .unwrap();
         assert_eq!(replacements[0].tokens.len(), 576);
+    }
+
+    #[test]
+    fn llava_matches_alias_via_model_type() {
+        let tokenizer = TestTokenizer::new(&[("<image>", 32000)]);
+        let config = json!({
+            "model_type": "llava",
+            "image_token_index": 32000,
+            "vision_config": {"patch_size": 14}
+        });
+        let metadata = ModelMetadata {
+            model_id: "custom-model",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("llava alias");
+        assert_eq!(spec.name(), "llava");
     }
 }

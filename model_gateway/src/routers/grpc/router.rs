@@ -133,6 +133,9 @@ impl GrpcRouter {
             .ok_or_else(|| "gRPC router requires MCP manager".to_string())?
             .clone();
 
+        // Capture storage request context from middleware task-local (before any spawn)
+        let storage_request_context = smg_data_connector::current_request_context();
+
         // Helper closure to create responses context with a given pipeline
         let create_responses_context = |pipeline: &RequestPipeline| {
             ResponsesContext::new(
@@ -143,6 +146,7 @@ impl GrpcRouter {
                 ctx.conversation_item_storage.clone(),
                 mcp_orchestrator.clone(),
                 ctx.metrics_store.clone(),
+                storage_request_context.clone(),
             )
         };
 
@@ -313,6 +317,7 @@ impl GrpcRouter {
                     .clone(),
                 self.harmony_responses_context.mcp_orchestrator.clone(),
                 self.harmony_responses_context.metrics_store.clone(),
+                smg_data_connector::current_request_context(),
             );
 
             if body.stream.unwrap_or(false) {

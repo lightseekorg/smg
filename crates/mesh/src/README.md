@@ -982,7 +982,8 @@ Configure mesh in your router configuration file:
 mesh:
   enabled: true
   self_name: "router-node-1"
-  self_addr: "0.0.0.0:8000"
+  bind_addr: "0.0.0.0:8000"
+  advertise_addr: "10.0.0.11:8000"
   init_peer: "router-node-2:8000"  # Optional: initial peer for bootstrap
 ```
 

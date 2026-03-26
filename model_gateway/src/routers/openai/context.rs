@@ -5,7 +5,10 @@ use std::sync::Arc;
 use axum::http::HeaderMap;
 use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
 use serde_json::Value;
-use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
+use smg_data_connector::{
+    ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
+    ResponseStorage,
+};
 use smg_mcp::{McpOrchestrator, McpToolSession};
 
 use super::provider::Provider;
@@ -15,6 +18,8 @@ pub struct RequestContext {
     pub input: RequestInput,
     pub components: ComponentRefs,
     pub state: ProcessingState,
+    /// Storage hook request context extracted from HTTP headers by middleware.
+    pub storage_request_context: Option<StorageRequestContext>,
 }
 
 pub struct RequestInput {
@@ -123,6 +128,7 @@ impl RequestContext {
             },
             components,
             state: ProcessingState::default(),
+            storage_request_context: None,
         }
     }
 
@@ -140,6 +146,7 @@ impl RequestContext {
             },
             components,
             state: ProcessingState::default(),
+            storage_request_context: None,
         }
     }
 }
@@ -196,6 +203,7 @@ pub struct StorageHandles {
     pub conversation: Arc<dyn ConversationStorage>,
     pub conversation_item: Arc<dyn ConversationItemStorage>,
     pub metrics_store: Option<Arc<metrics_service::MetricsStore>>,
+    pub request_context: Option<StorageRequestContext>,
 }
 
 pub struct OwnedStreamingContext {
@@ -243,6 +251,7 @@ impl RequestContext {
                 conversation,
                 conversation_item,
                 metrics_store,
+                request_context: self.storage_request_context,
             },
         })
     }

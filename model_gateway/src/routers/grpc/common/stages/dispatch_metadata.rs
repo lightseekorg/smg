@@ -29,6 +29,7 @@ impl PipelineStage for DispatchMetadataStage {
         let request_id = proto_request.request_id().to_string();
         let model = match &ctx.input.request_type {
             RequestType::Chat(req) => req.model.clone(),
+            RequestType::Completion(req) => req.model.clone(),
             RequestType::Generate(_req) => {
                 // Generate requests don't have a model field
                 // Use model_id from input
