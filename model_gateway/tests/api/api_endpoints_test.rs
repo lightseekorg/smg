@@ -1109,6 +1109,40 @@ mod responses_endpoint_tests {
     }
 
     #[tokio::test]
+    async fn test_v1_responses_store_omitted_retrieve_200() {
+        let ctx = create_openai_ctx(18973).await;
+        let app = ctx.create_app();
+
+        let (status, body) = create_response(
+            &app,
+            json!({
+                "input": "Hello",
+                "model": "mock-model",
+                "stream": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resp_id = body["id"].as_str().expect("response should have id");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/responses/{resp_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let get_body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+        assert_eq!(get_json["store"], true);
+
+        ctx.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn test_v1_responses_store_false_as_previous_response_id() {
         let ctx = create_openai_ctx(18972).await;
         let app = ctx.create_app();
@@ -1138,16 +1172,10 @@ mod responses_endpoint_tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
-        assert!(
-            err_body["error"]["code"]
-                .as_str()
-                .unwrap_or("")
-                .contains("not_found")
-                || err_body["error"]["message"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains("not found"),
-            "Expected not-found error, got: {err_body}"
+        assert_eq!(
+            err_body["error"]["code"].as_str(),
+            Some("previous_response_not_found"),
+            "Expected error code 'previous_response_not_found', got: {err_body}"
         );
 
         ctx.shutdown().await;

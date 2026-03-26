@@ -34,7 +34,7 @@ pub(crate) mod versioning;
 pub use core::{
     Conversation, ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
     ConversationStorage, ListParams, NewConversation, NewConversationItem, ResponseId,
-    ResponseStorage, SortOrder, StoredResponse,
+    ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
 };
 
 pub use config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};

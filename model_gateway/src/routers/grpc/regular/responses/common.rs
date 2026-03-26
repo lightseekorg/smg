@@ -15,7 +15,9 @@ use openai_protocol::{
         ResponsesRequest,
     },
 };
-use smg_data_connector::{self as data_connector, ConversationId, ResponseId};
+use smg_data_connector::{
+    self as data_connector, ConversationId, ResponseId, ResponseStorageError,
+};
 use smg_mcp::McpToolSession;
 use tracing::{debug, warn};
 
@@ -210,10 +212,16 @@ pub(super) async fn load_conversation_history(
                 conversation_items = Some(items);
                 modified_request.previous_response_id = None;
             }
-            Ok(_) | Err(_) => {
+            Ok(_) | Err(ResponseStorageError::ResponseNotFound(_)) => {
                 return Err(error::bad_request(
                     "previous_response_not_found",
                     format!("Previous response with id '{prev_id_str}' not found."),
+                ));
+            }
+            Err(e) => {
+                return Err(error::internal_error(
+                    "load_previous_response_chain_failed",
+                    format!("Failed to load previous response chain for {prev_id_str}: {e}"),
                 ));
             }
         }
