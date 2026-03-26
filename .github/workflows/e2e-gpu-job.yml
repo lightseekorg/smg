@@ -110,7 +110,7 @@ jobs:
       # Run tests
       - name: Run E2E tests
         env:
-          SHOW_WORKER_LOGS: "0"
+          SHOW_WORKER_LOGS: "1"
           SHOW_ROUTER_LOGS: "1"
           BRAVE_MCP_HOST: ${{ inputs.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
