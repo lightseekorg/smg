@@ -529,7 +529,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let response = match request_builder.send().await {
         Ok(resp) => resp,
         Err(err) => {
-            worker.record_outcome(false);
+            worker.record_outcome(502);
             return (
                 StatusCode::BAD_GATEWAY,
                 format!("Failed to forward request to OpenAI: {err}"),
@@ -542,8 +542,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let status_code =
         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-    // Record CB outcome based on HTTP status
-    worker.record_outcome(status.is_success());
+    worker.record_outcome(status.as_u16());
 
     if !status.is_success() {
         let error_body = response

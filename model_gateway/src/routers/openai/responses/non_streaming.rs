@@ -85,11 +85,9 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         .await
         {
             Ok(resp) => {
-                worker.record_outcome(true);
                 response_json = resp;
             }
             Err(err) => {
-                worker.record_outcome(false);
                 return error::internal_error("upstream_error", err);
             }
         }
@@ -101,7 +99,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         let response = match request_builder.send().await {
             Ok(r) => r,
             Err(e) => {
-                worker.record_outcome(false);
+                worker.record_outcome(502);
                 tracing::error!(
                     url = %url,
                     error = %e,
@@ -114,10 +112,12 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             }
         };
 
-        if !response.status().is_success() {
-            worker.record_outcome(false);
-            let status = StatusCode::from_u16(response.status().as_u16())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status = response.status();
+        worker.record_outcome(status.as_u16());
+
+        if !status.is_success() {
+            let status =
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let body = response.text().await.unwrap_or_default();
             let body = error::sanitize_error_body(&body);
             return (status, body).into_response();
@@ -126,15 +126,12 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         response_json = match response.json::<Value>().await {
             Ok(r) => r,
             Err(e) => {
-                worker.record_outcome(false);
                 return error::internal_error(
                     "parse_error",
                     format!("Failed to parse upstream response: {e}"),
                 );
             }
         };
-
-        worker.record_outcome(true);
     }
 
     restore_original_tools(&mut response_json, original_body);

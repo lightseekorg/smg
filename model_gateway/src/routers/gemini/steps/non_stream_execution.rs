@@ -64,7 +64,8 @@ pub(crate) async fn non_stream_request_execution(
     let response = match request_builder.send().await {
         Ok(r) => r,
         Err(e) => {
-            worker.record_outcome(false);
+            let status = if e.is_timeout() { 504 } else { 502 };
+            worker.record_outcome(status);
             tracing::warn!(url = %upstream_url, error = %e, "Request to worker failed");
 
             return if e.is_timeout() {
@@ -81,13 +82,10 @@ pub(crate) async fn non_stream_request_execution(
         }
     };
 
-    // Only trip the circuit breaker on server errors (5xx), not client errors (4xx).
-    let is_success = response.status().is_success();
-    if is_success || response.status().is_server_error() {
-        worker.record_outcome(is_success);
-    }
+    let status = response.status();
+    worker.record_outcome(status.as_u16());
 
-    if !is_success {
+    if !status.is_success() {
         let status = StatusCode::from_u16(response.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let content_type = response.headers().get(http::header::CONTENT_TYPE).cloned();

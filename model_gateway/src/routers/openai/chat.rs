@@ -169,7 +169,7 @@ pub(super) async fn route_chat(
                 let resp = match req.send().await {
                     Ok(r) => r,
                     Err(e) => {
-                        worker.record_outcome(false);
+                        worker.record_outcome(503);
                         return error::service_unavailable(
                             "upstream_error",
                             format!("Failed to contact upstream: {e}"),
@@ -184,7 +184,7 @@ pub(super) async fn route_chat(
                 // For streaming: status is known upfront (200 = success).
                 // For non-streaming: we record here too — body read errors
                 // are connection issues, not worker health issues.
-                worker.record_outcome(!is_retryable_status(status));
+                worker.record_outcome(status.as_u16());
 
                 if is_streaming {
                     let stream = resp.bytes_stream();
