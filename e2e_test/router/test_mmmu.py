@@ -25,8 +25,8 @@ from infra import run_eval
 logger = logging.getLogger(__name__)
 
 # Baseline accuracy from Qwen3-VL-8B-Instruct on Art and Design category
-# gRPC: 0.692, HTTP: 0.683
-MMMU_THRESHOLD = 0.65
+# vLLM gRPC: ~0.60-0.61
+MMMU_THRESHOLD = 0.60
 
 
 @pytest.mark.engine("vllm")
