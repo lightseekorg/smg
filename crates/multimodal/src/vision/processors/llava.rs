@@ -204,14 +204,19 @@ impl LlavaProcessor {
         let processed = match self.aspect_ratio {
             ImageAspectRatio::Pad => {
                 // Pad mode: expand to square with mean color padding, then resize
-                let mean_color = mean_to_rgb(&mean);
-                let squared = expand_to_square(image, mean_color);
+                let (w, h) = image.dimensions();
+                let squared = if w == h {
+                    std::borrow::Cow::Borrowed(image)
+                } else {
+                    let mean_color = mean_to_rgb(&mean);
+                    std::borrow::Cow::Owned(expand_to_square(image, mean_color))
+                };
 
                 // Resize to target size (maintaining square)
                 if config.do_resize.unwrap_or(true) {
                     resize(&squared, target_size, target_size, filter)
                 } else {
-                    squared
+                    squared.into_owned()
                 }
             }
             ImageAspectRatio::Square | ImageAspectRatio::Anyres => {
@@ -233,9 +238,14 @@ impl LlavaProcessor {
                     image.clone()
                 };
 
-                // Center crop to crop_size
+                // Center crop to crop_size (skip if image already fits)
                 if config.do_center_crop.unwrap_or(true) {
-                    center_crop(&resized, crop_size, crop_size)
+                    let (rw, rh) = resized.dimensions();
+                    if crop_size >= rw && crop_size >= rh {
+                        resized
+                    } else {
+                        center_crop(&resized, crop_size, crop_size)
+                    }
                 } else {
                     resized
                 }
@@ -472,10 +482,15 @@ impl LlavaNextProcessor {
             image.clone()
         };
 
-        // Center crop if configured
+        // Center crop if configured (skip if image already fits)
         let cropped = if config.do_center_crop.unwrap_or(true) {
             if let Some((crop_h, crop_w)) = config.get_crop_size() {
-                center_crop(&resized, crop_w, crop_h)
+                let (rw, rh) = resized.dimensions();
+                if crop_w >= rw && crop_h >= rh {
+                    resized
+                } else {
+                    center_crop(&resized, crop_w, crop_h)
+                }
             } else {
                 resized
             }
