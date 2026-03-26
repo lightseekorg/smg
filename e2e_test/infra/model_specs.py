@@ -70,6 +70,11 @@ MODEL_SPECS: dict[str, dict] = {
         "model": _resolve_model_path("mistralai/Mistral-7B-Instruct-v0.3"),
         "tp": 1,
         "features": ["chat", "streaming", "function_calling"],
+        "worker_args": ["--constrained-json-disable-any-whitespace"],
+        "vllm_args": [
+            "--structured-outputs-config",
+            '{"disable_any_whitespace": true, "backend": "xgrammar"}',
+        ],
     },
     # Embedding model
     "intfloat/e5-mistral-7b-instruct": {
