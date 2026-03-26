@@ -136,6 +136,7 @@ async fn test_dsml_streaming_chunked() {
 
     let mut found_name = false;
     let mut found_args = false;
+    let mut collected_args_chunks: Vec<String> = Vec::new();
 
     for chunk in chunks {
         let result = parser.parse_incremental(chunk, &tools).await.unwrap();
@@ -147,12 +148,20 @@ async fn test_dsml_streaming_chunked() {
             }
             if call.name.is_none() && !call.parameters.is_empty() {
                 found_args = true;
+                collected_args_chunks.push(call.parameters.clone());
             }
         }
     }
 
     assert!(found_name, "Should have found tool name during streaming");
-    assert!(found_args, "Should have found tool arguments during streaming");
+    assert!(
+        found_args,
+        "Should have found tool arguments during streaming"
+    );
+
+    let full_args: String = collected_args_chunks.join("");
+    let _: serde_json::Value =
+        serde_json::from_str(&full_args).expect("Collected argument chunks should form valid JSON");
 }
 
 #[tokio::test]
@@ -194,9 +203,7 @@ fn test_dsml_format_detection() {
 
     // Should detect DSML format
     assert!(parser.has_tool_markers("<\u{ff5c}DSML\u{ff5c}function_calls>"));
-    assert!(parser.has_tool_markers(
-        "text with <\u{ff5c}DSML\u{ff5c}function_calls> marker"
-    ));
+    assert!(parser.has_tool_markers("text with <\u{ff5c}DSML\u{ff5c}function_calls> marker"));
 
     // Should not detect other formats
     assert!(!parser.has_tool_markers("<\u{ff5c}tool\u{2581}calls\u{2581}begin\u{ff5c}>"));
@@ -309,7 +316,10 @@ async fn test_dsml_streaming_xml_parameters() {
     }
 
     assert!(found_name, "Should have found tool name during streaming");
-    assert!(found_args, "Should have found tool arguments during streaming");
+    assert!(
+        found_args,
+        "Should have found tool arguments during streaming"
+    );
 }
 
 #[tokio::test]
@@ -329,16 +339,33 @@ async fn test_dsml_reset() {
     // Reset
     parser.reset();
 
-    // After reset, parser should work fresh
-    let input = "<\u{ff5c}DSML\u{ff5c}function_calls>\n\
-        <\u{ff5c}DSML\u{ff5c}invoke name=\"get_weather\">\n\
-        {\"location\": \"Paris\"}\n\
-        </\u{ff5c}DSML\u{ff5c}invoke>\n\
-        </\u{ff5c}DSML\u{ff5c}function_calls>";
+    // After reset, reuse the SAME parser instance to verify state was cleared
+    let chunks = vec![
+        "<\u{ff5c}DSML\u{ff5c}function_calls>\n",
+        "<\u{ff5c}DSML\u{ff5c}invoke name=\"get_weather\">\n",
+        "{\"location\": \"Paris\"}\n",
+        "</\u{ff5c}DSML\u{ff5c}invoke>\n",
+        "</\u{ff5c}DSML\u{ff5c}function_calls>",
+    ];
 
-    // Use parse_complete on a fresh parser to verify it works
-    let fresh_parser = DeepSeekV32Parser::new();
-    let (_, tools_result) = fresh_parser.parse_complete(input).await.unwrap();
-    assert_eq!(tools_result.len(), 1);
-    assert_eq!(tools_result[0].function.name, "get_weather");
+    let mut found_name = false;
+    let mut found_args = false;
+
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if let Some(name) = &call.name {
+                assert_eq!(name, "get_weather");
+                found_name = true;
+            }
+            if call.name.is_none() && !call.parameters.is_empty() {
+                let args: serde_json::Value = serde_json::from_str(&call.parameters).unwrap();
+                assert_eq!(args["location"], "Paris");
+                found_args = true;
+            }
+        }
+    }
+
+    assert!(found_name, "After reset, parser should find tool name");
+    assert!(found_args, "After reset, parser should find tool arguments");
 }

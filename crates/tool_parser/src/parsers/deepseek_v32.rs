@@ -170,6 +170,7 @@ impl ToolParser for DeepSeekV32Parser {
         }
 
         // Find where function calls begin
+        // INVARIANT: has_tool_markers() already confirmed the marker exists
         let idx = text.find(FUNCTION_CALLS_START).ok_or_else(|| {
             ParserError::ParsingFailed("DSML function_calls marker not found".to_string())
         })?;
@@ -204,15 +205,25 @@ impl ToolParser for DeepSeekV32Parser {
         tools: &[Tool],
     ) -> ParserResult<StreamingParseResult> {
         self.buffer.push_str(chunk);
-        let current_text = self.buffer.clone();
 
         // Check if we have any DSML markers
-        let has_dsml = self.has_tool_markers(&current_text)
-            || current_text.contains("<\u{ff5c}DSML\u{ff5c}invoke");
+        let has_dsml = self.has_tool_markers(&self.buffer)
+            || self.buffer.contains("<\u{ff5c}DSML\u{ff5c}invoke");
 
         if !has_dsml {
-            // No DSML markers detected -- return all buffered content as normal text
-            let mut normal_text = std::mem::take(&mut self.buffer);
+            // No DSML markers detected -- return buffered content as normal text,
+            // but retain any suffix that could be the start of a DSML tag.
+            // All DSML tags start with "<\u{ff5c}", so keep everything from the
+            // last occurrence of that prefix to avoid flushing a partial tag.
+            let buf = std::mem::take(&mut self.buffer);
+            let (flush, retain) = if let Some(pos) = buf.rfind("<\u{ff5c}") {
+                (buf[..pos].to_string(), buf[pos..].to_string())
+            } else {
+                (buf, String::new())
+            };
+            self.buffer = retain;
+
+            let mut normal_text = flush;
             // Strip out end tokens if present
             for e_token in [FUNCTION_CALLS_END, INVOKE_END] {
                 normal_text = normal_text.replace(e_token, "");
@@ -225,9 +236,24 @@ impl ToolParser for DeepSeekV32Parser {
 
         let tool_indices = helpers::get_tool_indices(tools);
         let mut calls: Vec<ToolCallItem> = Vec::new();
+        let mut normal_text = String::new();
+
+        // Emit any text that appears before the DSML block
+        if let Some(dsml_start) = self.buffer.find(FUNCTION_CALLS_START) {
+            if dsml_start > 0 {
+                normal_text = self.buffer[..dsml_start].to_string();
+                self.buffer = self.buffer[dsml_start..].to_string();
+            }
+        }
 
         // Buffer-until-complete-invoke strategy: look for complete invoke blocks
-        while let Some(cap) = self.invoke_extractor.captures(&self.buffer.clone()) {
+        // Clone needed because regex captures borrow the string, but we mutate
+        // the buffer inside the loop body.
+        loop {
+            let current_text = self.buffer.clone();
+            let Some(cap) = self.invoke_extractor.captures(&current_text) else {
+                break;
+            };
             let full_match = cap.get(0).map_or("", |m| m.as_str());
             let match_end = cap.get(0).map(|m| m.end()).unwrap_or(0);
             let func_name = cap.get(1).map_or("", |m| m.as_str()).trim();
@@ -307,10 +333,7 @@ impl ToolParser for DeepSeekV32Parser {
             self.current_tool_name_sent = false;
         }
 
-        Ok(StreamingParseResult {
-            normal_text: String::new(),
-            calls,
-        })
+        Ok(StreamingParseResult { normal_text, calls })
     }
 
     fn has_tool_markers(&self, text: &str) -> bool {
