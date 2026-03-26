@@ -248,8 +248,16 @@ impl QwenVLProcessorBase {
         let merge_size = self.config.merge_size;
         let temporal_patch_size = self.config.temporal_patch_size;
 
-        debug_assert_eq!(height, grid_h * patch_size);
-        debug_assert_eq!(width, grid_w * patch_size);
+        debug_assert_eq!(
+            height,
+            grid_h * patch_size,
+            "Height must match grid_h * patch_size"
+        );
+        debug_assert_eq!(
+            width,
+            grid_w * patch_size,
+            "Width must match grid_w * patch_size"
+        );
 
         let num_patches = grid_t * grid_h * grid_w;
         let patch_features = channel * temporal_patch_size * patch_size * patch_size;
