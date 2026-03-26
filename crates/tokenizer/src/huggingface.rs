@@ -219,13 +219,14 @@ impl HuggingFaceTokenizer {
                 return None;
             }
 
-            let config_str = config_path.to_str()?;
             let content = std::fs::read_to_string(&config_path).ok()?;
             let config: serde_json::Value = serde_json::from_str(&content).ok()?;
 
-            let chat_template = super::chat_template::load_chat_template_from_config(config_str)
-                .ok()
-                .flatten();
+            // Extract chat template directly from parsed config (avoid re-reading the file)
+            let chat_template = config
+                .get("chat_template")
+                .and_then(|v| v.as_str())
+                .map(String::from);
 
             let add_bos_token = config.get("add_bos_token").and_then(|v| v.as_bool());
             let add_eos_token = config.get("add_eos_token").and_then(|v| v.as_bool());
