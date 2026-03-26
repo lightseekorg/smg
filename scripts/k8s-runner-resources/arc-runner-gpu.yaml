@@ -75,6 +75,8 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: RUNNER_UPDATE_DISABLED
+              value: "true"
             - name: HF_HOME
               value: /models
             - name: HF_TOKEN
@@ -193,6 +195,8 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: RUNNER_UPDATE_DISABLED
+              value: "true"
             - name: HF_HOME
               value: /models
             - name: HF_TOKEN
@@ -305,6 +309,8 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: RUNNER_UPDATE_DISABLED
+              value: "true"
             - name: HF_HOME
               value: /models
             - name: HF_TOKEN
@@ -424,6 +430,8 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: RUNNER_UPDATE_DISABLED
+              value: "true"
             - name: HF_HOME
               value: /models
             - name: HF_TOKEN
@@ -544,6 +552,8 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///var/run/docker.sock
+            - name: RUNNER_UPDATE_DISABLED
+              value: "true"
             - name: HF_HOME
               value: /models
             - name: HF_TOKEN
