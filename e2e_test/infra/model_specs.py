@@ -144,7 +144,7 @@ MODEL_SPECS: dict[str, dict] = {
         "vllm_args": [
             "--trust-remote-code",
             "--max-model-len=196608",
-            "--attention-backend=FLASHINFER",
+            "--attention-backend=FLASH_ATTN",
         ],
         "startup_timeout": 1200,  # Large MoE model may need extra download/load time
     },
