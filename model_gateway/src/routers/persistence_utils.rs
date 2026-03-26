@@ -344,6 +344,11 @@ async fn persist_conversation_items_inner(
     response_json: &Value,
     original_body: &ResponsesRequest,
 ) -> Result<(), String> {
+    // Respect store=false: skip persistence entirely (matches official API behavior)
+    if !original_body.store.unwrap_or(true) {
+        return Ok(());
+    }
+
     // Extract response ID
     let response_id_str = response_json
         .get("id")

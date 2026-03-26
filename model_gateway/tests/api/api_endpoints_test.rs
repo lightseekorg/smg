@@ -995,6 +995,191 @@ mod responses_endpoint_tests {
 
         ctx.shutdown().await;
     }
+
+    async fn create_openai_ctx(port: u16) -> AppTestContext {
+        use smg::config::RouterConfig;
+        let config = RouterConfig::builder()
+            .openai_mode(vec![])
+            .random_policy()
+            .host("127.0.0.1")
+            .port(3100)
+            .max_payload_size(256 * 1024 * 1024)
+            .request_timeout_secs(600)
+            .worker_startup_timeout_secs(10)
+            .worker_startup_check_interval_secs(1)
+            .max_concurrent_requests(64)
+            .queue_size(0)
+            .queue_timeout_secs(60)
+            .build_unchecked();
+
+        AppTestContext::new_with_config(
+            config,
+            vec![MockWorkerConfig {
+                port,
+                worker_type: WorkerType::Regular,
+                health_status: HealthStatus::Healthy,
+                response_delay_ms: 0,
+                fail_rate: 0.0,
+            }],
+        )
+        .await
+    }
+
+    async fn create_response(
+        app: &axum::Router,
+        payload: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn test_v1_responses_store_false_retrieve_404() {
+        let ctx = create_openai_ctx(18970).await;
+        let app = ctx.create_app();
+
+        let (status, body) = create_response(
+            &app,
+            json!({
+                "input": "Hello",
+                "model": "mock-model",
+                "stream": false,
+                "store": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resp_id = body["id"].as_str().expect("response should have id");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/responses/{resp_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        ctx.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_v1_responses_store_true_retrieve_200() {
+        let ctx = create_openai_ctx(18971).await;
+        let app = ctx.create_app();
+
+        let (status, body) = create_response(
+            &app,
+            json!({
+                "input": "Hello",
+                "model": "mock-model",
+                "stream": false,
+                "store": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resp_id = body["id"].as_str().expect("response should have id");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/responses/{resp_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let get_body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+        assert_eq!(get_json["store"], true);
+
+        ctx.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_v1_responses_store_omitted_retrieve_200() {
+        let ctx = create_openai_ctx(18973).await;
+        let app = ctx.create_app();
+
+        let (status, body) = create_response(
+            &app,
+            json!({
+                "input": "Hello",
+                "model": "mock-model",
+                "stream": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resp_id = body["id"].as_str().expect("response should have id");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/responses/{resp_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let get_body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+        assert_eq!(get_json["store"], true);
+
+        ctx.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_v1_responses_store_false_as_previous_response_id() {
+        let ctx = create_openai_ctx(18972).await;
+        let app = ctx.create_app();
+
+        let (status, body) = create_response(
+            &app,
+            json!({
+                "input": "Hello",
+                "model": "mock-model",
+                "stream": false,
+                "store": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resp_id = body["id"].as_str().expect("response should have id");
+
+        let (status, err_body) = create_response(
+            &app,
+            json!({
+                "input": "Follow up",
+                "model": "mock-model",
+                "stream": false,
+                "previous_response_id": resp_id
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        assert_eq!(
+            err_body["error"]["code"].as_str(),
+            Some("previous_response_not_found"),
+            "Expected error code 'previous_response_not_found', got: {err_body}"
+        );
+
+        ctx.shutdown().await;
+    }
 }
 
 #[cfg(test)]
