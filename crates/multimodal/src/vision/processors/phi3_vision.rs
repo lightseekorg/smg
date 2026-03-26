@@ -115,9 +115,9 @@ impl Phi3VisionProcessor {
         let (width, height) = image.dimensions();
 
         let (img, transposed) = if width < height {
-            // Transpose (PIL's Image.TRANSPOSE): equivalent to fliph + rotate270 (ccw 90°)
-            // This swaps x and y coordinates: pixel at (x, y) goes to (y, x)
-            (image.fliph().rotate270(), true)
+            // Transpose (PIL's Image.TRANSPOSE): swap x and y coordinates
+            // pixel at (x, y) goes to (y, x), done in a single pass
+            (transforms::transpose(image), true)
         } else {
             (image.clone(), false)
         };
@@ -146,7 +146,7 @@ impl Phi3VisionProcessor {
 
         // Transpose back if needed (transpose is self-inverse)
         if transposed {
-            padded.fliph().rotate270()
+            transforms::transpose(&padded)
         } else {
             padded
         }
@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn test_transpose_equivalence() {
-        // Test that fliph().rotate270() correctly implements PIL's Image.TRANSPOSE
+        // Test that transforms::transpose correctly implements PIL's Image.TRANSPOSE
         // TRANSPOSE swaps x and y coordinates: pixel at (x, y) goes to (y, x)
         use image::{GenericImageView, Rgb, RgbImage};
 
@@ -552,12 +552,18 @@ mod tests {
         img.put_pixel(99, 199, Rgb([255, 255, 0])); // Bottom-right = yellow
 
         let img = DynamicImage::ImageRgb8(img);
-        let transposed = img.fliph().rotate270();
+        let transposed = transforms::transpose(&img);
 
         // After TRANSPOSE: (x, y) -> (y, x)
+        assert_eq!(transposed.dimensions(), (200, 100)); // width/height swapped
         assert_eq!(transposed.get_pixel(0, 0).0[0..3], [255, 0, 0]); // (0,0) -> (0,0)
         assert_eq!(transposed.get_pixel(0, 99).0[0..3], [0, 255, 0]); // (99,0) -> (0,99)
         assert_eq!(transposed.get_pixel(199, 0).0[0..3], [0, 0, 255]); // (0,199) -> (199,0)
         assert_eq!(transposed.get_pixel(199, 99).0[0..3], [255, 255, 0]); // (99,199) -> (199,99)
+
+        // Verify equivalence with the old fliph().rotate270() approach
+        let old_transposed = img.fliph().rotate270();
+        assert_eq!(transposed.dimensions(), old_transposed.dimensions());
+        assert_eq!(transposed.to_rgb8().into_raw(), old_transposed.to_rgb8().into_raw());
     }
 }

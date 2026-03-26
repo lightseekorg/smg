@@ -315,6 +315,20 @@ pub fn stack_batch(tensors: &[Array3<f32>]) -> Result<Array4<f32>> {
     Ok(batch)
 }
 
+/// Transpose image: swap x and y coordinates (equivalent to PIL's Image.TRANSPOSE).
+/// Pixel at (x, y) moves to (y, x). Output dimensions are (height, width) of input.
+pub fn transpose(image: &DynamicImage) -> DynamicImage {
+    let rgb = image.to_rgb8();
+    let (w, h) = (rgb.width(), rgb.height());
+    let mut out = RgbImage::new(h, w);
+    for y in 0..h {
+        for x in 0..w {
+            out.put_pixel(y, x, *rgb.get_pixel(x, y));
+        }
+    }
+    DynamicImage::ImageRgb8(out)
+}
+
 /// Convert PIL/HuggingFace resampling enum to image crate filter.
 ///
 /// PIL resampling constants:
