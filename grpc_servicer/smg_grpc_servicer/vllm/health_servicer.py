@@ -5,20 +5,25 @@ Implements grpc.health.v1.Health protocol, delegating health status
 to AsyncLLM.check_health() from the vLLM EngineClient protocol.
 """
 
-from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 from vllm.logger import init_logger
 
+from smg_grpc_servicer.health_watch import HealthWatchMixin
+
 if TYPE_CHECKING:
     from vllm.v1.engine.async_llm import AsyncLLM
 
 logger = init_logger(__name__)
 
+SERVING = health_pb2.HealthCheckResponse.SERVING
+NOT_SERVING = health_pb2.HealthCheckResponse.NOT_SERVING
+SERVICE_UNKNOWN = health_pb2.HealthCheckResponse.SERVICE_UNKNOWN
 
-class VllmHealthServicer(health_pb2_grpc.HealthServicer):
+
+class VllmHealthServicer(HealthWatchMixin, health_pb2_grpc.HealthServicer):
     """
     Standard gRPC health check service for Kubernetes probes.
     Implements grpc.health.v1.Health protocol.
@@ -44,11 +49,13 @@ class VllmHealthServicer(health_pb2_grpc.HealthServicer):
         """
         self.async_llm = async_llm
         self._shutting_down = False
+        self._init_watch()
         logger.info("Standard gRPC health service initialized")
 
     def set_not_serving(self):
         """Mark all services as NOT_SERVING during graceful shutdown."""
         self._shutting_down = True
+        self._notify_shutdown()
         logger.info("Health service status set to NOT_SERVING")
 
     async def Check(
@@ -89,43 +96,24 @@ class VllmHealthServicer(health_pb2_grpc.HealthServicer):
         context.set_details(f"Unknown service: {service_name}")
         return health_pb2.HealthCheckResponse(status=health_pb2.HealthCheckResponse.SERVICE_UNKNOWN)
 
-    async def Watch(
-        self,
-        request: health_pb2.HealthCheckRequest,
-        context: grpc.aio.ServicerContext,
-    ) -> AsyncIterator[health_pb2.HealthCheckResponse]:
-        """
-        Streaming health check - sends current status once.
+    def _is_shutting_down(self) -> bool:
+        return self._shutting_down
 
-        For now, sends current status once (Kubernetes doesn't use Watch).
-        A full implementation would monitor status changes and stream updates.
-
-        Args:
-            request: Contains service name
-            context: gRPC context
-
-        Yields:
-            HealthCheckResponse messages
-        """
-        service_name = request.service
-        logger.debug(f"Health watch request for service: '{service_name}'")
-
-        # Inline status computation to avoid Check()'s context.set_code()
-        # side effect, which would incorrectly set the RPC status on the
-        # streaming response for unknown services.
-        status = health_pb2.HealthCheckResponse.SERVICE_UNKNOWN
+    async def _compute_watch_status(self, service_name: str) -> int:
+        """Async status computation -- delegates to check_health()."""
         if self._shutting_down:
-            status = health_pb2.HealthCheckResponse.NOT_SERVING
-        elif service_name in (self.OVERALL_SERVER, self.VLLM_SERVICE):
+            return NOT_SERVING
+
+        if service_name in (self.OVERALL_SERVER, self.VLLM_SERVICE):
             try:
                 await self.async_llm.check_health()
-                status = health_pb2.HealthCheckResponse.SERVING
+                return SERVING
             except Exception:
                 logger.debug(
-                    "Health watch check failed for service '%s'",
+                    "Health watch check failed for '%s'",
                     service_name,
                     exc_info=True,
                 )
-                status = health_pb2.HealthCheckResponse.NOT_SERVING
+                return NOT_SERVING
 
-        yield health_pb2.HealthCheckResponse(status=status)
+        return SERVICE_UNKNOWN
