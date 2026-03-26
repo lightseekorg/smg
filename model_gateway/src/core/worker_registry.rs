@@ -1052,7 +1052,20 @@ impl smg_mesh::WorkerStateSubscriber for WorkerRegistry {
     fn on_remote_worker_state(&self, state: &smg_mesh::WorkerState) {
         use openai_protocol::model_card::ModelCard;
 
-        // Build worker from the full WorkerSpec if available (new nodes),
+        // If worker already exists at this URL, update its health status
+        // from the mesh state. Don't re-register — the existing worker has
+        // full config from its creation workflow.
+        if let Some(existing) = self.get_by_url(&state.url) {
+            existing.set_healthy(state.health);
+            tracing::debug!(
+                url = %state.url,
+                healthy = state.health,
+                "Updated health for existing mesh-synced worker"
+            );
+            return;
+        }
+
+        // New worker — build from the full WorkerSpec if available,
         // otherwise fall back to minimal builder (old nodes / rolling upgrade).
         let worker = match bincode::deserialize::<openai_protocol::worker::WorkerSpec>(&state.spec)
         {
@@ -1066,6 +1079,7 @@ impl smg_mesh::WorkerStateSubscriber for WorkerRegistry {
 
         worker.set_healthy(state.health);
 
+        // register_inner skips mesh sync to avoid version-bump loop.
         if let Some(id) = self.register_inner(Arc::new(worker)) {
             tracing::info!(
                 worker_id = %id.as_str(),
