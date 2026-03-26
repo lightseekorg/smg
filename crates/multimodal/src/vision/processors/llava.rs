@@ -41,8 +41,8 @@ use crate::vision::{
     image_processor::{ImagePreProcessor, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
     transforms::{
-        center_crop, expand_to_square, mean_to_rgb, normalize, pil_to_filter, resize, stack_batch,
-        to_tensor, TransformError,
+        center_crop, expand_to_square, mean_to_rgb, pil_to_filter, resize, stack_batch, to_tensor,
+        to_tensor_and_normalize, TransformError,
     },
 };
 
@@ -242,15 +242,12 @@ impl LlavaProcessor {
             }
         };
 
-        // Convert to tensor [C, H, W] normalized to [0, 1]
-        let mut tensor = to_tensor(&processed);
-
-        // Normalize with mean/std
+        // Convert to tensor [C, H, W] normalized to [0, 1], fusing normalize when enabled
         if config.do_normalize.unwrap_or(true) {
-            normalize(&mut tensor, &mean, &std);
+            to_tensor_and_normalize(&processed, &mean, &std)
+        } else {
+            to_tensor(&processed)
         }
-
-        tensor
     }
 }
 
@@ -483,15 +480,12 @@ impl LlavaNextProcessor {
             resized
         };
 
-        // Convert to tensor
-        let mut tensor = to_tensor(&cropped);
-
-        // Normalize
+        // Convert to tensor, fusing normalize when enabled
         if config.do_normalize.unwrap_or(true) {
-            normalize(&mut tensor, &mean, &std);
+            to_tensor_and_normalize(&cropped, &mean, &std)
+        } else {
+            to_tensor(&cropped)
         }
-
-        tensor
     }
 }
 
