@@ -13,7 +13,9 @@ use image::{imageops::FilterType, DynamicImage, RgbImage};
 use llm_multimodal::vision::{
     image_processor::ImagePreProcessor,
     preprocessor_config::PreProcessorConfig,
-    processors::{Llama4VisionProcessor, Qwen2VLProcessor, Qwen3VLProcessor},
+    processors::{
+        Llama4VisionProcessor, Phi3VisionProcessor, Qwen2VLProcessor, Qwen3VLProcessor,
+    },
     transforms,
 };
 
@@ -161,6 +163,27 @@ fn bench_llama4(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_phi3_vision(c: &mut Criterion) {
+    let processor = Phi3VisionProcessor::new();
+    let config = PreProcessorConfig::default();
+
+    let sizes: &[(u32, u32)] = &[(224, 224), (336, 336), (640, 480), (1024, 768)];
+
+    let mut group = c.benchmark_group("phi3_vision_preprocess");
+    for &(w, h) in sizes {
+        let image = make_test_image(w, h);
+        let images = [image];
+        group.bench_with_input(
+            BenchmarkId::new("single", format!("{w}x{h}")),
+            &images,
+            |b, imgs| {
+                b.iter(|| processor.preprocess(imgs, &config).unwrap());
+            },
+        );
+    }
+    group.finish();
+}
+
 // ── Per-step profiling benchmarks ────────────────────────────────
 
 fn bench_individual_steps(c: &mut Criterion) {
@@ -277,6 +300,7 @@ criterion_group!(
     bench_qwen3_vl,
     bench_qwen2_vl,
     bench_llama4,
+    bench_phi3_vision,
     bench_llama4_steps,
     bench_individual_steps,
     bench_fused_to_tensor_normalize,
