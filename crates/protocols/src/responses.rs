@@ -9,7 +9,7 @@ use validator::{Validate, ValidationError};
 
 use super::{
     common::{
-        default_model, default_true, validate_stop, ChatLogProbs, Function, GenerationRequest,
+        default_true, validate_stop, ChatLogProbs, Function, GenerationRequest,
         PromptTokenUsageInfo, StringOrArray, ToolChoice, ToolChoiceValue, ToolReference, UsageInfo,
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
@@ -667,7 +667,6 @@ pub struct ResponsesRequest {
     pub metadata: Option<HashMap<String, Value>>,
 
     /// Model to use
-    #[serde(default = "default_model")]
     pub model: String,
 
     /// Optional conversation id to persist input/output as items
@@ -795,7 +794,7 @@ impl Default for ResponsesRequest {
             max_output_tokens: None,
             max_tool_calls: None,
             metadata: None,
-            model: default_model(),
+            model: String::new(),
             conversation: None,
             parallel_tool_calls: None,
             previous_response_id: None,

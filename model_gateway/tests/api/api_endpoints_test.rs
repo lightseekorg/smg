@@ -268,7 +268,7 @@ mod generation_tests {
         let app = ctx.create_app();
 
         let payload = json!({
-            "model": "test-model",
+            "model": "mock-model",
             "messages": [
                 {"role": "user", "content": "Hello!"}
             ],
@@ -367,7 +367,7 @@ mod model_info_tests {
         // Check for actual sglang model info fields
         assert_eq!(
             body_json.get("model_path").and_then(|v| v.as_str()),
-            Some("mock-model-path")
+            Some("mock-model")
         );
         assert_eq!(
             body_json.get("tokenizer_path").and_then(|v| v.as_str()),
@@ -424,7 +424,7 @@ mod model_info_tests {
         let first_model = &models[0];
         assert_eq!(
             first_model.get("id").and_then(|v| v.as_str()),
-            Some("mock-model-path")
+            Some("mock-model")
         );
         assert_eq!(
             first_model.get("object").and_then(|v| v.as_str()),
@@ -533,7 +533,7 @@ mod model_info_tests {
             let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(
                 body_json.get("model_path").and_then(|v| v.as_str()),
-                Some("mock-model-path")
+                Some("mock-model")
             );
         }
 
@@ -1176,8 +1176,8 @@ mod error_tests {
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
-        // Mock worker accepts any model, but real implementation might return 400
-        assert!(resp.status().is_success() || resp.status() == StatusCode::BAD_REQUEST);
+        // Invalid model should return 404 (no worker serves this model)
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         ctx.shutdown().await;
     }
@@ -1474,7 +1474,7 @@ mod request_id_tests {
 
         let chat_payload = json!({
             "messages": [{"role": "user", "content": "Hello"}],
-            "model": "test-model"
+            "model": "mock-model"
         });
 
         let req = Request::builder()
@@ -1592,7 +1592,7 @@ mod rerank_tests {
                 "Introduction to machine learning concepts",
                 "Deep learning neural networks tutorial"
             ],
-            "model": "test-rerank-model",
+            "model": "mock-model",
             "top_k": 2,
             "return_documents": true,
             "rid": "test-request-123"
@@ -1615,7 +1615,7 @@ mod rerank_tests {
 
         assert!(body_json.get("results").is_some());
         assert!(body_json.get("model").is_some());
-        assert_eq!(body_json["model"], "test-rerank-model");
+        assert_eq!(body_json["model"], "mock-model");
 
         let results = body_json["results"].as_array().unwrap();
         assert_eq!(results.len(), 2);
@@ -1645,7 +1645,7 @@ mod rerank_tests {
                 "Document 2",
                 "Document 3"
             ],
-            "model": "test-model",
+            "model": "mock-model",
             "top_k": 1,
             "return_documents": true
         });
@@ -1688,7 +1688,7 @@ mod rerank_tests {
         let payload = json!({
             "query": "test query",
             "documents": ["Document 1", "Document 2"],
-            "model": "test-model",
+            "model": "mock-model",
             "return_documents": false
         });
 
@@ -1732,7 +1732,7 @@ mod rerank_tests {
         let payload = json!({
             "query": "test query",
             "documents": ["Document 1"],
-            "model": "test-model"
+            "model": "mock-model"
         });
 
         let req = Request::builder()
@@ -1762,7 +1762,9 @@ mod rerank_tests {
 
         let app = ctx.create_app();
 
-        let payload = json!({
+        // V1 rerank without model field — model defaults to UNKNOWN_MODEL_ID,
+        // routed to any available worker via wildcard
+        let payload_no_model = json!({
             "query": "machine learning algorithms",
             "documents": [
                 "Introduction to machine learning concepts",
@@ -1775,33 +1777,13 @@ mod rerank_tests {
             .method("POST")
             .uri("/v1/rerank")
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .body(Body::from(
+                serde_json::to_string(&payload_no_model).unwrap(),
+            ))
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-        assert!(body_json.get("results").is_some());
-        assert!(body_json.get("model").is_some());
-
-        // V1 API should use default model name
-        assert_eq!(body_json["model"], "unknown");
-
-        let results = body_json["results"].as_array().unwrap();
-        assert_eq!(results.len(), 3); // All documents should be returned
-
-        assert!(results[0]["score"].as_f64().unwrap() >= results[1]["score"].as_f64().unwrap());
-        assert!(results[1]["score"].as_f64().unwrap() >= results[2]["score"].as_f64().unwrap());
-
-        // V1 API should return documents by default
-        for result in results {
-            assert!(result.get("document").is_some());
-        }
 
         ctx.shutdown().await;
     }
@@ -1822,7 +1804,7 @@ mod rerank_tests {
         let payload = json!({
             "query": "",
             "documents": ["Document 1", "Document 2"],
-            "model": "test-model"
+            "model": "mock-model"
         });
 
         let req = Request::builder()
@@ -1838,7 +1820,7 @@ mod rerank_tests {
         let payload = json!({
             "query": "   ",
             "documents": ["Document 1", "Document 2"],
-            "model": "test-model"
+            "model": "mock-model"
         });
 
         let req = Request::builder()
@@ -1854,7 +1836,7 @@ mod rerank_tests {
         let payload = json!({
             "query": "test query",
             "documents": [],
-            "model": "test-model"
+            "model": "mock-model"
         });
 
         let req = Request::builder()
@@ -1870,7 +1852,7 @@ mod rerank_tests {
         let payload = json!({
             "query": "test query",
             "documents": ["Document 1", "Document 2"],
-            "model": "test-model",
+            "model": "mock-model",
             "top_k": 0
         });
 

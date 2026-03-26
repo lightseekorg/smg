@@ -87,7 +87,9 @@ impl MockWorker {
         let app = Router::new()
             .route("/health", get(health_handler))
             .route("/health_generate", get(health_generate_handler))
+            .route("/server_info", get(server_info_handler))
             .route("/get_server_info", get(server_info_handler))
+            .route("/model_info", get(model_info_handler))
             .route("/get_model_info", get(model_info_handler))
             .route("/generate", post(generate_handler))
             .route("/v1/chat/completions", post(chat_completions_handler))
@@ -227,18 +229,12 @@ async fn health_generate_handler(State(config): State<Arc<RwLock<MockWorkerConfi
 async fn server_info_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Random failure for testing"
-            })),
-        )
-            .into_response();
-    }
+    // server_info is a metadata endpoint used during worker registration.
+    // Must always succeed regardless of fail_rate so workers register properly.
 
     Json(json!({
-        "model_path": "mock-model-path",
+        "model_path": "mock-model",
+        "served_model_name": "mock-model",
         "tokenizer_path": "mock-tokenizer-path",
         "port": config.port,
         "host": "127.0.0.1",
@@ -290,7 +286,7 @@ async fn model_info_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>)
     }
 
     Json(json!({
-        "model_path": "mock-model-path",
+        "model_path": "mock-model",
         "tokenizer_path": "mock-tokenizer-path",
         "is_generation": true,
         "preferred_sampling_params": {

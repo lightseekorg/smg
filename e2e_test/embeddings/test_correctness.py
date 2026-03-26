@@ -24,7 +24,6 @@ import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
-from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -221,13 +220,13 @@ class TestEmbeddingCorrectness:
     worker on GPU and compare. Using CPU for reference avoids GPU memory conflicts.
     """
 
-    def test_semantic_similarity(self, setup_backend, smg, hf_reference_embeddings):
+    def test_semantic_similarity(self, setup_backend, api_client, hf_reference_embeddings):
         """Check if gateway and HF embeddings give similar results.
 
         For each text in the semantic test sets, the gateway embedding should
         have >0.98 cosine similarity with the HuggingFace reference embedding.
         """
-        backend, model_path, client, gateway = setup_backend
+        backend, model_path, _, _ = setup_backend
         tolerance = 1e-2
 
         # Track position in pre-computed embeddings
@@ -236,7 +235,7 @@ class TestEmbeddingCorrectness:
         for i, input_texts in enumerate(SEMANTIC_TEST_SETS):
             logger.info("Processing semantic similarity test set %d", i + 1)
 
-            embedding_gateway = get_openai_embeddings(input_texts, client, model_path)
+            embedding_gateway = get_openai_embeddings(input_texts, api_client, model_path)
 
             # Get pre-computed HF embeddings for this set
             num_texts = len(input_texts)
@@ -256,32 +255,13 @@ class TestEmbeddingCorrectness:
 
             logger.info("Semantic similarity test set %d passed", i + 1)
 
-        # SmgClient comparison - verify SmgClient embeddings also match HF reference
-        with smg_compare():
-            embed_idx_smg = 0
-            for i, input_texts in enumerate(SEMANTIC_TEST_SETS):
-                smg_embeddings = []
-                for text in input_texts:
-                    smg_resp = smg.embeddings.create(model=model_path, input=text)
-                    smg_embeddings.append(smg_resp.data[0].embedding)
-                num_texts = len(input_texts)
-                embedding_hf = hf_reference_embeddings["semantic"][
-                    embed_idx_smg : embed_idx_smg + num_texts
-                ].tolist()
-                embed_idx_smg += num_texts
-                smg_similarities = compare_embeddings(smg_embeddings, embedding_hf)
-                for j, sim in enumerate(smg_similarities):
-                    assert abs(sim - 1.0) < tolerance, (
-                        f"SmgClient set {i + 1}, text {j + 1}: similarity {sim:.4f} not close to 1.0"
-                    )
-
-    def test_relevance_scores(self, setup_backend, smg, hf_reference_embeddings):
+    def test_relevance_scores(self, setup_backend, api_client, hf_reference_embeddings):
         """Compare relevance scores between gateway and HF implementations.
 
         The relevance scores (query @ docs) should match between the gateway
         and HuggingFace implementations within tolerance.
         """
-        backend, model_path, client, gateway = setup_backend
+        backend, model_path, _, _ = setup_backend
         tolerance = 0.05
 
         # Format query with instruction (for e5-mistral)
@@ -292,8 +272,8 @@ class TestEmbeddingCorrectness:
         docs = get_input_texts(RELEVANCE_TEST_DATA)
 
         # Get gateway scores
-        query_embeddings_gateway = get_openai_embeddings(query, client, model_path)
-        docs_embeddings_gateway = get_openai_embeddings(docs, client, model_path)
+        query_embeddings_gateway = get_openai_embeddings(query, api_client, model_path)
+        docs_embeddings_gateway = get_openai_embeddings(docs, api_client, model_path)
         scores_gateway = (
             np.array(query_embeddings_gateway) @ np.array(docs_embeddings_gateway).T
         ) * 100
@@ -309,16 +289,3 @@ class TestEmbeddingCorrectness:
         )
 
         logger.info("Relevance scores comparison passed")
-
-        # SmgClient comparison
-        with smg_compare():
-            smg_query_resp = smg.embeddings.create(model=model_path, input=query)
-            smg_query_emb = [smg_query_resp.data[0].embedding]
-            smg_doc_embs = []
-            for doc in docs:
-                smg_doc_resp = smg.embeddings.create(model=model_path, input=doc)
-                smg_doc_embs.append(smg_doc_resp.data[0].embedding)
-            smg_scores = (np.array(smg_query_emb) @ np.array(smg_doc_embs).T) * 100
-            assert np.allclose(smg_scores, scores_hf, atol=tolerance), (
-                f"SmgClient scores differ beyond tolerance:\nSmgClient: {smg_scores}\nHF: {scores_hf}"
-            )

@@ -142,7 +142,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &ChatCompletionRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         let deps = ChatRouterContext {
             worker_registry: &self.worker_registry,
@@ -157,7 +157,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         &self,
         headers: Option<&HeaderMap>,
         body: &ResponsesRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         let deps = ResponsesRouterContext {
             worker_registry: &self.worker_registry,

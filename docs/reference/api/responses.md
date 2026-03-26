@@ -356,6 +356,47 @@ Returns the full response object as shown in the Create Response section.
 
 ---
 
+## Cancel Response
+
+```
+POST /v1/responses/{response_id}/cancel
+```
+
+Attempts to cancel an in-progress response. Behavior depends on the connection mode:
+
+- **gRPC workers**: Background mode is not supported. This endpoint always returns a `400 Bad Request` error with code `cancellation_not_supported`.
+- **HTTP workers**: The request is proxied to the backend worker. Whether cancellation succeeds depends on backend support.
+
+### Path Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `response_id` | string | The response ID to cancel |
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:30000/v1/responses/resp_abc123def456/cancel
+```
+
+### Response
+
+**HTTP workers**: Returns the response object from the backend.
+
+**gRPC workers**: Returns a `400 Bad Request` error:
+
+```json
+{
+  "error": {
+    "message": "Background mode is not supported. Synchronous and streaming responses cannot be cancelled.",
+    "type": "Bad Request",
+    "code": "cancellation_not_supported"
+  }
+}
+```
+
+---
+
 ## Delete Response
 
 Delete a stored response.

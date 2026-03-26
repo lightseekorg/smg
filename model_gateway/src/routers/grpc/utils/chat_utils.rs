@@ -56,16 +56,7 @@ pub(crate) fn resolve_tokenizer(
     ctx: &mut RequestContext,
     stage_name: &str,
 ) -> Result<Arc<dyn Tokenizer>, Box<Response>> {
-    let model_id = ctx.input.model_id.as_deref().ok_or_else(|| {
-        error!(
-            function = %stage_name,
-            "model_id not set in request context"
-        );
-        Box::new(error::internal_error(
-            "model_id_not_set",
-            "model_id not set in request context - this is a bug in request routing",
-        ))
-    })?;
+    let model_id = ctx.input.model_id.as_str();
 
     let tokenizer = ctx
         .components

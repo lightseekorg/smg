@@ -68,7 +68,7 @@ mod request_format_tests {
         .await;
 
         let payload = json!({
-            "model": "test-model",
+            "model": "mock-model",
             "messages": [
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": "Hello!"}
@@ -88,7 +88,7 @@ mod request_format_tests {
         );
 
         let payload = json!({
-            "model": "test-model",
+            "model": "mock-model",
             "messages": [
                 {"role": "user", "content": "Tell me a joke"}
             ],
@@ -116,7 +116,7 @@ mod request_format_tests {
         .await;
 
         let payload = json!({
-            "model": "test-model",
+            "model": "mock-model",
             "prompt": "Once upon a time",
             "max_tokens": 50,
             "stream": false
@@ -133,7 +133,7 @@ mod request_format_tests {
         );
 
         let payload = json!({
-            "model": "test-model",
+            "model": "mock-model",
             "prompt": ["First prompt", "Second prompt"],
             "temperature": 0.5,
             "stream": false
@@ -143,7 +143,7 @@ mod request_format_tests {
         assert!(result.is_ok());
 
         let payload = json!({
-            "model": "test-model",
+            "model": "mock-model",
             "prompt": "The capital of France is",
             "max_tokens": 10,
             "logprobs": 5,

@@ -40,7 +40,11 @@ class SyncStream(Generic[T]):
         return self
 
     def __next__(self) -> T:
-        event = next(self._iterator)
+        try:
+            event = next(self._iterator)
+        except StopIteration:
+            self.close()
+            raise
         return self._model_cls.model_validate_json(event.data)
 
     def __enter__(self) -> SyncStream[T]:
@@ -73,7 +77,11 @@ class AsyncStream(Generic[T]):
         return self
 
     async def __anext__(self) -> T:
-        event = await self._iterator.__anext__()
+        try:
+            event = await self._iterator.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
         return self._model_cls.model_validate_json(event.data)
 
     async def __aenter__(self) -> AsyncStream[T]:
@@ -161,7 +169,11 @@ class ResponsesSyncStream:
         return self
 
     def __next__(self) -> EventObject:
-        event = next(self._iterator)
+        try:
+            event = next(self._iterator)
+        except StopIteration:
+            self.close()
+            raise
         try:
             data = event.json()
         except ValueError as e:
@@ -196,7 +208,11 @@ class ResponsesAsyncStream:
         return self
 
     async def __anext__(self) -> EventObject:
-        event = await self._iterator.__anext__()
+        try:
+            event = await self._iterator.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
         try:
             data = event.json()
         except ValueError as e:
@@ -248,7 +264,11 @@ class AnthropicSyncStream:
         return self
 
     def __next__(self) -> EventObject:
-        event = next(self._iterator)
+        try:
+            event = next(self._iterator)
+        except StopIteration:
+            self.close()
+            raise
         obj = _parse_anthropic_event(event)
         self._accumulate(obj)
         return obj
@@ -386,7 +406,11 @@ class AnthropicAsyncStream:
         return self
 
     async def __anext__(self) -> EventObject:
-        event = await self._iterator.__anext__()
+        try:
+            event = await self._iterator.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
         obj = _parse_anthropic_event(event)
         self._accumulate(obj)
         return obj

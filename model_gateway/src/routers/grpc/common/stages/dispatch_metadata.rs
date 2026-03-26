@@ -7,12 +7,9 @@ use axum::response::Response;
 use tracing::error;
 
 use super::PipelineStage;
-use crate::{
-    core::UNKNOWN_MODEL_ID,
-    routers::{
-        error,
-        grpc::context::{DispatchMetadata, RequestContext, RequestType, WorkerSelection},
-    },
+use crate::routers::{
+    error,
+    grpc::context::{DispatchMetadata, RequestContext, RequestType, WorkerSelection},
 };
 
 /// Dispatch metadata stage: Prepare metadata for dispatch
@@ -32,13 +29,11 @@ impl PipelineStage for DispatchMetadataStage {
         let request_id = proto_request.request_id().to_string();
         let model = match &ctx.input.request_type {
             RequestType::Chat(req) => req.model.clone(),
+            RequestType::Completion(req) => req.model.clone(),
             RequestType::Generate(_req) => {
                 // Generate requests don't have a model field
-                // Use model_id from input or UNKNOWN_MODEL_ID
-                ctx.input
-                    .model_id
-                    .clone()
-                    .unwrap_or_else(|| UNKNOWN_MODEL_ID.to_string())
+                // Use model_id from input
+                ctx.input.model_id.clone()
             }
             RequestType::Responses(req) => req.model.clone(),
             RequestType::Embedding(req) => req.model.clone(),

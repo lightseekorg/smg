@@ -8,7 +8,10 @@ use openai_protocol::{
     responses::{ResponseTool, ResponsesRequest, ResponsesResponse},
 };
 use serde_json::to_value;
-use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
+use smg_data_connector::{
+    ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
+    ResponseStorage,
+};
 use smg_mcp::{McpOrchestrator, McpServerBinding};
 use tracing::{debug, error, warn};
 
@@ -91,14 +94,7 @@ pub(crate) fn validate_worker_availability(
     let available_models = worker_registry.get_models();
 
     if !available_models.contains(&model.to_string()) {
-        return Some(error::service_unavailable(
-            "no_available_workers",
-            format!(
-                "No workers available for model '{}'. Available models: {}",
-                model,
-                available_models.join(", ")
-            ),
-        ));
+        return Some(error::model_not_found(model));
     }
 
     None
@@ -144,6 +140,7 @@ pub(crate) async fn persist_response_if_needed(
     response_storage: Arc<dyn ResponseStorage>,
     response: &ResponsesResponse,
     original_request: &ResponsesRequest,
+    request_context: Option<StorageRequestContext>,
 ) {
     if !original_request.store.unwrap_or(true) {
         return;
@@ -156,6 +153,7 @@ pub(crate) async fn persist_response_if_needed(
             response_storage,
             &response_json,
             original_request,
+            request_context,
         )
         .await
         {

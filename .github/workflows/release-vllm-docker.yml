@@ -2,9 +2,10 @@ name: Release SMG+vLLM Docker Image
 
 run-name: >-
   SMG+vLLM |
-  base=${{ inputs.base_image_ref }} |
-  engine=${{ inputs.vllm_commit }} |
-  smg=${{ inputs.smg_commit }} |
+  ${{ github.event_name == 'push' && '3-version matrix' || format('base={0}', inputs.base_image_ref || 'vllm/vllm-openai:v0.18.0') }} |
+  engine=${{ inputs.vllm_commit || 'latest' }} |
+  smg=${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.3.3' }} |
+  ${{ github.event_name == 'pull_request' && 'dry-run |' || '' }}
   by @${{ github.actor }}
 
 on:
@@ -12,11 +13,18 @@ on:
     branches: [main]
     paths:
       - bindings/python/pyproject.toml
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker/engine.Dockerfile'
+      - '.github/workflows/_build-engine-image.yml'
+      - '.github/workflows/release-*-docker.yml'
+      - 'scripts/installation/**'
   workflow_dispatch:
     inputs:
       base_image_ref:
-        description: 'Base image (e.g. vllm/vllm-openai:v0.17.0)'
-        default: 'vllm/vllm-openai:v0.17.0'
+        description: 'Base image (e.g. vllm/vllm-openai:v0.18.0)'
+        default: 'vllm/vllm-openai:v0.18.0'
         required: true
         type: string
       vllm_repo:
@@ -36,10 +44,10 @@ on:
       smg_commit:
         description: 'SMG commit/ref ("latest" for HEAD)'
         required: false
-        default: 'v1.3.2'
+        default: 'v1.3.3'
         type: string
       tag:
-        description: 'Override image tag (e.g. v1.3.2-vllm-v0.17.0)'
+        description: 'Override image tag (e.g. v1.3.3-vllm-v0.17.0)'
         required: false
         type: string
 
@@ -49,13 +57,18 @@ permissions:
 
 jobs:
   build:
+    strategy:
+      fail-fast: false
+      matrix:
+        base_image: ${{ github.event_name == 'push' && fromJSON('["vllm/vllm-openai:v0.18.0","vllm/vllm-openai:v0.17.1","vllm/vllm-openai:v0.16.0"]') || fromJSON(format('["{0}"]', inputs.base_image_ref || 'vllm/vllm-openai:v0.18.0')) }}
     uses: ./.github/workflows/_build-engine-image.yml
     with:
       engine: vllm
-      base_image_ref: ${{ inputs.base_image_ref || 'vllm/vllm-openai:v0.17.0' }}
+      base_image_ref: ${{ matrix.base_image }}
       engine_repo: ${{ inputs.vllm_repo }}
       engine_commit: ${{ inputs.vllm_commit || 'latest' }}
       smg_repo: ${{ inputs.smg_repo || 'https://github.com/lightseekorg/smg' }}
-      smg_commit: ${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.3.2' }}
+      smg_commit: ${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.3.3' }}
       tag: ${{ inputs.tag }}
+      dry_run: ${{ github.event_name == 'pull_request' }}
     secrets: inherit

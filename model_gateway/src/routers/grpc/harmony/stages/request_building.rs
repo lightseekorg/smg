@@ -63,6 +63,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             RequestType::Chat(_) => format!("chatcmpl-{}", Uuid::now_v7()),
             RequestType::Responses(_) => format!("responses-{}", Uuid::now_v7()),
             request_type @ (RequestType::Generate(_)
+            | RequestType::Completion(_)
             | RequestType::Embedding(_)
             | RequestType::Classify(_)
             | RequestType::Messages(_)) => {
@@ -107,7 +108,6 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             request.as_ref(),
                             placeholder_processed_text,
                             prep.token_ids.clone(),
-                            prep.harmony_stop_ids.clone(),
                             prep.tool_constraints.clone(),
                         )
                         .map_err(|e| {
@@ -153,7 +153,6 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             request.as_ref(),
                             placeholder_processed_text,
                             prep.token_ids.clone(),
-                            prep.harmony_stop_ids.clone(),
                             prep.tool_constraints.clone(),
                         )
                         .map_err(|e| {
@@ -199,7 +198,6 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             request.as_ref(),
                             placeholder_processed_text,
                             prep.token_ids.clone(),
-                            prep.harmony_stop_ids.clone(),
                             prep.tool_constraints.clone(),
                         )
                         .map_err(|e| {
@@ -248,6 +246,10 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 }
                 ProtoGenerateRequest::Trtllm(req) => {
                     req.stop_token_ids.extend_from_slice(harmony_stops);
+                    // TRT-LLM strips stop tokens from output by default, but
+                    // the Harmony parser needs them to detect channel boundaries
+                    // (e.g. <|call|> marks the tool-call channel transition).
+                    req.include_stop_token_in_output = true;
                     debug!(
                         stop_token_count = harmony_stops.len(),
                         "Injected Harmony stop tokens into TensorRT-LLM stop_token_ids"

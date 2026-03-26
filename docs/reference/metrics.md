@@ -609,12 +609,12 @@ Entries in the cache-aware routing cache.
 Default histogram buckets (20 buckets from 1ms to 240s):
 
 ```
-0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
-2.5, 5, 10, 15, 30, 60, 120, 180, 240
+0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+10.0, 15.0, 30.0, 45.0, 60.0, 90.0, 120.0, 180.0, 240.0
 ```
 
 Configure custom buckets via CLI:
 
 ```bash
-smg --prometheus-buckets "0.01,0.1,0.5,1,5,10"
+smg --prometheus-duration-buckets 0.01 0.1 0.5 1 5 10
 ```

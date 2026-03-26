@@ -288,26 +288,14 @@ The radix tree grows with unique prefixes. Configure based on your memory budget
 
 | Metric | Description | Alert Threshold |
 |--------|-------------|-----------------|
-| `smg_router_cache_hits_total` | Cache hit count | - |
-| `smg_router_cache_misses_total` | Cache miss count | - |
-| `smg_router_cache_tree_size` | Radix tree node count | >90% of max |
 | `smg_worker_requests_active` | Active requests per worker | Imbalance >50% |
+| `smg_worker_selection_total` | Worker selection count | - |
+| `smg_router_request_duration_seconds` | End-to-end request latency | - |
+| `smg_router_ttft_seconds` | Time to first token (gRPC only) | - |
 
 ### Useful PromQL Queries
 
 <div class="grid" markdown>
-
-<div class="card" markdown>
-
-#### Cache Hit Rate
-
-```promql
-rate(smg_router_cache_hits_total[5m]) /
-(rate(smg_router_cache_hits_total[5m]) +
- rate(smg_router_cache_misses_total[5m]))
-```
-
-</div>
 
 <div class="card" markdown>
 
@@ -320,15 +308,25 @@ avg(smg_worker_requests_active)
 
 </div>
 
+<div class="card" markdown>
+
+#### Time to First Token (gRPC only)
+
+```promql
+rate(smg_router_ttft_seconds_sum[5m]) /
+rate(smg_router_ttft_seconds_count[5m])
+```
+
+</div>
+
 </div>
 
 ### Alert Thresholds
 
 | Metric | Warning | Critical | Action |
 |--------|---------|----------|--------|
-| Cache hit rate | <50% | <30% | Review workload patterns |
-| Tree size | >80% max | >95% max | Increase `max-tree-size` or reduce eviction interval |
 | Load imbalance | >30% | >50% | Lower balance thresholds |
+| TTFT p99 | >500ms | >1s | Review workload patterns and cache policy |
 
 ---
 

@@ -102,7 +102,7 @@ impl MessagePreparationStage {
         let mut multimodal_intermediate = None;
         if multimodal::has_multimodal_content_messages(&request.messages) {
             if let Some(mm_components) = ctx.components.multimodal.as_ref() {
-                let model_id = ctx.input.model_id.as_deref().unwrap_or(&request.model);
+                let model_id = ctx.input.model_id.as_str();
                 let tokenizer_source = ctx
                     .components
                     .tokenizer_registry

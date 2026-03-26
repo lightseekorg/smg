@@ -10,7 +10,7 @@ This guide covers setting up a development environment and contributing code to 
 
 ## Prerequisites
 
-- **Rust**: 1.75 or later
+- **Rust**: 1.90 or later
 - **Docker**: For running integration tests
 - **Git**: For version control
 

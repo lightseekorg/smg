@@ -164,6 +164,7 @@ Plugins receive rich context for decision-making:
 |-------|-------------|
 | `method` | HTTP method (GET, POST, etc.) |
 | `path` | Request path |
+| `query` | URL query string |
 | `headers` | All request headers |
 | `body` | Request body (if present) |
 | `request_id` | Unique request identifier |
@@ -196,7 +197,7 @@ Plugins are managed via the Admin API at runtime:
 ### Deploy Plugins
 
 ```bash
-curl -X POST http://localhost:3000/wasm \
+curl -X POST http://localhost:30000/wasm \
   -H "Content-Type: application/json" \
   -d '{
     "modules": [
@@ -222,13 +223,13 @@ curl -X POST http://localhost:3000/wasm \
 ### List Plugins
 
 ```bash
-curl http://localhost:3000/wasm
+curl http://localhost:30000/wasm
 ```
 
 ### Remove Plugin
 
 ```bash
-curl -X DELETE http://localhost:3000/wasm/{uuid}
+curl -X DELETE http://localhost:30000/wasm/{uuid}
 ```
 
 ---

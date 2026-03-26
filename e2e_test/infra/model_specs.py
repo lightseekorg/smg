@@ -91,6 +91,12 @@ MODEL_SPECS: dict[str, dict] = {
         "worker_args": ["--trust-remote-code"],
         "vllm_args": ["--trust-remote-code"],
     },
+    # Vision-language model for multimodal benchmarks (MMMU)
+    "Qwen/Qwen3-VL-8B-Instruct": {
+        "model": _resolve_model_path("Qwen/Qwen3-VL-8B-Instruct"),
+        "tp": 1,
+        "features": ["chat", "streaming", "multimodal"],
+    },
     # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
         "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
