@@ -134,10 +134,18 @@ class TestMultimodalQwen3VL:
         assert text is not None and len(text) > 0
         text_lower = text.lower()
 
-        assert any(k in text_lower for k in ["dog", "pug", "puppy"]), (
+        # Should acknowledge all 3 images
+        assert "3" in text or "three" in text_lower, (
+            f"Expected model to count 3 images, got: {text}"
+        )
+        # Should identify both dog and pug
+        assert any(k in text_lower for k in ["dog", "puppy", "labrador"]), (
             f"Expected dog-related content, got: {text}"
         )
-        # Images 2 (URL) and 3 (base64) are the same pug — model should notice
+        assert any(k in text_lower for k in ["pug", "blanket", "wrapped"]), (
+            f"Expected pug-related content, got: {text}"
+        )
+        # Images 2 and 3 are the same pug — model should notice
         assert any(
             k in text_lower
             for k in [
