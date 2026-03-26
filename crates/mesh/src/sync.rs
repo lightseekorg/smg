@@ -480,27 +480,27 @@ impl MeshSyncManager {
             .map_err(|e| format!("Failed to update policy store: {e}"))
     }
 
-    /// Get tree state for a model from mesh stores
-    pub fn get_tree_state(&self, model_id: &str) -> Option<TreeState> {
-        let key = tree_state_key(model_id);
-        // Build tree state from the policy store config (may be stale)
-        // plus any pending operations not yet serialized into it.
-        let mut tree_state = if let Some(ps) = self.stores.policy.get(&key) {
-            if ps.config.is_empty() {
-                TreeState::new(model_id.to_string())
-            } else {
-                TreeState::from_bytes(&ps.config).ok()?
-            }
-        } else {
-            return None;
+    /// Materialize a TreeState for the given tree key by combining the
+    /// policy store's config blob (may be stale) with any pending operations.
+    fn materialize_tree_state(&self, key: &str, model_id: &str) -> Option<TreeState> {
+        let policy_state = self.stores.policy.get(key);
+        let mut tree_state = match policy_state {
+            Some(ps) if !ps.config.is_empty() => TreeState::from_bytes(&ps.config).ok()?,
+            Some(_) => TreeState::new(model_id.to_string()),
+            None => return None,
         };
-        // Append pending ops that haven't been serialized into config yet
-        if let Some(pending) = self.stores.tree_ops_pending.get(&key) {
+        if let Some(pending) = self.stores.tree_ops_pending.get(key) {
             for op in pending.iter() {
                 tree_state.add_operation(op.clone());
             }
         }
         Some(tree_state)
+    }
+
+    /// Get tree state for a model from mesh stores
+    pub fn get_tree_state(&self, model_id: &str) -> Option<TreeState> {
+        let key = tree_state_key(model_id);
+        self.materialize_tree_state(&key, model_id)
     }
 
     pub fn get_all_tree_states(&self) -> Vec<TreeState> {
@@ -509,28 +509,11 @@ impl MeshSyncManager {
             .all()
             .into_iter()
             .filter_map(|(key, state)| {
-                if state.policy_type != "tree_state" && state.policy_type != "tree_state_delta" {
+                if state.policy_type != "tree_state" {
                     return None;
                 }
                 let model_id = state.model_id.clone();
-                let mut tree_state = if state.config.is_empty() {
-                    TreeState::new(model_id)
-                } else {
-                    match TreeState::from_bytes(&state.config) {
-                        Ok(ts) => ts,
-                        Err(error) => {
-                            warn!(error = %error, store_key = %key, model_id = %state.model_id, "Failed to deserialize tree state from mesh store");
-                            return None;
-                        }
-                    }
-                };
-                // Append pending ops
-                if let Some(pending) = self.stores.tree_ops_pending.get(&key) {
-                    for op in pending.iter() {
-                        tree_state.add_operation(op.clone());
-                    }
-                }
-                Some(tree_state)
+                self.materialize_tree_state(&key, &model_id)
             })
             .collect()
     }
@@ -555,7 +538,7 @@ impl MeshSyncManager {
         };
 
         let mut current_version = 0;
-        let update_result = self.stores.policy.update_if(key, |current| {
+        let update_result = self.stores.policy.update_if(key.clone(), |current| {
             current_version = current
                 .as_ref()
                 .map(|existing| existing.version)
@@ -574,6 +557,8 @@ impl MeshSyncManager {
 
         match update_result {
             Ok((_, true)) => {
+                // Clear pending buffer — the new config includes the latest state
+                self.stores.tree_ops_pending.remove(&key);
                 debug!(
                     "Applied remote tree state update: model={} (version: {} -> {})",
                     model_id, current_version, tree_state.version
@@ -621,10 +606,10 @@ impl MeshSyncManager {
                     return None;
                 }
 
-                if existing.config.is_empty() {
-                    // Config not materialized yet — start from empty tree.
-                    // Pending ops are NOT included here because they're local
-                    // ops, not the remote delta we're applying.
+                // Build the base tree from config + pending ops so we
+                // don't lose local operations that haven't been
+                // materialized into the config blob yet.
+                let mut ts = if existing.config.is_empty() {
                     TreeState::new(delta.model_id.clone())
                 } else {
                     match TreeState::from_bytes(&existing.config) {
@@ -638,7 +623,13 @@ impl MeshSyncManager {
                             return None;
                         }
                     }
+                };
+                if let Some(pending) = self.stores.tree_ops_pending.get(&key) {
+                    for op in pending.iter() {
+                        ts.add_operation(op.clone());
+                    }
                 }
+                ts
             } else {
                 TreeState::new(delta.model_id.clone())
             };
@@ -658,6 +649,8 @@ impl MeshSyncManager {
 
         match update_result {
             Ok((_, true)) => {
+                // Clear pending buffer — the new config includes the latest state
+                self.stores.tree_ops_pending.remove(&key);
                 debug!(
                     "Applied remote tree delta: model={} (version: {} -> +{} ops)",
                     model_id, old_version, ops_count
@@ -680,6 +673,29 @@ impl MeshSyncManager {
                 debug!(error = %err, model_id = %model_id, actor = %actor, "Failed to apply remote tree delta");
             }
         }
+    }
+
+    /// Checkpoint pending tree operations into the policy store config blob.
+    /// Called periodically (e.g., from the GC cycle) to keep the config blob
+    /// reasonably fresh and limit how much the pending buffer can drift.
+    pub fn checkpoint_tree_states(&self) {
+        for entry in &self.stores.tree_ops_pending {
+            let key = entry.key().clone();
+            if let Some(tree_state) =
+                self.materialize_tree_state(&key, key.strip_prefix("tree:").unwrap_or(&key))
+            {
+                if let Ok(serialized) = tree_state.to_bytes() {
+                    let _ = self.stores.policy.update(key, |_| PolicyState {
+                        model_id: tree_state.model_id.clone(),
+                        policy_type: "tree_state".to_string(),
+                        config: serialized,
+                        version: tree_state.version,
+                    });
+                }
+            }
+        }
+        // Clear pending buffers after checkpoint
+        self.stores.tree_ops_pending.clear();
     }
 }
 

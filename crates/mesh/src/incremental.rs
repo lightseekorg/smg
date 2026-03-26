@@ -12,10 +12,9 @@ use parking_lot::RwLock;
 use tracing::{debug, trace};
 
 use super::{
-    tree_ops::TreeState,
     service::gossip::StateUpdate,
     stores::{AppState, MembershipState, PolicyState, StateStores, StoreType, WorkerState},
-    tree_ops::TreeStateDelta,
+    tree_ops::{TreeState, TreeStateDelta},
 };
 
 /// Trait for extracting version from state types
@@ -243,8 +242,14 @@ impl IncrementalUpdateCollector {
                             let mut tree_state = if state.config.is_empty() {
                                 TreeState::new(model_id.clone())
                             } else {
-                                TreeState::from_bytes(&state.config)
-                                    .unwrap_or_else(|_| TreeState::new(model_id.clone()))
+                                match TreeState::from_bytes(&state.config) {
+                                    Ok(ts) => ts,
+                                    Err(_) => {
+                                        // Corrupted config — skip this key, don't send garbage
+                                        debug!("Skipping full-state fallback for {} — config corrupted", key);
+                                        continue;
+                                    }
+                                }
                             };
                             // Append any pending ops not yet in the config blob
                             if let Some(pending) = self.stores.tree_ops_pending.get(key) {
@@ -252,11 +257,12 @@ impl IncrementalUpdateCollector {
                                     tree_state.add_operation(op.clone());
                                 }
                             }
+                            let tree_version = tree_state.version;
                             let full_state = PolicyState {
                                 model_id,
                                 policy_type: "tree_state".to_string(),
                                 config: tree_state.to_bytes().unwrap_or_default(),
-                                version: current_version,
+                                version: tree_version,
                             };
                             if let Ok(serialized) = bincode::serialize(&full_state) {
                                 updates.push(StateUpdate {

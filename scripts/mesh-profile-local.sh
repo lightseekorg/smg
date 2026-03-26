@@ -150,7 +150,7 @@ monitor_resources() {
                     fds=$(ls /proc/"$pid"/fd 2>/dev/null | wc -l || lsof -p "$pid" 2>/dev/null | wc -l || echo "?")
                     rss=$(ps -o rss= -p "$pid" 2>/dev/null | awk '{printf "%.0f", $1/1024}')
                     cpu=$(ps -o %cpu= -p "$pid" 2>/dev/null | tr -d ' ')
-                    threads=$(ps -M -p "$pid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ' || echo "?")
+                    threads=$(ls /proc/"$pid"/task 2>/dev/null | wc -l || ps -M -p "$pid" 2>/dev/null | tail -n +2 | wc -l || echo "?")
                     printf "%s | gw-%d | %d | %s | %s | %s | %s\n" \
                         "$(date +%H:%M:%S)" "$idx" "$pid" "$fds" "$rss" "$cpu" "$threads"
                 fi
