@@ -5,6 +5,26 @@ from unittest.mock import MagicMock
 import pytest
 from grpc_health.v1 import health_pb2
 
+# Stub out vllm and its submodules so vllm health_servicer can be imported
+# without a full vLLM installation.  MagicMock-based stubs auto-satisfy
+# any attribute access and from-import statements at collection time.
+# This must run before any smg_grpc_servicer imports are resolved.
+_VLLM_STUBS = [
+    "vllm",
+    "vllm.logger",
+    "vllm.logprobs",
+    "vllm.multimodal",
+    "vllm.multimodal.inputs",
+    "vllm.outputs",
+    "vllm.sampling_params",
+    "vllm.v1",
+    "vllm.v1.engine",
+    "vllm.v1.engine.async_llm",
+]
+for _name in _VLLM_STUBS:
+    if _name not in sys.modules:
+        sys.modules[_name] = MagicMock()
+
 # Stub out sglang and its submodules so health_servicer can be imported
 # without a full SGLang installation.  MagicMock-based stubs auto-satisfy
 # any attribute access and from-import statements at collection time.
