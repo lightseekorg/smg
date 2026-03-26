@@ -497,6 +497,14 @@ impl TokenizerTrait for TiktokenTokenizer {
         messages: &[serde_json::Value],
         params: ChatTemplateParams,
     ) -> Result<String> {
+        // Inject special tokens if the caller didn't provide them
+        if params.special_tokens.is_some() {
+            return self.chat_template.apply(messages, params);
+        }
+        let params = ChatTemplateParams {
+            special_tokens: Some(&self.special_tokens),
+            ..params
+        };
         self.chat_template.apply(messages, params)
     }
 
