@@ -282,6 +282,33 @@ impl Llama4VisionProcessor {
         DynamicImage::ImageRgb8(padded)
     }
 
+    /// Split image tensor into tiles.
+    fn split_to_tiles(
+        &self,
+        tensor: &Array3<f32>,
+        num_tiles_h: usize,
+        num_tiles_w: usize,
+    ) -> Array4<f32> {
+        let tile = self.tile_size as usize;
+        let num_tiles = num_tiles_h * num_tiles_w;
+
+        let mut tiles = Array4::<f32>::zeros((num_tiles, 3, tile, tile));
+
+        for h_idx in 0..num_tiles_h {
+            for w_idx in 0..num_tiles_w {
+                let tile_idx = h_idx * num_tiles_w + w_idx;
+                let y_start = h_idx * tile;
+                let x_start = w_idx * tile;
+
+                let tile_view =
+                    tensor.slice(s![.., y_start..y_start + tile, x_start..x_start + tile]);
+                tiles.slice_mut(s![tile_idx, .., .., ..]).assign(&tile_view);
+            }
+        }
+
+        tiles
+    }
+
     /// Create global image by bilinear interpolation to tile size.
     fn create_global_image(&self, image: &DynamicImage) -> Array3<f32> {
         let tile = self.tile_size;
@@ -299,6 +326,7 @@ impl Llama4VisionProcessor {
         let (target_h, target_w) = target_size;
 
         // Step 2: Compute resize target - limit upscaling if not resize_to_max_canvas
+        // This limits how much we resize the image, but we still pad to target_size
         let resize_target = if self.resize_to_max_canvas {
             target_size
         } else {
@@ -314,45 +342,35 @@ impl Llama4VisionProcessor {
 
         let resized = transforms::resize(image, new_w, new_h, FilterType::Triangle);
 
-        // Step 4: Pad to target_size
+        // Step 4: Pad to target_size (the canvas from get_best_fit, not resize_target)
         let padded = self.pad_image(&resized, target_w, target_h);
 
         // Step 5: Convert to tensor and normalize
         let tensor = transforms::to_tensor_and_normalize(&padded, &self.mean, &self.std);
 
-        // Step 6: Split into tiles
+        // Step 6: Calculate tile counts based on target_size (canvas size)
         let tile = self.tile_size as usize;
         let num_tiles_h = target_h as usize / tile;
         let num_tiles_w = target_w as usize / tile;
+
+        // Step 7: Split into tiles
+        let tiles = self.split_to_tiles(&tensor, num_tiles_h, num_tiles_w);
         let num_tiles = num_tiles_h * num_tiles_w;
 
-        let total_tiles = if num_tiles > 1 {
-            num_tiles + 1
-        } else {
-            num_tiles
-        };
-        let mut output = Array4::<f32>::zeros((total_tiles, 3, tile, tile));
-
-        for h_idx in 0..num_tiles_h {
-            for w_idx in 0..num_tiles_w {
-                let tile_idx = h_idx * num_tiles_w + w_idx;
-                let y_start = h_idx * tile;
-                let x_start = w_idx * tile;
-                let tile_view =
-                    tensor.slice(s![.., y_start..y_start + tile, x_start..x_start + tile]);
-                output
-                    .slice_mut(s![tile_idx, .., .., ..])
-                    .assign(&tile_view);
-            }
-        }
-
-        // Add global tile if multi-tile
-        if num_tiles > 1 {
+        // Step 8: Add global tile if there are multiple tiles
+        let output = if num_tiles > 1 {
             let global_tile = self.create_global_image(image);
-            output
+            let mut combined = Array4::<f32>::zeros((num_tiles + 1, 3, tile, tile));
+            combined
+                .slice_mut(s![..num_tiles, .., .., ..])
+                .assign(&tiles);
+            combined
                 .slice_mut(s![num_tiles, .., .., ..])
                 .assign(&global_tile);
-        }
+            combined
+        } else {
+            tiles
+        };
 
         (output, (num_tiles_h, num_tiles_w))
     }
@@ -425,6 +443,7 @@ impl ImagePreProcessor for Llama4VisionProcessor {
 
         // Concatenate all tiles from all images into a single 4D tensor
         // [total_tiles, C, H, W] — no batch dimension, no zero-padding.
+        // This matches what sglang and vLLM vision models expect.
         let pixel_values = if all_outputs.len() == 1 {
             all_outputs.remove(0)
         } else {
