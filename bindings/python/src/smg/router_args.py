@@ -1111,7 +1111,7 @@ class RouterArgs:
             prefixed_key = f"{prefix}{attr.name}"
             if prefixed_key in cli_args_dict and cli_args_dict[prefixed_key] is not None:
                 args_dict[attr.name] = cli_args_dict[prefixed_key]
-            elif attr.name in cli_args_dict:
+            elif attr.name in cli_args_dict and cli_args_dict[attr.name] not in (None, ""):
                 args_dict[attr.name] = cli_args_dict[attr.name]
 
             # Special handling for CLI args with dashes vs dataclass fields with underscores
