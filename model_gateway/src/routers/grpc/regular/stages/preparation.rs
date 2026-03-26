@@ -1,13 +1,16 @@
 //! Preparation stage that delegates to endpoint-specific implementations
 //!
 //! This stage checks RequestType at runtime and delegates to the appropriate
-//! endpoint-specific stage (ChatPreparationStage or GeneratePreparationStage).
+//! endpoint-specific stage. (ChatPreparationStage, CompletionPreparationStage or GeneratePreparationStage).
 
 use async_trait::async_trait;
 use axum::response::Response;
 use tracing::error;
 
-use super::{chat::ChatPreparationStage, generate::GeneratePreparationStage};
+use super::{
+    chat::ChatPreparationStage, completion::CompletionPreparationStage,
+    generate::GeneratePreparationStage,
+};
 use crate::routers::{
     error as grpc_error,
     grpc::{
@@ -20,6 +23,7 @@ use crate::routers::{
 pub(crate) struct PreparationStage {
     chat_stage: ChatPreparationStage,
     generate_stage: GeneratePreparationStage,
+    completion_stage: CompletionPreparationStage,
 }
 
 impl PreparationStage {
@@ -27,6 +31,7 @@ impl PreparationStage {
         Self {
             chat_stage: ChatPreparationStage,
             generate_stage: GeneratePreparationStage,
+            completion_stage: CompletionPreparationStage,
         }
     }
 }
@@ -43,6 +48,7 @@ impl PipelineStage for PreparationStage {
         match &ctx.input.request_type {
             RequestType::Chat(_) => self.chat_stage.execute(ctx).await,
             RequestType::Generate(_) => self.generate_stage.execute(ctx).await,
+            RequestType::Completion(_) => self.completion_stage.execute(ctx).await,
             request_type => {
                 error!(
                     function = "PreparationStage::execute",

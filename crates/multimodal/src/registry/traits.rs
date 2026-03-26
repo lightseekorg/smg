@@ -42,6 +42,10 @@ impl<'a> ModelMetadata<'a> {
         Self::find_value(self.config, path).and_then(|value| value.as_u64().map(|v| v as u32))
     }
 
+    pub fn config_model_type(&self) -> Option<&str> {
+        Self::find_value(self.config, &["model_type"]).and_then(Value::as_str)
+    }
+
     fn find_value<'v>(value: &'v Value, path: &[&str]) -> Option<&'v Value> {
         let mut current = value;
         for key in path {

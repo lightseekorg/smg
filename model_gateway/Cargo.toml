@@ -78,6 +78,7 @@ smg-mesh.workspace = true
 smg-grpc-client.workspace = true
 
 # External dependencies (not in workspace)
+bincode = "1.3"
 clap = { version = "4", features = ["derive", "env"] }
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
 tower = { version = "0.5", features = ["full"] }

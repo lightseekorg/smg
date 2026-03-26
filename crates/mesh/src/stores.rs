@@ -20,6 +20,7 @@ use tracing::debug;
 use super::{
     consistent_hash::ConsistentHashRing,
     crdt_kv::{CrdtOrMap, Operation, OperationLog, ReplicaId},
+    tree_ops::TreeOperation,
 };
 
 // ============================================================================
@@ -182,10 +183,6 @@ impl<T: CrdtValue> CrdtStore<T> {
         self.len() == 0
     }
 
-    // fn contains_key(&self, key: &str) -> bool {
-    //     self.inner.contains_key(key)
-    // }
-
     fn merge(&self, log: &OperationLog) {
         self.inner.merge(log);
     }
@@ -303,7 +300,12 @@ pub const GLOBAL_RATE_LIMIT_KEY: &str = "global_rate_limit";
 /// Key for global rate limit counter in RateLimitStore
 pub const GLOBAL_RATE_LIMIT_COUNTER_KEY: &str = "global";
 
-/// Worker state entry
+/// Worker state entry synced across mesh nodes.
+///
+/// Contains runtime state (`health`, `load`) plus an opaque `spec` blob
+/// carrying the full worker configuration. The mesh crate doesn't interpret
+/// `spec` — the gateway serializes `WorkerSpec` into it on the sending side
+/// and deserializes on the receiving side.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct WorkerState {
     pub worker_id: String,
@@ -312,6 +314,10 @@ pub struct WorkerState {
     pub health: bool,
     pub load: f64,
     pub version: u64,
+    /// Opaque worker specification (bincode-serialized WorkerSpec from the
+    /// gateway). Empty on old nodes that don't populate this field.
+    #[serde(default)]
+    pub spec: Vec<u8>,
 }
 
 // Implement Hash manually for WorkerState (excluding f64)
@@ -321,9 +327,9 @@ impl std::hash::Hash for WorkerState {
         self.model_id.hash(state);
         self.url.hash(state);
         self.health.hash(state);
-        // f64 cannot be hashed directly, use a workaround
         (self.load as i64).hash(state);
         self.version.hash(state);
+        self.spec.hash(state);
     }
 }
 
@@ -714,6 +720,9 @@ pub struct StateStores {
     pub worker: WorkerStore,
     pub policy: PolicyStore,
     pub rate_limit: RateLimitStore,
+    /// Pending tree operations for delta sync.
+    /// Key: tree key (e.g., "tree:model-name"), Value: operations since last successful send.
+    pub tree_ops_pending: DashMap<String, Vec<TreeOperation>>,
 }
 
 impl StateStores {
@@ -724,6 +733,7 @@ impl StateStores {
             worker: WorkerStore::new(),
             policy: PolicyStore::new(),
             rate_limit: RateLimitStore::new("default".to_string()),
+            tree_ops_pending: DashMap::new(),
         }
     }
 
@@ -734,6 +744,7 @@ impl StateStores {
             worker: WorkerStore::new(),
             policy: PolicyStore::new(),
             rate_limit: RateLimitStore::new(self_name),
+            tree_ops_pending: DashMap::new(),
         }
     }
 
@@ -804,6 +815,7 @@ mod tests {
             health: true,
             load: 0.5,
             version: 1,
+            spec: vec![],
         };
 
         let _ = store.insert(key.clone(), state.clone());
