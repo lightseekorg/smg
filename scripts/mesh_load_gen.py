@@ -152,11 +152,11 @@ async def send_request(
                 stats["total_latency"] += elapsed
                 return
         except TimeoutError:
-            retries += 1
-            stats["retries"] += 1
-            if retries > _max_retries:
+            if retries >= _max_retries:
                 stats["errors"] += 1
                 return
+            retries += 1
+            stats["retries"] += 1
             # Retry on a DIFFERENT gateway (simulates real retry storm)
             if urls:
                 url = random.choice(urls)

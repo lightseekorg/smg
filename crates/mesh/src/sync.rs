@@ -607,10 +607,11 @@ impl MeshSyncManager {
                     return None;
                 }
 
-                // Build the base tree from config + pending ops so we
-                // don't lose local operations that haven't been
-                // materialized into the config blob yet.
-                let mut ts = if existing.config.is_empty() {
+                // Build base tree from config only — do NOT replay
+                // tree_ops_pending here. Pending ops are local and will be
+                // included by materialize_tree_state() when the tree is
+                // read for routing or sync.
+                if existing.config.is_empty() {
                     TreeState::new(delta.model_id.clone())
                 } else {
                     match TreeState::from_bytes(&existing.config) {
@@ -624,13 +625,7 @@ impl MeshSyncManager {
                             return None;
                         }
                     }
-                };
-                if let Some(pending) = self.stores.tree_ops_pending.get(&key) {
-                    for op in pending.iter() {
-                        ts.add_operation(op.clone());
-                    }
                 }
-                ts
             } else {
                 TreeState::new(delta.model_id.clone())
             };
@@ -706,10 +701,19 @@ impl MeshSyncManager {
                             version: current_version.max(tree_state.version),
                         }
                     });
-                    // Remove only this key's pending ops — not a global clear.
-                    // New ops appended concurrently will appear in the next
-                    // checkpoint cycle.
-                    self.stores.tree_ops_pending.remove(&key);
+                    // Drain materialized ops from the pending buffer.
+                    // Use `alter` to atomically keep only ops appended AFTER
+                    // materialize_tree_state() read the buffer. The number of
+                    // ops materialized is `tree_state.operations.len()`.
+                    let materialized_count = tree_state.operations.len();
+                    self.stores.tree_ops_pending.alter(&key, |_, mut ops| {
+                        if ops.len() <= materialized_count {
+                            ops.clear();
+                        } else {
+                            ops.drain(..materialized_count);
+                        }
+                        ops
+                    });
                 }
             }
         }
