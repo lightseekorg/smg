@@ -1533,7 +1533,16 @@ class TestToolChoiceQwen(_TestToolChoiceBase):
 @pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
 @pytest.mark.model("mistralai/Mistral-7B-Instruct-v0.3")
-@pytest.mark.gateway(extra_args=["--tool-call-parser", "mistral", "--history-backend", "memory"])
+@pytest.mark.gateway(
+    extra_args=[
+        "--tool-call-parser",
+        "mistral",
+        "--history-backend",
+        "memory",
+        "--chat-template",
+        "e2e_test/fixtures/chat_templates/tool_chat_template_mistral_parallel.jinja",
+    ]
+)
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestToolChoiceMistral(_TestToolChoiceBase):
