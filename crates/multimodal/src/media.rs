@@ -200,9 +200,13 @@ impl MediaConnector {
         let cursor = std::io::Cursor::new(bytes.clone());
         let reader = image::ImageReader::new(cursor).with_guessed_format()?;
 
-        let image = task::spawn_blocking(move || reader.decode())
-            .await
-            .map_err(MediaConnectorError::Blocking)??;
+        let image = task::spawn_blocking(move || {
+            let decoded = reader.decode()?;
+            // Pre-convert to RGB8 so downstream processors never need to
+            Ok::<_, image::ImageError>(image::DynamicImage::ImageRgb8(decoded.into_rgb8()))
+        })
+        .await
+        .map_err(MediaConnectorError::Blocking)??;
 
         Ok(Arc::new(ImageFrame::new(
             image, bytes, detail, source, hash,
