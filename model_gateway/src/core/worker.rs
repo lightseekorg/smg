@@ -174,7 +174,10 @@ pub trait Worker: Send + Sync + fmt::Debug {
     /// Get worker-specific metadata
     fn metadata(&self) -> &WorkerMetadata;
 
-    /// Get the circuit breaker for this worker
+    /// Get the circuit breaker for this worker.
+    ///
+    /// **Do not call from routers.** Use `record_outcome(status_code)` to
+    /// record request outcomes and `is_available()` to check worker health.
     fn circuit_breaker(&self) -> &CircuitBreaker;
 
     /// Check if the worker is available (healthy + circuit closed/half-open)
