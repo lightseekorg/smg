@@ -139,7 +139,18 @@ class TestMultimodalQwen3VL:
         )
         # Images 2 (URL) and 3 (base64) are the same pug — model should notice
         assert any(
-            k in text_lower for k in ["same", "identical", "duplicate", "second", "third"]
+            k in text_lower
+            for k in [
+                "same",
+                "identical",
+                "duplicate",
+                "copy",
+                "copies",
+                "repeated",
+                "twice",
+                "similar",
+                "both",
+            ]
         ), f"Expected model to notice duplicate images, got: {text}"
         assert response.usage.prompt_tokens > 0
         assert response.usage.completion_tokens > 0
