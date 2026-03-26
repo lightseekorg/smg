@@ -133,7 +133,7 @@ class _StateManagementCloudBase:
         assert resp.status == "completed"
 
         with pytest.raises((openai.NotFoundError, smg_client.NotFoundError)):
-            api_client.responses.retrieve(resp.id)
+            api_client.responses.retrieve(response_id=resp.id)
 
     def test_store_false_previous_response_id_rejected(self, model, api_client):
         """Test that store=false response id cannot be used as previous_response_id."""
@@ -295,7 +295,7 @@ class TestStateManagementLocal:
         assert resp.status == "completed"
 
         with pytest.raises((openai.NotFoundError, smg_client.NotFoundError)):
-            api_client.responses.retrieve(resp.id)
+            api_client.responses.retrieve(response_id=resp.id)
 
     def test_store_false_previous_response_id_rejected(self, model, api_client):
         """Test that store=false response id cannot be used as previous_response_id."""
@@ -404,7 +404,7 @@ class TestStateManagementHarmony:
         assert resp.status == "completed"
 
         with pytest.raises((openai.NotFoundError, smg_client.NotFoundError)):
-            api_client.responses.retrieve(resp.id)
+            api_client.responses.retrieve(response_id=resp.id)
 
     def test_store_false_previous_response_id_rejected(self, model, api_client):
         """Test that store=false response id cannot be used as previous_response_id."""
