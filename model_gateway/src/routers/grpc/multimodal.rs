@@ -9,7 +9,7 @@
 //! functions differ because they work with different input types (`ChatMessage` vs
 //! `InputMessage`).
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -70,7 +70,7 @@ impl MultimodalComponents {
     }
 
     /// Load or retrieve cached model config for a given model and tokenizer source path.
-    pub fn get_or_load_config(
+    pub async fn get_or_load_config(
         &self,
         model_id: &str,
         tokenizer_source: &str,
@@ -79,7 +79,11 @@ impl MultimodalComponents {
             return Ok(cached.clone());
         }
 
-        let base_dir = Path::new(tokenizer_source);
+        let base_dir = llm_multimodal::hub::resolve_model_config_dir(tokenizer_source)
+            .await
+            .with_context(|| {
+                format!("Failed to resolve model config directory for '{tokenizer_source}'")
+            })?;
 
         // Load config.json
         let config_path = base_dir.join("config.json");
@@ -381,7 +385,9 @@ async fn process_multimodal_parts(
     );
 
     // Step 2: Resolve model spec and preprocess images
-    let model_config = components.get_or_load_config(model_id, tokenizer_source)?;
+    let model_config = components
+        .get_or_load_config(model_id, tokenizer_source)
+        .await?;
     let model_type = model_config
         .config
         .get("model_type")
