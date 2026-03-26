@@ -241,7 +241,10 @@ impl Phi3VisionProcessor {
         config: &PreProcessorConfig,
     ) -> (Array4<f32>, (usize, usize), usize) {
         // 1. Convert to RGB
-        let image = DynamicImage::ImageRgb8(image.to_rgb8());
+        let image = match image {
+            DynamicImage::ImageRgb8(_) => image.clone(),
+            _ => DynamicImage::ImageRgb8(image.to_rgb8()),
+        };
 
         // 2. HD transform
         let hd_image = self.hd_transform(&image);
