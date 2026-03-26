@@ -7,7 +7,7 @@
 //!
 //! 1. **HD Transform**: Resize and pad image to multiples of 336
 //! 2. **Normalize**: Apply CLIP normalization
-//! 3. **Create Global Image**: Bicubic interpolate to 336x336
+//! 3. **Create Global Image**: SIMD FIR CatmullRom resize to 336x336
 //! 4. **Tile**: Reshape into (num_tiles, 3, 336, 336)
 //! 5. **Concatenate**: [global_image, tiles...]
 //! 6. **Pad**: Zero-pad to (num_crops+1, 3, 336, 336)
@@ -177,16 +177,20 @@ impl Phi3VisionProcessor {
         new_image
     }
 
-    /// Create global image by bicubic interpolation to 336x336.
-    ///
-    /// Uses the shared `bicubic_resize` which matches PyTorch's
-    /// `torch.nn.functional.interpolate(mode='bicubic', align_corners=False)`.
+    /// Create global image by resizing the raw DynamicImage to TILE_SIZE x TILE_SIZE
+    /// using SIMD-accelerated FIR CatmullRom, then converting to a normalized tensor.
     #[expect(
         clippy::unused_self,
         reason = "method logically belongs to the processor; keeps API consistent"
     )]
-    fn create_global_image(&self, tensor: &Array3<f32>) -> Array3<f32> {
-        transforms::bicubic_resize(tensor, TILE_SIZE as usize, TILE_SIZE as usize)
+    fn create_global_image(
+        &self,
+        hd_image: &DynamicImage,
+        mean: &[f64; 3],
+        std: &[f64; 3],
+    ) -> Array3<f32> {
+        let resized = transforms::resize(hd_image, TILE_SIZE, TILE_SIZE, FilterType::CatmullRom);
+        transforms::to_tensor_and_normalize(&resized, mean, std)
     }
 
     /// Reshape HD image into tiles.
@@ -243,12 +247,11 @@ impl Phi3VisionProcessor {
         // 1. Convert to RGB
         let image = DynamicImage::ImageRgb8(image.to_rgb8());
 
-        // 2. HD transform
+        // 2. HD transform (produces a DynamicImage)
         let hd_image = self.hd_transform(&image);
         let (hd_w, hd_h) = hd_image.dimensions();
 
-        // 3. To tensor [0, 1] and normalize
-        let mut tensor = transforms::to_tensor(&hd_image);
+        // Resolve normalization parameters
         let mean = config
             .image_mean
             .as_ref()
@@ -259,10 +262,12 @@ impl Phi3VisionProcessor {
             .as_ref()
             .map(|v| [v[0], v[1], v[2]])
             .unwrap_or(self.std);
-        transforms::normalize(&mut tensor, &mean, &std);
 
-        // 4. Create global image (336x336)
-        let global_image = self.create_global_image(&tensor);
+        // 3. Create global image: FIR CatmullRom resize on raw image, then fused to_tensor+normalize
+        let global_image = self.create_global_image(&hd_image, &mean, &std);
+
+        // 4. Fused to_tensor + normalize on HD image (single pass)
+        let tensor = transforms::to_tensor_and_normalize(&hd_image, &mean, &std);
 
         // 5. Reshape HD image into tiles
         let tiles = self.reshape_to_tiles(&tensor);

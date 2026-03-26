@@ -302,13 +302,17 @@ impl Phi4VisionProcessor {
         DynamicImage::ImageRgb8(padded)
     }
 
-    /// Create global image by bicubic interpolation to base resolution.
-    ///
-    /// Uses the shared `bicubic_resize` which matches PyTorch's
-    /// `torch.nn.functional.interpolate(mode='bicubic', align_corners=False)`.
-    fn create_global_image(&self, tensor: &Array3<f32>) -> Array3<f32> {
-        let target = self.base_resolution as usize;
-        transforms::bicubic_resize(tensor, target, target)
+    /// Create global image by resizing the raw DynamicImage to base_resolution x base_resolution
+    /// using SIMD-accelerated FIR CatmullRom, then converting to a normalized tensor.
+    fn create_global_image(
+        &self,
+        hd_image: &DynamicImage,
+        mean: &[f64; 3],
+        std: &[f64; 3],
+    ) -> Array3<f32> {
+        let target = self.base_resolution;
+        let resized = transforms::resize(hd_image, target, target, FilterType::CatmullRom);
+        transforms::to_tensor_and_normalize(&resized, mean, std)
     }
 
     /// Tile the HD image into crops of base_resolution x base_resolution.
@@ -385,12 +389,11 @@ impl Phi4VisionProcessor {
         let hd_h = hd_image.height();
         let hd_w = hd_image.width();
 
-        // Step 2: Convert to tensor and normalize
-        let mut hd_tensor = transforms::to_tensor(&hd_image);
-        transforms::normalize(&mut hd_tensor, &self.mean, &self.std);
+        // Step 2: Create global image: FIR CatmullRom resize on raw image, then fused to_tensor+normalize
+        let global_tensor = self.create_global_image(&hd_image, &self.mean, &self.std);
 
-        // Step 3: Create global image
-        let global_tensor = self.create_global_image(&hd_tensor);
+        // Step 3: Fused to_tensor + normalize on HD image (single pass)
+        let hd_tensor = transforms::to_tensor_and_normalize(&hd_image, &self.mean, &self.std);
 
         // Step 4: Tile HD image
         let tiles = self.tile_image(&hd_tensor, h_crops, w_crops);
