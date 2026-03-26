@@ -1112,7 +1112,13 @@ class RouterArgs:
             if prefixed_key in cli_args_dict and cli_args_dict[prefixed_key] is not None:
                 args_dict[attr.name] = cli_args_dict[prefixed_key]
             elif attr.name in cli_args_dict:
-                args_dict[attr.name] = cli_args_dict[attr.name]
+                val = cli_args_dict[attr.name]
+                # Treat empty strings from backend defaults (e.g. vLLM's
+                # --reasoning-parser defaults to '') as unset so they don't
+                # override the dataclass default of None.
+                if val == "" and attr.default is None:
+                    continue
+                args_dict[attr.name] = val
 
             # Special handling for CLI args with dashes vs dataclass fields with underscores
             # e.g. --tls-cert-path maps to tls_cert_path in args namespace,
