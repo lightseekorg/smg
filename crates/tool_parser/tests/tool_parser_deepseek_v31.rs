@@ -65,7 +65,7 @@ async fn test_deepseek_v31_streaming() {
     ];
 
     let mut found_name = false;
-    let mut collected_args = String::new();
+    let mut collected_args_chunks: Vec<String> = Vec::new();
 
     for chunk in chunks {
         let result = parser.parse_incremental(chunk, &tools).await.unwrap();
@@ -76,16 +76,20 @@ async fn test_deepseek_v31_streaming() {
                 found_name = true;
             }
             if !call.parameters.is_empty() {
-                collected_args.push_str(&call.parameters);
+                collected_args_chunks.push(call.parameters.clone());
             }
         }
     }
 
     assert!(found_name, "Should have found tool name during streaming");
     assert!(
-        !collected_args.is_empty(),
+        !collected_args_chunks.is_empty(),
         "Should have collected argument chunks"
     );
+
+    let full_args: String = collected_args_chunks.join("");
+    let _: serde_json::Value =
+        serde_json::from_str(&full_args).expect("Collected argument chunks should form valid JSON");
 }
 
 #[tokio::test]

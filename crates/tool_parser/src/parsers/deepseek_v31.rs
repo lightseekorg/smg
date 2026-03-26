@@ -148,7 +148,7 @@ impl ToolParser for DeepSeekV31Parser {
         }
 
         // Find where tool calls begin
-        // Safe: has_tool_markers() already confirmed the marker exists
+        // INVARIANT: has_tool_markers() already confirmed the marker exists
         let idx = text
             .find("<｜tool▁calls▁begin｜>")
             .ok_or_else(|| ParserError::ParsingFailed("tool call marker not found".to_string()))?;
@@ -180,11 +180,11 @@ impl ToolParser for DeepSeekV31Parser {
         tools: &[Tool],
     ) -> ParserResult<StreamingParseResult> {
         self.buffer.push_str(chunk);
-        let current_text = &self.buffer.clone();
+        let current_text = self.buffer.clone();
 
         // Check if we have a tool call (either the start token or individual tool call)
         let has_tool_call =
-            self.has_tool_markers(current_text) || current_text.contains("<｜tool▁call▁begin｜>");
+            self.has_tool_markers(&current_text) || current_text.contains("<｜tool▁call▁begin｜>");
 
         if !has_tool_call {
             // No tool markers detected - return all buffered content as normal text
@@ -206,7 +206,7 @@ impl ToolParser for DeepSeekV31Parser {
 
         // Try to match the partial tool call pattern
         // V3.1: group 1 = name, group 2 = raw JSON args (no type field, no code fence)
-        if let Some(captures) = self.partial_tool_call_regex.captures(current_text) {
+        if let Some(captures) = self.partial_tool_call_regex.captures(&current_text) {
             let func_name = captures.get(1).map_or("", |m| m.as_str()).trim();
             let func_args_raw = captures.get(2).map_or("", |m| m.as_str()).trim();
 
@@ -275,7 +275,7 @@ impl ToolParser for DeepSeekV31Parser {
                     }
 
                     // Find the end of the current tool call and remove only that part from buffer
-                    if let Some(mat) = self.tool_call_end_pattern.find(current_text) {
+                    if let Some(mat) = self.tool_call_end_pattern.find(&current_text) {
                         // Remove the completed tool call from buffer, keep any remaining content
                         self.buffer = current_text[mat.end()..].to_string();
                     } else {
