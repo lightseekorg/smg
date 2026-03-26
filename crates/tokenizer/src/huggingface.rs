@@ -41,7 +41,7 @@ impl HuggingFaceTokenizer {
             .map_err(|e| Error::msg(format!("Failed to load tokenizer: {e}")))?;
 
         // Extract special tokens
-        let special_tokens = Self::extract_special_tokens(&tokenizer);
+        let special_tokens = Self::extract_special_tokens(&tokenizer, file_path);
 
         // Build vocab mappings (include special tokens to get added_tokens like <|im_start|>)
         let vocab = tokenizer.get_vocab(true); // true = include special tokens and added_tokens
@@ -137,7 +137,7 @@ impl HuggingFaceTokenizer {
 
     /// Create from an existing HuggingFace tokenizer
     pub fn from_tokenizer(tokenizer: HfTokenizer) -> Self {
-        let special_tokens = Self::extract_special_tokens(&tokenizer);
+        let special_tokens = Self::extract_special_tokens(&tokenizer, "");
         let vocab = tokenizer.get_vocab(true); // true = include special tokens and added_tokens
         let reverse_vocab: HashMap<TokenIdType, String> = vocab
             .iter()
@@ -153,8 +153,15 @@ impl HuggingFaceTokenizer {
         }
     }
 
-    /// Extract special tokens from the tokenizer
-    fn extract_special_tokens(tokenizer: &HfTokenizer) -> SpecialTokens {
+    /// Extract special tokens from the tokenizer and tokenizer_config.json.
+    ///
+    /// Prefers explicit values from `tokenizer_config.json` (e.g., `"bos_token": "<|begin_of_text|>"`)
+    /// over pattern matching against the vocabulary, since models like Llama 4 use non-standard
+    /// token names that aren't in the hardcoded pattern list.
+    fn extract_special_tokens(tokenizer: &HfTokenizer, tokenizer_path: &str) -> SpecialTokens {
+        // Try to read special tokens from tokenizer_config.json first
+        let config_tokens = Self::read_special_tokens_from_config(tokenizer_path);
+
         // Get vocab with special tokens included (added_tokens like <|im_start|>)
         let vocab = tokenizer.get_vocab(true);
 
@@ -171,19 +178,66 @@ impl HuggingFaceTokenizer {
         let additional_special_tokens: Vec<String> = tokenizer
             .get_added_tokens_decoder()
             .iter()
-            .filter(|(_id, token)| token.special) // Only tokens marked as special: true
+            .filter(|(_id, token)| token.special)
             .map(|(_id, token)| token.content.clone())
             .collect();
 
+        // Config values take priority over pattern matching
         SpecialTokens {
-            bos_token: find_token(&["<s>", "<|startoftext|>", "<BOS>", "[CLS]"]),
-            eos_token: find_token(&["</s>", "<|endoftext|>", "<EOS>", "[SEP]"]),
-            unk_token: find_token(&["<unk>", "<UNK>", "[UNK]"]),
+            bos_token: config_tokens
+                .0
+                .or_else(|| find_token(&["<s>", "<|startoftext|>", "<BOS>", "[CLS]"])),
+            eos_token: config_tokens
+                .1
+                .or_else(|| find_token(&["</s>", "<|endoftext|>", "<EOS>", "[SEP]"])),
+            unk_token: config_tokens
+                .2
+                .or_else(|| find_token(&["<unk>", "<UNK>", "[UNK]"])),
             sep_token: find_token(&["[SEP]", "<sep>", "<SEP>"]),
-            pad_token: find_token(&["<pad>", "<PAD>", "[PAD]"]),
+            pad_token: config_tokens
+                .3
+                .or_else(|| find_token(&["<pad>", "<PAD>", "[PAD]"])),
             cls_token: find_token(&["[CLS]", "<cls>", "<CLS>"]),
             mask_token: find_token(&["[MASK]", "<mask>", "<MASK>"]),
             additional_special_tokens,
+        }
+    }
+
+    /// Read bos/eos/unk/pad tokens from tokenizer_config.json.
+    /// Returns (bos, eos, unk, pad) with None for missing values.
+    fn read_special_tokens_from_config(
+        tokenizer_path: &str,
+    ) -> (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) {
+        let config_path = std::path::Path::new(tokenizer_path)
+            .parent()
+            .map(|p| p.join("tokenizer_config.json"));
+
+        let config: Option<serde_json::Value> = config_path
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok());
+
+        let get_token = |config: &serde_json::Value, key: &str| -> Option<String> {
+            config.get(key).and_then(|v| {
+                // Handle both string and {"content": "..."} formats
+                v.as_str()
+                    .map(String::from)
+                    .or_else(|| v.get("content").and_then(|c| c.as_str()).map(String::from))
+            })
+        };
+
+        match config {
+            Some(ref c) => (
+                get_token(c, "bos_token"),
+                get_token(c, "eos_token"),
+                get_token(c, "unk_token"),
+                get_token(c, "pad_token"),
+            ),
+            None => (None, None, None, None),
         }
     }
 
