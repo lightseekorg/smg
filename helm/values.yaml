@@ -77,6 +77,12 @@ args:
   - "0.0.0.0"
   - "--history-backend"
   - "oracle"
+  - "--storage-hook-wasm-path"
+  - "/opt/smg/examples/wasm/genai-wasm-guest-storage-hook/target/wasm32-wasip2/release/wasm_guest_storage_hook.component.wasm"
+  - "--schema-config"
+  - "/opt/smg/crates/data_connector/oracle_schema_config.yaml"
+  - "--storage-context-headers"
+  - "OpenAI-Project=generative_ai_project_id"
   - "--oracle-external-auth"
 
 # This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/

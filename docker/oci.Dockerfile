@@ -37,6 +37,9 @@ RUN microdnf install -y git gcc gcc-c++ make openssl-devel pkgconf-pkg-config pe
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     && rustc --version && cargo --version && protoc --version
 
+RUN cargo install wasm-tools
+RUN rustup target add wasm32-wasip2
+
 COPY --from=local_src /src /opt/smg
 WORKDIR /opt/smg
 
@@ -46,6 +49,10 @@ RUN uv pip install maturin \
     && cd bindings/python \
     && ulimit -n 65536 && maturin build --release --features vendored-openssl --out dist \
     && rm -rf /root/.cache
+
+RUN cd /opt/smg/examples/wasm/genai-wasm-guest-storage-hook \
+    && chmod +x build.sh \
+    && ./build.sh
 
 ######################### ROUTER IMAGE #########################
 FROM base AS router-image
@@ -74,6 +81,8 @@ RUN mkdir -p /opt/oracle/instantclient/network/admin
 RUN mkdir -p /opt/oracle/wallet
 
 COPY --from=build-image /opt/smg/bindings/python/dist/*.whl dist/
+COPY --from=build-image /opt/smg/examples/wasm/genai-wasm-guest-storage-hook/target/wasm32-wasip2/release/wasm_guest_storage_hook.component.wasm /opt/smg/examples/wasm/genai-wasm-guest-storage-hook/target/wasm32-wasip2/release/wasm_guest_storage_hook.component.wasm
+COPY --from=build-image /opt/smg/crates/data_connector/oracle_schema_config.yaml /opt/smg/crates/data_connector/oracle_schema_config.yaml
 
 RUN uv pip install --force-reinstall dist/*.whl
 

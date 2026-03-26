@@ -1,0 +1,70 @@
+owner: "ADMIN"
+version: 3
+auto_migrate: false
+
+conversations:
+  table: "CONVERSATIONS"
+  columns:
+    id: "CONVERSATION_ID"
+    created_at: "CREATED_AT"
+    metadata: "METADATA"
+  extra_columns:
+    CONVERSATION_STORE_ID:
+      sql_type: "VARCHAR2(255)"
+    ITEMS:
+      sql_type: "CLOB"
+    UPDATED_AT:
+      sql_type: "TIMESTAMP WITH TIME ZONE"
+    VERSION:
+      sql_type: "NUMBER"
+      default_value: 1
+    SHORT_TERM_MEMORY:
+      sql_type: "CLOB"
+    GENERATIVE_AI_PROJECT_ID:
+      sql_type: "VARCHAR2(255)"
+    SHORT_TERM_MEMORY_BYTES:
+      sql_type: "NUMBER"
+
+responses:
+  table: "RESPONSES"
+  columns:
+    id: "RESPONSE_ID"
+    conversation_id: "CONVERSATION_ID"
+    previous_response_id: "PREVIOUS_RESPONSE_ID"
+    input: "INPUT_ITEMS"
+    created_at: "CREATED_AT"
+    safety_identifier: "SAFETY_IDENTIFIER"
+    model: "MODEL"
+    raw_response: "RESPONSE_OBJECT"
+  extra_columns:
+    CONVERSATION_STORE_ID:
+      sql_type: "VARCHAR2(255)"
+    SUBJECT_ID:
+      sql_type: "VARCHAR2(255)"
+    INPUT_EMBEDDING:
+      sql_type: "VECTOR(1024,FLOAT32,DENSE)"
+    OUTPUT_EMBEDDING:
+      sql_type: "VECTOR(1024,FLOAT32,DENSE)"
+    GENERATIVE_AI_PROJECT_ID:
+      sql_type: "VARCHAR2(255)"
+
+conversation_items:
+  table: "CONVERSATION_ITEMS"
+  columns:
+    id: "ID"
+    response_id: "RESPONSE_ID"
+    item_type: "ITEM_TYPE"
+    role: "ROLE"
+    content: "CONTENT"
+    status: "STATUS"
+    created_at: "CREATED_AT"
+  extra_columns:
+    GENERATIVE_AI_PROJECT_ID:
+      sql_type: "VARCHAR2(255)"
+
+conversation_item_links:
+  table: "CONVERSATION_ITEM_LINKS"
+  columns:
+    conversation_id: "CONVERSATION_ID"
+    item_id: "ITEM_ID"
+    added_at: "ADDED_AT"
