@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import anthropic
 import openai
@@ -178,6 +179,9 @@ def _setup_local(
         logger.info("Tearing down %s backend", backend_name)
         gateway.shutdown()
         stop_workers(workers)
+        # Allow CUDA driver time to reclaim GPU memory from killed worker processes.
+        # Without this, the next test may start before memory is freed, causing OOM.
+        time.sleep(10)
 
 
 # ---------------------------------------------------------------------------
