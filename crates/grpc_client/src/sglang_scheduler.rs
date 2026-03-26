@@ -11,6 +11,7 @@ use std::{
 use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
+    completion::CompletionRequest,
     generate::GenerateRequest,
     messages::CreateMessageRequest,
     responses::ResponsesRequest,
@@ -667,6 +668,97 @@ impl SglangSchedulerClient {
             constraint: Self::build_constraint_for_responses(tool_call_constraint)?,
             ..Default::default()
         })
+    }
+
+    /// Build a GenerateRequest from CompletionRequest (`/v1/completions`)
+    #[expect(
+        clippy::unused_self,
+        reason = "method receiver kept for consistent public API"
+    )]
+    pub fn build_generate_request_from_completion(
+        &self,
+        request_id: String,
+        body: &CompletionRequest,
+        original_text: String,
+        token_ids: Vec<u32>,
+    ) -> Result<proto::GenerateRequest, String> {
+        let sampling_params = Self::build_grpc_sampling_params_from_completion(body)?;
+
+        let grpc_request = proto::GenerateRequest {
+            request_id,
+            tokenized: Some(proto::TokenizedInput {
+                original_text,
+                input_ids: token_ids,
+            }),
+            mm_inputs: None,
+            sampling_params: Some(sampling_params),
+            return_logprob: body.logprobs.is_some(),
+            logprob_start_len: -1,
+            top_logprobs_num: body.logprobs.unwrap_or(0) as i32,
+            return_hidden_states: body.return_hidden_states,
+            stream: body.stream,
+            ..Default::default()
+        };
+
+        Ok(grpc_request)
+    }
+
+    fn build_grpc_sampling_params_from_completion(
+        request: &CompletionRequest,
+    ) -> Result<proto::SamplingParams, String> {
+        let stop_sequences = match &request.stop {
+            Some(StringOrArray::String(s)) => vec![s.clone()],
+            Some(StringOrArray::Array(arr)) => arr.clone(),
+            None => vec![],
+        };
+
+        let constraint = Self::build_single_constraint_from_completion(request)?;
+
+        Ok(proto::SamplingParams {
+            temperature: request.temperature.unwrap_or(1.0),
+            top_p: request.top_p.unwrap_or(1.0),
+            top_k: request.top_k.unwrap_or(-1),
+            min_p: request.min_p.unwrap_or(0.0),
+            frequency_penalty: request.frequency_penalty.unwrap_or(0.0),
+            presence_penalty: request.presence_penalty.unwrap_or(0.0),
+            repetition_penalty: request.repetition_penalty.unwrap_or(1.0),
+            max_new_tokens: request.max_tokens,
+            min_new_tokens: request.min_tokens.unwrap_or(0),
+            stop: stop_sequences,
+            stop_token_ids: request.stop_token_ids.clone().unwrap_or_default(),
+            skip_special_tokens: request.skip_special_tokens,
+            spaces_between_special_tokens: true,
+            ignore_eos: request.ignore_eos,
+            no_stop_trim: request.no_stop_trim,
+            n: request.n.unwrap_or(1),
+            constraint,
+            ..Default::default()
+        })
+    }
+
+    fn build_single_constraint_from_completion(
+        request: &CompletionRequest,
+    ) -> Result<Option<proto::sampling_params::Constraint>, String> {
+        let mut constraints = Vec::new();
+        if let Some(json_schema) = &request.json_schema {
+            constraints.push(proto::sampling_params::Constraint::JsonSchema(
+                json_schema.clone(),
+            ));
+        }
+        if let Some(regex) = &request.regex {
+            constraints.push(proto::sampling_params::Constraint::Regex(regex.clone()));
+        }
+        if let Some(ebnf) = &request.ebnf {
+            constraints.push(proto::sampling_params::Constraint::EbnfGrammar(
+                ebnf.clone(),
+            ));
+        }
+
+        match constraints.len() {
+            0 => Ok(None),
+            1 => Ok(constraints.pop()),
+            _ => Err("Multiple structured constraints are not allowed".to_string()),
+        }
     }
 
     fn build_single_constraint_from_plain(

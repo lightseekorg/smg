@@ -11,6 +11,7 @@ use std::{
 use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
+    completion::CompletionRequest,
     generate::GenerateRequest,
     messages::CreateMessageRequest,
     responses::ResponsesRequest,
@@ -598,6 +599,96 @@ impl VllmEngineClient {
             constraint: Self::build_constraint_for_responses(tool_call_constraint)?,
             ..Default::default()
         })
+    }
+
+    /// Build a GenerateRequest from CompletionRequest (`/v1/completions`)
+    #[expect(
+        clippy::unused_self,
+        reason = "method receiver kept for consistent public API"
+    )]
+    pub fn build_generate_request_from_completion(
+        &self,
+        request_id: String,
+        body: &CompletionRequest,
+        original_text: String,
+        token_ids: Vec<u32>,
+    ) -> Result<proto::GenerateRequest, String> {
+        let sampling_params = Self::build_grpc_sampling_params_from_completion(body)?;
+
+        let grpc_request = proto::GenerateRequest {
+            request_id,
+            input: Some(proto::generate_request::Input::Tokenized(
+                proto::TokenizedInput {
+                    original_text,
+                    input_ids: token_ids,
+                },
+            )),
+            sampling_params: Some(sampling_params),
+            stream: body.stream,
+            kv_transfer_params: None,
+            mm_inputs: None,
+        };
+
+        Ok(grpc_request)
+    }
+
+    fn build_grpc_sampling_params_from_completion(
+        request: &CompletionRequest,
+    ) -> Result<proto::SamplingParams, String> {
+        let stop_sequences = match &request.stop {
+            Some(StringOrArray::String(s)) => vec![s.clone()],
+            Some(StringOrArray::Array(arr)) => arr.clone(),
+            None => vec![],
+        };
+
+        let logprobs = request.logprobs.map(|v| v.min(5) as i32);
+
+        let constraint = Self::build_single_constraint_from_completion(request)?;
+
+        Ok(proto::SamplingParams {
+            temperature: request.temperature,
+            top_p: request.top_p.unwrap_or(1.0),
+            top_k: request.top_k.map(|v| v.max(0) as u32).unwrap_or(0),
+            min_p: request.min_p.unwrap_or(0.0),
+            frequency_penalty: request.frequency_penalty.unwrap_or(0.0),
+            presence_penalty: request.presence_penalty.unwrap_or(0.0),
+            repetition_penalty: request.repetition_penalty.unwrap_or(1.0),
+            max_tokens: request.max_tokens,
+            min_tokens: request.min_tokens.unwrap_or(0),
+            stop: stop_sequences,
+            stop_token_ids: request.stop_token_ids.clone().unwrap_or_default(),
+            skip_special_tokens: request.skip_special_tokens,
+            spaces_between_special_tokens: true,
+            ignore_eos: request.ignore_eos,
+            include_stop_str_in_output: request.no_stop_trim,
+            n: request.n.unwrap_or(1),
+            logprobs,
+            constraint,
+            ..Default::default()
+        })
+    }
+
+    fn build_single_constraint_from_completion(
+        request: &CompletionRequest,
+    ) -> Result<Option<proto::sampling_params::Constraint>, String> {
+        let mut constraints = Vec::new();
+        if let Some(json_schema) = &request.json_schema {
+            constraints.push(proto::sampling_params::Constraint::JsonSchema(
+                json_schema.clone(),
+            ));
+        }
+        if let Some(regex) = &request.regex {
+            constraints.push(proto::sampling_params::Constraint::Regex(regex.clone()));
+        }
+        if let Some(ebnf) = &request.ebnf {
+            constraints.push(proto::sampling_params::Constraint::Grammar(ebnf.clone()));
+        }
+
+        match constraints.len() {
+            0 => Ok(None),
+            1 => Ok(constraints.pop()),
+            _ => Err("Multiple structured constraints are not allowed".to_string()),
+        }
     }
 
     fn build_single_constraint_from_plain(
