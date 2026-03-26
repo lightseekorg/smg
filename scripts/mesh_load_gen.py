@@ -129,7 +129,9 @@ _retry_timeout = 0.0  # seconds; 0 = no retry
 _max_retries = 0
 
 
-async def send_request(session: aiohttp.ClientSession, url: str, stats: dict):
+async def send_request(
+    session: aiohttp.ClientSession, url: str, stats: dict, urls: list[str] | None = None
+):
     prompt = make_prompt(pad_to=_prompt_pad_size)
     payload = {
         "model": "mock-model",
@@ -155,7 +157,9 @@ async def send_request(session: aiohttp.ClientSession, url: str, stats: dict):
             if retries > _max_retries:
                 stats["errors"] += 1
                 return
-            # Retry with a different gateway (simulate client retry storm)
+            # Retry on a DIFFERENT gateway (simulates real retry storm)
+            if urls:
+                url = random.choice(urls)
             continue
         except Exception as e:
             stats["errors"] += 1
@@ -187,7 +191,7 @@ async def run_load(
         while time.monotonic() < end_time:
             # Round-robin across gateways
             url = random.choice(urls)
-            task = asyncio.create_task(send_request(session, url, stats))
+            task = asyncio.create_task(send_request(session, url, stats, urls=urls))
             tasks.add(task)
             task.add_done_callback(tasks.discard)
 
