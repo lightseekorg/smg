@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -114,12 +115,20 @@ def _build_command(
         cmd.extend(["--server-gpu-count", str(gpu_count)])
     # Disable ignore_eos for SGLang: its scheduler was specifically tuned for
     # ignore_eos, so normal workloads (without it) are actually slower.
+    # genai-bench prompts interactively when ignore_eos=false; pipe "N" via
+    # stdin so CI auto-answers "No" (keep ignore_eos=false).
+    needs_stdin_pipe = False
     if api_backend == "sglang":
         cmd.extend(["--additional-request-params", '{"ignore_eos": false}'])
+        needs_stdin_pipe = True
 
     log_dir = os.environ.get("E2E_LOG_DIR")
     if log_dir:
         cmd.extend(["--log-dir", log_dir])
+
+    if needs_stdin_pipe:
+        cmd = ["bash", "-c", f"echo N | {shlex.join(cmd)}"]
+
     return cmd
 
 
