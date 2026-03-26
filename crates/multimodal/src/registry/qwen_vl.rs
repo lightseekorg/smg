@@ -63,7 +63,7 @@ impl ModelProcessorSpec for QwenVLVisionSpec {
         let pad_token_id = Self::pad_token_id(metadata)?;
         let placeholder_token = self.placeholder_token(metadata)?;
         // The chat template already wraps each image with <|vision_start|> ... <|vision_end|>,
-        // so we only expand the single <|image_pad|> placeholder to N pad tokens.
+        // so we only expand the single <image> placeholder to N pad tokens.
         Ok(preprocessed
             .num_img_tokens
             .iter()

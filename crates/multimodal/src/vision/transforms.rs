@@ -182,17 +182,18 @@ pub fn resize(image: &DynamicImage, width: u32, height: u32, filter: FilterType)
     if resizer.resize(image, &mut dst, &options).is_err() {
         return image.resize_exact(width, height, filter);
     }
-    fir_image_to_dynamic(dst, width, height, image)
+    fir_image_to_dynamic(dst, width, height, image, filter)
 }
 
 /// Convert a `fast_image_resize::Image` back to a `DynamicImage`.
 ///
-/// Falls back to cloning the source format if the pixel type is not recognized.
+/// Falls back to the `image` crate resize for unhandled pixel formats.
 fn fir_image_to_dynamic(
     img: FirImage<'_>,
     width: u32,
     height: u32,
     source: &DynamicImage,
+    filter: FilterType,
 ) -> DynamicImage {
     let buf = img.into_vec();
     match source {
@@ -207,7 +208,7 @@ fn fir_image_to_dynamic(
         }
         _ => None,
     }
-    .unwrap_or_else(|| source.resize_exact(width, height, FilterType::Lanczos3))
+    .unwrap_or_else(|| source.resize_exact(width, height, filter))
 }
 
 /// Resize image preserving aspect ratio, fitting within max dimensions.
