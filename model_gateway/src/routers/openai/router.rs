@@ -144,11 +144,17 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
+        // Use per-model retry config if set by a worker, otherwise fall back to router default.
+        let per_model_retry_config = self.worker_registry.get_retry_config(model_id);
+        let retry_config = per_model_retry_config
+            .as_ref()
+            .unwrap_or(&self.retry_config);
+
         let deps = ChatRouterContext {
             worker_registry: &self.worker_registry,
             provider_registry: &self.provider_registry,
             shared_components: &self.shared_components,
-            retry_config: &self.retry_config,
+            retry_config,
         };
         chat::route_chat(&deps, headers, body, model_id).await
     }
