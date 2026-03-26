@@ -227,8 +227,7 @@ async fn after_hook_passes_through_extra_columns() -> TestResult {
         "after() should preserve non-empty extra_table_writes"
     );
     assert_eq!(
-        updated.extra_table_writes[0].table,
-        "event_outbox",
+        updated.extra_table_writes[0].table, "event_outbox",
         "after() should pass through side-write table name"
     );
     assert_eq!(
