@@ -492,10 +492,12 @@ impl ImagePreProcessor for Llama4VisionProcessor {
             num_img_tokens.push(tokens);
         }
 
+        // Per-image tile counts (must be computed before remove/concatenate)
+        let patches_per_image: Vec<i64> = all_outputs.iter().map(|o| o.shape()[0] as i64).collect();
+
         // Concatenate all tiles from all images into a single 4D tensor
         // [total_tiles, C, H, W] — no batch dimension, no zero-padding.
         let pixel_values = if all_outputs.len() == 1 {
-            // Single image: take ownership directly, no copy
             all_outputs.remove(0)
         } else {
             let tile_views: Vec<ndarray::ArrayView4<f32>> =
@@ -520,9 +522,6 @@ impl ImagePreProcessor for Llama4VisionProcessor {
                 shape: vec![batch_size, 2],
             },
         );
-
-        // Per-image tile counts for flat slicing of pixel_values.
-        let patches_per_image: Vec<i64> = all_outputs.iter().map(|o| o.shape()[0] as i64).collect();
         model_specific.insert(
             "patches_per_image".to_string(),
             ModelSpecificValue::int_1d(patches_per_image),
