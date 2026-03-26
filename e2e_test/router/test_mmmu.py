@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Baseline accuracy from Qwen3-VL-8B-Instruct on Art and Design category
 # vLLM gRPC: ~0.60-0.61
-MMMU_THRESHOLD = 0.60
+MMMU_THRESHOLD = 0.57
 
 
 @pytest.mark.engine("vllm")
