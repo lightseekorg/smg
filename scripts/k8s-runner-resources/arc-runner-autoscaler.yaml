@@ -102,8 +102,6 @@ spec:
   maxReplicas: 8
 
   metrics:
-    - type: PercentageRunnersBusy
-      scaleUpThreshold: "0.95"
-      scaleDownThreshold: "0.25"
-      scaleUpFactor: "0.5"
-      scaleDownFactor: "0.5"
+    - type: TotalNumberOfQueuedAndInProgressWorkflowRuns
+      repositoryNames:
+        - lightseekorg/smg

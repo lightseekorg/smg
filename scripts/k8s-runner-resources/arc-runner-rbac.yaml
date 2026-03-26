@@ -10,7 +10,6 @@ metadata:
   name: arc-runner
   namespace: actions-runner-system
 rules:
-  # Argo Workflows
   - apiGroups: [""]
     resources:
       - secrets
