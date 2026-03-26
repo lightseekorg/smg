@@ -40,9 +40,6 @@ impl HuggingFaceTokenizer {
         let mut tokenizer = HfTokenizer::from_file(file_path)
             .map_err(|e| Error::msg(format!("Failed to load tokenizer: {e}")))?;
 
-        // Extract special tokens
-        let special_tokens = Self::extract_special_tokens(&tokenizer, file_path);
-
         // Build vocab mappings (include special tokens to get added_tokens like <|im_start|>)
         let vocab = tokenizer.get_vocab(true); // true = include special tokens and added_tokens
         let reverse_vocab: HashMap<TokenIdType, String> = vocab
@@ -50,10 +47,14 @@ impl HuggingFaceTokenizer {
             .map(|(token, &id)| (id, token.clone()))
             .collect();
 
-        // Always load tokenizer_config.json for add_bos_token/add_eos_token,
-        // then override only the chat template string when an explicit path is provided.
-        let (mut chat_template_str, add_bos_token, add_eos_token) =
-            Self::load_chat_template_and_config(file_path);
+        // Load tokenizer_config.json once for chat template, add_bos/eos, and special tokens
+        let config_result = Self::load_chat_template_and_config(file_path);
+        let mut chat_template_str = config_result.chat_template;
+        let add_bos_token = config_result.add_bos_token;
+        let add_eos_token = config_result.add_eos_token;
+
+        // Extract special tokens — config values override vocab pattern matching
+        let special_tokens = Self::extract_special_tokens(&tokenizer, &config_result.config_tokens);
 
         if let Some(template_path) = chat_template_path {
             chat_template_str = load_chat_template_from_file(template_path)?;
@@ -137,7 +138,7 @@ impl HuggingFaceTokenizer {
 
     /// Create from an existing HuggingFace tokenizer
     pub fn from_tokenizer(tokenizer: HfTokenizer) -> Self {
-        let special_tokens = Self::extract_special_tokens(&tokenizer, "");
+        let special_tokens = Self::extract_special_tokens(&tokenizer, &ConfigTokens::default());
         let vocab = tokenizer.get_vocab(true); // true = include special tokens and added_tokens
         let reverse_vocab: HashMap<TokenIdType, String> = vocab
             .iter()
@@ -153,15 +154,15 @@ impl HuggingFaceTokenizer {
         }
     }
 
-    /// Extract special tokens from the tokenizer and tokenizer_config.json.
+    /// Extract special tokens from the tokenizer, using config values when available.
     ///
     /// Prefers explicit values from `tokenizer_config.json` (e.g., `"bos_token": "<|begin_of_text|>"`)
     /// over pattern matching against the vocabulary, since models like Llama 4 use non-standard
     /// token names that aren't in the hardcoded pattern list.
-    fn extract_special_tokens(tokenizer: &HfTokenizer, tokenizer_path: &str) -> SpecialTokens {
-        // Try to read special tokens from tokenizer_config.json first
-        let config_tokens = Self::read_special_tokens_from_config(tokenizer_path);
-
+    fn extract_special_tokens(
+        tokenizer: &HfTokenizer,
+        config_tokens: &ConfigTokens,
+    ) -> SpecialTokens {
         // Get vocab with special tokens included (added_tokens like <|im_start|>)
         let vocab = tokenizer.get_vocab(true);
 
@@ -185,17 +186,21 @@ impl HuggingFaceTokenizer {
         // Config values take priority over pattern matching
         SpecialTokens {
             bos_token: config_tokens
-                .0
+                .bos_token
+                .clone()
                 .or_else(|| find_token(&["<s>", "<|startoftext|>", "<BOS>", "[CLS]"])),
             eos_token: config_tokens
-                .1
+                .eos_token
+                .clone()
                 .or_else(|| find_token(&["</s>", "<|endoftext|>", "<EOS>", "[SEP]"])),
             unk_token: config_tokens
-                .2
+                .unk_token
+                .clone()
                 .or_else(|| find_token(&["<unk>", "<UNK>", "[UNK]"])),
             sep_token: find_token(&["[SEP]", "<sep>", "<SEP>"]),
             pad_token: config_tokens
-                .3
+                .pad_token
+                .clone()
                 .or_else(|| find_token(&["<pad>", "<PAD>", "[PAD]"])),
             cls_token: find_token(&["[CLS]", "<cls>", "<CLS>"]),
             mask_token: find_token(&["[MASK]", "<mask>", "<MASK>"]),
@@ -203,49 +208,9 @@ impl HuggingFaceTokenizer {
         }
     }
 
-    /// Read bos/eos/unk/pad tokens from tokenizer_config.json.
-    /// Returns (bos, eos, unk, pad) with None for missing values.
-    fn read_special_tokens_from_config(
-        tokenizer_path: &str,
-    ) -> (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) {
-        let config_path = std::path::Path::new(tokenizer_path)
-            .parent()
-            .map(|p| p.join("tokenizer_config.json"));
-
-        let config: Option<serde_json::Value> = config_path
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok());
-
-        let get_token = |config: &serde_json::Value, key: &str| -> Option<String> {
-            config.get(key).and_then(|v| {
-                // Handle both string and {"content": "..."} formats
-                v.as_str()
-                    .map(String::from)
-                    .or_else(|| v.get("content").and_then(|c| c.as_str()).map(String::from))
-            })
-        };
-
-        match config {
-            Some(ref c) => (
-                get_token(c, "bos_token"),
-                get_token(c, "eos_token"),
-                get_token(c, "unk_token"),
-                get_token(c, "pad_token"),
-            ),
-            None => (None, None, None, None),
-        }
-    }
-
-    /// Load chat template and special token settings from tokenizer_config.json
-    /// Returns Option<bool> to distinguish between explicit false vs not set
-    fn load_chat_template_and_config(
-        tokenizer_path: &str,
-    ) -> (Option<String>, Option<bool>, Option<bool>) {
+    /// Load chat template, special token settings, and token strings from tokenizer_config.json.
+    /// Reads the file once and extracts everything needed by the tokenizer constructor.
+    fn load_chat_template_and_config(tokenizer_path: &str) -> TokenizerConfigResult {
         (|| {
             let path = std::path::Path::new(tokenizer_path);
             let config_path = path.parent()?.join("tokenizer_config.json");
@@ -265,10 +230,49 @@ impl HuggingFaceTokenizer {
             let add_bos_token = config.get("add_bos_token").and_then(|v| v.as_bool());
             let add_eos_token = config.get("add_eos_token").and_then(|v| v.as_bool());
 
-            Some((chat_template, add_bos_token, add_eos_token))
+            // Extract special token strings (handles both "string" and {"content": "string"})
+            let get_token = |key: &str| -> Option<String> {
+                config.get(key).and_then(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .or_else(|| v.get("content").and_then(|c| c.as_str()).map(String::from))
+                })
+            };
+
+            let config_tokens = ConfigTokens {
+                bos_token: get_token("bos_token"),
+                eos_token: get_token("eos_token"),
+                unk_token: get_token("unk_token"),
+                pad_token: get_token("pad_token"),
+            };
+
+            Some(TokenizerConfigResult {
+                chat_template,
+                add_bos_token,
+                add_eos_token,
+                config_tokens,
+            })
         })()
-        .unwrap_or((None, None, None))
+        .unwrap_or_default()
     }
+}
+
+/// Special token strings read from tokenizer_config.json.
+#[derive(Default)]
+struct ConfigTokens {
+    bos_token: Option<String>,
+    eos_token: Option<String>,
+    unk_token: Option<String>,
+    pad_token: Option<String>,
+}
+
+/// Result of parsing tokenizer_config.json.
+#[derive(Default)]
+struct TokenizerConfigResult {
+    chat_template: Option<String>,
+    add_bos_token: Option<bool>,
+    add_eos_token: Option<bool>,
+    config_tokens: ConfigTokens,
 }
 
 impl Encoder for HuggingFaceTokenizer {
