@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from grpc_health.v1 import health_pb2
-
 from smg_grpc_servicer.vllm.health_servicer import VllmHealthServicer
 
 SERVING = health_pb2.HealthCheckResponse.SERVING
@@ -41,9 +40,7 @@ async def test_watch_sends_initial_serving(servicer, request_msg, grpc_context):
 
 
 @pytest.mark.asyncio
-async def test_watch_yields_on_engine_failure(
-    servicer, request_msg, grpc_context, async_llm
-):
+async def test_watch_yields_on_engine_failure(servicer, request_msg, grpc_context, async_llm):
     """Watch must send NOT_SERVING when check_health() starts failing."""
     request_msg.service = ""
     servicer.WATCH_POLL_INTERVAL_S = 0.05
@@ -126,9 +123,7 @@ async def test_watch_unknown_service(servicer, request_msg, grpc_context):
 
 
 @pytest.mark.asyncio
-async def test_watch_no_duplicate_on_stable_status(
-    servicer, request_msg, grpc_context
-):
+async def test_watch_no_duplicate_on_stable_status(servicer, request_msg, grpc_context):
     """Stable SERVING must not yield duplicates across poll cycles."""
     request_msg.service = ""
     servicer.WATCH_POLL_INTERVAL_S = 0.05
@@ -149,9 +144,7 @@ async def test_watch_no_duplicate_on_stable_status(
 
 
 @pytest.mark.asyncio
-async def test_watch_shutdown_overrides_healthy(
-    servicer, request_msg, grpc_context, async_llm
-):
+async def test_watch_shutdown_overrides_healthy(servicer, request_msg, grpc_context, async_llm):
     """After set_not_serving(), Watch returns NOT_SERVING even if
     check_health() would succeed."""
     servicer.set_not_serving()
