@@ -425,8 +425,17 @@ impl MeshSyncManager {
         }
     }
 
-    /// Sync tree operation to mesh stores
-    /// This adds a tree operation (insert or remove) to the tree state for a specific model
+    /// Sync tree operation to mesh stores.
+    ///
+    /// This is called on every request (hot path). The operation is appended to
+    /// the pending buffer for delta sync — the collector serializes and sends it
+    /// to peers. We do NOT read/deserialize/serialize the full TreeState here,
+    /// because that is O(tree_size) per request and caused multi-GB memory usage
+    /// at 200+ rps.
+    ///
+    /// The policy store version is bumped so the generation-based collector
+    /// detects the change, but the `config` blob is NOT updated on every call.
+    /// It is rebuilt lazily by the collector when a full-state fallback is needed.
     pub fn sync_tree_operation(
         &self,
         model_id: String,
@@ -434,68 +443,64 @@ impl MeshSyncManager {
     ) -> Result<(), String> {
         let key = tree_state_key(&model_id);
 
-        // Get current tree state or create new one
-        let mut tree_state = if let Some(policy_state) = self.stores.policy.get(&key) {
-            match TreeState::from_bytes(&policy_state.config) {
-                Ok(state) => state,
-                Err(err) => {
-                    warn!(
-                        model_id = %model_id,
-                        error = %err,
-                        "Corrupted tree state in policy store — refusing to overwrite with empty state"
-                    );
-                    return Err(format!(
-                        "Tree state for model {model_id} is corrupted and cannot be deserialized: {err}"
-                    ));
-                }
-            }
-        } else {
-            TreeState::new(model_id.clone())
-        };
-
-        // Add the new operation
-        tree_state.add_operation(operation.clone());
-
-        // Serialize with bincode (compact binary, ~3-5x smaller than JSON for token arrays)
-        let serialized = tree_state.to_bytes()?;
-
-        // Get current version if exists
-        let current_version = self.stores.policy.get(&key).map(|s| s.version).unwrap_or(0);
-        let new_version = current_version + 1;
-
-        let state = PolicyState {
-            model_id: model_id.clone(),
-            policy_type: "tree_state".to_string(),
-            config: serialized,
-            version: new_version,
-        };
-
-        if let Err(err) = self.stores.policy.insert(key.clone(), state) {
-            return Err(format!("Failed to persist tree state: {err}"));
-        }
-
-        // Record the operation for delta sync AFTER successful insert so
-        // the pending buffer never contains ops that failed to persist.
+        // Append to pending buffer for delta sync. The collector reads this
+        // buffer to build deltas or full-state messages for peers.
+        //
+        // We do NOT update the policy store config blob here — doing so
+        // requires deserializing and re-serializing the entire TreeState
+        // on every request, which caused multi-GB memory usage at 200+ rps.
+        // The policy store entry is created (if missing) with an empty config
+        // so the collector detects it, but the config is only materialized
+        // lazily by the collector when a full-state fallback is needed.
         self.stores
             .tree_ops_pending
-            .entry(key)
+            .entry(key.clone())
             .or_default()
             .push(operation);
-        debug!(
-            "Synced tree operation to mesh: model={} (version: {})",
-            model_id, new_version
-        );
 
-        Ok(())
+        // Ensure the policy store has an entry for this tree key so the
+        // generation-based collector detects changes. `update` creates the
+        // entry if absent or bumps its version if present, without touching
+        // the config blob.
+        self.stores
+            .policy
+            .update(key, |current| {
+                let (current_version, config) = match current {
+                    Some(existing) => (existing.version, existing.config),
+                    None => (0, Vec::new()),
+                };
+                PolicyState {
+                    model_id: model_id.clone(),
+                    policy_type: "tree_state".to_string(),
+                    config,
+                    version: current_version + 1,
+                }
+            })
+            .map(|_| ())
+            .map_err(|e| format!("Failed to update policy store: {e}"))
     }
 
     /// Get tree state for a model from mesh stores
     pub fn get_tree_state(&self, model_id: &str) -> Option<TreeState> {
         let key = tree_state_key(model_id);
-        self.stores
-            .policy
-            .get(&key)
-            .and_then(|ps| TreeState::from_bytes(&ps.config).ok())
+        // Build tree state from the policy store config (may be stale)
+        // plus any pending operations not yet serialized into it.
+        let mut tree_state = if let Some(ps) = self.stores.policy.get(&key) {
+            if ps.config.is_empty() {
+                TreeState::new(model_id.to_string())
+            } else {
+                TreeState::from_bytes(&ps.config).ok()?
+            }
+        } else {
+            return None;
+        };
+        // Append pending ops that haven't been serialized into config yet
+        if let Some(pending) = self.stores.tree_ops_pending.get(&key) {
+            for op in pending.iter() {
+                tree_state.add_operation(op.clone());
+            }
+        }
+        Some(tree_state)
     }
 
     pub fn get_all_tree_states(&self) -> Vec<TreeState> {
@@ -504,17 +509,28 @@ impl MeshSyncManager {
             .all()
             .into_iter()
             .filter_map(|(key, state)| {
-                if state.policy_type != "tree_state" {
+                if state.policy_type != "tree_state" && state.policy_type != "tree_state_delta" {
                     return None;
                 }
-
-                match TreeState::from_bytes(&state.config) {
-                    Ok(tree_state) => Some(tree_state),
-                    Err(error) => {
-                        warn!(error = %error, store_key = %key, model_id = %state.model_id, "Failed to deserialize tree state from mesh store");
-                        None
+                let model_id = state.model_id.clone();
+                let mut tree_state = if state.config.is_empty() {
+                    TreeState::new(model_id)
+                } else {
+                    match TreeState::from_bytes(&state.config) {
+                        Ok(ts) => ts,
+                        Err(error) => {
+                            warn!(error = %error, store_key = %key, model_id = %state.model_id, "Failed to deserialize tree state from mesh store");
+                            return None;
+                        }
+                    }
+                };
+                // Append pending ops
+                if let Some(pending) = self.stores.tree_ops_pending.get(&key) {
+                    for op in pending.iter() {
+                        tree_state.add_operation(op.clone());
                     }
                 }
+                Some(tree_state)
             })
             .collect()
     }
@@ -605,15 +621,22 @@ impl MeshSyncManager {
                     return None;
                 }
 
-                match TreeState::from_bytes(&existing.config) {
-                    Ok(state) => state,
-                    Err(err) => {
-                        warn!(
-                            model_id = %delta.model_id,
-                            error = %err,
-                            "Corrupted tree state — rejecting delta to avoid data loss"
-                        );
-                        return None;
+                if existing.config.is_empty() {
+                    // Config not materialized yet — start from empty tree.
+                    // Pending ops are NOT included here because they're local
+                    // ops, not the remote delta we're applying.
+                    TreeState::new(delta.model_id.clone())
+                } else {
+                    match TreeState::from_bytes(&existing.config) {
+                        Ok(state) => state,
+                        Err(err) => {
+                            warn!(
+                                model_id = %delta.model_id,
+                                error = %err,
+                                "Corrupted tree state — rejecting delta to avoid data loss"
+                            );
+                            return None;
+                        }
                     }
                 }
             } else {

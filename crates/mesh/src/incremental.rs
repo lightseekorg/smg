@@ -12,6 +12,7 @@ use parking_lot::RwLock;
 use tracing::{debug, trace};
 
 use super::{
+    tree_ops::TreeState,
     service::gossip::StateUpdate,
     stores::{AppState, MembershipState, PolicyState, StateStores, StoreType, WorkerState},
     tree_ops::TreeStateDelta,
@@ -234,10 +235,30 @@ impl IncrementalUpdateCollector {
                         }
 
                         if !sent_delta {
-                            // Buffer was cleared (another peer's mark_sent) or peer
-                            // reconnected — fall back to sending the full tree state
-                            // so that no operations are lost.
-                            if let Ok(serialized) = bincode::serialize(state) {
+                            // Build full TreeState from the policy store's config
+                            // plus any pending operations not yet in the config.
+                            // The config blob may be stale since sync_tree_operation
+                            // no longer rebuilds it on every request.
+                            let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
+                            let mut tree_state = if state.config.is_empty() {
+                                TreeState::new(model_id.clone())
+                            } else {
+                                TreeState::from_bytes(&state.config)
+                                    .unwrap_or_else(|_| TreeState::new(model_id.clone()))
+                            };
+                            // Append any pending ops not yet in the config blob
+                            if let Some(pending) = self.stores.tree_ops_pending.get(key) {
+                                for op in pending.iter() {
+                                    tree_state.add_operation(op.clone());
+                                }
+                            }
+                            let full_state = PolicyState {
+                                model_id,
+                                policy_type: "tree_state".to_string(),
+                                config: tree_state.to_bytes().unwrap_or_default(),
+                                version: current_version,
+                            };
+                            if let Ok(serialized) = bincode::serialize(&full_state) {
                                 updates.push(StateUpdate {
                                     key: key.clone(),
                                     value: serialized,
