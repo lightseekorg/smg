@@ -370,6 +370,7 @@ impl WorkerRegistry {
                     worker.url().to_string(),
                     worker.is_healthy(),
                     0.0,
+                    bincode::serialize(&worker.metadata().spec).unwrap_or_default(),
                 );
             }
         }
@@ -514,6 +515,7 @@ impl WorkerRegistry {
                     new_worker.url().to_string(),
                     new_worker.is_healthy(),
                     0.0,
+                    bincode::serialize(&new_worker.metadata().spec).unwrap_or_default(),
                 );
             }
         }
@@ -691,6 +693,7 @@ impl WorkerRegistry {
                         worker.url().to_string(),
                         is_healthy,
                         0.0, // TODO: Get actual load
+                        bincode::serialize(&worker.metadata().spec).unwrap_or_default(),
                     );
                 }
             }
@@ -1049,16 +1052,41 @@ impl smg_mesh::WorkerStateSubscriber for WorkerRegistry {
     fn on_remote_worker_state(&self, state: &smg_mesh::WorkerState) {
         use openai_protocol::model_card::ModelCard;
 
-        let worker = super::worker_builder::BasicWorkerBuilder::new(&state.url)
-            .model(ModelCard::new(&state.model_id))
-            .build();
+        // If worker already exists at this URL, update its health status
+        // from the mesh state. Don't re-register — the existing worker has
+        // full config from its creation workflow.
+        if let Some(existing) = self.get_by_url(&state.url) {
+            existing.set_healthy(state.health);
+            tracing::debug!(
+                url = %state.url,
+                healthy = state.health,
+                "Updated health for existing mesh-synced worker"
+            );
+            return;
+        }
+
+        // New worker — build from the full WorkerSpec if available,
+        // otherwise fall back to minimal builder (old nodes / rolling upgrade).
+        let worker = match bincode::deserialize::<openai_protocol::worker::WorkerSpec>(&state.spec)
+        {
+            Ok(spec) if !state.spec.is_empty() => {
+                super::worker_builder::BasicWorkerBuilder::from_spec(spec).build()
+            }
+            _ => super::worker_builder::BasicWorkerBuilder::new(&state.url)
+                .model(ModelCard::new(&state.model_id))
+                .build(),
+        };
+
+        worker.set_healthy(state.health);
 
         // register_inner skips mesh sync to avoid version-bump loop.
         if let Some(id) = self.register_inner(Arc::new(worker)) {
-            tracing::debug!(
+            tracing::info!(
                 worker_id = %id.as_str(),
                 url = %state.url,
                 model = %state.model_id,
+                healthy = state.health,
+                has_spec = !state.spec.is_empty(),
                 "Registered mesh-synced worker into local registry"
             );
         }
@@ -1506,6 +1534,7 @@ mod tests {
             health: true,
             load: 0.5,
             version: 1,
+            spec: vec![],
         };
 
         // Should register the worker locally

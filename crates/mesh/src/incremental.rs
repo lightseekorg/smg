@@ -447,6 +447,7 @@ mod tests {
             health: true,
             load: 0.5,
             version: 1,
+            spec: vec![],
         };
         let _ = stores.worker.insert(key, worker_state);
 
@@ -475,6 +476,7 @@ mod tests {
             health: false,
             load: 0.8,
             version: 2,
+            spec: vec![],
         };
         let _ = stores.worker.insert(key2, worker_state2);
 
@@ -557,6 +559,7 @@ mod tests {
                 health: true,
                 load: 0.5,
                 version: 1,
+                spec: vec![],
             },
         );
 
@@ -591,6 +594,7 @@ mod tests {
                 health: true,
                 load: 0.5,
                 version: 1,
+                spec: vec![],
             },
         );
 
@@ -655,6 +659,7 @@ mod tests {
                 health: true,
                 load: 0.5,
                 version: 1,
+                spec: vec![],
             },
         );
 
@@ -673,6 +678,7 @@ mod tests {
                 health: false,
                 load: 0.8,
                 version: 2,
+                spec: vec![],
             },
         );
 
@@ -691,6 +697,7 @@ mod tests {
                 health: true,
                 load: 0.3,
                 version: 3,
+                spec: vec![],
             },
         );
 

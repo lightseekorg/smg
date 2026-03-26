@@ -36,6 +36,7 @@ async fn test_multi_node_state_synchronization() {
         "http://localhost:8000".to_string(),
         true,
         0.5,
+        vec![],
     );
 
     // Simulate synchronization: Node2 and Node3 receive the update
@@ -66,6 +67,7 @@ async fn test_node_join_and_leave() {
         "http://localhost:8000".to_string(),
         true,
         0.5,
+        vec![],
     );
 
     manager1.sync_policy_state(
@@ -275,6 +277,7 @@ async fn test_version_conflict_resolution() {
         "http://localhost:8000".to_string(),
         true,
         0.5,
+        vec![],
     );
 
     // Node2 tries to apply an older version
@@ -285,6 +288,7 @@ async fn test_version_conflict_resolution() {
         health: false,
         load: 0.8,
         version: 0, // Older version
+        spec: vec![],
     };
 
     manager2.apply_remote_worker_state(old_state, Some("node2".to_string()));
@@ -320,6 +324,7 @@ async fn test_concurrent_updates() {
         "http://localhost:8000".to_string(),
         true,
         0.5,
+        vec![],
     );
 
     manager2.sync_worker_state(
@@ -328,6 +333,7 @@ async fn test_concurrent_updates() {
         "http://localhost:8001".to_string(),
         true,
         0.6,
+        vec![],
     );
 
     manager3.sync_worker_state(
@@ -336,6 +342,7 @@ async fn test_concurrent_updates() {
         "http://localhost:8002".to_string(),
         true,
         0.7,
+        vec![],
     );
 
     // Simulate synchronization: all nodes receive all updates

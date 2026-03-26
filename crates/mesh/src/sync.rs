@@ -78,6 +78,7 @@ impl MeshSyncManager {
         url: String,
         health: bool,
         load: f64,
+        spec: Vec<u8>,
     ) {
         let key = worker_id.clone();
 
@@ -94,6 +95,7 @@ impl MeshSyncManager {
                 health,
                 load,
                 version: new_version,
+                spec,
             }
         });
 
@@ -719,6 +721,7 @@ mod tests {
             "http://localhost:8000".to_string(),
             true,
             0.5,
+            vec![],
         );
 
         let state = manager.get_worker_state("worker1").unwrap();
@@ -740,6 +743,7 @@ mod tests {
             "http://localhost:8000".to_string(),
             true,
             0.5,
+            vec![],
         );
 
         manager.sync_worker_state(
@@ -748,6 +752,7 @@ mod tests {
             "http://localhost:8001".to_string(),
             false,
             0.8,
+            vec![],
         );
 
         manager.sync_worker_state(
@@ -756,6 +761,7 @@ mod tests {
             "http://localhost:8002".to_string(),
             true,
             0.3,
+            vec![],
         );
 
         let all_states = manager.get_all_worker_states();
@@ -784,6 +790,7 @@ mod tests {
             "http://localhost:8000".to_string(),
             true,
             0.5,
+            vec![],
         );
 
         let state1 = manager.get_worker_state("worker1").unwrap();
@@ -795,6 +802,7 @@ mod tests {
             "http://localhost:8000".to_string(),
             false,
             0.8,
+            vec![],
         );
 
         let state2 = manager.get_worker_state("worker1").unwrap();
@@ -813,6 +821,7 @@ mod tests {
             "http://localhost:8000".to_string(),
             true,
             0.5,
+            vec![],
         );
 
         assert!(manager.get_worker_state("worker1").is_some());
@@ -922,6 +931,7 @@ mod tests {
             health: true,
             load: 0.5,
             version: 5,
+            spec: vec![],
         };
 
         manager.apply_remote_worker_state(remote_state.clone(), Some("node2".to_string()));
@@ -941,6 +951,7 @@ mod tests {
             health: true,
             load: 0.6,
             version: 1,
+            spec: vec![],
         };
 
         manager.apply_remote_worker_state(remote_state.clone(), None);
@@ -966,6 +977,7 @@ mod tests {
             "http://localhost:8000".to_string(),
             true,
             0.5,
+            vec![],
         );
 
         // Try to apply older version - should be skipped
@@ -976,6 +988,7 @@ mod tests {
             health: false,
             load: 0.8,
             version: 0, // Older version
+            spec: vec![],
         };
 
         manager.apply_remote_worker_state(old_state, Some("node2".to_string()));
@@ -1018,6 +1031,7 @@ mod tests {
             "http://localhost:8000".to_string(),
             true,
             0.5,
+            vec![],
         );
 
         // Add remote worker
@@ -1028,6 +1042,7 @@ mod tests {
             health: true,
             load: 0.7,
             version: 1,
+            spec: vec![],
         };
         manager.apply_remote_worker_state(remote_state, None);
 
@@ -1049,6 +1064,7 @@ mod tests {
             "http://localhost:8000".to_string(),
             true,
             0.5,
+            vec![],
         );
 
         // Update state
@@ -1058,6 +1074,7 @@ mod tests {
             "http://localhost:8000".to_string(),
             false,
             0.9,
+            vec![],
         );
 
         let state = manager.get_worker_state("worker1").unwrap();
@@ -1431,6 +1448,7 @@ mod tests {
             "http://localhost:8000".to_string(),
             true,
             0.5,
+            vec![],
         );
 
         manager.sync_worker_state(
@@ -1439,6 +1457,7 @@ mod tests {
             "http://localhost:8001".to_string(),
             false,
             0.8,
+            vec![],
         );
 
         let all_states = manager.get_all_worker_states();
