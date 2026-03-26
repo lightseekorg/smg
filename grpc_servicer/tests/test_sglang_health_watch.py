@@ -6,7 +6,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from grpc_health.v1 import health_pb2
-
 from smg_grpc_servicer.sglang.health_servicer import SGLangHealthServicer
 
 SERVING = health_pb2.HealthCheckResponse.SERVING
@@ -48,9 +47,7 @@ async def test_watch_sends_initial_status(servicer, request_msg, grpc_context):
 
 
 @pytest.mark.asyncio
-async def test_watch_yields_on_status_change(
-    servicer, request_msg, grpc_context, request_manager
-):
+async def test_watch_yields_on_status_change(servicer, request_msg, grpc_context, request_manager):
     """Watch must send a new response when status changes."""
     servicer.set_serving()
     request_msg.service = ""
@@ -120,9 +117,7 @@ async def test_watch_unknown_service(servicer, request_msg, grpc_context):
 
 
 @pytest.mark.asyncio
-async def test_watch_no_duplicate_on_stable_status(
-    servicer, request_msg, grpc_context
-):
+async def test_watch_no_duplicate_on_stable_status(servicer, request_msg, grpc_context):
     """Stable status must not yield duplicate responses."""
     servicer.set_serving()
     request_msg.service = ""
