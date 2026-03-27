@@ -37,8 +37,11 @@ impl ModelProcessorSpec for LlavaSpec {
         if model_type.is_some_and(|mt| mt == "llava_next") {
             return false;
         }
-        metadata.model_id.to_ascii_lowercase().contains("llava")
-            || model_type.is_some_and(|mt| mt == "llava")
+        let model_id_lower = metadata.model_id.to_ascii_lowercase();
+        if model_id_lower.contains("llava-next") || model_id_lower.contains("llava_next") {
+            return false;
+        }
+        model_id_lower.contains("llava") || model_type.is_some_and(|mt| mt == "llava")
     }
 
     fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {

@@ -570,7 +570,7 @@ impl ImagePreProcessor for LlavaNextProcessor {
         // Build 5D pixel_values [num_images, max_patches, C, H, W] matching the
         // HF LlavaNextImageProcessor output that vLLM expects with Batched layout.
         let max_patches = patches_per_image.iter().map(|p| p.len()).max().unwrap_or(0);
-        let (c, h, w) = if let Some(first) = patches_per_image.first().and_then(|p| p.first()) {
+        let (c, h, w) = if let Some(first) = patches_per_image.iter().find_map(|p| p.first()) {
             let s = first.shape();
             (s[0], s[1], s[2])
         } else {
@@ -603,17 +603,24 @@ impl ImagePreProcessor for LlavaNextProcessor {
         Ok(result)
     }
 
-    fn calculate_num_tokens(&self, width: u32, height: u32, _config: &PreProcessorConfig) -> usize {
+    fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
         let original_size = (width, height);
+
+        // Use effective geometry from config, falling back to base defaults.
+        let image_size = config
+            .get_target_size()
+            .map(|(h, _w)| h)
+            .unwrap_or(self.base.image_size);
+        let patch_size = self.base.patch_size;
 
         // Base feature tokens (from original resized image through ViT).
         // CLIP ViT produces (image_size/patch_size)^2 + 1 tokens (patches + CLS).
         // With vision_feature_select_strategy="default" CLS is removed,
         // leaving (image_size/patch_size)^2 = 576 features.
-        let npatches = self.base.image_size / self.base.patch_size; // 24 for 336/14
+        let npatches = image_size / patch_size; // 24 for 336/14
         let base_features = (npatches * npatches) as usize; // 576
 
-        // Grid shape in crops (e.g. 2x2 for 672x672 best resolution)
+        // Grid shape in crops (e.g. 1x2 for 336x672 best resolution)
         let (grid_w, grid_h) = self.get_anyres_grid_shape(original_size);
 
         // Unpadded feature dimensions — matches vLLM's
