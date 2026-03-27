@@ -4,11 +4,12 @@ use serde_json::{json, Value};
 
 use crate::{
     registry::{image_sizes_hw, ModelMetadata, ModelProcessorSpec, RegistryResult},
-    types::{ImageSize, Modality, PromptReplacement, TokenId},
+    types::{FieldLayout, ImageSize, Modality, PromptReplacement, TokenId},
     vision::image_processor::PreprocessedImages,
 };
 
 pub(super) struct LlavaSpec;
+pub(super) struct LlavaNextSpec;
 
 impl LlavaSpec {
     fn patch_size(metadata: &ModelMetadata) -> u32 {
@@ -31,10 +32,13 @@ impl ModelProcessorSpec for LlavaSpec {
     }
 
     fn matches(&self, metadata: &ModelMetadata) -> bool {
+        // Match plain "llava" but not "llava_next" (handled by LlavaNextSpec).
+        let model_type = metadata.config_model_type();
+        if model_type.is_some_and(|mt| mt == "llava_next") {
+            return false;
+        }
         metadata.model_id.to_ascii_lowercase().contains("llava")
-            || metadata
-                .config_model_type()
-                .is_some_and(|mt| mt == "llava" || mt == "llava_next")
+            || model_type.is_some_and(|mt| mt == "llava")
     }
 
     fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {
@@ -74,6 +78,64 @@ impl ModelProcessorSpec for LlavaSpec {
                 PromptReplacement::repeated(Modality::Image, &token, token_id, count)
             })
             .collect())
+    }
+}
+
+impl ModelProcessorSpec for LlavaNextSpec {
+    fn name(&self) -> &'static str {
+        "llava_next"
+    }
+
+    fn matches(&self, metadata: &ModelMetadata) -> bool {
+        metadata
+            .config_model_type()
+            .is_some_and(|mt| mt == "llava_next")
+    }
+
+    fn placeholder_token(&self, metadata: &ModelMetadata) -> RegistryResult<String> {
+        LlavaSpec.placeholder_token(metadata)
+    }
+
+    fn placeholder_token_id(&self, metadata: &ModelMetadata) -> RegistryResult<TokenId> {
+        LlavaSpec.placeholder_token_id(metadata)
+    }
+
+    fn modality_limits(
+        &self,
+        metadata: &ModelMetadata,
+    ) -> RegistryResult<HashMap<Modality, usize>> {
+        LlavaSpec.modality_limits(metadata)
+    }
+
+    fn processor_kwargs(&self, metadata: &ModelMetadata) -> RegistryResult<Value> {
+        LlavaSpec.processor_kwargs(metadata)
+    }
+
+    fn prompt_replacements(
+        &self,
+        metadata: &ModelMetadata,
+        preprocessed: &PreprocessedImages,
+    ) -> RegistryResult<Vec<PromptReplacement>> {
+        // LLaVA-Next token counts differ from plain LLaVA because of
+        // anyres multi-crop + spatial_unpad.  The correct per-image counts
+        // are already computed by LlavaNextProcessor::calculate_num_tokens
+        // and stored in preprocessed.num_img_tokens.
+        let token_id = LlavaSpec.placeholder_token_id(metadata)?;
+        let token = LlavaSpec.placeholder_token(metadata)?;
+        Ok(preprocessed
+            .num_img_tokens
+            .iter()
+            .map(|&count| PromptReplacement::repeated(Modality::Image, &token, token_id, count))
+            .collect())
+    }
+
+    fn field_layouts(&self) -> HashMap<String, FieldLayout> {
+        // pixel_values is [num_images, max_patches, C, H, W] (5D, batched).
+        // image_sizes is [num_images, 2] (batched).
+        HashMap::from([
+            ("pixel_values".to_string(), FieldLayout::Batched),
+            ("image_sizes".to_string(), FieldLayout::Batched),
+        ])
     }
 }
 

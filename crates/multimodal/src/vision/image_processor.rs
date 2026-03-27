@@ -380,9 +380,13 @@ impl ImageProcessorRegistry {
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
 
-        // Register LLaVA-NeXT first (more specific pattern)
+        // LLaVA-NeXT (v1.6+, anyres multi-crop)
         registry.register(
             "llava-next",
+            Box::new(super::processors::LlavaNextProcessor::new()),
+        );
+        registry.register(
+            "llava_next",
             Box::new(super::processors::LlavaNextProcessor::new()),
         );
         registry.register(
@@ -390,8 +394,17 @@ impl ImageProcessorRegistry {
             Box::new(super::processors::LlavaNextProcessor::new()),
         );
 
-        // Register standard LLaVA (matches llava-1.5, llava-v1.5, etc.)
-        registry.register("llava", Box::new(super::processors::LlavaProcessor::new()));
+        // Standard LLaVA (v1.5, single-patch).
+        // Use specific patterns so they don't accidentally match LLaVA-NeXT
+        // model IDs like "llava-v1.6-*".
+        registry.register(
+            "llava-1.5",
+            Box::new(super::processors::LlavaProcessor::new()),
+        );
+        registry.register(
+            "llava-v1.5",
+            Box::new(super::processors::LlavaProcessor::new()),
+        );
 
         // Register Qwen3-VL first (more specific pattern - must match before qwen2)
         registry.register(

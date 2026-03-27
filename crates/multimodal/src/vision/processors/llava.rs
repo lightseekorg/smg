@@ -35,10 +35,10 @@
 //! 5. Stack all processed patches
 
 use image::{DynamicImage, GenericImageView};
-use ndarray::Array3;
+use ndarray::{self, Array3};
 
 use crate::vision::{
-    image_processor::{ImagePreProcessor, PreprocessedImages},
+    image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
     transforms::{
         center_crop, expand_to_square, mean_to_rgb, normalize, pil_to_filter, resize, stack_batch,
@@ -409,8 +409,9 @@ impl LlavaNextProcessor {
                 arr.iter()
                     .filter_map(|p| {
                         let pair = p.as_array()?;
-                        let w = pair.first()?.as_u64()? as u32;
-                        let h = pair.get(1)?.as_u64()? as u32;
+                        // HF config stores pinpoints as [height, width]
+                        let h = pair.first()?.as_u64()? as u32;
+                        let w = pair.get(1)?.as_u64()? as u32;
                         Some((w, h))
                     })
                     .collect()
@@ -430,10 +431,13 @@ impl LlavaNextProcessor {
         select_best_resolution(original_size, &self.image_grid_pinpoints)
     }
 
-    /// Get the grid shape (in patches) for anyres processing.
+    /// Get the grid shape (in crops) for anyres processing.
+    ///
+    /// Returns (grid_width, grid_height) — the number of 336×336 crops along
+    /// each axis of the best-fit resolution.
     pub fn get_anyres_grid_shape(&self, image_size: (u32, u32)) -> (u32, u32) {
         let (width, height) = self.select_best_resolution(image_size);
-        (width / self.base.patch_size, height / self.base.patch_size)
+        (width / self.base.image_size, height / self.base.image_size)
     }
 
     /// Calculate unpad dimensions based on original aspect ratio.
@@ -528,7 +532,7 @@ impl ImagePreProcessor for LlavaNextProcessor {
             return Err(TransformError::EmptyBatch);
         }
 
-        let mut all_patches = Vec::new();
+        let mut patches_per_image: Vec<Vec<Array3<f32>>> = Vec::with_capacity(images.len());
         let mut num_img_tokens = Vec::with_capacity(images.len());
         let mut image_sizes = Vec::with_capacity(images.len());
 
@@ -550,9 +554,11 @@ impl ImagePreProcessor for LlavaNextProcessor {
             let mut samples = vec![image_original_resize];
             samples.extend(self.divide_to_samples(&image_padded, crop_size));
 
-            for sample in samples {
-                all_patches.push(self.process_patch(&sample, config));
-            }
+            let patches: Vec<Array3<f32>> = samples
+                .iter()
+                .map(|s| self.process_patch(s, config))
+                .collect();
+            patches_per_image.push(patches);
 
             num_img_tokens.push(self.calculate_num_tokens(
                 original_size.0,
@@ -561,28 +567,79 @@ impl ImagePreProcessor for LlavaNextProcessor {
             ));
         }
 
-        let pixel_values = stack_batch(&all_patches)?;
+        // Build 5D pixel_values [num_images, max_patches, C, H, W] matching the
+        // HF LlavaNextImageProcessor output that vLLM expects with Batched layout.
+        let max_patches = patches_per_image.iter().map(|p| p.len()).max().unwrap_or(0);
+        let (c, h, w) = if let Some(first) = patches_per_image.first().and_then(|p| p.first()) {
+            let s = first.shape();
+            (s[0], s[1], s[2])
+        } else {
+            return Err(TransformError::EmptyBatch);
+        };
 
-        Ok(PreprocessedImages::new(
-            pixel_values,
-            num_img_tokens,
-            image_sizes,
-        ))
+        let num_images = images.len();
+        let mut pixel_values = ndarray::Array5::<f32>::zeros((num_images, max_patches, c, h, w));
+        for (i, patches) in patches_per_image.iter().enumerate() {
+            for (j, patch) in patches.iter().enumerate() {
+                pixel_values
+                    .slice_mut(ndarray::s![i, j, .., .., ..])
+                    .assign(patch);
+            }
+        }
+
+        // Build image_sizes tensor as [num_images, 2] in (height, width) order
+        // to match the HF LlavaNextImageProcessor output format that vLLM expects.
+        let image_sizes_flat: Vec<i64> = image_sizes
+            .iter()
+            .flat_map(|&(w, h)| [h as i64, w as i64])
+            .collect();
+
+        let mut result =
+            PreprocessedImages::new_dynamic(pixel_values.into_dyn(), num_img_tokens, image_sizes);
+        result.model_specific.insert(
+            "image_sizes".to_string(),
+            ModelSpecificValue::int_2d(image_sizes_flat, num_images, 2),
+        );
+        Ok(result)
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, _config: &PreProcessorConfig) -> usize {
         let original_size = (width, height);
 
-        // Base tokens (from original resized image)
-        let patches_per_side = self.base.image_size / self.base.patch_size;
-        let base_tokens = (patches_per_side * patches_per_side) as usize;
+        // Base feature tokens (from original resized image through ViT).
+        // CLIP ViT produces (image_size/patch_size)^2 + 1 tokens (patches + CLS).
+        // With vision_feature_select_strategy="default" CLS is removed,
+        // leaving (image_size/patch_size)^2 = 576 features.
+        let npatches = self.base.image_size / self.base.patch_size; // 24 for 336/14
+        let base_features = (npatches * npatches) as usize; // 576
 
-        // Grid tokens (from crops)
-        let grid_shape = self.get_anyres_grid_shape(original_size);
-        let unpad_shape = self.calculate_unpad(grid_shape, original_size);
+        // Grid shape in crops (e.g. 2x2 for 672x672 best resolution)
+        let (grid_w, grid_h) = self.get_anyres_grid_shape(original_size);
 
-        // Total: base + unpadded area
-        base_tokens + (unpad_shape.0 as usize + 1) * unpad_shape.1 as usize
+        // Unpadded feature dimensions — matches vLLM's
+        // _get_num_unpadded_features which operates in feature space
+        // (npatches * grid_dim) per axis.
+        let current_w = (npatches * grid_w) as f32;
+        let current_h = (npatches * grid_h) as f32;
+        let aspect_ratio = width as f32 / height as f32;
+        let current_aspect = current_w / current_h;
+
+        let (feat_h, feat_w) = if aspect_ratio > current_aspect {
+            // Landscape: height is unpadded
+            let new_h = (height as f32 * (current_w / width as f32)).round();
+            let padding = ((current_h - new_h) / 2.0).floor() as usize;
+            (current_h as usize - 2 * padding, current_w as usize)
+        } else {
+            // Portrait or square: width is unpadded
+            let new_w = (width as f32 * (current_h / height as f32)).round();
+            let padding = ((current_w - new_w) / 2.0).floor() as usize;
+            (current_h as usize, current_w as usize - 2 * padding)
+        };
+
+        let unpadded_features = feat_h * feat_w;
+        let newline_features = feat_h; // one newline token per row
+
+        unpadded_features + newline_features + base_features
     }
 
     fn model_name(&self) -> &'static str {
@@ -626,8 +683,10 @@ fn select_best_resolution(
             (original_width_f * scale) as u32,
             (original_height_f * scale) as u32,
         );
-        let effective_resolution =
-            std::cmp::min(width * height, downscaled_width * downscaled_height);
+        let effective_resolution = std::cmp::min(
+            downscaled_width * downscaled_height,
+            original_width * original_height,
+        );
         let wasted_resolution = width * height - effective_resolution;
 
         if effective_resolution > max_effective_resolution
@@ -869,8 +928,10 @@ mod tests {
         let image = create_test_image(500, 500, Rgb([128, 128, 128]));
         let result = processor.preprocess(&[image], &config).unwrap();
 
-        // Should have multiple patches (original + crops)
-        assert!(result.batch_size() > 1);
+        // 5D: [num_images=1, num_patches, C, H, W]
+        assert_eq!(result.batch_size(), 1);
+        // Should have multiple patches (original + crops) in the second dimension
+        assert!(result.pixel_values.shape()[1] > 1);
     }
 
     #[test]
