@@ -130,7 +130,7 @@ impl ExponentialBackoff {
             * self.multiplier.powi(attempt.min(i32::MAX as u32) as i32);
         // Guard against f64 overflow to infinity (e.g., 2.0^1024)
         // which would panic in Duration::from_secs_f64.
-        let capped = if delay_secs.is_finite() {
+        let capped = if delay_secs.is_finite() && delay_secs >= 0.0 {
             delay_secs.min(max_delay_secs)
         } else {
             max_delay_secs
