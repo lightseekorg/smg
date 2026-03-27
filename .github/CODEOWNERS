@@ -30,7 +30,6 @@
 /crates/grpc_client @CatherineSue @slin1237
 /crates/grpc_client/proto/vllm_engine.proto @njhill @CatherineSue @slin1237
 /crates/grpc_client/proto/common.proto @njhill @CatherineSue @slin1237
-/crates/grpc_servicer @njhill @CatherineSue
 /crates/kv_index @slin1237
 /crates/mcp @key4ng @CatherineSue @slin1237
 /crates/mesh @tonyluj @llfl @slin1237
@@ -41,6 +40,10 @@
 /crates/tool_parser @slin1237 @CatherineSue
 /crates/wasm @slin1237 @tonyluj
 /crates/workflow @slin1237 @CatherineSue
+
+# gRPC servicer
+/grpc_servicer @CatherineSue @slin1237
+/grpc_servicer/smg_grpc_servicer/vllm @njhill @CatherineSue @slin1237
 
 # Examples
 /examples/wasm @tonyluj @slin1237
