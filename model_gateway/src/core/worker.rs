@@ -191,8 +191,9 @@ pub trait Worker: Send + Sync + fmt::Debug {
     /// per-worker `retryable_status_codes` set (default: 408, 429, 5xx).
     /// Callers just pass the status — no need to interpret it.
     ///
-    /// If no HTTP status is available (e.g., connection error), don't call
-    /// this — health checks handle reachability separately.
+    /// For transport/connection errors where no HTTP response is received,
+    /// pass the status code returned to the client (e.g., 502 for a send
+    /// error, 504 for a timeout).
     fn record_outcome(&self, status_code: u16) {
         let is_failure = self
             .resilience()
