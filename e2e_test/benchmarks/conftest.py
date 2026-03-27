@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shlex
 import shutil
 import subprocess
 import time
@@ -73,16 +72,12 @@ def _build_command(
         if os.path.isdir(local_tokenizer):
             tokenizer_path = local_tokenizer
 
-    # Map runtime to the correct genai-bench --api-backend value.
-    runtime = os.environ.get("E2E_RUNTIME", "").lower()
-    api_backend = {"sglang": "sglang", "vllm": "vllm"}.get(runtime, "openai")
-
     cmd.extend(
         [
             image,
             "benchmark",
             "--api-backend",
-            api_backend,
+            "openai",
             "--api-base",
             router_url,
             "--api-key",
@@ -113,22 +108,9 @@ def _build_command(
         cmd.extend(["--server-gpu-type", gpu_type])
     if gpu_count:
         cmd.extend(["--server-gpu-count", str(gpu_count)])
-    # Disable ignore_eos for SGLang: its scheduler was specifically tuned for
-    # ignore_eos, so normal workloads (without it) are actually slower.
-    # genai-bench prompts interactively when ignore_eos=false; pipe "N" via
-    # stdin so CI auto-answers "No" (keep ignore_eos=false).
-    needs_stdin_pipe = False
-    if api_backend == "sglang":
-        cmd.extend(["--additional-request-params", '{"ignore_eos": false}'])
-        needs_stdin_pipe = True
-
     log_dir = os.environ.get("E2E_LOG_DIR")
     if log_dir:
         cmd.extend(["--log-dir", log_dir])
-
-    if needs_stdin_pipe:
-        cmd = ["bash", "-c", f"echo N | {shlex.join(cmd)}"]
-
     return cmd
 
 

@@ -102,14 +102,6 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["chat", "streaming", "multimodal"],
     },
-    # Llama-4-Scout (17B with 16 experts) - Multimodal tests
-    "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
-        "model": _resolve_model_path("meta-llama/Llama-4-Scout-17B-16E-Instruct"),
-        "tp": 4,
-        "features": ["chat", "streaming", "multimodal", "moe"],
-        "vllm_args": ["--max-model-len", "196608"],
-        "startup_timeout": 1200,
-    },
     # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
         "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
@@ -128,11 +120,11 @@ MODEL_SPECS: dict[str, dict] = {
         ],
         "startup_timeout": 1200,  # Large MoE model may need extra download/load time
     },
-    # Llama-4-Scout (17B with 16 experts) - Nightly benchmarks
+    # Llama-4-Scout (17B with 16 experts) - Nightly benchmarks and Multimodal tests
     "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
         "model": _resolve_model_path("meta-llama/Llama-4-Scout-17B-16E-Instruct"),
         "tp": 4,
-        "features": ["chat", "streaming", "function_calling", "moe"],
+        "features": ["chat", "streaming", "function_calling", "multimodal", "moe"],
         "worker_args": [
             "--trust-remote-code",
             "--context-length=196608",
@@ -144,7 +136,6 @@ MODEL_SPECS: dict[str, dict] = {
         "vllm_args": [
             "--trust-remote-code",
             "--max-model-len=196608",
-            "--attention-backend=FLASH_ATTN",
         ],
         "startup_timeout": 1200,  # Large MoE model may need extra download/load time
     },
@@ -156,13 +147,6 @@ MODEL_SPECS: dict[str, dict] = {
         "worker_args": [
             "--trust-remote-code",
             "--mem-fraction-static=0.9",
-            "--enable-hierarchical-cache",
-            "--hicache-size=80",
-            "--enable-cache-report",
-            "--prefill-attention-backend=flashinfer",
-            "--decode-attention-backend=flashinfer",
-            "--hicache-io-backend=kernel",
-            "--hicache-mem-layout=layer_first",
         ],
         "vllm_args": [
             "--trust-remote-code",
@@ -179,13 +163,6 @@ MODEL_SPECS: dict[str, dict] = {
         "worker_args": [
             "--trust-remote-code",
             "--mem-fraction-static=0.9",
-            "--enable-hierarchical-cache",
-            "--hicache-size=80",
-            "--enable-cache-report",
-            "--prefill-attention-backend=flashinfer",
-            "--decode-attention-backend=flashinfer",
-            "--hicache-io-backend=kernel",
-            "--hicache-mem-layout=layer_first",
         ],
         "vllm_args": [
             "--trust-remote-code",
