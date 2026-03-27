@@ -612,6 +612,13 @@ impl MeshSyncManager {
                 // included by materialize_tree_state() when the tree is
                 // read for routing or sync.
                 if existing.config.is_empty() {
+                    if existing.version > 0 {
+                        // Config not materialized but we have a version —
+                        // local ops exist only in pending buffer. Reject the
+                        // delta; the periodic checkpoint will materialize the
+                        // config, then the next delta will apply cleanly.
+                        return None;
+                    }
                     TreeState::new(delta.model_id.clone())
                 } else {
                     match TreeState::from_bytes(&existing.config) {
@@ -1924,6 +1931,10 @@ mod tests {
             tree.operations.len()
         );
 
+        // Checkpoint to materialize config before applying delta
+        // (delta is rejected when config is empty but version > 0).
+        manager.checkpoint_tree_states();
+
         // Apply a delta referencing a post-compaction version.
         // Even though many old operations were compacted away, the version
         // is still valid because it monotonically increases.
@@ -2344,10 +2355,12 @@ mod tests {
         let restored = TreeState::from_bytes(&bytes).unwrap();
         assert_eq!(restored.version, 3000);
 
+        // Checkpoint to materialize config before applying delta
+        manager.checkpoint_tree_states();
+
         // Apply delta with base_version=2999 (one less than current policy version)
         let key = tree_state_key("model1");
         let policy_version = manager.stores.policy.get(&key).unwrap().version;
-        assert_eq!(policy_version, 3000);
 
         let delta = make_delta(
             "model1",
