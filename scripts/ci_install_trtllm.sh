@@ -5,7 +5,7 @@
 # so we build from source (main branch) which compiles the C++
 # extensions properly and includes the gRPC serve command.
 #
-# Cache version: 3 — rebuild for NCCL 2.28+ (required by TRT-LLM PR #12015)
+# Cache version: 4 — rebuild for torch 2.10+cu130 / cuda-bindings 13.x
 #
 # Prerequisites (expected on k8s-runner-gpu nodes):
 #   - NVIDIA driver 580+ (CUDA 13)
@@ -15,6 +15,8 @@
 # At runtime we use --backend pytorch, which avoids TRT engine compilation.
 
 set -euo pipefail
+
+NCCL_VERSION_CONSTRAINT="nvidia-nccl-cu13>=2.28.9,<=2.29.2"
 
 # Activate venv if it exists
 if [ -f ".venv/bin/activate" ]; then
@@ -56,13 +58,16 @@ if [ -n "$CACHED_WHEEL" ] && [ -f "$CACHED_WHEEL" ]; then
     export PATH="$CUDA_HOME/bin:$PATH"
     export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
 
-    # ── Install NCCL runtime ─────────────────────────────────────────────────
+    # ── Install pip and NCCL runtime ─────────────────────────────────────────
     pip install --upgrade pip
-    pip install --no-cache-dir "nvidia-nccl-cu13>=2.28.0"
+    pip install --no-cache-dir "$NCCL_VERSION_CONSTRAINT"
 
     # ── Install cached wheel ─────────────────────────────────────────────────
+    # Use --extra-index-url for cu130 torch so pip resolves torch 2.10+cu130
+    # (cuda-bindings==13.x) instead of the default PyPI torch (cuda-bindings==12.9.4),
+    # which conflicts with tensorrt-llm's cuda-python>=13 requirement.
     echo "Installing cached wheel..."
-    pip install --no-cache-dir "$CACHED_WHEEL"
+    pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu130 "$CACHED_WHEEL"
 
     # ── Setup LD_LIBRARY_PATH ────────────────────────────────────────────────
     SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
@@ -179,14 +184,11 @@ if [ -f "requirements-dev.txt" ]; then
     pip install --no-cache-dir -r requirements-dev.txt
 fi
 
-# ── NCCL 2.28+ setup ────────────────────────────────────────────────────────
-# TRT-LLM PR #12015 requires NCCL 2.28+ headers for NCCLWindowAllocator.
-# Problem: torch==2.9.1+cu130 pins nvidia-nccl-cu13==2.27.7 as an exact dep,
-# and build_wheel.py runs pip install internally which downgrades NCCL.
-#
-# Solution: install NCCL 2.28+, copy headers+libs to a fixed directory that
-# pip can't overwrite, and point NCCL_ROOT there for CMake.
-pip install --no-cache-dir --force-reinstall "nvidia-nccl-cu13>=2.28.0"
+# ── NCCL setup ──────────────────────────────────────────────────────────────
+# build_wheel.py runs pip install internally which can change the NCCL version.
+# Copy headers+libs to a fixed directory that pip can't overwrite, and point
+# NCCL_ROOT there for CMake.
+pip install --no-cache-dir --force-reinstall "$NCCL_VERSION_CONSTRAINT"
 
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
 NCCL_PIP_ROOT="$SITE_PACKAGES/nvidia/nccl"
@@ -297,17 +299,6 @@ p.write_text(text)
 print('FindNCCL.cmake patched to use NCCL_ROOT hint')
 PYTHON_EOF
 fi
-
-# ── Patch NCCL version constraint ────────────────────────────────────────────
-# TRT-LLM requirements.txt pins nvidia-nccl-cu13<=2.28.9 which conflicts with
-# the 2.28+ requirement from PR #12015's NCCL_VERSION gate. The build_wheel.py
-# script internally runs pip install, so we patch the constraint in-place.
-for req_file in requirements.txt requirements-dev.txt; do
-    if [ -f "$req_file" ]; then
-        sed -i 's/nvidia-nccl-cu13<=2\.28\.9,>=2\.27\.7/nvidia-nccl-cu13>=2.28.0/' "$req_file"
-        echo "Patched NCCL constraint in $req_file"
-    fi
-done
 
 # ── Build TensorRT-LLM ───────────────────────────────────────────────────────
 echo "=== Building TensorRT-LLM from source (this may take a while)... ==="

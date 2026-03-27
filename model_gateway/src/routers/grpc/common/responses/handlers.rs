@@ -2,32 +2,11 @@
 //!
 //! These handlers are used by both pipelines for retrieving and cancelling responses.
 
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use smg_data_connector::ResponseId;
 
 use super::ResponsesContext;
 use crate::routers::error;
-
-/// Implementation for GET /v1/responses/{response_id}
-///
-/// Retrieves a stored response from the database.
-/// Used by both regular and harmony implementations.
-pub(crate) async fn get_response_impl(ctx: &ResponsesContext, response_id: &str) -> Response {
-    let resp_id = ResponseId::from(response_id);
-
-    // Retrieve response from storage
-    match ctx.response_storage.get_response(&resp_id).await {
-        Ok(Some(stored_response)) => axum::Json(stored_response.raw_response).into_response(),
-        Ok(None) => error::not_found(
-            "response_not_found",
-            format!("Response with id '{response_id}' not found"),
-        ),
-        Err(e) => error::internal_error(
-            "retrieve_response_failed",
-            format!("Failed to retrieve response: {e}"),
-        ),
-    }
-}
 
 /// Implementation for POST /v1/responses/{response_id}/cancel
 ///

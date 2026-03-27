@@ -3,6 +3,8 @@
 //! This module provides composable transforms that match HuggingFace image processor
 //! behavior, enabling pure Rust preprocessing without Python dependencies.
 
+use std::cell::RefCell;
+
 use fast_image_resize::{
     images::Image as FirImage, IntoImageView, ResizeAlg, ResizeOptions, Resizer,
 };
@@ -164,6 +166,10 @@ fn to_fir_algorithm(filter: FilterType) -> ResizeAlg {
     }
 }
 
+thread_local! {
+    static RESIZER: RefCell<Resizer> = RefCell::new(Resizer::new());
+}
+
 /// Resize image to exact dimensions using SIMD-accelerated resizer.
 ///
 /// # Arguments
@@ -178,8 +184,8 @@ pub fn resize(image: &DynamicImage, width: u32, height: u32, filter: FilterType)
     };
     let mut dst = FirImage::new(width, height, pixel_type);
     let options = ResizeOptions::new().resize_alg(to_fir_algorithm(filter));
-    let mut resizer = Resizer::new();
-    if resizer.resize(image, &mut dst, &options).is_err() {
+    let ok = RESIZER.with(|r| r.borrow_mut().resize(image, &mut dst, &options).is_ok());
+    if !ok {
         return image.resize_exact(width, height, filter);
     }
     fir_image_to_dynamic(dst, width, height, image, filter)

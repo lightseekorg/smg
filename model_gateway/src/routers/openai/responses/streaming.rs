@@ -514,7 +514,7 @@ pub(super) fn send_final_response_event(
 /// Simple pass-through streaming without MCP interception
 pub(super) async fn handle_simple_streaming_passthrough(
     client: &reqwest::Client,
-    circuit_breaker: &crate::core::CircuitBreaker,
+    worker: &Arc<dyn crate::core::Worker>,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
 ) -> Response {
@@ -529,7 +529,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let response = match request_builder.send().await {
         Ok(resp) => resp,
         Err(err) => {
-            circuit_breaker.record_failure();
+            worker.record_outcome(502);
             return (
                 StatusCode::BAD_GATEWAY,
                 format!("Failed to forward request to OpenAI: {err}"),
@@ -542,8 +542,9 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let status_code =
         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
+    worker.record_outcome(status.as_u16());
+
     if !status.is_success() {
-        circuit_breaker.record_failure();
         let error_body = response
             .text()
             .await
@@ -551,8 +552,6 @@ pub(super) async fn handle_simple_streaming_passthrough(
         let error_body = error::sanitize_error_body(&error_body);
         return (status_code, error_body).into_response();
     }
-
-    circuit_breaker.record_success();
 
     let preserved_headers = preserve_response_headers(response.headers());
     let mut upstream_stream = response.bytes_stream();
@@ -1026,7 +1025,6 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
             return error::internal_error("internal_error", "Worker not selected");
         }
     };
-    let circuit_breaker = worker.circuit_breaker();
     let headers = ctx.headers().cloned();
     let original_body = match ctx.responses_request() {
         Some(r) => r,
@@ -1057,13 +1055,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     };
 
     let Some(mcp_servers) = mcp_servers else {
-        return handle_simple_streaming_passthrough(
-            &client,
-            circuit_breaker,
-            headers.as_ref(),
-            req,
-        )
-        .await;
+        return handle_simple_streaming_passthrough(&client, &worker, headers.as_ref(), req).await;
     };
 
     handle_streaming_with_tool_interception(

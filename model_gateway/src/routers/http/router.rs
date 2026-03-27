@@ -16,7 +16,7 @@ use openai_protocol::{
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
     rerank::{RerankRequest, RerankResponse, RerankResult},
-    responses::{ResponsesGetParams, ResponsesRequest},
+    responses::ResponsesRequest,
 };
 use reqwest::Client;
 use tokio::sync::mpsc;
@@ -210,8 +210,14 @@ impl Router {
             bool_to_static_str(is_stream),
         );
 
+        // Use per-model retry config if set by a worker, otherwise fall back to router default.
+        let per_model_retry_config = self.worker_registry.get_retry_config(model_id);
+        let retry_config = per_model_retry_config
+            .as_ref()
+            .unwrap_or(&self.retry_config);
+
         let response = RetryExecutor::execute_response_with_retry(
-            &self.retry_config,
+            retry_config,
             // operation per attempt
             |_: u32| async {
                 let res = self
@@ -328,7 +334,7 @@ impl Router {
         events::RequestReceivedEvent {}.emit();
 
         let status = response.status();
-        worker.record_outcome(!is_retryable_status(status));
+        worker.record_outcome(status.as_u16());
 
         // Record worker errors for server errors (5xx)
         if status.is_server_error() {
@@ -442,12 +448,6 @@ impl Router {
 
         last_response
             .unwrap_or_else(|| error::bad_gateway("no_worker_response", "No worker response"))
-    }
-
-    // Route a GET request with provided headers to a specific endpoint
-    async fn route_get_request(&self, headers: Option<&HeaderMap>, endpoint: &str) -> Response {
-        self.route_simple_request(headers, endpoint, Method::GET)
-            .await
     }
 
     // Route a POST request with empty body to a specific endpoint
@@ -724,16 +724,6 @@ impl RouterTrait for Router {
     ) -> Response {
         self.route_typed_request(headers, body, "/v1/responses", model_id)
             .await
-    }
-
-    async fn get_response(
-        &self,
-        headers: Option<&HeaderMap>,
-        response_id: &str,
-        _params: &ResponsesGetParams,
-    ) -> Response {
-        let endpoint = format!("v1/responses/{response_id}");
-        self.route_get_request(headers, &endpoint).await
     }
 
     async fn cancel_response(&self, headers: Option<&HeaderMap>, response_id: &str) -> Response {

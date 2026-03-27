@@ -6,20 +6,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use openai_protocol::{
-    chat::ChatCompletionRequest,
-    classify::ClassifyRequest,
-    embedding::EmbeddingRequest,
-    generate::GenerateRequest,
-    messages::CreateMessageRequest,
-    responses::{ResponsesGetParams, ResponsesRequest},
+    chat::ChatCompletionRequest, classify::ClassifyRequest, embedding::EmbeddingRequest,
+    generate::GenerateRequest, messages::CreateMessageRequest, responses::ResponsesRequest,
 };
 use tracing::debug;
 
 use super::{
     common::responses::{
-        handlers::{cancel_response_impl, get_response_impl},
-        utils::validate_worker_availability,
-        ResponsesContext,
+        handlers::cancel_response_impl, utils::validate_worker_availability, ResponsesContext,
     },
     context::SharedComponents,
     harmony::{serve_harmony_responses, serve_harmony_responses_stream, HarmonyDetector},
@@ -194,8 +188,14 @@ impl GrpcRouter {
         let model_id_cloned = model_id.to_string();
         let components = self.shared_components.clone();
 
+        // Use per-model retry config if set by a worker, otherwise fall back to router default.
+        let per_model_retry_config = self.worker_registry.get_retry_config(model_id);
+        let retry_config = per_model_retry_config
+            .as_ref()
+            .unwrap_or(&self.retry_config);
+
         RetryExecutor::execute_response_with_retry(
-            &self.retry_config,
+            retry_config,
             // Operation: execute pipeline (creates fresh context each attempt)
             |_attempt| {
                 let request = Arc::clone(&request);
@@ -245,8 +245,14 @@ impl GrpcRouter {
         let components = self.shared_components.clone();
         let pipeline = &self.pipeline;
 
+        // Use per-model retry config if set by a worker, otherwise fall back to router default.
+        let per_model_retry_config = self.worker_registry.get_retry_config(model_id);
+        let retry_config = per_model_retry_config
+            .as_ref()
+            .unwrap_or(&self.retry_config);
+
         RetryExecutor::execute_response_with_retry(
-            &self.retry_config,
+            retry_config,
             // Operation: execute pipeline (creates fresh context each attempt)
             |_attempt| {
                 let request = Arc::clone(&request);
@@ -371,8 +377,14 @@ impl GrpcRouter {
         let components = self.shared_components.clone();
         let pipeline = &self.messages_pipeline;
 
+        // Use per-model retry config if set by a worker, otherwise fall back to router default.
+        let per_model_retry_config = self.worker_registry.get_retry_config(model_id);
+        let retry_config = per_model_retry_config
+            .as_ref()
+            .unwrap_or(&self.retry_config);
+
         RetryExecutor::execute_response_with_retry(
-            &self.retry_config,
+            retry_config,
             |_attempt| {
                 let request = Arc::clone(&request);
                 let headers = headers_cloned.clone();
@@ -462,15 +474,6 @@ impl RouterTrait for GrpcRouter {
         model_id: &str,
     ) -> Response {
         self.route_responses_impl(headers, body, model_id).await
-    }
-
-    async fn get_response(
-        &self,
-        _headers: Option<&HeaderMap>,
-        response_id: &str,
-        _params: &ResponsesGetParams,
-    ) -> Response {
-        get_response_impl(&self.responses_context, response_id).await
     }
 
     async fn cancel_response(&self, _headers: Option<&HeaderMap>, response_id: &str) -> Response {
