@@ -74,6 +74,10 @@ pub struct IncrementalUpdateCollector {
     self_name: String,
     last_sent: Arc<RwLock<LastSentVersions>>,
     last_scanned: Arc<RwLock<LastScannedGenerations>>,
+    /// Snapshot of `tree_generation` captured during the last collection.
+    /// Used in `mark_sent` instead of re-reading the atomic to avoid
+    /// advancing `last_scanned.tree` past the batch boundary.
+    collected_tree_gen: Arc<RwLock<u64>>,
 }
 
 impl IncrementalUpdateCollector {
@@ -83,6 +87,7 @@ impl IncrementalUpdateCollector {
             self_name,
             last_sent: Arc::new(RwLock::new(LastSentVersions::default())),
             last_scanned: Arc::new(RwLock::new(LastScannedGenerations::default())),
+            collected_tree_gen: Arc::new(RwLock::new(0)),
         }
     }
 
@@ -171,6 +176,11 @@ impl IncrementalUpdateCollector {
                 if !policy_changed && !tree_changed {
                     return vec![];
                 }
+
+                // Snapshot tree_gen for mark_sent — avoids advancing
+                // last_scanned.tree past this batch if new ops arrive
+                // between collection and mark_sent.
+                *self.collected_tree_gen.write() = tree_gen;
 
                 let timestamp = Self::current_timestamp();
 
@@ -428,7 +438,10 @@ impl IncrementalUpdateCollector {
             StoreType::Worker => last_scanned.worker = self.stores.worker.generation(),
             StoreType::Policy => {
                 last_scanned.policy = self.stores.policy.generation();
-                last_scanned.tree = self.stores.tree_generation.load(Ordering::Acquire);
+                // Use the snapshot captured during collection, not a
+                // live re-read — prevents skipping ops that arrived
+                // between collect and mark_sent.
+                last_scanned.tree = *self.collected_tree_gen.read();
             }
             StoreType::App => last_scanned.app = self.stores.app.generation(),
             StoreType::Membership => {

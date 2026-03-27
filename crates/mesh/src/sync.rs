@@ -579,6 +579,9 @@ impl MeshSyncManager {
                     "Applied remote tree state update: model={} (version: {} -> {})",
                     model_id, current_version, tree_state.version
                 );
+                // Advance atomic tree version so subsequent local ops
+                // start above the remote baseline.
+                self.stores.advance_tree_version(&key, tree_state.version);
                 self.notify_tree_state_subscribers(&model_id, &tree_state);
             }
             Ok((_, false)) => {
@@ -674,6 +677,12 @@ impl MeshSyncManager {
                     "Applied remote tree delta: model={} (version: {} -> +{} ops)",
                     model_id, old_version, ops_count
                 );
+
+                // Advance atomic tree version so subsequent local ops
+                // start above the remote baseline.
+                if let Some(ps) = self.stores.policy.get(&key) {
+                    self.stores.advance_tree_version(&key, ps.version);
+                }
 
                 // Re-read the committed state for subscriber notification
                 if let Some(policy_state) = self.stores.policy.get(&key) {

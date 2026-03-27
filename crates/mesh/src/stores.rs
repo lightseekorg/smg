@@ -776,15 +776,34 @@ impl StateStores {
     /// generation.  Returns the new version.  This is O(1) with no
     /// serialization — unlike `policy.update()` which deserializes and
     /// re-serializes the entire config blob.
+    ///
+    /// On the first call for a given key the counter is seeded from the
+    /// existing PolicyState version (if any) so that local ops don't
+    /// regress the advertised version below a remote/checkpointed baseline.
     pub fn bump_tree_version(&self, key: &str) -> u64 {
         let version = self
             .tree_versions
             .entry(key.to_string())
-            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .or_insert_with(|| {
+                // Seed from the committed policy version so deltas
+                // start above any existing remote/checkpointed state.
+                let base = self.policy.get(key).map(|ps| ps.version).unwrap_or(0);
+                Arc::new(AtomicU64::new(base))
+            })
             .fetch_add(1, Ordering::Release)
             + 1;
         self.tree_generation.fetch_add(1, Ordering::Release);
         version
+    }
+
+    /// Advance the tree version counter to at least `version`.
+    /// Called after applying remote deltas/full-state updates so that
+    /// subsequent local ops start above the remote baseline.
+    pub fn advance_tree_version(&self, key: &str, version: u64) {
+        self.tree_versions
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .fetch_max(version, Ordering::Release);
     }
 
     /// Run garbage collection across all stores, removing tombstoned CRDT
