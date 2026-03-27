@@ -111,6 +111,7 @@ pub(crate) async fn forward_realtime_rest(
             response
         }
         Err(e) => {
+            worker.record_outcome(502);
             error!(error = %e, endpoint, "Failed to forward realtime REST request");
             Metrics::record_router_error(
                 metrics_labels::ROUTER_OPENAI,

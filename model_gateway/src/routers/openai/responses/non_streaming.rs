@@ -85,9 +85,11 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         .await
         {
             Ok(resp) => {
+                worker.record_outcome(200);
                 response_json = resp;
             }
             Err(err) => {
+                worker.record_outcome(502);
                 return error::internal_error("upstream_error", err);
             }
         }
