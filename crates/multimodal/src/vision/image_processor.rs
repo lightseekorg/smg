@@ -372,7 +372,7 @@ impl ImageProcessorRegistry {
     ///
     /// Currently registers:
     /// - `llava-next` -> LlavaNextProcessor
-    /// - `llava` -> LlavaProcessor (also matches llava-1.5, etc.)
+    /// - `llava-1.5` / `llava-v1.5` -> LlavaProcessor
     /// - `qwen2-vl` -> Qwen2VLProcessor
     /// - `qwen2.5-vl` -> Qwen2VLProcessor (same preprocessing as Qwen2-VL)
     /// - `qwen3-vl` -> Qwen3VLProcessor (patch_size=16, [0.5,0.5,0.5] normalization)
