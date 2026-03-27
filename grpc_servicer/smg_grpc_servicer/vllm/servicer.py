@@ -118,9 +118,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                     prompt["prompt"] = request.tokenized.original_text
                 prompt = self.engine.renderer.process_for_engine(prompt, arrival_time=arrival_time)
             else:
-                # Text prompt path: let the renderer handle tokenization.
-                prompt = self.engine.renderer.process_for_engine(
-                    {"prompt": request.text}, arrival_time=arrival_time
+                raise ValueError(
+                    "Text prompts are not supported via gRPC. Use tokenized input instead."
                 )
 
             # Build sampling params with detokenize=False
