@@ -18,11 +18,53 @@ Log directory layout:
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 BFCL_LOGS_DIR = Path(__file__).parent.parent / "bfcl_logs"
+
+
+def extract_tool_calls(response: Any) -> list[dict[str, Any]]:
+    """Pull structured tool calls out of an OpenAI ChatCompletion response.
+
+    Returns a list of ``{"name": str, "arguments": dict}`` entries.
+    Malformed tool calls are included with ``{"_parse_error": ...}`` arguments
+    so downstream evaluation can distinguish parse failures from missing calls.
+    """
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return []
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        return []
+    tool_calls = getattr(message, "tool_calls", None) or []
+    result = []
+    for tc in tool_calls:
+        function = getattr(tc, "function", None)
+        if function is None:
+            logger.warning("Skipping malformed tool call with no function payload: %r", tc)
+            continue
+        try:
+            args = json.loads(function.arguments)
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning(
+                "Malformed tool call arguments for %r — %s | raw: %r",
+                function.name,
+                exc,
+                function.arguments,
+            )
+            args = {"_parse_error": str(exc)}
+        result.append({"name": function.name, "arguments": args})
+    return result
+
+
+def log_file_for_summary(run_dir: Path, log_path: Path) -> str:
+    """Return a log path relative to the BFCL run directory for summary entries."""
+    return str(log_path.relative_to(run_dir))
 
 
 class BFCLEvaluator:

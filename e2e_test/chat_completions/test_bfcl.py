@@ -27,7 +27,6 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -40,7 +39,9 @@ import pytest
 from bfcl import (
     MissingBFCLAnswerFileError,
     bfcl_to_openai_tools,
+    extract_tool_calls,
     load_bfcl_category,
+    log_file_for_summary,
 )
 from bfcl.session_state import append_result, get_evaluator, get_or_create_run_dir
 
@@ -51,37 +52,8 @@ BFCL_CATEGORIES = ("simple", "multiple", "parallel", "parallel_multiple", "irrel
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Data loading helpers (pytest-specific, stay in the test module)
 # ---------------------------------------------------------------------------
-
-
-def _extract_tool_calls(response: Any) -> list[dict[str, Any]]:
-    """Pull structured tool calls out of an OpenAI ChatCompletion response."""
-    choices = getattr(response, "choices", None) or []
-    if not choices:
-        return []
-    message = getattr(choices[0], "message", None)
-    if message is None:
-        return []
-    tool_calls = getattr(message, "tool_calls", None) or []
-    result = []
-    for tc in tool_calls:
-        function = getattr(tc, "function", None)
-        if function is None:
-            logger.warning("Skipping malformed tool call with no function payload: %r", tc)
-            continue
-        try:
-            args = json.loads(function.arguments)
-        except (json.JSONDecodeError, TypeError) as exc:
-            logger.warning(
-                "Malformed tool call arguments for %r — %s | raw: %r",
-                function.name,
-                exc,
-                function.arguments,
-            )
-            args = {"_parse_error": str(exc)}
-        result.append({"name": function.name, "arguments": args})
-    return result
 
 
 def _load(category: str) -> list[dict]:
@@ -123,11 +95,6 @@ def _get_cases_for_category(category: str) -> list[dict]:
     if category not in _cases_cache:
         _cases_cache[category] = _load(category)
     return _cases_cache[category]
-
-
-def _log_file_for_summary(run_dir: Path, log_path: Path) -> str:
-    """Persist log paths relative to the BFCL run directory."""
-    return str(log_path.relative_to(run_dir))
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
@@ -194,7 +161,7 @@ def _run_bfcl_case(
     try:
         response = client.chat.completions.create(**request_payload)
         response_payload = response.model_dump()
-        actual = _extract_tool_calls(response)
+        actual = extract_tool_calls(response)
     except Exception as exc:
         latency = (time.monotonic() - start) * 1000
         log_path = evaluator.save_test_log(
@@ -222,7 +189,7 @@ def _run_bfcl_case(
                 "finish_reason": None,
                 "completion_tokens": None,
                 "had_reasoning": False,
-                "log_file": _log_file_for_summary(run_dir, log_path),
+                "log_file": log_file_for_summary(run_dir, log_path),
                 "model": model,
                 "backend": backend,
             }
@@ -274,7 +241,7 @@ def _run_bfcl_case(
             "finish_reason": finish_reason,
             "completion_tokens": completion_tokens,
             "had_reasoning": had_reasoning,
-            "log_file": _log_file_for_summary(run_dir, log_path),
+            "log_file": log_file_for_summary(run_dir, log_path),
             "model": model,
             "backend": backend,
         }
@@ -286,7 +253,7 @@ def _run_bfcl_case(
         test_id,
         status,
         latency,
-        _log_file_for_summary(run_dir, log_path),
+        log_file_for_summary(run_dir, log_path),
     )
 
     if not passed:

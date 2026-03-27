@@ -5,7 +5,7 @@ BFCL v3 test cases run against the SMG gateway.
 """
 
 from .converter import bfcl_to_openai_tools
-from .evaluator import BFCLEvaluator
+from .evaluator import BFCLEvaluator, extract_tool_calls, log_file_for_summary
 from .loader import (
     BFCL_CATEGORIES,
     MissingBFCLAnswerFileError,
@@ -17,5 +17,7 @@ __all__ = [
     "BFCLEvaluator",
     "MissingBFCLAnswerFileError",
     "bfcl_to_openai_tools",
+    "extract_tool_calls",
     "load_bfcl_category",
+    "log_file_for_summary",
 ]
