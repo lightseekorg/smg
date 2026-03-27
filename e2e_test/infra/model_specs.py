@@ -126,7 +126,6 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 4,
         "features": ["chat", "streaming", "function_calling", "multimodal", "moe"],
         "worker_args": [
-            "--trust-remote-code",
             "--context-length=196608",
             "--attention-backend=fa3",
             "--cuda-graph-max-bs=256",
@@ -134,7 +133,6 @@ MODEL_SPECS: dict[str, dict] = {
             "--mem-fraction-static=0.85",
         ],
         "vllm_args": [
-            "--trust-remote-code",
             "--max-model-len=196608",
         ],
         "startup_timeout": 1200,  # Large MoE model may need extra download/load time
@@ -145,11 +143,9 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 4,
         "features": ["chat", "streaming", "function_calling"],
         "worker_args": [
-            "--trust-remote-code",
             "--mem-fraction-static=0.9",
         ],
         "vllm_args": [
-            "--trust-remote-code",
             "--max-model-len=131072",
             "--gpu-memory-utilization=0.9",
             "--enable-chunked-prefill",
@@ -161,11 +157,9 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 4,
         "features": ["chat", "streaming", "function_calling"],
         "worker_args": [
-            "--trust-remote-code",
             "--mem-fraction-static=0.9",
         ],
         "vllm_args": [
-            "--trust-remote-code",
             "--max-model-len=131072",
             "--gpu-memory-utilization=0.9",
             "--enable-chunked-prefill",
