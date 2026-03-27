@@ -599,8 +599,7 @@ impl PDRouter {
         };
 
         // Process decode response
-        let res = decode_response;
-        let status = StatusCode::from_u16(res.status().as_u16())
+        let status = StatusCode::from_u16(decode_response.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         debug!("Decode response status: {}", status);
 
@@ -612,28 +611,17 @@ impl PDRouter {
             );
 
             return self
-                .handle_decode_error_response(res, &context, prefill, decode)
+                .handle_decode_error_response(decode_response, &context, prefill, decode)
                 .await;
         }
 
         // Process prefill response
-        let prefill_body = if context.return_logprob {
-            match self
-                .process_prefill_response(prefill_response, prefill.url(), context.return_logprob)
-                .await
-            {
-                Ok((_, body)) => body,
-                Err(error_response) => return error_response,
-            }
-        } else {
-            // Even if we don't need logprobs, we should check prefill status
-            match self
-                .process_prefill_response(prefill_response, prefill.url(), false)
-                .await
-            {
-                Ok((_, body)) => body,
-                Err(error_response) => return error_response,
-            }
+        let prefill_body = match self
+            .process_prefill_response(prefill_response, prefill.url(), context.return_logprob)
+            .await
+        {
+            Ok((_, body)) => body,
+            Err(error_response) => return error_response,
         };
 
         if context.is_stream {
@@ -647,10 +635,10 @@ impl PDRouter {
                 None
             };
 
-            let response_headers = header_utils::preserve_response_headers(res.headers());
+            let response_headers = header_utils::preserve_response_headers(decode_response.headers());
 
             self.create_streaming_response(
-                res.bytes_stream(),
+                decode_response.bytes_stream(),
                 status,
                 prefill_logprobs,
                 context.return_logprob,
@@ -663,7 +651,7 @@ impl PDRouter {
             // Non-streaming response
             if context.return_logprob {
                 self.process_non_streaming_response(
-                    res,
+                    decode_response,
                     status,
                     context.return_logprob,
                     prefill_body,
@@ -671,9 +659,9 @@ impl PDRouter {
                 .await
             } else {
                 // Direct passthrough when no logprobs needed
-                let response_headers = header_utils::preserve_response_headers(res.headers());
+                let response_headers = header_utils::preserve_response_headers(decode_response.headers());
 
-                match res.bytes().await {
+                match decode_response.bytes().await {
                     Ok(decode_body) => {
                         let mut response = Response::new(Body::from(decode_body));
                         *response.status_mut() = status;
