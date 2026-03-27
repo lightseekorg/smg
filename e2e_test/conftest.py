@@ -26,6 +26,7 @@ model: Convenience fixture that returns just the model_path from setup_backend.
 
 from __future__ import annotations
 
+import glob
 import logging
 import sys
 from importlib.util import find_spec
@@ -118,6 +119,28 @@ def model(setup_backend):
     """Return the model path from setup_backend."""
     _, model_path, _, _ = setup_backend
     return model_path
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Dump worker logs inline when a test fails."""
+    outcome = yield
+    report = outcome.get_result()
+
+    if report.when == "call" and report.failed:
+        log_files = glob.glob("/tmp/smg_worker_logs/*.log")
+        if log_files:
+            print(f"\n{'=' * 60}")
+            print("WORKER LOGS")
+            print(f"{'=' * 60}")
+            for log_path in sorted(log_files):
+                try:
+                    with open(log_path) as f:
+                        content = f.read()
+                    print(f"\n--- {log_path} ---")
+                    print(content)
+                except OSError:
+                    pass
 
 
 @pytest.fixture
