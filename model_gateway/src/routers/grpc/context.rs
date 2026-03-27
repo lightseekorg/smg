@@ -512,34 +512,34 @@ impl WorkerSelection {
         }
     }
 
-    /// Record circuit breaker outcome for all workers
-    pub fn record_outcome(&self, success: bool) {
+    /// Record circuit breaker outcome for all workers based on HTTP status code.
+    pub fn record_outcome(&self, status_code: u16) {
         match self {
-            Self::Single { worker } => worker.record_outcome(success),
+            Self::Single { worker } => worker.record_outcome(status_code),
             Self::Dual {
                 prefill, decode, ..
             } => {
-                prefill.record_outcome(success);
-                decode.record_outcome(success);
+                prefill.record_outcome(status_code);
+                decode.record_outcome(status_code);
             }
         }
     }
 
     /// Record circuit breaker outcomes for dual dispatch (individual tracking)
-    pub fn record_dual_outcomes(&self, prefill_success: bool, decode_success: bool) {
+    pub fn record_dual_outcomes(&self, prefill_status: u16, decode_status: u16) {
         if let Self::Dual {
             prefill, decode, ..
         } = self
         {
-            prefill.record_outcome(prefill_success);
-            decode.record_outcome(decode_success);
+            prefill.record_outcome(prefill_status);
+            decode.record_outcome(decode_status);
         }
     }
 
     /// Record circuit breaker outcome for prefill worker only (sequential PD)
-    pub fn record_outcome_prefill(&self, success: bool) {
+    pub fn record_outcome_prefill(&self, status_code: u16) {
         match self {
-            Self::Dual { prefill, .. } => prefill.record_outcome(success),
+            Self::Dual { prefill, .. } => prefill.record_outcome(status_code),
             Self::Single { .. } => {
                 debug!("record_outcome_prefill called on Single worker selection, ignoring");
             }
@@ -547,9 +547,9 @@ impl WorkerSelection {
     }
 
     /// Record circuit breaker outcome for decode worker only (sequential PD)
-    pub fn record_outcome_decode(&self, success: bool) {
+    pub fn record_outcome_decode(&self, status_code: u16) {
         match self {
-            Self::Dual { decode, .. } => decode.record_outcome(success),
+            Self::Dual { decode, .. } => decode.record_outcome(status_code),
             Self::Single { .. } => {
                 debug!("record_outcome_decode called on Single worker selection, ignoring");
             }

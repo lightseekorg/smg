@@ -128,6 +128,8 @@ impl MeshController {
                 if removed > 0 {
                     log::info!("GC: removed {removed} tombstoned CRDT metadata entries");
                 }
+                // Checkpoint pending tree ops into config blobs
+                self.sync_manager.checkpoint_tree_states();
                 // Record store sizes for monitoring
                 metrics::record_store_sizes(
                     self.stores.worker.len(),
@@ -135,6 +137,8 @@ impl MeshController {
                     self.stores.membership.len(),
                     self.stores.app.len(),
                 );
+                // Clean up retry managers for peers no longer in cluster state
+                retry_managers.retain(|peer_name, _| map.contains_key(peer_name));
             }
 
             tokio::select! {

@@ -499,7 +499,7 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
     };
 
     // Process messages and apply chat template
-    let processed_messages = match process_chat_messages(&chat_request, tokenizer.as_ref()) {
+    let processed_messages = match process_chat_messages(&chat_request, tokenizer.as_ref(), None) {
         Ok(msgs) => msgs,
         Err(e) => {
             set_error_message(error_out, &format!("Failed to process messages: {e}"));

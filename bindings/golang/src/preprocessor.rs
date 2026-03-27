@@ -37,7 +37,7 @@ fn preprocess_impl(
     tokenizer: &dyn Tokenizer,
 ) -> Result<PreprocessResult, (SglErrorCode, String)> {
     // Process chat messages (apply chat_template)
-    let processed_messages = process_chat_messages(chat_request, tokenizer).map_err(|e| {
+    let processed_messages = process_chat_messages(chat_request, tokenizer, None).map_err(|e| {
         (
             SglErrorCode::ParsingError,
             format!("Failed to process chat messages: {e}"),

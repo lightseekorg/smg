@@ -1,0 +1,599 @@
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: arc-runner-4-gpu-h100
+  namespace: actions-runner-system
+spec:
+  replicas: 4
+  template:
+    spec:
+      ephemeral: true
+      repository: lightseekorg/smg
+      labels:
+        - 4-gpu-h100
+        - k8s-runner-gpu
+      serviceAccountName: arc-runner-sa
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
+
+      nodeSelector:
+        nvidia.com/gpu: "true"
+        node.kubernetes.io/instance-type: BM.GPU.H100.8
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: runner-deployment-name
+                      operator: In
+                      values:
+                        - arc-runner-4-gpu-h100
+                topologyKey: kubernetes.io/hostname
+
+      volumes:
+        - name: model-cache
+          hostPath:
+            path: /raid/models
+            type: Directory
+        - name: docker-sock
+          emptyDir: {}
+        - name: docker-storage
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+      containers:
+        - name: runner
+          image: fra.ocir.io/idqj093njucb/action-runner:v0.0.1
+          resources:
+            requests:
+              cpu: "32"
+              memory: "128Gi"
+            limits:
+              nvidia.com/gpu: 4
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: docker-sock
+              mountPath: /var/run
+            - name: dshm
+              mountPath: /dev/shm
+          env:
+            - name: DOCKER_HOST
+              value: unix:///var/run/docker.sock
+            - name: RUNNER_UPDATE_DISABLED
+              value: "true"
+            - name: HF_HOME
+              value: /models
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HUGGINGFACE_API_KEY
+                  name: huggingface-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: OPENAI_API_KEY
+                  name: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: ANTHROPIC_API_KEY
+                  name: anthropic-api-key
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: XAI_API_KEY
+                  name: xai-api-key
+        - name: docker
+          image: fra.ocir.io/idqj093njucb/docker:dind
+          securityContext:
+            privileged: true  # Required for DinD
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""  # Disables TLS for shared socket use
+            - name: DOCKER_DRIVER
+              value: overlay2
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run
+            - name: docker-storage
+              mountPath: /var/lib/docker
+---
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: arc-runner-gpu-a10
+  namespace: actions-runner-system
+spec:
+  replicas: 2
+  template:
+    spec:
+      ephemeral: true
+      repository: lightseekorg/smg
+      labels:
+        - 4-gpu-a10
+        - k8s-runner-gpu
+      serviceAccountName: arc-runner-sa
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
+
+      nodeSelector:
+        nvidia.com/gpu: "true"
+        node.kubernetes.io/instance-type: BM.GPU.A10.4
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: runner-deployment-name
+                      operator: In
+                      values:
+                        - arc-runner-gpu-a10
+                topologyKey: kubernetes.io/hostname
+
+      volumes:
+        - name: model-cache
+          hostPath:
+            path: /raid/models
+            type: Directory
+        - name: docker-sock
+          emptyDir: {}
+        - name: docker-storage
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+      containers:
+        - name: runner
+          image: fra.ocir.io/idqj093njucb/action-runner:v0.0.1
+          resources:
+            limits:
+              nvidia.com/gpu: 4
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: docker-sock
+              mountPath: /var/run
+            - name: dshm
+              mountPath: /dev/shm
+          env:
+            - name: DOCKER_HOST
+              value: unix:///var/run/docker.sock
+            - name: RUNNER_UPDATE_DISABLED
+              value: "true"
+            - name: HF_HOME
+              value: /models
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HUGGINGFACE_API_KEY
+                  name: huggingface-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: OPENAI_API_KEY
+                  name: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: ANTHROPIC_API_KEY
+                  name: anthropic-api-key
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: XAI_API_KEY
+                  name: xai-api-key
+        - name: docker
+          image: fra.ocir.io/idqj093njucb/docker:dind
+          securityContext:
+            privileged: true  # Required for DinD
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""  # Disables TLS for shared socket use
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run
+            - name: docker-storage
+              mountPath: /var/lib/docker
+---
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: arc-runner-1-gpu-h100
+  namespace: actions-runner-system
+spec:
+  replicas: 4
+  template:
+    spec:
+      ephemeral: true
+      repository: lightseekorg/smg
+      labels:
+        - 1-gpu-h100
+        - 1-gpu
+      serviceAccountName: arc-runner-sa
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
+
+      nodeSelector:
+        nvidia.com/gpu: "true"
+        node.kubernetes.io/instance-type: BM.GPU.H100.8
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: runner-deployment-name
+                      operator: In
+                      values:
+                        - arc-runner-1-gpu-h100
+                topologyKey: kubernetes.io/hostname
+
+      volumes:
+        - name: model-cache
+          hostPath:
+            path: /raid/models
+            type: Directory
+        - name: docker-sock
+          emptyDir: {}
+        - name: docker-storage
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+      containers:
+        - name: runner
+          image: fra.ocir.io/idqj093njucb/action-runner:v0.0.1
+          resources:
+            requests:
+              cpu: "32"
+              memory: "128Gi"
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: docker-sock
+              mountPath: /var/run
+            - name: dshm
+              mountPath: /dev/shm
+          env:
+            - name: DOCKER_HOST
+              value: unix:///var/run/docker.sock
+            - name: RUNNER_UPDATE_DISABLED
+              value: "true"
+            - name: HF_HOME
+              value: /models
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HUGGINGFACE_API_KEY
+                  name: huggingface-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: OPENAI_API_KEY
+                  name: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: ANTHROPIC_API_KEY
+                  name: anthropic-api-key
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: XAI_API_KEY
+                  name: xai-api-key
+        - name: docker
+          image: fra.ocir.io/idqj093njucb/docker:dind
+          securityContext:
+            privileged: true  # Required for DinD
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""  # Disables TLS for shared socket use
+            - name: DOCKER_DRIVER
+              value: overlay2
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run
+            - name: docker-storage
+              mountPath: /var/lib/docker
+---
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: arc-runner-1-gpu
+  namespace: actions-runner-system
+spec:
+  replicas: 2
+  template:
+    spec:
+      ephemeral: true
+      repository: lightseekorg/smg
+      labels:
+        - 1-gpu
+      serviceAccountName: arc-runner-sa
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
+
+      nodeSelector:
+        nvidia.com/gpu: "true"
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: runner-deployment-name
+                      operator: In
+                      values:
+                        - arc-runner-1-gpu
+                topologyKey: kubernetes.io/hostname
+
+      volumes:
+        - name: model-cache
+          hostPath:
+            path: /raid/models
+            type: Directory
+        - name: docker-sock
+          emptyDir: {}
+        - name: docker-storage
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+      containers:
+        - name: runner
+          image: fra.ocir.io/idqj093njucb/action-runner:v0.0.1
+          resources:
+            requests:
+              cpu: "32"
+              memory: "128Gi"
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: docker-sock
+              mountPath: /var/run
+            - name: dshm
+              mountPath: /dev/shm
+          env:
+            - name: DOCKER_HOST
+              value: unix:///var/run/docker.sock
+            - name: RUNNER_UPDATE_DISABLED
+              value: "true"
+            - name: HF_HOME
+              value: /models
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HUGGINGFACE_API_KEY
+                  name: huggingface-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: OPENAI_API_KEY
+                  name: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: ANTHROPIC_API_KEY
+                  name: anthropic-api-key
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: XAI_API_KEY
+                  name: xai-api-key
+        - name: docker
+          image: fra.ocir.io/idqj093njucb/docker:dind
+          securityContext:
+            privileged: true  # Required for DinD
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""  # Disables TLS for shared socket use
+            - name: DOCKER_DRIVER
+              value: overlay2
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run
+            - name: docker-storage
+              mountPath: /var/lib/docker
+---
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: arc-runner-2-gpu-h100
+  namespace: actions-runner-system
+spec:
+  replicas: 2
+  template:
+    spec:
+      ephemeral: true
+      repository: lightseekorg/smg
+      labels:
+        - 2-gpu-h100
+      serviceAccountName: arc-runner-sa
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
+
+      nodeSelector:
+        nvidia.com/gpu: "true"
+        node.kubernetes.io/instance-type: BM.GPU.H100.8
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: runner-deployment-name
+                      operator: In
+                      values:
+                        - arc-runner-2-gpu-h100
+                topologyKey: kubernetes.io/hostname
+
+      volumes:
+        - name: model-cache
+          hostPath:
+            path: /raid/models
+            type: Directory
+        - name: docker-sock
+          emptyDir: {}
+        - name: docker-storage
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+      containers:
+        - name: runner
+          image: fra.ocir.io/idqj093njucb/action-runner:v0.0.1
+          resources:
+            requests:
+              cpu: "32"
+              memory: "128Gi"
+            limits:
+              nvidia.com/gpu: 2
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: docker-sock
+              mountPath: /var/run
+            - name: dshm
+              mountPath: /dev/shm
+          env:
+            - name: DOCKER_HOST
+              value: unix:///var/run/docker.sock
+            - name: RUNNER_UPDATE_DISABLED
+              value: "true"
+            - name: HF_HOME
+              value: /models
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HUGGINGFACE_API_KEY
+                  name: huggingface-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: OPENAI_API_KEY
+                  name: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: ANTHROPIC_API_KEY
+                  name: anthropic-api-key
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: XAI_API_KEY
+                  name: xai-api-key
+        - name: docker
+          image: fra.ocir.io/idqj093njucb/docker:dind
+          securityContext:
+            privileged: true  # Required for DinD
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""  # Disables TLS for shared socket use
+            - name: DOCKER_DRIVER
+              value: overlay2
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run
+            - name: docker-storage
+              mountPath: /var/lib/docker
