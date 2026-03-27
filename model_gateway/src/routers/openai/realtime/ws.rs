@@ -117,7 +117,7 @@ pub(crate) async fn handle_realtime_ws(
     );
 
     ws.on_upgrade(move |socket: WebSocket| async move {
-        let success = match proxy::run_ws_proxy(
+        match proxy::run_ws_proxy(
             socket,
             &upstream_ws_url,
             &auth_str,
@@ -127,14 +127,13 @@ pub(crate) async fn handle_realtime_ws(
         )
         .await
         {
-            Ok(()) => true,
+            Ok(()) => worker.record_outcome(200),
             Err(e) => {
+                worker.record_outcome(502);
                 error!(session_id, error = %e, "Realtime WebSocket proxy error");
-                false
             }
-        };
+        }
 
-        worker.record_outcome(success);
         realtime_registry.remove_session(&session_id);
         debug!(session_id, "Realtime session cleaned up");
     })

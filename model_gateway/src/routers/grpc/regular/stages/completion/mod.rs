@@ -1,13 +1,12 @@
 //! Completion API endpoint pipeline stages
 //!
-//! This module is the next stacked step after the native completion typing work
-//! landed in PR #840. That PR introduced `RequestType::Completion`,
-//! `FinalResponse::Completion`, and `execute_completion()`. This branch begins
-//! the endpoint-specific stage stack with `CompletionPreparationStage`.
-//!
-//! Later follow-up PRs can add completion-specific request building and
-//! response processing here, similar to the Messages API pipeline.
+//! This module continues the native `/v1/completions` stage stack after the
+//! scaffolding in PR #840 and preparation in PR #907. It adds completion-specific
+//! request building, with response processing deferred to a follow-up PR.
 
 mod preparation;
+mod request_building;
 
 pub(crate) use preparation::CompletionPreparationStage;
+#[expect(unused_imports, reason = "wired in pipeline factory follow-up PR")]
+pub(crate) use request_building::CompletionRequestBuildingStage;

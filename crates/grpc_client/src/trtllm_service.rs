@@ -11,6 +11,7 @@ use std::{
 use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{ResponseFormat, StringOrArray},
+    completion::CompletionRequest,
     generate::GenerateRequest,
     messages::CreateMessageRequest,
     responses::ResponsesRequest,
@@ -712,6 +713,132 @@ impl TrtllmServiceClient {
             no_repeat_ngram_size: None,
             min_p: None,
             beam_width_array: vec![],
+        }
+    }
+
+    /// Build a GenerateRequest from CompletionRequest (`/v1/completions`)
+    #[expect(
+        clippy::unused_self,
+        reason = "method receiver kept for consistent public API"
+    )]
+    pub fn build_generate_request_from_completion(
+        &self,
+        request_id: String,
+        body: &CompletionRequest,
+        original_text: String,
+        token_ids: Vec<u32>,
+    ) -> Result<proto::GenerateRequest, String> {
+        let sampling_config = Self::build_sampling_config_from_completion(body);
+        let output_config = proto::OutputConfig {
+            logprobs: body.logprobs.map(|v| v.min(5) as i32),
+            prompt_logprobs: None,
+            return_context_logits: false,
+            return_generation_logits: false,
+            exclude_input_from_output: true,
+            return_encoder_output: false,
+            return_perf_metrics: false,
+        };
+
+        let guided_decoding = Self::build_guided_decoding_from_completion(body)?;
+
+        let stop = match &body.stop {
+            Some(StringOrArray::String(s)) => vec![s.clone()],
+            Some(StringOrArray::Array(arr)) => arr.clone(),
+            None => vec![],
+        };
+
+        let grpc_request = proto::GenerateRequest {
+            request_id,
+            tokenized: Some(proto::TokenizedInput {
+                original_text,
+                input_token_ids: token_ids,
+                query_token_ids: vec![],
+            }),
+            sampling_config: Some(sampling_config),
+            output_config: Some(output_config),
+            max_tokens: body.max_tokens.unwrap_or(16),
+            streaming: body.stream,
+            stop,
+            stop_token_ids: body.stop_token_ids.clone().unwrap_or_default(),
+            ignore_eos: body.ignore_eos,
+            bad: vec![],
+            bad_token_ids: vec![],
+            guided_decoding,
+            embedding_bias: vec![],
+            lora_config: None,
+            prompt_tuning_config: None,
+            multimodal_input: None,
+            kv_cache_retention: None,
+            disaggregated_params: None,
+            lookahead_config: None,
+            cache_salt_id: None,
+            arrival_time: None,
+            include_stop_token_in_output: body.no_stop_trim,
+        };
+
+        Ok(grpc_request)
+    }
+
+    fn build_sampling_config_from_completion(request: &CompletionRequest) -> proto::SamplingConfig {
+        proto::SamplingConfig {
+            beam_width: 1,
+            num_return_sequences: request.n.unwrap_or(1),
+            top_k: request.top_k.map(|v| v.max(0)),
+            top_p: Some(request.top_p.unwrap_or(1.0)),
+            top_p_min: None,
+            top_p_reset_ids: None,
+            top_p_decay: None,
+            seed: request.seed.map(|s| s as u64),
+            temperature: Some(request.temperature.unwrap_or(1.0)),
+            min_tokens: request.min_tokens,
+            beam_search_diversity_rate: None,
+            repetition_penalty: Some(request.repetition_penalty.unwrap_or(1.0)),
+            presence_penalty: request.presence_penalty,
+            frequency_penalty: request.frequency_penalty,
+            prompt_ignore_length: None,
+            length_penalty: None,
+            early_stopping: None,
+            no_repeat_ngram_size: None,
+            min_p: request.min_p,
+            beam_width_array: vec![],
+        }
+    }
+
+    fn build_guided_decoding_from_completion(
+        request: &CompletionRequest,
+    ) -> Result<Option<proto::GuidedDecodingParams>, String> {
+        let mut guides = Vec::new();
+
+        if let Some(json_schema) = &request.json_schema {
+            guides.push((
+                proto::guided_decoding_params::GuideType::JsonSchema,
+                json_schema.clone(),
+            ));
+        }
+        if let Some(regex) = &request.regex {
+            guides.push((
+                proto::guided_decoding_params::GuideType::Regex,
+                regex.clone(),
+            ));
+        }
+        if let Some(ebnf) = &request.ebnf {
+            guides.push((
+                proto::guided_decoding_params::GuideType::EbnfGrammar,
+                ebnf.clone(),
+            ));
+        }
+
+        match guides.len() {
+            0 => Ok(None),
+            1 => {
+                #[expect(clippy::expect_used, reason = "INVARIANT: checked len == 1 above")]
+                let (guide_type, guide) = guides.pop().expect("checked len == 1");
+                Ok(Some(proto::GuidedDecodingParams {
+                    guide_type: guide_type as i32,
+                    guide,
+                }))
+            }
+            _ => Err("Multiple structured constraints are not allowed".to_string()),
         }
     }
 

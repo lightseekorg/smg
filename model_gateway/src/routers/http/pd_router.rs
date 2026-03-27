@@ -354,9 +354,8 @@ impl PDRouter {
                             .await;
 
                         let status = response.status();
-                        let not_error = status.is_success() || status.is_client_error();
-                        prefill.record_outcome(not_error);
-                        decode.record_outcome(not_error);
+                        prefill.record_outcome(status.as_u16());
+                        decode.record_outcome(status.as_u16());
 
                         // Record worker errors for server errors (5xx)
                         if status.is_server_error() {

@@ -28,7 +28,7 @@ use openai_protocol::{
         RealtimeTranscriptionSessionCreateRequest,
     },
     rerank::{RerankRequest, V1RerankReqInput},
-    responses::{ResponsesGetParams, ResponsesRequest},
+    responses::ResponsesRequest,
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
     validated::ValidatedJson,
     worker::{WorkerSpec, WorkerUpdateRequest},
@@ -65,7 +65,7 @@ use crate::{
             get_worker_states, set_global_rate_limit, trigger_graceful_shutdown, update_app_config,
         },
         openai::realtime::ws::RealtimeQueryParams,
-        parse,
+        parse, responses as response_handlers,
         router_manager::RouterManager,
         tokenize, RouterTrait,
     },
@@ -290,13 +290,8 @@ async fn v1_classify(
 async fn v1_responses_get(
     State(state): State<Arc<AppState>>,
     Path(response_id): Path<String>,
-    headers: http::HeaderMap,
-    Query(params): Query<ResponsesGetParams>,
 ) -> Response {
-    state
-        .router
-        .get_response(Some(&headers), &response_id, &params)
-        .await
+    response_handlers::get_response(&state.context.response_storage, &response_id).await
 }
 
 async fn v1_responses_cancel(
@@ -313,22 +308,15 @@ async fn v1_responses_cancel(
 async fn v1_responses_delete(
     State(state): State<Arc<AppState>>,
     Path(response_id): Path<String>,
-    headers: http::HeaderMap,
 ) -> Response {
-    state
-        .router
-        .delete_response(Some(&headers), &response_id)
-        .await
+    response_handlers::delete_response(&state.context.response_storage, &response_id).await
 }
 
 async fn v1_responses_list_input_items(
     State(state): State<Arc<AppState>>,
     Path(response_id): Path<String>,
-    headers: http::HeaderMap,
 ) -> Response {
-    state
-        .router
-        .list_response_input_items(Some(&headers), &response_id)
+    response_handlers::list_response_input_items(&state.context.response_storage, &response_id)
         .await
 }
 
