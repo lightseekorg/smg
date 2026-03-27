@@ -48,32 +48,12 @@ impl ChatPreparationStage {
         // Step 1: Filter tools if needed
         let body_ref = utils::filter_chat_request_by_tool_choice(request);
 
-        // Step 2: Process messages and apply chat template
-        let processed_messages = match utils::process_chat_messages(&body_ref, &*tokenizer) {
-            Ok(msgs) => msgs,
-            Err(e) => {
-                error!(function = "ChatPreparationStage::execute", error = %e, "Failed to process chat messages");
-                return Err(error::bad_request("process_messages_failed", e));
-            }
-        };
-
-        // Step 3: Tokenize the processed text (no special tokens - chat template already handles them)
-        let encoding = match tokenizer.encode(&processed_messages.text, false) {
-            Ok(encoding) => encoding,
-            Err(e) => {
-                error!(function = "ChatPreparationStage::execute", error = %e, "Tokenization failed");
-                return Err(error::internal_error(
-                    "tokenization_failed",
-                    format!("Tokenization failed: {e}"),
-                ));
-            }
-        };
-
-        let mut token_ids = encoding.token_ids().to_vec();
-
-        // Step 3.5: Full multimodal processing (fetch + preprocess + expand tokens + hash)
-        let mut multimodal_intermediate = None;
-        if multimodal::has_multimodal_content(&request.messages) {
+        // Resolve multimodal context once: placeholder token, model_id, tokenizer_source.
+        // The placeholder is passed to process_chat_messages so that string-format chat
+        // templates insert it per image instead of stripping image parts.  The remaining
+        // fields are reused by process_multimodal to avoid duplicate lookups.
+        let is_multimodal = multimodal::has_multimodal_content(&request.messages);
+        let (image_placeholder, mm_context) = if is_multimodal {
             if let Some(mm_components) = ctx.components.multimodal.as_ref() {
                 let model_id = ctx.input.model_id.as_str();
                 let tokenizer_source = ctx
@@ -96,37 +76,20 @@ impl ChatPreparationStage {
                     ));
                 }
 
-                match multimodal::process_multimodal(
-                    &request.messages,
+                let placeholder = multimodal::resolve_placeholder_token(
                     model_id,
                     &*tokenizer,
-                    token_ids,
                     mm_components,
                     &tokenizer_source,
                 )
                 .await
-                {
-                    Ok(output) => {
-                        debug!(
-                            function = "ChatPreparationStage::execute",
-                            expanded_tokens = output.expanded_token_ids.len(),
-                            "Multimodal processing complete"
-                        );
-                        token_ids = output.expanded_token_ids;
-                        multimodal_intermediate = Some(output.intermediate);
-                    }
-                    Err(e) => {
-                        error!(
-                            function = "ChatPreparationStage::execute",
-                            error = %e,
-                            "Multimodal processing failed"
-                        );
-                        return Err(error::bad_request(
-                            "multimodal_processing_failed",
-                            format!("Multimodal processing failed: {e}"),
-                        ));
-                    }
-                }
+                .ok()
+                .flatten();
+
+                (
+                    placeholder,
+                    Some((mm_components, model_id, tokenizer_source)),
+                )
             } else {
                 error!(
                     function = "ChatPreparationStage::execute",
@@ -136,6 +99,71 @@ impl ChatPreparationStage {
                     "multimodal_not_supported",
                     "Multimodal content detected but multimodal processing is not available",
                 ));
+            }
+        } else {
+            (None, None)
+        };
+
+        // Step 2: Process messages and apply chat template
+        let processed_messages = match utils::process_chat_messages(
+            &body_ref,
+            &*tokenizer,
+            image_placeholder.as_deref(),
+        ) {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                error!(function = "ChatPreparationStage::execute", error = %e, "Failed to process chat messages");
+                return Err(error::bad_request("process_messages_failed", e));
+            }
+        };
+
+        // Step 3: Tokenize the processed text (no special tokens - chat template already handles them)
+        let encoding = match tokenizer.encode(&processed_messages.text, false) {
+            Ok(encoding) => encoding,
+            Err(e) => {
+                error!(function = "ChatPreparationStage::execute", error = %e, "Tokenization failed");
+                return Err(error::internal_error(
+                    "tokenization_failed",
+                    format!("Tokenization failed: {e}"),
+                ));
+            }
+        };
+
+        let mut token_ids = encoding.token_ids().to_vec();
+
+        // Step 4: Full multimodal processing (fetch + preprocess + expand tokens + hash)
+        let mut multimodal_intermediate = None;
+        if let Some((mm_components, model_id, tokenizer_source)) = mm_context {
+            match multimodal::process_multimodal(
+                &request.messages,
+                model_id,
+                &*tokenizer,
+                token_ids,
+                mm_components,
+                &tokenizer_source,
+            )
+            .await
+            {
+                Ok(output) => {
+                    debug!(
+                        function = "ChatPreparationStage::execute",
+                        expanded_tokens = output.expanded_token_ids.len(),
+                        "Multimodal processing complete"
+                    );
+                    token_ids = output.expanded_token_ids;
+                    multimodal_intermediate = Some(output.intermediate);
+                }
+                Err(e) => {
+                    error!(
+                        function = "ChatPreparationStage::execute",
+                        error = %e,
+                        "Multimodal processing failed"
+                    );
+                    return Err(error::bad_request(
+                        "multimodal_processing_failed",
+                        format!("Multimodal processing failed: {e}"),
+                    ));
+                }
             }
         }
 
