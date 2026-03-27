@@ -10,7 +10,7 @@ use openai_protocol::{
         RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
         RealtimeTranscriptionSessionCreateRequest,
     },
-    responses::{ResponsesGetParams, ResponsesRequest},
+    responses::ResponsesRequest,
 };
 
 use super::{
@@ -171,23 +171,6 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             responses_components: &self.responses_components,
         };
         responses_route::route_responses(&deps, headers, body, model_id).await
-    }
-
-    async fn get_response(
-        &self,
-        _headers: Option<&HeaderMap>,
-        response_id: &str,
-        _params: &ResponsesGetParams,
-    ) -> Response {
-        super::responses::get_response(&self.responses_components, response_id).await
-    }
-
-    async fn list_response_input_items(
-        &self,
-        _headers: Option<&HeaderMap>,
-        response_id: &str,
-    ) -> Response {
-        super::responses::list_response_input_items(&self.responses_components, response_id).await
     }
 
     async fn route_realtime_session(

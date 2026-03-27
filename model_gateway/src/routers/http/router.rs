@@ -16,7 +16,7 @@ use openai_protocol::{
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
     rerank::{RerankRequest, RerankResponse, RerankResult},
-    responses::{ResponsesGetParams, ResponsesRequest},
+    responses::ResponsesRequest,
 };
 use reqwest::Client;
 use tokio::sync::mpsc;
@@ -450,12 +450,6 @@ impl Router {
             .unwrap_or_else(|| error::bad_gateway("no_worker_response", "No worker response"))
     }
 
-    // Route a GET request with provided headers to a specific endpoint
-    async fn route_get_request(&self, headers: Option<&HeaderMap>, endpoint: &str) -> Response {
-        self.route_simple_request(headers, endpoint, Method::GET)
-            .await
-    }
-
     // Route a POST request with empty body to a specific endpoint
     async fn route_post_empty_request(
         &self,
@@ -730,16 +724,6 @@ impl RouterTrait for Router {
     ) -> Response {
         self.route_typed_request(headers, body, "/v1/responses", model_id)
             .await
-    }
-
-    async fn get_response(
-        &self,
-        headers: Option<&HeaderMap>,
-        response_id: &str,
-        _params: &ResponsesGetParams,
-    ) -> Response {
-        let endpoint = format!("v1/responses/{response_id}");
-        self.route_get_request(headers, &endpoint).await
     }
 
     async fn cancel_response(&self, headers: Option<&HeaderMap>, response_id: &str) -> Response {
