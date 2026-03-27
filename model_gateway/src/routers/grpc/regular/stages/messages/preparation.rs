@@ -71,36 +71,9 @@ impl MessagePreparationStage {
             Some(filtered_tools.as_slice())
         };
 
-        // Step 2: Process messages and apply chat template
-        let processed_messages = match message_utils::process_messages(
-            request,
-            &*tokenizer,
-            tools_for_template,
-        ) {
-            Ok(msgs) => msgs,
-            Err(e) => {
-                error!(function = "MessagePreparationStage::execute", error = %e, "Failed to process messages");
-                return Err(error::bad_request("process_messages_failed", e));
-            }
-        };
-
-        // Step 3: Tokenize the processed text
-        let encoding = match tokenizer.encode(&processed_messages.text, false) {
-            Ok(encoding) => encoding,
-            Err(e) => {
-                error!(function = "MessagePreparationStage::execute", error = %e, "Tokenization failed");
-                return Err(error::internal_error(
-                    "tokenization_failed",
-                    format!("Tokenization failed: {e}"),
-                ));
-            }
-        };
-
-        let mut token_ids = encoding.token_ids().to_vec();
-
-        // Step 3.5: Multimodal processing (fetch + preprocess + expand tokens + hash)
-        let mut multimodal_intermediate = None;
-        if multimodal::has_multimodal_content_messages(&request.messages) {
+        // Resolve multimodal context once (see chat/preparation.rs for details).
+        let is_multimodal = multimodal::has_multimodal_content_messages(&request.messages);
+        let (image_placeholder, mm_context) = if is_multimodal {
             if let Some(mm_components) = ctx.components.multimodal.as_ref() {
                 let model_id = ctx.input.model_id.as_str();
                 let tokenizer_source = ctx
@@ -123,37 +96,20 @@ impl MessagePreparationStage {
                     ));
                 }
 
-                match multimodal::process_multimodal_messages(
-                    &request.messages,
+                let placeholder = multimodal::resolve_placeholder_token(
                     model_id,
                     &*tokenizer,
-                    token_ids,
                     mm_components,
                     &tokenizer_source,
                 )
                 .await
-                {
-                    Ok(output) => {
-                        debug!(
-                            function = "MessagePreparationStage::execute",
-                            expanded_tokens = output.expanded_token_ids.len(),
-                            "Multimodal processing complete"
-                        );
-                        token_ids = output.expanded_token_ids;
-                        multimodal_intermediate = Some(output.intermediate);
-                    }
-                    Err(e) => {
-                        error!(
-                            function = "MessagePreparationStage::execute",
-                            error = %e,
-                            "Multimodal processing failed"
-                        );
-                        return Err(error::bad_request(
-                            "multimodal_processing_failed",
-                            format!("Multimodal processing failed: {e}"),
-                        ));
-                    }
-                }
+                .ok()
+                .flatten();
+
+                (
+                    placeholder,
+                    Some((mm_components, model_id, tokenizer_source)),
+                )
             } else {
                 error!(
                     function = "MessagePreparationStage::execute",
@@ -163,6 +119,72 @@ impl MessagePreparationStage {
                     "multimodal_not_supported",
                     "Multimodal content detected but multimodal processing is not available",
                 ));
+            }
+        } else {
+            (None, None)
+        };
+
+        // Step 2: Process messages and apply chat template
+        let processed_messages = match message_utils::process_messages(
+            request,
+            &*tokenizer,
+            tools_for_template,
+            image_placeholder.as_deref(),
+        ) {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                error!(function = "MessagePreparationStage::execute", error = %e, "Failed to process messages");
+                return Err(error::bad_request("process_messages_failed", e));
+            }
+        };
+
+        // Step 3: Tokenize the processed text
+        let encoding = match tokenizer.encode(&processed_messages.text, false) {
+            Ok(encoding) => encoding,
+            Err(e) => {
+                error!(function = "MessagePreparationStage::execute", error = %e, "Tokenization failed");
+                return Err(error::internal_error(
+                    "tokenization_failed",
+                    format!("Tokenization failed: {e}"),
+                ));
+            }
+        };
+
+        let mut token_ids = encoding.token_ids().to_vec();
+
+        // Step 4: Multimodal processing (fetch + preprocess + expand tokens + hash)
+        let mut multimodal_intermediate = None;
+        if let Some((mm_components, model_id, tokenizer_source)) = mm_context {
+            match multimodal::process_multimodal_messages(
+                &request.messages,
+                model_id,
+                &*tokenizer,
+                token_ids,
+                mm_components,
+                &tokenizer_source,
+            )
+            .await
+            {
+                Ok(output) => {
+                    debug!(
+                        function = "MessagePreparationStage::execute",
+                        expanded_tokens = output.expanded_token_ids.len(),
+                        "Multimodal processing complete"
+                    );
+                    token_ids = output.expanded_token_ids;
+                    multimodal_intermediate = Some(output.intermediate);
+                }
+                Err(e) => {
+                    error!(
+                        function = "MessagePreparationStage::execute",
+                        error = %e,
+                        "Multimodal processing failed"
+                    );
+                    return Err(error::bad_request(
+                        "multimodal_processing_failed",
+                        format!("Multimodal processing failed: {e}"),
+                    ));
+                }
             }
         }
 
