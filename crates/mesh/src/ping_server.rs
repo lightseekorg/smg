@@ -564,19 +564,8 @@ impl Gossip for GossipService {
 
             const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
             loop {
-                let msg_result =
-                    match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming.next()).await {
-                        Ok(Some(msg)) => msg,
-                        Ok(None) => break, // stream closed normally
-                        Err(_) => {
-                            tracing::warn!(
-                                "sync_stream idle timeout ({STREAM_IDLE_TIMEOUT:?}) — closing"
-                            );
-                            break;
-                        }
-                    };
-                match msg_result {
-                    Ok(msg) => {
+                match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming.next()).await {
+                    Ok(Some(Ok(msg))) => {
                         sequence += 1;
                         peer_id.clone_from(&msg.peer_id);
 
@@ -1134,11 +1123,18 @@ impl Gossip for GossipService {
                             }
                         }
                     }
-                    Err(e) => {
+                    Ok(Some(Err(e))) => {
                         log::error!("Error receiving stream message: {}", e);
                         record_nack(&peer_id);
                         update_peer_connections(&peer_id, false);
                         record_peer_reconnect(&peer_id);
+                        break;
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            "sync_stream idle timeout ({STREAM_IDLE_TIMEOUT:?}) — closing"
+                        );
                         break;
                     }
                 }

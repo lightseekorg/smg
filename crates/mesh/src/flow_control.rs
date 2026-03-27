@@ -125,11 +125,16 @@ impl ExponentialBackoff {
 
     /// Calculate delay for attempt number (0-indexed)
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
-        // Clamp attempt to prevent f64 overflow: 2.0^63 < f64::MAX,
-        // but 2.0^1024 = infinity which panics in Duration::from_secs_f64.
-        let attempt_clamped = attempt.min(63) as i32;
-        let delay_secs = self.initial_delay.as_secs_f64() * self.multiplier.powi(attempt_clamped);
-        let capped = delay_secs.min(self.max_delay.as_secs_f64());
+        let max_delay_secs = self.max_delay.as_secs_f64();
+        let delay_secs = self.initial_delay.as_secs_f64()
+            * self.multiplier.powi(attempt.min(i32::MAX as u32) as i32);
+        // Guard against f64 overflow to infinity (e.g., 2.0^1024)
+        // which would panic in Duration::from_secs_f64.
+        let capped = if delay_secs.is_finite() {
+            delay_secs.min(max_delay_secs)
+        } else {
+            max_delay_secs
+        };
         Duration::from_secs_f64(capped)
     }
 }
