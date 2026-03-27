@@ -16,6 +16,8 @@
 
 set -euo pipefail
 
+NCCL_VERSION_CONSTRAINT="nvidia-nccl-cu13>=2.28.9,<=2.29.2"
+
 # Activate venv if it exists
 if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
@@ -58,7 +60,7 @@ if [ -n "$CACHED_WHEEL" ] && [ -f "$CACHED_WHEEL" ]; then
 
     # ── Install pip and NCCL runtime ─────────────────────────────────────────
     pip install --upgrade pip
-    pip install --no-cache-dir "nvidia-nccl-cu13>=2.28.9,<=2.29.2"
+    pip install --no-cache-dir "$NCCL_VERSION_CONSTRAINT"
 
     # ── Install cached wheel ─────────────────────────────────────────────────
     # Use --extra-index-url for cu130 torch so pip resolves torch 2.10+cu130
@@ -186,7 +188,7 @@ fi
 # build_wheel.py runs pip install internally which can change the NCCL version.
 # Copy headers+libs to a fixed directory that pip can't overwrite, and point
 # NCCL_ROOT there for CMake.
-pip install --no-cache-dir --force-reinstall "nvidia-nccl-cu13>=2.28.9,<=2.29.2"
+pip install --no-cache-dir --force-reinstall "$NCCL_VERSION_CONSTRAINT"
 
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
 NCCL_PIP_ROOT="$SITE_PACKAGES/nvidia/nccl"
