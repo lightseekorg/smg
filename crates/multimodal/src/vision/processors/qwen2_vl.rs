@@ -20,7 +20,6 @@
 use std::ops::Deref;
 
 use image::DynamicImage;
-use ndarray::Array3;
 
 use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
 use crate::vision::{
@@ -188,18 +187,6 @@ impl Qwen2VLProcessor {
         self.inner
             .calculate_tokens_from_grid(grid_t, grid_h, grid_w)
     }
-
-    /// Reshape pixel values from [C, H, W] to flattened patches format.
-    pub fn reshape_to_patches(
-        &self,
-        tensor: &Array3<f32>,
-        grid_t: usize,
-        grid_h: usize,
-        grid_w: usize,
-    ) -> Result<Vec<f32>, TransformError> {
-        self.inner
-            .reshape_to_patches(tensor, grid_t, grid_h, grid_w)
-    }
 }
 
 impl Deref for Qwen2VLProcessor {
@@ -326,12 +313,15 @@ mod tests {
     }
 
     #[test]
-    fn test_smart_resize_too_small_dimension_error() {
+    fn test_smart_resize_small_dimension_clamps_to_factor() {
         let processor = Qwen2VLProcessor::new();
 
-        // Dimension smaller than factor
-        let result = processor.smart_resize(10, 100);
-        assert!(result.is_err());
+        // Dimension smaller than factor (28) should be clamped up, not rejected
+        let (h, w) = processor.smart_resize(10, 100).unwrap();
+        assert!(h >= 28);
+        assert!(w >= 28);
+        assert_eq!(h % 28, 0);
+        assert_eq!(w % 28, 0);
     }
 
     #[test]

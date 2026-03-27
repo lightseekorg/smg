@@ -273,7 +273,7 @@ impl Phi4VisionProcessor {
         // Resize image with bilinear interpolation (matching HuggingFace torchvision)
         // HuggingFace uses torchvision.transforms.functional.resize with BILINEAR + antialias=True.
         // FilterType::Triangle (bilinear) closely matches this behavior.
-        let resized = image.resize_exact(new_w, new_h, FilterType::Triangle);
+        let resized = transforms::resize(image, new_w, new_h, FilterType::Triangle);
 
         // Pad to target dimensions (white padding on right/bottom)
         let padded = self.pad_image(&resized, target_width, target_height);

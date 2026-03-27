@@ -36,7 +36,7 @@ use openai_protocol::{
 use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
+use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler, WorkerStateSubscriber};
 use tokio::{signal, spawn, sync::mpsc};
 use tracing::{debug, error, info, warn, Level};
 use wfaas::LoggingSubscriber;
@@ -200,7 +200,7 @@ async fn v1_chat_completions(
 async fn v1_completions(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
-    Json(body): Json<CompletionRequest>,
+    ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Response {
     state
         .router
@@ -1123,6 +1123,14 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         app_context
             .worker_registry
             .set_mesh_sync(Some(handle.sync_manager.clone()));
+        handle
+            .sync_manager
+            .register_worker_state_subscriber(app_context.worker_registry.clone());
+        // Replay workers already in the CRDT store — they arrived between
+        // mesh server start and subscriber registration above.
+        for state in handle.sync_manager.get_all_worker_states() {
+            app_context.worker_registry.on_remote_worker_state(&state);
+        }
         info!("Mesh sync manager set on worker registry");
 
         handle
@@ -1139,7 +1147,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let mesh_port = config
         .mesh_server_config
         .as_ref()
-        .map(|c| c.self_addr.port());
+        .map(|c| c.advertise_addr.port());
 
     let app_state = Arc::new(AppState {
         router,

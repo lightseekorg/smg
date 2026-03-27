@@ -116,10 +116,10 @@ Enable mesh networking with minimal flags:
 
 ```bash
 # Start first node
-smg --enable-mesh --mesh-port 39527
+smg --enable-mesh --mesh-host 0.0.0.0 --mesh-advertise-host 10.0.0.1 --mesh-port 39527
 
 # Start second node, joining the first
-smg --enable-mesh --mesh-port 39528 --mesh-peer-urls 10.0.0.1:39527
+smg --enable-mesh --mesh-host 0.0.0.0 --mesh-advertise-host 10.0.0.2 --mesh-port 39528 --mesh-peer-urls 10.0.0.1:39527
 ```
 
 ### Command Line Options
@@ -128,17 +128,20 @@ smg --enable-mesh --mesh-port 39528 --mesh-peer-urls 10.0.0.1:39527
 |------|---------|-------------|
 | `--enable-mesh` | `false` | Enable mesh networking for HA deployments |
 | `--mesh-server-name` | (auto) | Unique identifier for this node in the cluster |
-| `--mesh-host` | `0.0.0.0` | Host address for mesh communication |
+| `--mesh-host` | `0.0.0.0` | Bind address for mesh communication |
+| `--mesh-advertise-host` | `--mesh-host` | Routable address advertised to mesh peers |
 | `--mesh-port` | `39527` | Port for mesh gRPC communication |
 | `--mesh-peer-urls` | (none) | Initial peer URLs for cluster bootstrap |
 | `--router-selector` | (none) | Label selector for Kubernetes pod discovery (e.g. `app=smg tier=router`) |
 
 ### Python Entrypoint
 
-`--enable-mesh` is also available in the Python entrypoint used by the Docker image:
+`--enable-mesh` is also available in the Python entrypoint used by the Docker image. When
+`--mesh-host` is left at `0.0.0.0`, set `--mesh-advertise-host` to a routable address such as
+the pod IP:
 
 ```bash
-smg launch --enable-mesh --mesh-port 39527
+smg launch --enable-mesh --mesh-host 0.0.0.0 --mesh-advertise-host 10.0.0.11 --mesh-port 39527
 ```
 
 ### Basic Configuration
@@ -153,6 +156,7 @@ smg launch --enable-mesh --mesh-port 39527
 smg --enable-mesh \
     --mesh-server-name node1 \
     --mesh-host 0.0.0.0 \
+    --mesh-advertise-host 10.0.0.11 \
     --mesh-port 39527 \
     --host 0.0.0.0 \
     --port 8000
@@ -167,8 +171,10 @@ smg --enable-mesh \
 ```bash
 smg --enable-mesh \
     --mesh-server-name node2 \
+    --mesh-host 0.0.0.0 \
+    --mesh-advertise-host 10.0.0.12 \
     --mesh-port 39527 \
-    --mesh-peer-urls "node1:39527" \
+    --mesh-peer-urls "10.0.0.11:39527" \
     --host 0.0.0.0 \
     --port 8000
 ```
@@ -182,8 +188,10 @@ smg --enable-mesh \
 ```bash
 smg --enable-mesh \
     --mesh-server-name node3 \
+    --mesh-host 0.0.0.0 \
+    --mesh-advertise-host 10.0.0.13 \
     --mesh-port 39527 \
-    --mesh-peer-urls "node1:39527,node2:39527" \
+    --mesh-peer-urls "10.0.0.11:39527,10.0.0.12:39527" \
     --host 0.0.0.0 \
     --port 8000
 ```
@@ -198,8 +206,9 @@ smg --enable-mesh \
 export SMG_ENABLE_MESH=true
 export SMG_MESH_SERVER_NAME=node1
 export SMG_MESH_HOST=0.0.0.0
+export SMG_MESH_ADVERTISE_HOST=10.0.0.11
 export SMG_MESH_PORT=39527
-export SMG_MESH_PEER_URLS="node1:39527,node2:39527"
+export SMG_MESH_PEER_URLS="10.0.0.11:39527,10.0.0.12:39527"
 ```
 
 ---
@@ -403,6 +412,7 @@ spec:
         - --enable-mesh
         - --mesh-server-name=$(POD_NAME)
         - --mesh-host=0.0.0.0
+        - --mesh-advertise-host=$(POD_IP)
         - --mesh-port=39527
         - --mesh-peer-urls=smg-0.smg-mesh:39527,smg-1.smg-mesh:39527,smg-2.smg-mesh:39527
         - --worker-urls=$(WORKER_URLS)

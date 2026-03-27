@@ -70,6 +70,11 @@ MODEL_SPECS: dict[str, dict] = {
         "model": _resolve_model_path("mistralai/Mistral-7B-Instruct-v0.3"),
         "tp": 1,
         "features": ["chat", "streaming", "function_calling"],
+        "worker_args": ["--constrained-json-disable-any-whitespace"],
+        "vllm_args": [
+            "--structured-outputs-config",
+            '{"disable_any_whitespace": true, "backend": "xgrammar"}',
+        ],
     },
     # Embedding model
     "intfloat/e5-mistral-7b-instruct": {
@@ -90,6 +95,12 @@ MODEL_SPECS: dict[str, dict] = {
         "features": ["chat", "streaming", "function_calling", "reasoning"],
         "worker_args": ["--trust-remote-code"],
         "vllm_args": ["--trust-remote-code"],
+    },
+    # Vision-language model for multimodal benchmarks (MMMU)
+    "Qwen/Qwen3-VL-8B-Instruct": {
+        "model": _resolve_model_path("Qwen/Qwen3-VL-8B-Instruct"),
+        "tp": 1,
+        "features": ["chat", "streaming", "multimodal"],
     },
     # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {

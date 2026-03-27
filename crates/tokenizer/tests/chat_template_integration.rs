@@ -410,3 +410,71 @@ fn test_template_with_multimodal_content() {
     assert!(result.contains("Look at this:"));
     assert!(result.contains("[IMAGE]"));
 }
+
+#[test]
+fn test_bos_token_injected_via_special_tokens() {
+    // Simplified Llama-style template that uses {{ bos_token }}
+    let template = r"{{- bos_token }}{%- for message in messages %}<|start_header_id|>{{ message.role }}<|end_header_id|>
+
+{{ message.content }}<|eot_id|>
+{%- endfor %}{%- if add_generation_prompt %}<|start_header_id|>assistant<|end_header_id|>
+
+{% endif %}";
+
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
+
+    let messages = vec![serde_json::json!({
+        "role": "user",
+        "content": "Hello"
+    })];
+
+    let special_tokens = llm_tokenizer::SpecialTokens {
+        bos_token: Some("<|begin_of_text|>".to_string()),
+        eos_token: Some("<|eot_id|>".to_string()),
+        ..Default::default()
+    };
+
+    let result = processor
+        .apply_chat_template(
+            &messages,
+            ChatTemplateParams {
+                add_generation_prompt: true,
+                special_tokens: Some(&special_tokens),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert!(
+        result.starts_with("<|begin_of_text|>"),
+        "Must start with BOS token. Got: {:?}",
+        &result[..50.min(result.len())]
+    );
+    assert!(result.contains("Hello"));
+    assert!(result.ends_with("assistant<|end_header_id|>\n\n"));
+}
+
+#[test]
+fn test_bos_token_missing_without_special_tokens() {
+    // Same template but without special tokens — bos_token should be empty/undefined
+    let template = r"{{- bos_token }}{%- for message in messages %}{{ message.role }}: {{ message.content }}
+{%- endfor %}";
+
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
+
+    let messages = vec![serde_json::json!({
+        "role": "user",
+        "content": "Hello"
+    })];
+
+    let result = processor
+        .apply_chat_template(&messages, ChatTemplateParams::default())
+        .unwrap();
+
+    // Without special tokens, bos_token is undefined and renders as empty
+    assert!(
+        !result.contains("<|begin_of_text|>"),
+        "Should NOT contain BOS without special tokens"
+    );
+    assert!(result.contains("Hello"));
+}

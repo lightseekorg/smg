@@ -3,6 +3,9 @@
 //! This module provides composable transforms that match HuggingFace image processor
 //! behavior, enabling pure Rust preprocessing without Python dependencies.
 
+use fast_image_resize::{
+    images::Image as FirImage, IntoImageView, ResizeAlg, ResizeOptions, Resizer,
+};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage};
 use ndarray::{s, Array3, Array4};
 use thiserror::Error;
@@ -31,38 +34,65 @@ pub enum TransformError {
 
 pub type Result<T> = std::result::Result<T, TransformError>;
 
+/// Extract RGB pixel data from a DynamicImage, avoiding a copy when already RGB8.
+/// Returns (width, height, raw_bytes) where raw_bytes is interleaved R,G,B,R,G,B,...
+fn rgb_bytes(image: &DynamicImage) -> (usize, usize, std::borrow::Cow<'_, [u8]>) {
+    match image {
+        DynamicImage::ImageRgb8(rgb) => (
+            rgb.width() as usize,
+            rgb.height() as usize,
+            std::borrow::Cow::Borrowed(rgb.as_raw()),
+        ),
+        _ => {
+            let rgb = image.to_rgb8();
+            let w = rgb.width() as usize;
+            let h = rgb.height() as usize;
+            (w, h, std::borrow::Cow::Owned(rgb.into_raw()))
+        }
+    }
+}
+
+/// Build a [C, H, W] f32 tensor from interleaved RGB bytes with per-channel
+/// `scale` and `bias`: `output[c][i] = raw[i*3 + c] * scale[c] + bias[c]`.
+fn build_planar_tensor(
+    raw: &[u8],
+    w: usize,
+    h: usize,
+    scale: [f32; 3],
+    bias: [f32; 3],
+) -> Array3<f32> {
+    let pixels = h * w;
+    let mut data = vec![0.0f32; 3 * pixels];
+    let (r_plane, rest) = data.split_at_mut(pixels);
+    let (g_plane, b_plane) = rest.split_at_mut(pixels);
+
+    for (i, chunk) in raw.chunks_exact(3).enumerate() {
+        r_plane[i] = chunk[0] as f32 * scale[0] + bias[0];
+        g_plane[i] = chunk[1] as f32 * scale[1] + bias[1];
+        b_plane[i] = chunk[2] as f32 * scale[2] + bias[2];
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "data has exactly 3*h*w elements by construction"
+    )]
+    Array3::from_shape_vec((3, h, w), data).expect("shape matches pre-allocated buffer")
+}
+
 /// Convert image to tensor [C, H, W] normalized to [0, 1].
 ///
 /// This matches the default behavior of `torchvision.transforms.ToTensor()`.
 pub fn to_tensor(image: &DynamicImage) -> Array3<f32> {
-    let rgb = image.to_rgb8();
-    let (w, h) = (rgb.width() as usize, rgb.height() as usize);
-    let mut arr = Array3::<f32>::zeros((3, h, w));
-
-    for (x, y, pixel) in rgb.enumerate_pixels() {
-        let (x, y) = (x as usize, y as usize);
-        arr[[0, y, x]] = pixel[0] as f32 / 255.0;
-        arr[[1, y, x]] = pixel[1] as f32 / 255.0;
-        arr[[2, y, x]] = pixel[2] as f32 / 255.0;
-    }
-    arr
+    let (w, h, raw) = rgb_bytes(image);
+    let s = 1.0 / 255.0;
+    build_planar_tensor(&raw, w, h, [s, s, s], [0.0, 0.0, 0.0])
 }
 
 /// Convert image to tensor [C, H, W] without normalization (keeps [0, 255]).
-///
-/// Some models expect unnormalized pixel values.
+#[cfg(test)]
 pub fn to_tensor_no_norm(image: &DynamicImage) -> Array3<f32> {
-    let rgb = image.to_rgb8();
-    let (w, h) = (rgb.width() as usize, rgb.height() as usize);
-    let mut arr = Array3::<f32>::zeros((3, h, w));
-
-    for (x, y, pixel) in rgb.enumerate_pixels() {
-        let (x, y) = (x as usize, y as usize);
-        arr[[0, y, x]] = pixel[0] as f32;
-        arr[[1, y, x]] = pixel[1] as f32;
-        arr[[2, y, x]] = pixel[2] as f32;
-    }
-    arr
+    let (w, h, raw) = rgb_bytes(image);
+    build_planar_tensor(&raw, w, h, [1.0, 1.0, 1.0], [0.0, 0.0, 0.0])
 }
 
 /// Normalize tensor per channel: (x - mean) / std.
@@ -74,13 +104,44 @@ pub fn to_tensor_no_norm(image: &DynamicImage) -> Array3<f32> {
 /// * `mean` - Per-channel mean values
 /// * `std` - Per-channel standard deviation values
 pub fn normalize(tensor: &mut Array3<f32>, mean: &[f64; 3], std: &[f64; 3]) {
-    for c in 0..3 {
-        let mean_c = mean[c] as f32;
-        let std_c = std[c] as f32;
-        tensor
-            .slice_mut(s![c, .., ..])
-            .mapv_inplace(|v| (v - mean_c) / std_c);
+    let [h, w] = [tensor.shape()[1], tensor.shape()[2]];
+    let pixels = h * w;
+
+    if let Some(flat) = tensor.as_slice_mut() {
+        // Fast path: contiguous memory, process channel planes directly
+        for c in 0..3 {
+            let mean_c = mean[c] as f32;
+            let inv_std_c = 1.0 / std[c] as f32;
+            let plane = &mut flat[c * pixels..(c + 1) * pixels];
+            for v in plane.iter_mut() {
+                *v = (*v - mean_c) * inv_std_c;
+            }
+        }
+    } else {
+        for c in 0..3 {
+            let mean_c = mean[c] as f32;
+            let std_c = std[c] as f32;
+            tensor
+                .slice_mut(s![c, .., ..])
+                .mapv_inplace(|v| (v - mean_c) / std_c);
+        }
     }
+}
+
+/// Convert image to tensor and normalize in a single pass.
+///
+/// Fuses `to_tensor` (u8→f32 with /255) and `normalize` ((x-mean)/std)
+/// into one loop to avoid an extra pass over the data.
+pub fn to_tensor_and_normalize(
+    image: &DynamicImage,
+    mean: &[f64; 3],
+    std: &[f64; 3],
+) -> Array3<f32> {
+    let (w, h, raw) = rgb_bytes(image);
+    // Fused: (pixel/255 - mean) / std = pixel * (1/(255*std)) - mean/std
+    let scale: [f32; 3] = std::array::from_fn(|c| 1.0 / (255.0 * std[c] as f32));
+    let bias: [f32; 3] = std::array::from_fn(|c| -(mean[c] as f32) / (std[c] as f32));
+    build_planar_tensor(&raw, w, h, scale, bias)
 }
 
 /// Rescale tensor by a constant factor.
@@ -91,7 +152,19 @@ pub fn rescale(tensor: &mut Array3<f32>, factor: f64) {
     tensor.mapv_inplace(|v| v * factor);
 }
 
-/// Resize image to exact dimensions.
+/// Map `image` crate filter types to `fast_image_resize` algorithm.
+fn to_fir_algorithm(filter: FilterType) -> ResizeAlg {
+    use fast_image_resize::FilterType as FirFilter;
+    match filter {
+        FilterType::Nearest => ResizeAlg::Nearest,
+        FilterType::Triangle => ResizeAlg::Convolution(FirFilter::Bilinear),
+        FilterType::CatmullRom => ResizeAlg::Convolution(FirFilter::CatmullRom),
+        FilterType::Gaussian => ResizeAlg::Convolution(FirFilter::Gaussian),
+        FilterType::Lanczos3 => ResizeAlg::Convolution(FirFilter::Lanczos3),
+    }
+}
+
+/// Resize image to exact dimensions using SIMD-accelerated resizer.
 ///
 /// # Arguments
 /// * `image` - Input image
@@ -99,7 +172,43 @@ pub fn rescale(tensor: &mut Array3<f32>, factor: f64) {
 /// * `height` - Target height
 /// * `filter` - Interpolation filter (Nearest, Triangle/Bilinear, CatmullRom/Bicubic, Lanczos3)
 pub fn resize(image: &DynamicImage, width: u32, height: u32, filter: FilterType) -> DynamicImage {
-    image.resize_exact(width, height, filter)
+    let pixel_type = match image.pixel_type() {
+        Some(pt) => pt,
+        None => return image.resize_exact(width, height, filter),
+    };
+    let mut dst = FirImage::new(width, height, pixel_type);
+    let options = ResizeOptions::new().resize_alg(to_fir_algorithm(filter));
+    let mut resizer = Resizer::new();
+    if resizer.resize(image, &mut dst, &options).is_err() {
+        return image.resize_exact(width, height, filter);
+    }
+    fir_image_to_dynamic(dst, width, height, image, filter)
+}
+
+/// Convert a `fast_image_resize::Image` back to a `DynamicImage`.
+///
+/// Falls back to the `image` crate resize for unhandled pixel formats.
+fn fir_image_to_dynamic(
+    img: FirImage<'_>,
+    width: u32,
+    height: u32,
+    source: &DynamicImage,
+    filter: FilterType,
+) -> DynamicImage {
+    let buf = img.into_vec();
+    match source {
+        DynamicImage::ImageRgb8(_) => {
+            RgbImage::from_raw(width, height, buf).map(DynamicImage::ImageRgb8)
+        }
+        DynamicImage::ImageRgba8(_) => {
+            image::RgbaImage::from_raw(width, height, buf).map(DynamicImage::ImageRgba8)
+        }
+        DynamicImage::ImageLuma8(_) => {
+            image::GrayImage::from_raw(width, height, buf).map(DynamicImage::ImageLuma8)
+        }
+        _ => None,
+    }
+    .unwrap_or_else(|| source.resize_exact(width, height, filter))
 }
 
 /// Resize image preserving aspect ratio, fitting within max dimensions.
@@ -109,7 +218,14 @@ pub fn resize_to_fit(
     max_height: u32,
     filter: FilterType,
 ) -> DynamicImage {
-    image.resize(max_width, max_height, filter)
+    let (w, h) = image.dimensions();
+    let ratio = (max_width as f64 / w as f64).min(max_height as f64 / h as f64);
+    if ratio >= 1.0 {
+        return image.clone();
+    }
+    let new_w = ((w as f64 * ratio).round() as u32).max(1);
+    let new_h = ((h as f64 * ratio).round() as u32).max(1);
+    resize(image, new_w, new_h, filter)
 }
 
 /// Center crop image to specified dimensions.

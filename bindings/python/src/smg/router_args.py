@@ -5,7 +5,7 @@ import dataclasses
 import logging
 import os
 
-from smg.smg_rs import get_available_tool_call_parsers
+from smg.smg_rs import get_available_reasoning_parsers, get_available_tool_call_parsers
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +160,7 @@ class RouterArgs:
     enable_mesh: bool = False
     mesh_server_name: str | None = None
     mesh_host: str = "0.0.0.0"
+    mesh_advertise_host: str | None = None
     mesh_port: int = 39527
     mesh_peer_urls: list[str] = dataclasses.field(default_factory=list)
 
@@ -784,11 +785,13 @@ class RouterArgs:
         )
 
         # Parser configuration
+        reasoning_parser_choices = get_available_reasoning_parsers()
         parser_group.add_argument(
             f"--{prefix}reasoning-parser",
             type=str,
             default=None,
-            help="Specify the parser for reasoning models (e.g., deepseek-r1, qwen3)",
+            choices=reasoning_parser_choices,
+            help="Specify the parser for reasoning models (e.g., deepseek_r1, qwen3)",
         )
         tool_call_parser_choices = get_available_tool_call_parsers()
         parser_group.add_argument(
@@ -1062,6 +1065,15 @@ class RouterArgs:
             type=str,
             default="0.0.0.0",
             help="Mesh server bind address (default: 0.0.0.0)",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-advertise-host",
+            type=str,
+            default=None,
+            help=(
+                "Routable mesh address to advertise to peers."
+                " Required when --mesh-host binds to 0.0.0.0."
+            ),
         )
         mesh_group.add_argument(
             f"--{prefix}mesh-port",

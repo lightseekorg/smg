@@ -50,7 +50,7 @@ jobs:
       E2E_ENGINE: ${{ inputs.engine }}
       E2E_RUNTIME: ${{ inputs.engine }}
       E2E_GPU_TIER: ${{ inputs.gpu_tier }}
-      ROUTER_LOCAL_MODEL_PATH: /home/ubuntu/models
+      ROUTER_LOCAL_MODEL_PATH: /models
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

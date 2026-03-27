@@ -83,8 +83,11 @@ impl ModelProcessorSpec for Llama4Spec {
 
     fn matches(&self, metadata: &ModelMetadata) -> bool {
         let id = metadata.model_id.to_ascii_lowercase();
-        // Match "llama-4", "llama4", "Llama-4-Maverick", "Llama-4-Scout", etc.
-        id.contains("llama-4") || id.contains("llama4")
+        id.contains("llama-4")
+            || id.contains("llama4")
+            || metadata
+                .config_model_type()
+                .is_some_and(|mt| mt == "llama4")
     }
 
     fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {
@@ -264,5 +267,30 @@ mod tests {
                                                                      // The token before the last patch block is <|image|> (global tile marker)
                                                                      // Position: 1 + 290 + 290 = 581
         assert_eq!(replacements[0].tokens[581], 200090); // <|image|>
+    }
+
+    #[test]
+    fn llama4_matches_alias_via_model_type() {
+        let tokenizer = TestTokenizer::new(&[
+            ("<|image|>", 200090),
+            ("<|image_start|>", 200088),
+            ("<|image_end|>", 200089),
+            ("<|patch|>", 200092),
+            ("<|tile_x_separator|>", 200093),
+            ("<|tile_y_separator|>", 200094),
+        ]);
+        let config = json!({
+            "model_type": "llama4",
+            "image_token_index": 200092,
+            "vision_config": {"image_size": 336, "patch_size": 14}
+        });
+        let metadata = ModelMetadata {
+            model_id: "custom-model",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("llama4 alias");
+        assert_eq!(spec.name(), "llama4");
     }
 }
