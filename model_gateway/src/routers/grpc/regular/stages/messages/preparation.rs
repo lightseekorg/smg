@@ -103,8 +103,18 @@ impl MessagePreparationStage {
                     &tokenizer_source,
                 )
                 .await
-                .ok()
-                .flatten();
+                .map_err(|e| {
+                    error!(
+                        function = "MessagePreparationStage::execute",
+                        model = %model_id,
+                        error = %e,
+                        "Failed to resolve multimodal placeholder token"
+                    );
+                    error::internal_error(
+                        "multimodal_placeholder_resolution_failed",
+                        format!("Failed to resolve multimodal placeholder token: {e}"),
+                    )
+                })?;
 
                 (
                     placeholder,

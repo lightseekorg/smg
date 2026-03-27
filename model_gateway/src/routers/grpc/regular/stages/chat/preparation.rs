@@ -83,8 +83,18 @@ impl ChatPreparationStage {
                     &tokenizer_source,
                 )
                 .await
-                .ok()
-                .flatten();
+                .map_err(|e| {
+                    error!(
+                        function = "ChatPreparationStage::execute",
+                        model = %model_id,
+                        error = %e,
+                        "Failed to resolve multimodal placeholder token"
+                    );
+                    error::internal_error(
+                        "multimodal_placeholder_resolution_failed",
+                        format!("Failed to resolve multimodal placeholder token: {e}"),
+                    )
+                })?;
 
                 (
                     placeholder,
