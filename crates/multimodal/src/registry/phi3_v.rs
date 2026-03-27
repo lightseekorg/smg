@@ -88,7 +88,10 @@ mod tests {
         let registry = ModelRegistry::new();
         let spec = registry.lookup(&metadata).expect("phi3 spec");
         let replacements = spec
-            .prompt_replacements(&metadata, &test_preprocessed(&[ImageSize::new(336, 336)]))
+            .prompt_replacements(
+                &metadata,
+                &test_preprocessed_with_tokens(&[ImageSize::new(336, 336)], &[144]),
+            )
             .unwrap();
         assert_eq!(replacements[0].tokens.len(), 144);
         assert_eq!(replacements[0].tokens[0], 555);
