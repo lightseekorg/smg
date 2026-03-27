@@ -24,7 +24,7 @@ LOG_DIR="${REPO_ROOT}/target/mesh-profile"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null || echo "${REPO_ROOT}/target")}"
 SMG_BIN="${CARGO_TARGET_DIR}/release/smg"
 NUM_WORKERS="${NUM_WORKERS:-20}"
-NUM_GATEWAYS=3
+NUM_GATEWAYS="${NUM_GATEWAYS:-2}"
 WORKER_BASE_PORT=9000
 GATEWAY_BASE_PORT=30000
 MESH_BASE_PORT=39500
@@ -59,7 +59,13 @@ start_gateways() {
         for j in $(seq 0 $((NUM_GATEWAYS - 1))); do
             [ "$i" != "$j" ] && MESH_PEERS="$MESH_PEERS 127.0.0.1:$((MESH_BASE_PORT + j))"
         done
+        # Build worker URLs (same as production --worker-urls)
+        local WORKER_URLS=""
+        for w in $(seq 0 $((NUM_WORKERS - 1))); do
+            WORKER_URLS="$WORKER_URLS http://127.0.0.1:$((WORKER_BASE_PORT + w))"
+        done
         "$SMG_BIN" --host 127.0.0.1 --port "$port" --policy cache_aware \
+            --worker-urls $WORKER_URLS \
             --enable-mesh --mesh-host 127.0.0.1 --mesh-port "$mesh_port" \
             --mesh-server-name "gw-$i" --mesh-peer-urls $MESH_PEERS \
             --prometheus-port "$metrics_port" --prometheus-host 127.0.0.1 \
@@ -127,6 +133,34 @@ show_metrics() {
         | grep -v '^#' | sed 's/^/  /'
 }
 
+# Monitor fd count, CPU, memory for gateway processes over time
+monitor_resources() {
+    local interval="${1:-5}"
+    local duration="${2:-300}"
+    local end=$((SECONDS + duration))
+    echo "Monitoring gateway resources every ${interval}s for ${duration}s..."
+    echo "Time | Gateway | PID | FDs | RSS_MB | CPU% | Threads"
+    echo "-----|---------|-----|-----|--------|------|--------"
+    while [ $SECONDS -lt $end ]; do
+        if [ -f "$LOG_DIR/gateway_pids.txt" ]; then
+            local idx=0
+            while read -r pid; do
+                if kill -0 "$pid" 2>/dev/null; then
+                    local fds rss cpu threads
+                    fds=$(ls /proc/"$pid"/fd 2>/dev/null | wc -l || lsof -p "$pid" 2>/dev/null | wc -l || echo "?")
+                    rss=$(ps -o rss= -p "$pid" 2>/dev/null | awk '{printf "%.0f", $1/1024}')
+                    cpu=$(ps -o %cpu= -p "$pid" 2>/dev/null | tr -d ' ')
+                    threads=$(ls /proc/"$pid"/task 2>/dev/null | wc -l || ps -M -p "$pid" 2>/dev/null | tail -n +2 | wc -l || echo "?")
+                    printf "%s | gw-%d | %d | %s | %s | %s | %s\n" \
+                        "$(date +%H:%M:%S)" "$idx" "$pid" "$fds" "$rss" "$cpu" "$threads"
+                fi
+                idx=$((idx + 1))
+            done < "$LOG_DIR/gateway_pids.txt"
+        fi
+        sleep "$interval"
+    done
+}
+
 show_status() {
     for i in $(seq 0 $((NUM_GATEWAYS - 1))); do
         local port=$((GATEWAY_BASE_PORT + i))
@@ -147,11 +181,12 @@ run_one_scenario() {
     stop_all >/dev/null 2>&1
     sleep 2
 
+    NUM_WORKERS="$workers"
     start_mock_workers "$workers" >/dev/null
     sleep 1
     start_gateways "warn" >/dev/null
-    sleep 5
-    register_workers "$workers" >/dev/null 2>&1
+    echo "  Waiting 30s for worker creation workflows..." >&2
+    sleep 30
 
     run_load "$rps" "$duration" "$prompt_size" 2>/dev/null | grep -E 'Done' >&2
 
@@ -198,15 +233,21 @@ case "${1:-help}" in
         NUM_WORKERS="${2:-$NUM_WORKERS}"
         start_mock_workers "$NUM_WORKERS"
         sleep 1
+        # Workers passed via --worker-urls (like production), not API registration
         start_gateways "info"
-        sleep 5
-        register_workers "$NUM_WORKERS"
+        echo "Waiting 30s for worker creation workflows..."
+        sleep 30
         show_status
         echo ""
-        echo "Next: $0 load [rps] [duration] [prompt_size]"
+        echo "Next steps:"
+        echo "  $0 load [rps] [duration] [prompt_size]"
+        echo "  $0 monitor [interval_secs] [duration_secs]"
         ;;
     load)
         run_load "${2:-200}" "${3:-60}" "${4:-0}"
+        ;;
+    monitor)
+        monitor_resources "${2:-5}" "${3:-300}"
         ;;
     metrics)
         show_metrics
@@ -221,10 +262,11 @@ case "${1:-help}" in
         run_bench
         ;;
     *)
-        echo "Usage: $0 {start|load|metrics|status|stop|bench}"
+        echo "Usage: $0 {start|load|metrics|status|stop|bench|monitor}"
         echo ""
-        echo "  start [workers]              Start mock workers + 3 mesh gateways (default: 20)"
+        echo "  start [workers]              Start mock workers + $NUM_GATEWAYS mesh gateways (default: 20 workers)"
         echo "  load [rps] [dur] [psize]     Send load (default: 200 req/s, 60s, 0-char pad)"
+        echo "  monitor [interval] [dur]     Track fd count, CPU, memory (default: 5s, 300s)"
         echo "  metrics                      Show mesh sync Prometheus metrics"
         echo "  status                       Show gateway/worker health"
         echo "  stop                         Stop everything"

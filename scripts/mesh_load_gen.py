@@ -125,7 +125,13 @@ def make_prompt(pad_to: int = 0) -> str:
 _prompt_pad_size = 0
 
 
-async def send_request(session: aiohttp.ClientSession, url: str, stats: dict):
+_retry_timeout = 0.0  # seconds; 0 = no retry
+_max_retries = 0
+
+
+async def send_request(
+    session: aiohttp.ClientSession, url: str, stats: dict, urls: list[str] | None = None
+):
     prompt = make_prompt(pad_to=_prompt_pad_size)
     payload = {
         "model": "mock-model",
@@ -133,19 +139,33 @@ async def send_request(session: aiohttp.ClientSession, url: str, stats: dict):
         "stream": True,
     }
 
-    try:
-        start = time.monotonic()
-        async with session.post(url, json=payload) as resp:
-            # Read the stream to completion
-            async for _ in resp.content:
-                pass
-            elapsed = time.monotonic() - start
-            stats["success"] += 1
-            stats["total_latency"] += elapsed
-    except Exception as e:
-        stats["errors"] += 1
-        if stats["errors"] <= 5:
-            print(f"  Request error: {e}")
+    retries = 0
+    while True:
+        try:
+            timeout = aiohttp.ClientTimeout(total=_retry_timeout if _retry_timeout > 0 else None)
+            start = time.monotonic()
+            async with session.post(url, json=payload, timeout=timeout) as resp:
+                async for _ in resp.content:
+                    pass
+                elapsed = time.monotonic() - start
+                stats["success"] += 1
+                stats["total_latency"] += elapsed
+                return
+        except TimeoutError:
+            if retries >= _max_retries:
+                stats["errors"] += 1
+                return
+            retries += 1
+            stats["retries"] += 1
+            # Retry on a DIFFERENT gateway (simulates real retry storm)
+            if urls:
+                url = random.choice(urls)
+            continue
+        except Exception as e:
+            stats["errors"] += 1
+            if stats["errors"] <= 5:
+                print(f"  Request error: {e}")
+            return
 
 
 async def run_load(
@@ -155,7 +175,7 @@ async def run_load(
 ):
     urls = [f"http://127.0.0.1:{p}/v1/chat/completions" for p in gateway_ports]
 
-    stats = {"success": 0, "errors": 0, "total_latency": 0.0}
+    stats = {"success": 0, "errors": 0, "retries": 0, "total_latency": 0.0}
     interval = 1.0 / rps if rps > 0 else 0.01
     end_time = time.monotonic() + duration
 
@@ -171,7 +191,7 @@ async def run_load(
         while time.monotonic() < end_time:
             # Round-robin across gateways
             url = random.choice(urls)
-            task = asyncio.create_task(send_request(session, url, stats))
+            task = asyncio.create_task(send_request(session, url, stats, urls=urls))
             tasks.add(task)
             task.add_done_callback(tasks.discard)
 
@@ -187,6 +207,7 @@ async def run_load(
                     f"rps={recent_rps:.0f} "
                     f"total={stats['success']} "
                     f"errors={stats['errors']} "
+                    f"retries={stats['retries']} "
                     f"avg_latency={avg_latency * 1000:.0f}ms"
                 )
                 last_report = now
@@ -198,7 +219,9 @@ async def run_load(
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    print(f"\nDone. {stats['success']} successful, {stats['errors']} errors")
+    print(
+        f"\nDone. {stats['success']} successful, {stats['errors']} errors, {stats['retries']} retries"
+    )
     if stats["success"] > 0:
         print(f"Avg latency: {stats['total_latency'] / stats['success'] * 1000:.0f}ms")
 
@@ -219,12 +242,25 @@ def main():
         default=0,
         help="Pad prompts to this many chars (0=no padding, 500=realistic, 2000=large)",
     )
+    parser.add_argument(
+        "--retry-timeout",
+        type=float,
+        default=0,
+        help="Client timeout in seconds. Timed-out requests retry (simulates retry storm). 0=no timeout.",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Max retries per request when --retry-timeout is set (default: 3)",
+    )
     args = parser.parse_args()
 
     ports = [int(p) for p in args.gateway_ports.split(",")]
-    # Set global prompt size for make_prompt
-    global _prompt_pad_size
+    global _prompt_pad_size, _retry_timeout, _max_retries
     _prompt_pad_size = args.prompt_size
+    _retry_timeout = args.retry_timeout
+    _max_retries = args.max_retries
     asyncio.run(run_load(ports, args.rps, args.duration))
 
 
