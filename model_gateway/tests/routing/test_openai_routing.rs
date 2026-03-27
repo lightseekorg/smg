@@ -21,7 +21,7 @@ use openai_protocol::{
     common::StringOrArray,
     completion::CompletionRequest,
     generate::GenerateRequest,
-    responses::{ResponseInput, ResponsesGetParams, ResponsesRequest},
+    responses::{ResponseInput, ResponsesRequest},
 };
 use serde_json::json;
 use smg::{
@@ -303,25 +303,8 @@ async fn test_openai_router_responses_with_mock() {
     assert_eq!(output_items2.len(), 1);
     assert_eq!(output_items2[0]["content"][0]["text"], "mock_output_2");
 
-    let get1 = router
-        .get_response(None, &stored1.id.0, &ResponsesGetParams::default())
-        .await;
-    assert_eq!(get1.status(), StatusCode::OK);
-    let get1_body_bytes = axum::body::to_bytes(get1.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let get1_json: serde_json::Value = serde_json::from_slice(&get1_body_bytes).unwrap();
-    assert_eq!(get1_json, body1);
-
-    let get2 = router
-        .get_response(None, &stored2.id.0, &ResponsesGetParams::default())
-        .await;
-    assert_eq!(get2.status(), StatusCode::OK);
-    let get2_body_bytes = axum::body::to_bytes(get2.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let get2_json: serde_json::Value = serde_json::from_slice(&get2_body_bytes).unwrap();
-    assert_eq!(get2_json, body2);
+    assert_eq!(stored1.raw_response, body1);
+    assert_eq!(stored2.raw_response, body2);
 
     server.abort();
 }

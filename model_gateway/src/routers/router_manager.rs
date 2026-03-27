@@ -32,7 +32,7 @@ use openai_protocol::{
         RealtimeTranscriptionSessionCreateRequest,
     },
     rerank::RerankRequest,
-    responses::{ResponsesGetParams, ResponsesRequest},
+    responses::ResponsesRequest,
 };
 use serde_json::Value;
 use tracing::{debug, info, warn};
@@ -623,24 +623,6 @@ impl RouterTrait for RouterManager {
         }
     }
 
-    async fn get_response(
-        &self,
-        headers: Option<&HeaderMap>,
-        response_id: &str,
-        params: &ResponsesGetParams,
-    ) -> Response {
-        let router = self.select_router_for_request(headers, None);
-        if let Some(router) = router {
-            router.get_response(headers, response_id, params).await
-        } else {
-            (
-                StatusCode::NOT_FOUND,
-                format!("No router available to get response '{response_id}'"),
-            )
-                .into_response()
-        }
-    }
-
     async fn cancel_response(&self, headers: Option<&HeaderMap>, response_id: &str) -> Response {
         let router = self.select_router_for_request(headers, None);
         if let Some(router) = router {
@@ -649,33 +631,6 @@ impl RouterTrait for RouterManager {
             (
                 StatusCode::NOT_FOUND,
                 format!("No router available to cancel response '{response_id}'"),
-            )
-                .into_response()
-        }
-    }
-
-    async fn delete_response(&self, _headers: Option<&HeaderMap>, _response_id: &str) -> Response {
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            "responses api not yet implemented in inference gateway mode",
-        )
-            .into_response()
-    }
-
-    async fn list_response_input_items(
-        &self,
-        headers: Option<&HeaderMap>,
-        response_id: &str,
-    ) -> Response {
-        // Delegate to the default router (typically http-regular)
-        // Response storage is shared across all routers via AppContext
-        let router = self.select_router_for_request(headers, None);
-        if let Some(router) = router {
-            router.list_response_input_items(headers, response_id).await
-        } else {
-            (
-                StatusCode::NOT_FOUND,
-                "No router available to list response input items",
             )
                 .into_response()
         }

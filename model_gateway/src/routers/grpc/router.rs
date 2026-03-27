@@ -6,20 +6,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use openai_protocol::{
-    chat::ChatCompletionRequest,
-    classify::ClassifyRequest,
-    embedding::EmbeddingRequest,
-    generate::GenerateRequest,
-    messages::CreateMessageRequest,
-    responses::{ResponsesGetParams, ResponsesRequest},
+    chat::ChatCompletionRequest, classify::ClassifyRequest, embedding::EmbeddingRequest,
+    generate::GenerateRequest, messages::CreateMessageRequest, responses::ResponsesRequest,
 };
 use tracing::debug;
 
 use super::{
     common::responses::{
-        handlers::{cancel_response_impl, get_response_impl},
-        utils::validate_worker_availability,
-        ResponsesContext,
+        handlers::cancel_response_impl, utils::validate_worker_availability, ResponsesContext,
     },
     context::SharedComponents,
     harmony::{serve_harmony_responses, serve_harmony_responses_stream, HarmonyDetector},
@@ -480,15 +474,6 @@ impl RouterTrait for GrpcRouter {
         model_id: &str,
     ) -> Response {
         self.route_responses_impl(headers, body, model_id).await
-    }
-
-    async fn get_response(
-        &self,
-        _headers: Option<&HeaderMap>,
-        response_id: &str,
-        _params: &ResponsesGetParams,
-    ) -> Response {
-        get_response_impl(&self.responses_context, response_id).await
     }
 
     async fn cancel_response(&self, _headers: Option<&HeaderMap>, response_id: &str) -> Response {
