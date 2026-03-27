@@ -16,16 +16,14 @@ from transformers import BatchFeature
 from vllm import PoolingParams, SamplingParams, TokensPrompt
 from vllm.engine.protocol import EngineClient
 from vllm.inputs import token_inputs
+from vllm.inputs.engine import MultiModalInput as VllmMultiModalInput
+from vllm.inputs.engine import mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     PlaceholderRange,
-    mm_inputs,
-)
-from vllm.multimodal.inputs import (
-    MultiModalInputs as VllmMultiModalInputs,
 )
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
@@ -367,7 +365,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         self,
         tokenized: vllm_engine_pb2.TokenizedInput,
         mm_proto: vllm_engine_pb2.MultimodalInputs,
-    ) -> VllmMultiModalInputs:
+    ) -> VllmMultiModalInput:
         """Build vLLM MultiModalInputs from preprocessed proto data.
 
         Bypasses HF processor entirely — pixel values and model-specific
@@ -450,7 +448,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 )
             mm_placeholders["image"] = placeholders
 
-        return mm_inputs(
+        return mm_input(
             prompt_token_ids=prompt_token_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
