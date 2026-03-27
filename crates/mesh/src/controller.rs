@@ -530,7 +530,23 @@ impl MeshController {
                 };
 
                 // Handle incoming messages
-                while let Some(msg_result) = incoming_stream.next().await {
+                const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+                loop {
+                    let msg_result = match tokio::time::timeout(
+                        STREAM_IDLE_TIMEOUT,
+                        incoming_stream.next(),
+                    )
+                    .await
+                    {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => break, // stream closed normally
+                        Err(_) => {
+                            log::warn!(
+                                "sync_stream to {peer_name} idle timeout ({STREAM_IDLE_TIMEOUT:?}) — closing"
+                            );
+                            break;
+                        }
+                    };
                     match msg_result {
                         Ok(msg) => {
                             sequence.fetch_add(1, Ordering::Relaxed);

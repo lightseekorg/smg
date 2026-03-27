@@ -577,11 +577,14 @@ pub async fn try_ping(
         format!("http://{peer_addr}")
     };
 
-    let mut endpoint = Endpoint::from_shared(connect_url.clone()).map_err(|e| {
-        tonic::Status::invalid_argument(format!(
-            "Invalid endpoint for node {peer_name}: {connect_url}, {e}"
-        ))
-    })?;
+    let mut endpoint = Endpoint::from_shared(connect_url.clone())
+        .map_err(|e| {
+            tonic::Status::invalid_argument(format!(
+                "Invalid endpoint for node {peer_name}: {connect_url}, {e}"
+            ))
+        })?
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10));
 
     if let Some(mtls_manager) = mtls_manager {
         mtls_manager.load_client_config().await.map_err(|e| {

@@ -562,7 +562,19 @@ impl Gossip for GossipService {
                 }
             }
 
-            while let Some(msg_result) = incoming.next().await {
+            const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+            loop {
+                let msg_result =
+                    match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming.next()).await {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => break, // stream closed normally
+                        Err(_) => {
+                            tracing::warn!(
+                                "sync_stream idle timeout ({STREAM_IDLE_TIMEOUT:?}) — closing"
+                            );
+                            break;
+                        }
+                    };
                 match msg_result {
                     Ok(msg) => {
                         sequence += 1;

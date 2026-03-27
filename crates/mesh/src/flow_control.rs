@@ -125,9 +125,12 @@ impl ExponentialBackoff {
 
     /// Calculate delay for attempt number (0-indexed)
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
-        let delay_secs = self.initial_delay.as_secs_f64() * self.multiplier.powi(attempt as i32);
-        let delay = Duration::from_secs_f64(delay_secs);
-        delay.min(self.max_delay)
+        // Clamp attempt to prevent f64 overflow: 2.0^63 < f64::MAX,
+        // but 2.0^1024 = infinity which panics in Duration::from_secs_f64.
+        let attempt_clamped = attempt.min(63) as i32;
+        let delay_secs = self.initial_delay.as_secs_f64() * self.multiplier.powi(attempt_clamped);
+        let capped = delay_secs.min(self.max_delay.as_secs_f64());
+        Duration::from_secs_f64(capped)
     }
 }
 
@@ -169,7 +172,8 @@ impl RetryManager {
     /// Record a retry attempt
     pub fn record_attempt(&self) {
         *self.last_attempt.write() = Some(Instant::now());
-        *self.attempt_count.write() += 1;
+        let mut count = self.attempt_count.write();
+        *count = count.saturating_add(1);
     }
 
     /// Reset retry state (on successful connection)
