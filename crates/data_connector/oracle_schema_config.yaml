@@ -1,6 +1,6 @@
 owner: "ADMIN"
 version: 3
-auto_migrate: false
+auto_migrate: true
 
 conversations:
   table: "CONVERSATIONS"

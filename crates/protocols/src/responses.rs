@@ -36,6 +36,10 @@ pub enum ResponseTool {
     #[serde(rename = "code_interpreter")]
     CodeInterpreter(CodeInterpreterTool),
 
+    /// Built-in tool.
+    #[serde(rename = "image_generation")]
+    ImageGeneration(ImageGenerationTool),
+
     /// MCP server tool.
     #[serde(rename = "mcp")]
     Mcp(McpTool),
@@ -78,6 +82,17 @@ pub struct WebSearchPreviewTool {
 #[serde(deny_unknown_fields)]
 pub struct CodeInterpreterTool {
     pub container: Option<Value>,
+}
+
+/// Built-in image generation tool.
+///
+/// The upstream API may add optional fields over time. We keep this tool shape
+/// open by preserving unknown key/value pairs.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+pub struct ImageGenerationTool {
+    #[serde(flatten)]
+    pub options: HashMap<String, Value>,
 }
 
 /// `require_approval` values.
@@ -314,6 +329,13 @@ pub enum ResponseOutputItem {
         queries: Vec<String>,
         results: Option<Vec<FileSearchResult>>,
     },
+    #[serde(rename = "image_generation_call")]
+    ImageGenerationCall {
+        id: String,
+        status: ImageGenerationCallStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<String>,
+    },
 }
 
 // ============================================================================
@@ -384,6 +406,17 @@ pub enum CodeInterpreterOutput {
 pub enum FileSearchCallStatus {
     InProgress,
     Searching,
+    Completed,
+    Incomplete,
+    Failed,
+}
+
+/// Status for image generation tool calls.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageGenerationCallStatus {
+    InProgress,
+    Generating,
     Completed,
     Incomplete,
     Failed,
