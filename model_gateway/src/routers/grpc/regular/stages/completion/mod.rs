@@ -1,7 +1,7 @@
 //! Completion API endpoint pipeline stages
 //!
-//! This module continues the native `/v1/completions` stage stack. With
-//! preparation (#907), request building (#915), and now response processing,
+//! This module continues the native `/v1/completions` stage stack. With scaffolding
+//! in PR #840,preparation (#907), request building (#915), and now response processing,
 //! three of the four endpoint-specific pipeline stages are complete. The shared
 //! stages (worker selection, client acquisition, dispatch, execution) are reused
 //! from the existing pipeline.

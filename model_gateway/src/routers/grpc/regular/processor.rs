@@ -781,7 +781,13 @@ impl ResponseProcessor {
 
             let matched_stop = complete.matched_stop_json();
 
-            let mut text = String::new();
+            let suffix_len = completion_req.suffix.as_ref().map_or(0, |s| s.len());
+            let echo_len = if completion_req.echo {
+                prompt_text.len()
+            } else {
+                0
+            };
+            let mut text = String::with_capacity(echo_len + decoded_text.len() + suffix_len);
             if completion_req.echo {
                 text.push_str(prompt_text);
             }
@@ -793,7 +799,7 @@ impl ResponseProcessor {
             choices.push(CompletionChoice {
                 text,
                 index: i as u32,
-                logprobs: None,
+                logprobs: None, // TODO: wire legacy LogProbs from backend token_logprobs
                 finish_reason: finish_reason.or_else(|| Some("stop".to_string())),
                 matched_stop,
             });

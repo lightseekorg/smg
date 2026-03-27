@@ -36,7 +36,7 @@ impl CompletionRequestBuildingStage {
 #[async_trait]
 impl PipelineStage for CompletionRequestBuildingStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
-        let prep = ctx.state.preparation.take().ok_or_else(|| {
+        let prep = ctx.state.preparation.as_ref().ok_or_else(|| {
             error!(
                 function = "CompletionRequestBuildingStage::execute",
                 "Preparation not completed"
@@ -68,8 +68,8 @@ impl PipelineStage for CompletionRequestBuildingStage {
             .build_completion_request(
                 request_id,
                 &completion_request,
-                prep.original_text.unwrap_or_default(),
-                prep.token_ids,
+                prep.original_text.clone().unwrap_or_default(),
+                prep.token_ids.clone(),
             )
             .map_err(|e| {
                 error!(
