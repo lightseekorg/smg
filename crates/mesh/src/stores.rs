@@ -707,6 +707,11 @@ impl RateLimitStore {
 
         affected_keys
     }
+
+    /// Remove tombstoned CRDT metadata from the underlying counter store.
+    pub fn gc_tombstones(&self) -> usize {
+        self.counters.gc_tombstones()
+    }
 }
 
 impl Default for RateLimitStore {
@@ -813,6 +818,21 @@ impl StateStores {
             + self.app.gc_tombstones()
             + self.worker.gc_tombstones()
             + self.policy.gc_tombstones()
+            + self.rate_limit.gc_tombstones()
+    }
+
+    /// Remove stale tree entries for models that no longer have pending
+    /// ops or a policy store entry.  Called from the GC block.
+    pub fn gc_stale_tree_entries(&self) -> usize {
+        let before = self.tree_versions.len() + self.tree_ops_pending.len();
+        self.tree_versions.retain(|k, _| {
+            self.tree_ops_pending.get(k).is_some_and(|v| !v.is_empty())
+                || self.policy.get(k).is_some()
+        });
+        self.tree_ops_pending
+            .retain(|k, v| !v.is_empty() || self.policy.get(k).is_some());
+        let after = self.tree_versions.len() + self.tree_ops_pending.len();
+        before.saturating_sub(after)
     }
 }
 

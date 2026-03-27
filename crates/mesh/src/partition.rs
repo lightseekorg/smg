@@ -68,8 +68,19 @@ impl PartitionDetector {
         last_seen.insert(node_name.to_string(), Instant::now());
     }
 
+    /// Remove `last_seen` entries for nodes no longer in the cluster state.
+    pub fn prune_departed(&self, cluster_state: &BTreeMap<String, NodeState>) {
+        self.last_seen
+            .write()
+            .retain(|name, _| cluster_state.contains_key(name));
+    }
+
     /// Detect partition based on current cluster state
     pub fn detect_partition(&self, cluster_state: &BTreeMap<String, NodeState>) -> PartitionState {
+        // Prune entries for nodes no longer in cluster state to
+        // prevent unbounded growth from peer churn.
+        self.prune_departed(cluster_state);
+
         let now = Instant::now();
         let last_seen = self.last_seen.read();
 

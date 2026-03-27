@@ -128,6 +128,11 @@ impl MeshController {
                 if removed > 0 {
                     log::info!("GC: removed {removed} tombstoned CRDT metadata entries");
                 }
+                // Clean stale tree_versions/tree_ops_pending for removed models
+                let tree_removed = self.stores.gc_stale_tree_entries();
+                if tree_removed > 0 {
+                    log::info!("GC: removed {tree_removed} stale tree entries");
+                }
                 // Checkpoint pending tree ops into config blobs
                 self.sync_manager.checkpoint_tree_states();
                 // Record store sizes for monitoring
