@@ -85,9 +85,10 @@ pub(crate) async fn forward_realtime_rest(
 
     match result {
         Ok(resp) => {
-            let success = resp.status().is_success();
+            let status = resp.status();
+            worker.record_outcome(status.as_u16());
+            let success = status.is_success();
             let response = proxy_response(resp).await;
-            worker.record_outcome(success);
             if success {
                 Metrics::record_router_duration(
                     metrics_labels::ROUTER_OPENAI,
@@ -110,8 +111,8 @@ pub(crate) async fn forward_realtime_rest(
             response
         }
         Err(e) => {
+            worker.record_outcome(502);
             error!(error = %e, endpoint, "Failed to forward realtime REST request");
-            worker.record_outcome(false);
             Metrics::record_router_error(
                 metrics_labels::ROUTER_OPENAI,
                 metrics_labels::BACKEND_EXTERNAL,

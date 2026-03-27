@@ -171,7 +171,7 @@ impl RequestExecutionStage {
         })?;
 
         let result = client.generate(proto_request).await;
-        workers.record_outcome(result.is_healthy());
+        workers.record_outcome(result.cb_status_code());
 
         let stream = result.map_err(|e| {
             error!(function = "execute_single", error = %e, "Failed to start generation");
@@ -262,7 +262,10 @@ impl RequestExecutionStage {
         );
 
         // Record circuit breaker outcomes (client errors don't count as failures)
-        workers.record_dual_outcomes(prefill_result.is_healthy(), decode_result.is_healthy());
+        workers.record_dual_outcomes(
+            prefill_result.cb_status_code(),
+            decode_result.cb_status_code(),
+        );
 
         // Handle prefill result
         let prefill_stream = prefill_result.map_err(|e| {
@@ -359,7 +362,7 @@ impl RequestExecutionStage {
             .generate(prefill_request)
             .await
             .map_err(|e| {
-                workers.record_outcome_prefill(!e.is_cb_failure());
+                workers.record_outcome_prefill(e.http_status().as_u16());
                 error!(function = "execute_sequential_pd", error = %e, "Prefill worker failed to start");
                 e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {}", e.message()))
             })?;
@@ -371,7 +374,7 @@ impl RequestExecutionStage {
                     // Just consume the response, we use bootstrap info from worker metadata
                 }
                 Err(e) => {
-                    workers.record_outcome_prefill(!e.is_cb_failure());
+                    workers.record_outcome_prefill(e.http_status().as_u16());
                     error!(function = "execute_sequential_pd", error = %e, "Prefill stream error");
                     return Err(e.to_http_error(
                         "prefill_stream_error",
@@ -381,7 +384,7 @@ impl RequestExecutionStage {
             }
         }
         prefill_stream.mark_completed();
-        workers.record_outcome_prefill(true);
+        workers.record_outcome_prefill(200);
 
         debug!("vLLM PD: prefill completed, sending decode request");
 
@@ -398,7 +401,7 @@ impl RequestExecutionStage {
 
         // Send request to decode
         let decode_stream = decode_client.generate(decode_request).await.map_err(|e| {
-            workers.record_outcome_decode(!e.is_cb_failure());
+            workers.record_outcome_decode(e.http_status().as_u16());
             error!(function = "execute_sequential_pd", error = %e, "Decode worker failed to start");
             e.to_http_error(
                 "decode_worker_failed_to_start",
@@ -406,7 +409,7 @@ impl RequestExecutionStage {
             )
         })?;
 
-        workers.record_outcome_decode(true);
+        workers.record_outcome_decode(200);
 
         Ok(ExecutionResult::Single {
             stream: decode_stream,
