@@ -315,18 +315,18 @@ class Worker:
         stderr_target: int | IO[Any] | None = None
 
         if not show_output:
-            if self.log_dir:
-                os.makedirs(self.log_dir, exist_ok=True)
-                safe_name = f"{self.model_id}_{self.engine}_{self.mode.value}_{self.port}".replace(
-                    "/", "__"
-                ).replace(":", "_")
-                log_path = os.path.join(self.log_dir, f"worker-{safe_name}.log")
-                self._log_file = open(log_path, "w", encoding="utf-8")
-                stdout_target = self._log_file
-                stderr_target = subprocess.STDOUT
-            else:
-                stdout_target = subprocess.DEVNULL
-                stderr_target = subprocess.DEVNULL
+            # Always write to log file for post-failure debugging.
+            # Use log_dir if provided, otherwise fall back to /tmp/smg_worker_logs.
+            log_dir = self.log_dir or "/tmp/smg_worker_logs"
+            os.makedirs(log_dir, exist_ok=True)
+            safe_name = f"{self.model_id}_{self.engine}_{self.mode.value}_{self.port}".replace(
+                "/", "__"
+            ).replace(":", "_")
+            log_path = os.path.join(log_dir, f"worker-{safe_name}.log")
+            self._log_file = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
+            self._log_path = log_path
+            stdout_target = self._log_file
+            stderr_target = subprocess.STDOUT
 
         try:
             return subprocess.Popen(

@@ -122,6 +122,17 @@ jobs:
             --reruns 2 --reruns-delay 5 \
             -s -vv
 
+      - name: Show worker logs on failure
+        if: failure()
+        run: |
+          echo "=== Worker logs ==="
+          for f in /tmp/smg_worker_logs/*.log; do
+            [ -f "$f" ] || continue
+            echo "--- $(basename "$f") ---"
+            tail -200 "$f"
+            echo ""
+          done
+
       - name: Cleanup Oracle test users
         if: always() && inputs.setup_agentic_deps
         run: |
