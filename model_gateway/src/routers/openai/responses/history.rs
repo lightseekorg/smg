@@ -9,7 +9,7 @@ use openai_protocol::{
     responses::{ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponsesRequest},
 };
 use serde_json::Value;
-use smg_data_connector::{ConversationId, ListParams, ResponseId, SortOrder};
+use smg_data_connector::{ConversationId, ListParams, ResponseId, ResponseStorageError, SortOrder};
 use tracing::warn;
 
 use super::super::context::ResponsesComponents;
@@ -44,7 +44,7 @@ pub(crate) async fn load_input_history(
             .get_response_chain(&prev_id, None)
             .await
         {
-            Ok(chain) => {
+            Ok(chain) if !chain.responses.is_empty() => {
                 let items: Vec<ResponseInputOutputItem> = chain
                     .responses
                     .iter()
@@ -61,11 +61,37 @@ pub(crate) async fn load_input_history(
                     .collect();
                 chain_items = Some(items);
             }
+            Ok(_) | Err(ResponseStorageError::ResponseNotFound(_)) => {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model,
+                    metrics_labels::ENDPOINT_RESPONSES,
+                    metrics_labels::ERROR_VALIDATION,
+                );
+                return Err(error::bad_request(
+                    "previous_response_not_found",
+                    format!("Previous response with id '{prev_id_str}' not found."),
+                ));
+            }
             Err(e) => {
                 warn!(
                     "Failed to load previous response chain for {}: {}",
                     prev_id_str, e
                 );
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model,
+                    metrics_labels::ENDPOINT_RESPONSES,
+                    metrics_labels::ERROR_INTERNAL,
+                );
+                return Err(error::internal_error(
+                    "load_previous_response_chain_failed",
+                    format!("Failed to load previous response chain for {prev_id_str}: {e}"),
+                ));
             }
         }
     }

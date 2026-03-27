@@ -116,7 +116,6 @@ class _StateManagementCloudBase:
 
         # SmgClient: conversations API not supported, skipping comparison
 
-    @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")
     def test_previous_response_id_invalid(self, model, api_client):
         """Test using invalid previous_response_id."""
         with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
@@ -126,6 +125,39 @@ class _StateManagementCloudBase:
                 previous_response_id="resp_invalid123",
                 max_output_tokens=50,
             )
+
+    def test_store_false_not_retrievable(self, model, api_client):
+        """Test that store=false responses cannot be retrieved."""
+        resp = api_client.responses.create(model=model, input="Hello", store=False)
+        assert resp.id is not None
+        assert resp.status == "completed"
+
+        with pytest.raises((openai.NotFoundError, smg_client.NotFoundError)):
+            api_client.responses.retrieve(response_id=resp.id)
+
+    def test_store_false_previous_response_id_rejected(self, model, api_client):
+        """Test that store=false response id cannot be used as previous_response_id."""
+        resp = api_client.responses.create(model=model, input="Hello", store=False)
+        assert resp.id is not None
+
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
+            api_client.responses.create(
+                model=model,
+                input="Follow up",
+                previous_response_id=resp.id,
+            )
+
+    def test_store_false_conversation_no_items(self, model, api_client):
+        """Test that store=false with conversation does not persist items."""
+        conv = api_client.conversations.create(metadata={"test": "store_false"})
+
+        resp = api_client.responses.create(
+            model=model, input="Hello", store=False, conversation=conv.id
+        )
+        assert resp.status == "completed"
+
+        items = api_client.conversations.items.list(conv.id)
+        assert len(items.data) == 0
 
     def test_mutually_exclusive_parameters(self, model, api_client):
         """Test that previous_response_id and conversation are mutually exclusive."""
@@ -197,7 +229,6 @@ class TestStateManagementOracleCustom(_StateManagementCloudBase):
 class TestStateManagementLocal:
     """State management tests against local gRPC backend."""
 
-    @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")
     def test_previous_response_id_invalid(self, model, api_client):
         """Test using invalid previous_response_id."""
         with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
@@ -256,6 +287,27 @@ class TestStateManagementLocal:
         assert resp3.error is None
         assert resp3.status == "completed"
         assert "Bob" in resp3.output_text
+
+    def test_store_false_not_retrievable(self, model, api_client):
+        """Test that store=false responses cannot be retrieved."""
+        resp = api_client.responses.create(model=model, input="Hello", store=False)
+        assert resp.id is not None
+        assert resp.status == "completed"
+
+        with pytest.raises((openai.NotFoundError, smg_client.NotFoundError)):
+            api_client.responses.retrieve(response_id=resp.id)
+
+    def test_store_false_previous_response_id_rejected(self, model, api_client):
+        """Test that store=false response id cannot be used as previous_response_id."""
+        resp = api_client.responses.create(model=model, input="Hello", store=False)
+        assert resp.id is not None
+
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
+            api_client.responses.create(
+                model=model,
+                input="Follow up",
+                previous_response_id=resp.id,
+            )
 
     def test_mutually_exclusive_parameters(self, model, api_client):
         """Test that previous_response_id and conversation are mutually exclusive."""
@@ -286,7 +338,6 @@ class TestStateManagementLocal:
 class TestStateManagementHarmony:
     """State management tests against local gRPC backend with Harmony model."""
 
-    @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")
     def test_previous_response_id_invalid(self, model, api_client):
         """Test using invalid previous_response_id."""
         with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
@@ -345,6 +396,27 @@ class TestStateManagementHarmony:
         assert resp3.error is None
         assert resp3.status == "completed"
         assert "Bob" in resp3.output_text
+
+    def test_store_false_not_retrievable(self, model, api_client):
+        """Test that store=false responses cannot be retrieved."""
+        resp = api_client.responses.create(model=model, input="Hello", store=False)
+        assert resp.id is not None
+        assert resp.status == "completed"
+
+        with pytest.raises((openai.NotFoundError, smg_client.NotFoundError)):
+            api_client.responses.retrieve(response_id=resp.id)
+
+    def test_store_false_previous_response_id_rejected(self, model, api_client):
+        """Test that store=false response id cannot be used as previous_response_id."""
+        resp = api_client.responses.create(model=model, input="Hello", store=False)
+        assert resp.id is not None
+
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)):
+            api_client.responses.create(
+                model=model,
+                input="Follow up",
+                previous_response_id=resp.id,
+            )
 
     def test_mutually_exclusive_parameters(self, model, api_client):
         """Test that previous_response_id and conversation are mutually exclusive."""
