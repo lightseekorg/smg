@@ -421,6 +421,7 @@ def start_workers(
 
     spec = get_model_spec(model_id)
     tp = spec.get("tp", 1)
+    timeout = spec.get("startup_timeout", timeout)
 
     # Detect IB device for PD workers
     has_pd = worker_type in (WorkerType.PREFILL, WorkerType.DECODE)
