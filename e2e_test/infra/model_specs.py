@@ -107,6 +107,8 @@ MODEL_SPECS: dict[str, dict] = {
         "model": _resolve_model_path("meta-llama/Llama-4-Scout-17B-16E-Instruct"),
         "tp": 4,
         "features": ["chat", "streaming", "multimodal", "moe"],
+        "vllm_args": ["--max-model-len", "196608"],
+        "startup_timeout": 1200,
     },
     # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
