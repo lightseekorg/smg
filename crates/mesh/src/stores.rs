@@ -9,7 +9,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use dashmap::DashMap;
@@ -723,6 +726,15 @@ pub struct StateStores {
     /// Pending tree operations for delta sync.
     /// Key: tree key (e.g., "tree:model-name"), Value: operations since last successful send.
     pub tree_ops_pending: DashMap<String, Vec<TreeOperation>>,
+    /// Per-key version counters for tree state, bumped atomically on every
+    /// `sync_tree_operation` call.  Replaces the expensive CRDT
+    /// `policy.update()` that previously serialized the entire TreeState
+    /// config blob (~1 MB) on every request.
+    pub tree_versions: DashMap<String, Arc<AtomicU64>>,
+    /// Global generation counter for tree changes.  The incremental collector
+    /// checks this (in addition to `policy.generation()`) to decide whether
+    /// the policy store needs scanning.
+    pub tree_generation: Arc<AtomicU64>,
 }
 
 impl StateStores {
@@ -734,6 +746,8 @@ impl StateStores {
             policy: PolicyStore::new(),
             rate_limit: RateLimitStore::new("default".to_string()),
             tree_ops_pending: DashMap::new(),
+            tree_versions: DashMap::new(),
+            tree_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -745,7 +759,51 @@ impl StateStores {
             policy: PolicyStore::new(),
             rate_limit: RateLimitStore::new(self_name),
             tree_ops_pending: DashMap::new(),
+            tree_versions: DashMap::new(),
+            tree_generation: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Get the current version for a tree key.
+    pub fn tree_version(&self, key: &str) -> u64 {
+        self.tree_versions
+            .get(key)
+            .map(|v| v.load(Ordering::Acquire))
+            .unwrap_or(0)
+    }
+
+    /// Atomically bump the version for a tree key and the global tree
+    /// generation.  Returns the new version.  This is O(1) with no
+    /// serialization — unlike `policy.update()` which deserializes and
+    /// re-serializes the entire config blob.
+    ///
+    /// On the first call for a given key the counter is seeded from the
+    /// existing PolicyState version (if any) so that local ops don't
+    /// regress the advertised version below a remote/checkpointed baseline.
+    pub fn bump_tree_version(&self, key: &str) -> u64 {
+        let version = self
+            .tree_versions
+            .entry(key.to_string())
+            .or_insert_with(|| {
+                // Seed from the committed policy version so deltas
+                // start above any existing remote/checkpointed state.
+                let base = self.policy.get(key).map(|ps| ps.version).unwrap_or(0);
+                Arc::new(AtomicU64::new(base))
+            })
+            .fetch_add(1, Ordering::Release)
+            + 1;
+        self.tree_generation.fetch_add(1, Ordering::Release);
+        version
+    }
+
+    /// Advance the tree version counter to at least `version`.
+    /// Called after applying remote deltas/full-state updates so that
+    /// subsequent local ops start above the remote baseline.
+    pub fn advance_tree_version(&self, key: &str, version: u64) {
+        self.tree_versions
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .fetch_max(version, Ordering::Release);
     }
 
     /// Run garbage collection across all stores, removing tombstoned CRDT

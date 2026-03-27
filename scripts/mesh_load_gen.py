@@ -130,7 +130,7 @@ _max_retries = 0
 
 
 async def send_request(
-    session: aiohttp.ClientSession, url: str, stats: dict, urls: list[str] | None = None
+    session: aiohttp.ClientSession, url: str, stats: dict, urls: list | None = None
 ):
     prompt = make_prompt(pad_to=_prompt_pad_size)
     payload = {
