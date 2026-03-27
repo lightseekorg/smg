@@ -10,14 +10,6 @@ use crate::{
 
 pub(super) struct Phi3VisionSpec;
 
-impl Phi3VisionSpec {
-    fn tokens_per_image(metadata: &ModelMetadata) -> usize {
-        metadata
-            .config_u32(&["img_processor", "num_img_tokens"])
-            .unwrap_or(256) as usize
-    }
-}
-
 impl ModelProcessorSpec for Phi3VisionSpec {
     fn name(&self) -> &'static str {
         "phi3_v"
@@ -64,14 +56,10 @@ impl ModelProcessorSpec for Phi3VisionSpec {
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let token_id = self.placeholder_token_id(metadata)?;
         let token = self.placeholder_token(metadata)?;
-        let fallback = Self::tokens_per_image(metadata);
         Ok(preprocessed
             .num_img_tokens
             .iter()
-            .map(|&count| {
-                let n = if count > 0 { count } else { fallback };
-                PromptReplacement::repeated(Modality::Image, &token, token_id, n)
-            })
+            .map(|&count| PromptReplacement::repeated(Modality::Image, &token, token_id, count))
             .collect())
     }
 }
