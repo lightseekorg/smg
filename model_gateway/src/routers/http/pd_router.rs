@@ -635,7 +635,8 @@ impl PDRouter {
                 None
             };
 
-            let response_headers = header_utils::preserve_response_headers(decode_response.headers());
+            let response_headers =
+                header_utils::preserve_response_headers(decode_response.headers());
 
             self.create_streaming_response(
                 decode_response.bytes_stream(),
@@ -659,7 +660,8 @@ impl PDRouter {
                 .await
             } else {
                 // Direct passthrough when no logprobs needed
-                let response_headers = header_utils::preserve_response_headers(decode_response.headers());
+                let response_headers =
+                    header_utils::preserve_response_headers(decode_response.headers());
 
                 match decode_response.bytes().await {
                     Ok(decode_body) => {
