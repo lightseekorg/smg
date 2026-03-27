@@ -137,6 +137,8 @@ impl MeshController {
                     self.stores.membership.len(),
                     self.stores.app.len(),
                 );
+                // Clean up retry managers for peers no longer in cluster state
+                retry_managers.retain(|peer_name, _| map.contains_key(peer_name));
             }
 
             tokio::select! {

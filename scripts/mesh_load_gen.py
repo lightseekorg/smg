@@ -129,9 +129,7 @@ _retry_timeout = 0.0  # seconds; 0 = no retry
 _max_retries = 0
 
 
-async def send_request(
-    session: aiohttp.ClientSession, url: str, stats: dict, urls: list[str] | None = None
-):
+async def send_request(session: aiohttp.ClientSession, url: str, stats: dict, urls=None):
     prompt = make_prompt(pad_to=_prompt_pad_size)
     payload = {
         "model": "mock-model",
