@@ -151,11 +151,6 @@ pub(super) mod test_helpers {
         }
     }
 
-    /// Build a minimal `PreprocessedImages` for testing prompt_replacements.
-    pub fn test_preprocessed(image_sizes: &[ImageSize]) -> PreprocessedImages {
-        test_preprocessed_with_tokens(image_sizes, &vec![0; image_sizes.len()])
-    }
-
     pub fn test_preprocessed_with_tokens(
         image_sizes: &[ImageSize],
         num_img_tokens: &[usize],
