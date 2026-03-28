@@ -472,7 +472,13 @@ impl MeshSyncManager {
 
     /// Materialize a TreeState for the given tree key by combining the
     /// tree_configs blob (may be stale) with any pending operations.
-    fn materialize_tree_state(&self, key: &str, model_id: &str) -> Option<TreeState> {
+    ///
+    /// Returns `(TreeState, pending_count)` where `pending_count` is the
+    /// number of operations read from the pending buffer under the same
+    /// DashMap `Ref`.  Callers that need to drain the pending buffer after
+    /// checkpoint should use this count (not `tree_state.operations.len()`,
+    /// which also includes operations baked into the config blob).
+    fn materialize_tree_state(&self, key: &str, model_id: &str) -> Option<(TreeState, usize)> {
         let config_blob = self.stores.tree_configs.get(key);
         let mut tree_state = match config_blob.as_deref() {
             Some(bytes) if !bytes.is_empty() => TreeState::from_bytes(bytes).ok()?,
@@ -490,18 +496,21 @@ impl MeshSyncManager {
         };
         // Drop the DashMap ref before accessing tree_ops_pending.
         drop(config_blob);
+        let mut pending_count = 0;
         if let Some(pending) = self.stores.tree_ops_pending.get(key) {
+            pending_count = pending.len();
             for op in pending.iter() {
                 tree_state.add_operation(op.clone());
             }
         }
-        Some(tree_state)
+        Some((tree_state, pending_count))
     }
 
     /// Get tree state for a model from mesh stores
     pub fn get_tree_state(&self, model_id: &str) -> Option<TreeState> {
         let key = tree_state_key(model_id);
         self.materialize_tree_state(&key, model_id)
+            .map(|(tree_state, _)| tree_state)
     }
 
     pub fn get_all_tree_states(&self) -> Vec<TreeState> {
@@ -513,7 +522,7 @@ impl MeshSyncManager {
             let key = entry.key().clone();
             let model_id = key.strip_prefix("tree:").unwrap_or(&key).to_string();
             seen.insert(key.clone());
-            if let Some(ts) = self.materialize_tree_state(&key, &model_id) {
+            if let Some((ts, _)) = self.materialize_tree_state(&key, &model_id) {
                 results.push(ts);
             }
         }
@@ -526,7 +535,7 @@ impl MeshSyncManager {
                 continue;
             }
             let model_id = key.strip_prefix("tree:").unwrap_or(key);
-            if let Some(ts) = self.materialize_tree_state(key, model_id) {
+            if let Some((ts, _)) = self.materialize_tree_state(key, model_id) {
                 results.push(ts);
             }
         }
@@ -591,104 +600,125 @@ impl MeshSyncManager {
     /// Merges the delta operations into the existing local tree state,
     /// avoiding the cost of replacing the entire tree state on every sync.
     ///
-    /// Writes to `tree_configs` (plain DashMap) instead of the CRDT policy
-    /// store to avoid operation log memory accumulation.
+    /// Uses `DashMap::entry()` for atomic read-modify-write on `tree_configs`
+    /// to avoid the TOCTOU gap between `get()` and `insert()`.
     pub fn apply_remote_tree_delta(&self, delta: TreeStateDelta, actor: Option<String>) {
+        use dashmap::mapref::entry::Entry;
+
         let key = tree_state_key(&delta.model_id);
-        let actor = actor.unwrap_or_else(|| "remote".to_string());
+        let _actor = actor.unwrap_or_else(|| "remote".to_string());
         let model_id = delta.model_id.clone();
         let ops_count = delta.operations.len();
 
-        // Read current config from tree_configs (bypasses CRDT).
-        let current_config = self.stores.tree_configs.get(&key);
-        let current_version = current_config
-            .as_ref()
-            .and_then(|bytes| TreeState::from_bytes(bytes).ok().map(|ts| ts.version))
-            .unwrap_or(0);
-        let old_version = current_version;
+        // Perform the atomic read-modify-write inside the entry block.
+        // Tree construction and serialization happen while holding the
+        // shard write lock; subscriber notification happens after.
+        let result: Option<(TreeState, u64)> = match self.stores.tree_configs.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                let bytes = entry.get();
+                let current_version = if bytes.is_empty() {
+                    0
+                } else {
+                    match TreeState::from_bytes(bytes) {
+                        Ok(ts) => ts.version,
+                        Err(_) => 0,
+                    }
+                };
 
-        // If the delta's base_version is ahead of our current version,
-        // there is a gap — we are missing operations. Skip the delta;
-        // the next full-state sync will catch us up.
-        if delta.base_version > current_version {
-            debug!(
-                "Skipped remote tree delta: model={} (base_version={}, new_version={}, current={})",
-                model_id, delta.base_version, delta.new_version, old_version
-            );
-            return;
-        }
-
-        // Skip if we already have a version >= the delta's new_version
-        if current_version >= delta.new_version {
-            debug!(
-                "Skipped remote tree delta: model={} (base_version={}, new_version={}, current={})",
-                model_id, delta.base_version, delta.new_version, old_version
-            );
-            return;
-        }
-
-        // Build base tree from config only — do NOT replay
-        // tree_ops_pending here. Pending ops are local and will be
-        // included by materialize_tree_state() when the tree is
-        // read for routing or sync.
-        let mut tree_state = match current_config.as_ref() {
-            Some(bytes) if !bytes.is_empty() => match TreeState::from_bytes(bytes) {
-                Ok(state) => state,
-                Err(err) => {
-                    warn!(
-                        model_id = %delta.model_id,
-                        error = %err,
-                        "Corrupted tree state — rejecting delta to avoid data loss"
-                    );
-                    return;
-                }
-            },
-            Some(_) => {
-                if current_version > 0 {
-                    // Config not materialized but we have a version —
-                    // local ops exist only in pending buffer. Reject the
-                    // delta; the periodic checkpoint will materialize the
-                    // config, then the next delta will apply cleanly.
+                // Version checks
+                if delta.base_version > current_version || current_version >= delta.new_version {
                     debug!(
                         "Skipped remote tree delta: model={} (base_version={}, new_version={}, current={})",
-                        model_id, delta.base_version, delta.new_version, old_version
+                        model_id, delta.base_version, delta.new_version, current_version
                     );
                     return;
                 }
-                TreeState::new(delta.model_id.clone())
-            }
-            None => TreeState::new(delta.model_id.clone()),
-        };
-        // Drop the DashMap ref before inserting to avoid deadlock.
-        drop(current_config);
 
-        for op in &delta.operations {
-            tree_state.add_operation(op.clone());
+                // Build base tree from config only — do NOT replay
+                // tree_ops_pending here. Pending ops are local and will be
+                // included by materialize_tree_state() when the tree is
+                // read for routing or sync.
+                let mut tree_state = if bytes.is_empty() {
+                    if current_version > 0 {
+                        debug!(
+                            "Skipped remote tree delta: model={} (base_version={}, new_version={}, current={})",
+                            model_id, delta.base_version, delta.new_version, current_version
+                        );
+                        return;
+                    }
+                    TreeState::new(delta.model_id.clone())
+                } else {
+                    match TreeState::from_bytes(bytes) {
+                        Ok(state) => state,
+                        Err(err) => {
+                            warn!(
+                                model_id = %delta.model_id,
+                                error = %err,
+                                "Corrupted tree state — rejecting delta to avoid data loss"
+                            );
+                            return;
+                        }
+                    }
+                };
+
+                let old_version = current_version;
+                for op in &delta.operations {
+                    tree_state.add_operation(op.clone());
+                }
+                let new_version = tree_state.version;
+
+                match tree_state.to_bytes() {
+                    Ok(serialized) => {
+                        entry.insert(serialized);
+                        debug!(
+                            "Applied remote tree delta: model={} (version: {} -> +{} ops)",
+                            model_id, old_version, ops_count
+                        );
+                        Some((tree_state, new_version))
+                    }
+                    Err(err) => {
+                        debug!(error = %err, model_id = %model_id, "Failed to serialize tree state after delta apply");
+                        None
+                    }
+                }
+            }
+            Entry::Vacant(entry) => {
+                // No existing config — new tree from delta.
+                if delta.base_version > 0 {
+                    debug!(
+                        "Skipped remote tree delta: model={} (base_version={}, new_version={}, no local state)",
+                        model_id, delta.base_version, delta.new_version
+                    );
+                    return;
+                }
+                let mut tree_state = TreeState::new(delta.model_id.clone());
+                for op in &delta.operations {
+                    tree_state.add_operation(op.clone());
+                }
+                let new_version = tree_state.version;
+
+                match tree_state.to_bytes() {
+                    Ok(serialized) => {
+                        entry.insert(serialized);
+                        debug!(
+                            "Applied remote tree delta (new tree): model={} (+{} ops)",
+                            model_id, ops_count
+                        );
+                        Some((tree_state, new_version))
+                    }
+                    Err(err) => {
+                        debug!(error = %err, model_id = %model_id, "Failed to serialize new tree state from delta");
+                        None
+                    }
+                }
+            }
+        };
+
+        // Notification happens outside the entry block (shard lock released).
+        if let Some((tree_state, new_version)) = result {
+            self.stores.advance_tree_version(&key, new_version);
+            self.notify_tree_state_subscribers(&model_id, &tree_state);
         }
-
-        let new_version = tree_state.version;
-        let serialized = match tree_state.to_bytes() {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                debug!(error = %err, model_id = %model_id, actor = %actor, "Failed to serialize tree state after delta apply");
-                return;
-            }
-        };
-
-        // Write to tree_configs — plain DashMap, no CRDT operation log.
-        self.stores.tree_configs.insert(key.clone(), serialized);
-
-        debug!(
-            "Applied remote tree delta: model={} (version: {} -> +{} ops)",
-            model_id, old_version, ops_count
-        );
-
-        // Advance atomic tree version so subsequent local ops
-        // start above the remote baseline.
-        self.stores.advance_tree_version(&key, new_version);
-
-        // Notify subscribers with the applied tree state.
-        self.notify_tree_state_subscribers(&model_id, &tree_state);
     }
 
     /// Checkpoint pending tree operations into the tree_configs store.
@@ -707,24 +737,25 @@ impl MeshSyncManager {
 
         for key in keys {
             let model_id = key.strip_prefix("tree:").unwrap_or(&key);
-            if let Some(tree_state) = self.materialize_tree_state(&key, model_id) {
+            if let Some((tree_state, pending_count)) = self.materialize_tree_state(&key, model_id) {
                 if let Ok(serialized) = tree_state.to_bytes() {
                     // Write to tree_configs — plain DashMap, no CRDT operation log.
                     self.stores.tree_configs.insert(key.clone(), serialized);
 
                     // Drain materialized ops from the pending buffer.
                     // Use `alter` to atomically keep only ops appended AFTER
-                    // materialize_tree_state() read the buffer. The number of
-                    // ops materialized is `tree_state.operations.len()`.
-                    let materialized_count = tree_state.operations.len();
+                    // materialize_tree_state() read the buffer. We use
+                    // `pending_count` (captured under the same DashMap Ref as
+                    // iteration) rather than `tree_state.operations.len()`
+                    // which includes ops from the config blob.
                     self.stores.tree_ops_pending.alter(&key, |_, mut ops| {
-                        if ops.len() <= materialized_count {
+                        if ops.len() <= pending_count {
                             // Release Vec capacity to return memory to the
                             // allocator. Without this, drained Vecs retain
                             // their peak capacity indefinitely.
                             ops = Vec::new();
                         } else {
-                            ops.drain(..materialized_count);
+                            ops.drain(..pending_count);
                         }
                         ops
                     });

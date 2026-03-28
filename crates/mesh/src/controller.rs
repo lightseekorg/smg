@@ -135,6 +135,10 @@ impl MeshController {
                 if removed > 0 {
                     log::info!("GC: removed {removed} tombstoned CRDT metadata entries");
                 }
+                let tree_removed = self.stores.gc_stale_tree_entries();
+                if tree_removed > 0 {
+                    log::info!("GC: removed {tree_removed} stale tree_configs entries");
+                }
                 // Record store sizes for monitoring
                 metrics::record_store_sizes(
                     self.stores.worker.len(),

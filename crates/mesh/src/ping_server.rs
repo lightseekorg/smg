@@ -118,6 +118,12 @@ impl GossipService {
                     .policy
                     .all()
                     .into_iter()
+                    .filter(|(k, _)| {
+                        // Tree configs are handled separately below via
+                        // stores.tree_configs — skip stale CRDT policy
+                        // entries with "tree:" keys.
+                        !k.starts_with("tree:")
+                    })
                     .map(|(k, v)| {
                         let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
                             log::error!("Failed to serialize policy state: {}", e);

@@ -828,6 +828,19 @@ impl StateStores {
             + self.worker.gc_tombstones()
             + self.policy.gc_tombstones()
     }
+
+    /// Remove tree_configs entries for trees that have no pending ops and no
+    /// active version counter.  These are stale configs left behind after the
+    /// tree was fully drained or removed.  Returns the number of entries
+    /// removed.
+    pub fn gc_stale_tree_entries(&self) -> usize {
+        let before = self.tree_configs.len();
+        self.tree_configs.retain(|k, _| {
+            self.tree_ops_pending.get(k).is_some_and(|v| !v.is_empty())
+                || self.tree_versions.contains_key(k)
+        });
+        before.saturating_sub(self.tree_configs.len())
+    }
 }
 
 impl Default for StateStores {
