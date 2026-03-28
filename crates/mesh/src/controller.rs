@@ -122,14 +122,19 @@ impl MeshController {
             };
             cnt += 1;
 
+            // Checkpoint pending tree ops every 10 rounds (~10s) to bound
+            // the pending buffer size.  With 20k-char prompts at 500 rps,
+            // 60-round intervals accumulated ~300 MB in pending.
+            if cnt.is_multiple_of(10) {
+                self.sync_manager.checkpoint_tree_states();
+            }
+
             // Periodic GC: clean up tombstoned CRDT metadata every 60 rounds (~60s)
             if cnt.is_multiple_of(60) {
                 let removed = self.stores.gc_tombstones();
                 if removed > 0 {
                     log::info!("GC: removed {removed} tombstoned CRDT metadata entries");
                 }
-                // Checkpoint pending tree ops into config blobs
-                self.sync_manager.checkpoint_tree_states();
                 // Record store sizes for monitoring
                 metrics::record_store_sizes(
                     self.stores.worker.len(),

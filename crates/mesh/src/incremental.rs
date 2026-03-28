@@ -185,33 +185,24 @@ impl IncrementalUpdateCollector {
                 let timestamp = Self::current_timestamp();
 
                 // --- Policy store scan (only if CRDT generation changed) ---
-                // Handles non-tree policy keys AND tree keys that arrived via
-                // remote operations (not in tree_ops_pending).
+                // Handles non-tree policy keys only. Tree keys are stored
+                // in tree_configs (plain DashMap) and handled by the tree-
+                // specific scan below.
                 if policy_changed {
                     let all_policies = self.stores.policy.all();
                     for (key, state) in &all_policies {
+                        // Tree keys are no longer in the CRDT policy store;
+                        // skip any stale entries that may remain from before
+                        // the migration.
+                        if key.starts_with("tree:") {
+                            continue;
+                        }
+
                         let current_version = state.version();
                         let last_sent_version =
                             last_sent.policy.get(key.as_str()).copied().unwrap_or(0);
                         if current_version <= last_sent_version {
                             continue;
-                        }
-
-                        if key.starts_with("tree:") {
-                            // Skip tree keys that have non-empty local pending
-                            // ops — those are handled by the tree-specific scan
-                            // below which uses atomic version counters.
-                            let has_pending = self
-                                .stores
-                                .tree_ops_pending
-                                .get(key.as_str())
-                                .is_some_and(|v| !v.is_empty());
-                            if has_pending {
-                                continue;
-                            }
-                            // Tree key with no pending ops (remote operation,
-                            // or local ops already drained) — send the full
-                            // PolicyState as-is.
                         }
 
                         if let Ok(serialized) = bincode::serialize(state) {
@@ -232,6 +223,9 @@ impl IncrementalUpdateCollector {
 
                 // --- Tree keys (driven by atomic tree_versions, not CRDT) ---
                 if tree_changed {
+                    let mut emitted_tree_keys = std::collections::HashSet::new();
+
+                    // Phase 1: Scan tree_ops_pending for keys with pending ops.
                     for entry in &self.stores.tree_ops_pending {
                         let key = entry.key();
                         let pending = entry.value();
@@ -287,19 +281,20 @@ impl IncrementalUpdateCollector {
                                             current_version
                                         );
                                         sent_delta = true;
+                                        emitted_tree_keys.insert(key.clone());
                                     }
                                 }
                             }
                         }
 
                         if !sent_delta {
-                            // Full-state fallback: build TreeState from policy
-                            // store config (if checkpointed) + pending ops.
+                            // Full-state fallback: build TreeState from
+                            // tree_configs (if checkpointed) + pending ops.
                             let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
-                            let policy_state = self.stores.policy.get(key.as_str());
-                            let mut tree_state = match &policy_state {
-                                Some(ps) if !ps.config.is_empty() => {
-                                    match TreeState::from_bytes(&ps.config) {
+                            let config_blob = self.stores.tree_configs.get(key.as_str());
+                            let mut tree_state = match config_blob.as_deref() {
+                                Some(bytes) if !bytes.is_empty() => {
+                                    match TreeState::from_bytes(bytes) {
                                         Ok(ts) => ts,
                                         Err(_) => {
                                             debug!("Skipping full-state fallback for {} — config corrupted", key);
@@ -309,6 +304,7 @@ impl IncrementalUpdateCollector {
                                 }
                                 _ => TreeState::new(model_id.clone()),
                             };
+                            drop(config_blob);
                             for op in &**pending {
                                 tree_state.add_operation(op.clone());
                             }
@@ -331,7 +327,58 @@ impl IncrementalUpdateCollector {
                                     "Collected full tree state fallback: {} (version: {})",
                                     key, current_version
                                 );
+                                emitted_tree_keys.insert(key.clone());
                             }
+                        }
+                    }
+
+                    // Phase 2: Scan tree_configs for keys not yet emitted
+                    // (e.g., after checkpoint + buffer drain, or remote-only entries).
+                    for entry in &self.stores.tree_configs {
+                        let key = entry.key();
+                        if emitted_tree_keys.contains(key.as_str()) {
+                            continue;
+                        }
+                        let current_version = self.stores.tree_version(key);
+                        let last_sent_version =
+                            last_sent.policy.get(key.as_str()).copied().unwrap_or(0);
+                        if current_version <= last_sent_version {
+                            continue;
+                        }
+                        let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
+                        let config_bytes = entry.value();
+                        if config_bytes.is_empty() {
+                            continue;
+                        }
+                        let tree_state = match TreeState::from_bytes(config_bytes) {
+                            Ok(ts) => ts,
+                            Err(_) => {
+                                debug!(
+                                    "Skipping tree_configs full-state for {} — config corrupted",
+                                    key
+                                );
+                                continue;
+                            }
+                        };
+                        let tree_version = tree_state.version;
+                        let full_state = PolicyState {
+                            model_id,
+                            policy_type: "tree_state".to_string(),
+                            config: tree_state.to_bytes().unwrap_or_default(),
+                            version: tree_version,
+                        };
+                        if let Ok(serialized) = bincode::serialize(&full_state) {
+                            updates.push(StateUpdate {
+                                key: key.clone(),
+                                value: serialized,
+                                version: current_version,
+                                actor: self.self_name.clone(),
+                                timestamp,
+                            });
+                            debug!(
+                                "Collected tree_configs full state: {} (version: {})",
+                                key, current_version
+                            );
                         }
                     }
                 }

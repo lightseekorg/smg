@@ -735,6 +735,10 @@ pub struct StateStores {
     /// checks this (in addition to `policy.generation()`) to decide whether
     /// the policy store needs scanning.
     pub tree_generation: Arc<AtomicU64>,
+    /// Materialized tree state config blobs, stored outside the CRDT policy
+    /// store to avoid operation log memory accumulation (~50 MB/min leak).
+    /// Key: tree key (e.g., "tree:model-name"), Value: bincode-serialized TreeState.
+    pub tree_configs: DashMap<String, Vec<u8>>,
 }
 
 impl StateStores {
@@ -748,6 +752,7 @@ impl StateStores {
             tree_ops_pending: DashMap::new(),
             tree_versions: DashMap::new(),
             tree_generation: Arc::new(AtomicU64::new(0)),
+            tree_configs: DashMap::new(),
         }
     }
 
@@ -761,6 +766,7 @@ impl StateStores {
             tree_ops_pending: DashMap::new(),
             tree_versions: DashMap::new(),
             tree_generation: Arc::new(AtomicU64::new(0)),
+            tree_configs: DashMap::new(),
         }
     }
 
@@ -785,9 +791,17 @@ impl StateStores {
             .tree_versions
             .entry(key.to_string())
             .or_insert_with(|| {
-                // Seed from the committed policy version so deltas
+                // Seed from the committed tree config version so deltas
                 // start above any existing remote/checkpointed state.
-                let base = self.policy.get(key).map(|ps| ps.version).unwrap_or(0);
+                let base = self
+                    .tree_configs
+                    .get(key)
+                    .and_then(|bytes| {
+                        super::tree_ops::TreeState::from_bytes(&bytes)
+                            .ok()
+                            .map(|ts| ts.version)
+                    })
+                    .unwrap_or(0);
                 Arc::new(AtomicU64::new(base))
             })
             .fetch_add(1, Ordering::Release)
