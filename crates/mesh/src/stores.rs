@@ -840,20 +840,31 @@ impl StateStores {
         let before =
             self.tree_configs.len() + self.tree_versions.len() + self.tree_ops_pending.len();
 
-        // Remove tree_configs for models with no pending ops.
-        self.tree_configs
-            .retain(|k, _| self.tree_ops_pending.get(k).is_some_and(|v| !v.is_empty()));
+        // tree_configs is the authoritative store — NEVER remove entries
+        // that still have data. Only remove if the model is truly gone
+        // (no config, no pending ops, no version counter).
+        //
+        // An active tree has: tree_configs entry (from checkpoint or
+        // remote apply). Pending ops drain every 10 rounds via
+        // checkpoint, so empty pending does NOT mean the tree is stale.
 
-        // Remove tree_versions for models with no pending ops AND no
-        // remaining tree_configs entry.
+        // Remove tree_versions for models with no tree_configs AND no
+        // pending ops (model was fully deregistered).
         self.tree_versions.retain(|k, _| {
-            self.tree_ops_pending.get(k).is_some_and(|v| !v.is_empty())
-                || self.tree_configs.contains_key(k)
+            self.tree_configs.contains_key(k)
+                || self.tree_ops_pending.get(k).is_some_and(|v| !v.is_empty())
         });
 
         // Remove empty pending op buffers for models with no tree_configs.
         self.tree_ops_pending
             .retain(|k, v| !v.is_empty() || self.tree_configs.contains_key(k));
+
+        // Only remove tree_configs for models with no version counter
+        // AND no pending ops — these are truly orphaned entries.
+        self.tree_configs.retain(|k, _| {
+            self.tree_versions.contains_key(k)
+                || self.tree_ops_pending.get(k).is_some_and(|v| !v.is_empty())
+        });
 
         let after =
             self.tree_configs.len() + self.tree_versions.len() + self.tree_ops_pending.len();

@@ -768,7 +768,7 @@ impl MeshSyncManager {
                     // >= the current config version. A concurrent remote
                     // update may have written a newer entry between
                     // materialize_tree_state and now.
-                    match self.stores.tree_configs.entry(key.clone()) {
+                    let inserted = match self.stores.tree_configs.entry(key.clone()) {
                         Entry::Occupied(mut entry) => {
                             let current = TreeState::from_bytes(entry.get())
                                 .ok()
@@ -776,30 +776,33 @@ impl MeshSyncManager {
                                 .unwrap_or(0);
                             if tree_state.version >= current {
                                 entry.insert(serialized);
+                                true
+                            } else {
+                                // A concurrent remote update wrote a newer
+                                // version — skip our stale checkpoint.
+                                false
                             }
                         }
                         Entry::Vacant(entry) => {
                             entry.insert(serialized);
+                            true
                         }
-                    }
+                    };
 
-                    // Drain materialized ops from the pending buffer.
-                    // Use `alter` to atomically keep only ops appended AFTER
-                    // materialize_tree_state() read the buffer. We use
-                    // `pending_count` (captured under the same DashMap Ref as
-                    // iteration) rather than `tree_state.operations.len()`
-                    // which includes ops from the config blob.
-                    self.stores.tree_ops_pending.alter(&key, |_, mut ops| {
-                        if ops.len() <= pending_count {
-                            // Release Vec capacity to return memory to the
-                            // allocator. Without this, drained Vecs retain
-                            // their peak capacity indefinitely.
-                            ops = Vec::new();
-                        } else {
-                            ops.drain(..pending_count);
-                        }
-                        ops
-                    });
+                    // Only drain pending ops if the checkpoint was actually
+                    // written. If a concurrent remote update won the version
+                    // race, our materialized data is stale — draining would
+                    // lose ops that haven't been persisted anywhere.
+                    if inserted {
+                        self.stores.tree_ops_pending.alter(&key, |_, mut ops| {
+                            if ops.len() <= pending_count {
+                                ops = Vec::new();
+                            } else {
+                                ops.drain(..pending_count);
+                            }
+                            ops
+                        });
+                    }
                 }
             }
         }
