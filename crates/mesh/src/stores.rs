@@ -829,17 +829,35 @@ impl StateStores {
             + self.policy.gc_tombstones()
     }
 
-    /// Remove tree_configs entries for trees that have no pending ops and no
-    /// active version counter.  These are stale configs left behind after the
-    /// tree was fully drained or removed.  Returns the number of entries
-    /// removed.
+    /// Remove stale tree entries that have no pending operations.
+    /// Returns the total number of entries removed across all tree maps.
+    ///
+    /// `tree_versions` entries are never removed during normal operation, so
+    /// using `tree_versions.contains_key()` as a liveness signal is
+    /// ineffective — it always returns true for any key that was ever used.
+    /// Instead, we use pending ops as the primary liveness indicator.
     pub fn gc_stale_tree_entries(&self) -> usize {
-        let before = self.tree_configs.len();
-        self.tree_configs.retain(|k, _| {
+        let before =
+            self.tree_configs.len() + self.tree_versions.len() + self.tree_ops_pending.len();
+
+        // Remove tree_configs for models with no pending ops.
+        self.tree_configs
+            .retain(|k, _| self.tree_ops_pending.get(k).is_some_and(|v| !v.is_empty()));
+
+        // Remove tree_versions for models with no pending ops AND no
+        // remaining tree_configs entry.
+        self.tree_versions.retain(|k, _| {
             self.tree_ops_pending.get(k).is_some_and(|v| !v.is_empty())
-                || self.tree_versions.contains_key(k)
+                || self.tree_configs.contains_key(k)
         });
-        before.saturating_sub(self.tree_configs.len())
+
+        // Remove empty pending op buffers for models with no tree_configs.
+        self.tree_ops_pending
+            .retain(|k, v| !v.is_empty() || self.tree_configs.contains_key(k));
+
+        let after =
+            self.tree_configs.len() + self.tree_versions.len() + self.tree_ops_pending.len();
+        before.saturating_sub(after)
     }
 }
 

@@ -2,7 +2,10 @@
 //!
 //! Handles synchronization of worker and policy states across mesh cluster nodes
 
-use std::{fmt::Debug, sync::Arc};
+use std::{
+    fmt::Debug,
+    sync::{atomic::Ordering, Arc},
+};
 
 use parking_lot::RwLock;
 use tracing::{debug, warn};
@@ -479,8 +482,10 @@ impl MeshSyncManager {
     /// checkpoint should use this count (not `tree_state.operations.len()`,
     /// which also includes operations baked into the config blob).
     fn materialize_tree_state(&self, key: &str, model_id: &str) -> Option<(TreeState, usize)> {
-        let config_blob = self.stores.tree_configs.get(key);
-        let mut tree_state = match config_blob.as_deref() {
+        // Clone bytes out of the DashMap ref so no guard is held while
+        // accessing tree_ops_pending.
+        let config_bytes = self.stores.tree_configs.get(key).map(|r| r.clone());
+        let mut tree_state = match config_bytes.as_deref() {
             Some(bytes) if !bytes.is_empty() => TreeState::from_bytes(bytes).ok()?,
             Some(_) => TreeState::new(model_id.to_string()),
             None => {
@@ -494,8 +499,6 @@ impl MeshSyncManager {
                 }
             }
         };
-        // Drop the DashMap ref before accessing tree_ops_pending.
-        drop(config_blob);
         let mut pending_count = 0;
         if let Some(pending) = self.stores.tree_ops_pending.get(key) {
             pending_count = pending.len();
@@ -548,12 +551,17 @@ impl MeshSyncManager {
     ///
     /// Writes to `tree_configs` (plain DashMap) instead of the CRDT policy
     /// store to avoid operation log memory accumulation.
+    ///
+    /// Uses `DashMap::entry()` for atomic read-modify-write on `tree_configs`
+    /// to avoid the TOCTOU gap between `get()` and `insert()`.
     pub fn apply_remote_tree_operation(
         &self,
         model_id: String,
         tree_state: TreeState,
         actor: Option<String>,
     ) {
+        use dashmap::mapref::entry::Entry;
+
         let key = tree_state_key(&model_id);
         let _actor = actor.unwrap_or_else(|| "remote".to_string());
 
@@ -565,34 +573,48 @@ impl MeshSyncManager {
             }
         };
 
-        // Read current version from tree_configs (bypasses CRDT).
-        let current_version = self
-            .stores
-            .tree_configs
-            .get(&key)
-            .and_then(|bytes| TreeState::from_bytes(&bytes).ok().map(|ts| ts.version))
-            .unwrap_or(0);
+        // Atomic read-modify-write via entry() — version check and insert
+        // happen under the same shard lock, closing the TOCTOU gap.
+        let applied = match self.stores.tree_configs.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                let current_version = TreeState::from_bytes(entry.get())
+                    .ok()
+                    .map(|ts| ts.version)
+                    .unwrap_or(0);
+                if tree_state.version > current_version {
+                    entry.insert(serialized);
+                    debug!(
+                        "Applied remote tree state update: model={} (version: {} -> {})",
+                        model_id, current_version, tree_state.version
+                    );
+                    true
+                } else {
+                    debug!(
+                        "Skipped remote tree state update: model={} (version {} <= current {})",
+                        model_id, tree_state.version, current_version
+                    );
+                    false
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(serialized);
+                debug!(
+                    "Applied remote tree state update (new): model={} (version: {})",
+                    model_id, tree_state.version
+                );
+                true
+            }
+        };
 
-        if tree_state.version > current_version {
-            // Write to tree_configs — plain DashMap, no CRDT operation log.
-            self.stores.tree_configs.insert(key.clone(), serialized);
-
+        // Subscriber notification and version advancement happen after
+        // dropping the entry (shard lock released).
+        if applied {
             // Note: we do NOT clear tree_ops_pending here — concurrent
             // local ops may have been appended since we read the config.
             // The periodic checkpoint (every ~60s) handles cleanup.
-            debug!(
-                "Applied remote tree state update: model={} (version: {} -> {})",
-                model_id, current_version, tree_state.version
-            );
-            // Advance atomic tree version so subsequent local ops
-            // start above the remote baseline.
             self.stores.advance_tree_version(&key, tree_state.version);
+            self.stores.tree_generation.fetch_add(1, Ordering::Release);
             self.notify_tree_state_subscribers(&model_id, &tree_state);
-        } else {
-            debug!(
-                "Skipped remote tree state update: model={} (version {} <= current {})",
-                model_id, tree_state.version, current_version
-            );
         }
     }
 
@@ -717,6 +739,7 @@ impl MeshSyncManager {
         // Notification happens outside the entry block (shard lock released).
         if let Some((tree_state, new_version)) = result {
             self.stores.advance_tree_version(&key, new_version);
+            self.stores.tree_generation.fetch_add(1, Ordering::Release);
             self.notify_tree_state_subscribers(&model_id, &tree_state);
         }
     }
@@ -728,6 +751,8 @@ impl MeshSyncManager {
     /// Writes to `tree_configs` (plain DashMap) instead of the CRDT policy
     /// store to avoid operation log memory accumulation.
     pub fn checkpoint_tree_states(&self) {
+        use dashmap::mapref::entry::Entry;
+
         let keys: Vec<String> = self
             .stores
             .tree_ops_pending
@@ -739,8 +764,24 @@ impl MeshSyncManager {
             let model_id = key.strip_prefix("tree:").unwrap_or(&key);
             if let Some((tree_state, pending_count)) = self.materialize_tree_state(&key, model_id) {
                 if let Ok(serialized) = tree_state.to_bytes() {
-                    // Write to tree_configs — plain DashMap, no CRDT operation log.
-                    self.stores.tree_configs.insert(key.clone(), serialized);
+                    // Write to tree_configs only if our materialized version
+                    // >= the current config version. A concurrent remote
+                    // update may have written a newer entry between
+                    // materialize_tree_state and now.
+                    match self.stores.tree_configs.entry(key.clone()) {
+                        Entry::Occupied(mut entry) => {
+                            let current = TreeState::from_bytes(entry.get())
+                                .ok()
+                                .map(|ts| ts.version)
+                                .unwrap_or(0);
+                            if tree_state.version >= current {
+                                entry.insert(serialized);
+                            }
+                        }
+                        Entry::Vacant(entry) => {
+                            entry.insert(serialized);
+                        }
+                    }
 
                     // Drain materialized ops from the pending buffer.
                     // Use `alter` to atomically keep only ops appended AFTER

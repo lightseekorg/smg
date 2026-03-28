@@ -291,8 +291,14 @@ impl IncrementalUpdateCollector {
                             // Full-state fallback: build TreeState from
                             // tree_configs (if checkpointed) + pending ops.
                             let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
-                            let config_blob = self.stores.tree_configs.get(key.as_str());
-                            let mut tree_state = match config_blob.as_deref() {
+                            // Clone bytes out of the DashMap ref so no guard
+                            // is held while iterating tree_ops_pending.
+                            let config_bytes = self
+                                .stores
+                                .tree_configs
+                                .get(key.as_str())
+                                .map(|r| r.clone());
+                            let mut tree_state = match config_bytes.as_deref() {
                                 Some(bytes) if !bytes.is_empty() => {
                                     match TreeState::from_bytes(bytes) {
                                         Ok(ts) => ts,
@@ -304,7 +310,6 @@ impl IncrementalUpdateCollector {
                                 }
                                 _ => TreeState::new(model_id.clone()),
                             };
-                            drop(config_blob);
                             for op in &**pending {
                                 tree_state.add_operation(op.clone());
                             }
@@ -334,6 +339,9 @@ impl IncrementalUpdateCollector {
 
                     // Phase 2: Scan tree_configs for keys not yet emitted
                     // (e.g., after checkpoint + buffer drain, or remote-only entries).
+                    // tree_configs already stores serialized TreeState bytes, so
+                    // we use them directly as the PolicyState config instead of
+                    // round-tripping through deserialize + re-serialize.
                     for entry in &self.stores.tree_configs {
                         let key = entry.key();
                         if emitted_tree_keys.contains(key.as_str()) {
@@ -346,12 +354,15 @@ impl IncrementalUpdateCollector {
                             continue;
                         }
                         let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
-                        let config_bytes = entry.value();
+                        let config_bytes = entry.value().clone();
                         if config_bytes.is_empty() {
                             continue;
                         }
-                        let tree_state = match TreeState::from_bytes(config_bytes) {
-                            Ok(ts) => ts,
+                        // Validate the bytes are a valid TreeState and extract
+                        // the version, but use the raw bytes directly as the
+                        // config payload to avoid redundant re-serialization.
+                        let tree_version = match TreeState::from_bytes(&config_bytes) {
+                            Ok(ts) => ts.version,
                             Err(_) => {
                                 debug!(
                                     "Skipping tree_configs full-state for {} — config corrupted",
@@ -360,11 +371,10 @@ impl IncrementalUpdateCollector {
                                 continue;
                             }
                         };
-                        let tree_version = tree_state.version;
                         let full_state = PolicyState {
                             model_id,
                             policy_type: "tree_state".to_string(),
-                            config: tree_state.to_bytes().unwrap_or_default(),
+                            config: config_bytes,
                             version: tree_version,
                         };
                         if let Ok(serialized) = bincode::serialize(&full_state) {
