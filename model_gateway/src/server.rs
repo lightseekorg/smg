@@ -55,6 +55,7 @@ use crate::{
     observability::{
         logging::{self, LoggingConfig},
         metrics::{self, PrometheusConfig},
+        metrics_server,
         otel_trace,
     },
     routers::{
@@ -882,11 +883,14 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     // Graceful shutdown with close frames will be added when the WS endpoint lands.
     let _metrics_server_handle = if let Some(prometheus_config) = &config.prometheus_config {
         let handle = metrics::start_prometheus(prometheus_config.clone());
-        Some(crate::observability::metrics_server::start_metrics_server(
-            handle,
-            prometheus_config.host.clone(),
-            prometheus_config.port,
-        ))
+        Some(
+            metrics_server::start_metrics_server(
+                handle,
+                prometheus_config.host.clone(),
+                prometheus_config.port,
+            )
+            .await,
+        )
     } else {
         None
     };

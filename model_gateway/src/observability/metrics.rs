@@ -143,6 +143,10 @@ impl Default for PrometheusConfig {
     }
 }
 
+/// Upkeep interval for histogram maintenance. Must match the value passed to
+/// `PrometheusBuilder::upkeep_timeout()` in `start_prometheus`.
+pub(crate) const UPKEEP_INTERVAL_SECS: u64 = 5 * 60;
+
 pub(crate) fn init_metrics() {
     // Layer 1: HTTP metrics
     describe_counter!(
@@ -349,7 +353,7 @@ pub fn start_prometheus(config: PrometheusConfig) -> PrometheusHandle {
     });
 
     PrometheusBuilder::new()
-        .upkeep_timeout(Duration::from_secs(5 * 60))
+        .upkeep_timeout(Duration::from_secs(UPKEEP_INTERVAL_SECS))
         .set_buckets_for_metric(duration_matcher, &duration_bucket)
         .expect("failed to set duration bucket")
         .install_recorder()
