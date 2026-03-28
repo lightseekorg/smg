@@ -137,6 +137,8 @@ impl MeshController {
                     self.stores.membership.len(),
                     self.stores.app.len(),
                 );
+                // Clean up retry managers for peers no longer in cluster state
+                retry_managers.retain(|peer_name, _| map.contains_key(peer_name));
             }
 
             tokio::select! {
@@ -528,9 +530,10 @@ impl MeshController {
                 };
 
                 // Handle incoming messages
-                while let Some(msg_result) = incoming_stream.next().await {
-                    match msg_result {
-                        Ok(msg) => {
+                const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+                loop {
+                    match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming_stream.next()).await {
+                        Ok(Some(Ok(msg))) => {
                             sequence.fetch_add(1, Ordering::Relaxed);
 
                             match msg.message_type() {
@@ -852,8 +855,15 @@ impl MeshController {
                                 }
                             }
                         }
-                        Err(e) => {
+                        Ok(Some(Err(e))) => {
                             log::error!("Error receiving from sync_stream with {}: {}", peer_name, e);
+                            break;
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            log::warn!(
+                                "sync_stream to {peer_name} idle timeout ({STREAM_IDLE_TIMEOUT:?}) — closing"
+                            );
                             break;
                         }
                     }

@@ -1,12 +1,17 @@
 //! Completion API endpoint pipeline stages
 //!
-//! This module continues the native `/v1/completions` stage stack after the
-//! scaffolding in PR #840 and preparation in PR #907. It adds completion-specific
-//! request building, with response processing deferred to a follow-up PR.
+//! This module continues the native `/v1/completions` stage stack. With scaffolding
+//! in PR #840,preparation (#907), request building (#915), and now response processing,
+//! three of the four endpoint-specific pipeline stages are complete. The shared
+//! stages (worker selection, client acquisition, dispatch, execution) are reused
+//! from the existing pipeline.
 
 mod preparation;
 mod request_building;
+mod response_processing;
 
 pub(crate) use preparation::CompletionPreparationStage;
 #[expect(unused_imports, reason = "wired in pipeline factory follow-up PR")]
 pub(crate) use request_building::CompletionRequestBuildingStage;
+#[expect(unused_imports, reason = "wired in pipeline factory follow-up PR")]
+pub(crate) use response_processing::CompletionResponseProcessingStage;

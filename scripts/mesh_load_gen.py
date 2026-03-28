@@ -8,6 +8,8 @@ create realistic tree branching.
 Usage: python3 scripts/mesh_load_gen.py [--rps 200] [--duration 60] [--gateway-ports 30000]
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import random
@@ -130,7 +132,7 @@ _max_retries = 0
 
 
 async def send_request(
-    session: aiohttp.ClientSession, url: str, stats: dict, urls: list[str] | None = None
+    session: aiohttp.ClientSession, url: str, stats: dict, urls: list | None = None
 ):
     prompt = make_prompt(pad_to=_prompt_pad_size)
     payload = {

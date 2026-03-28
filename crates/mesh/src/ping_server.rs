@@ -406,15 +406,15 @@ impl Gossip for GossipService {
         });
 
         // Spawn task to periodically send incremental updates
-        if let Some(collector) = collector {
+        let incremental_sender_handle = if let Some(collector) = collector {
             let tx_incremental = tx.clone();
             let self_name_incremental = self_name.clone();
             let size_validator_clone = size_validator.clone();
             #[expect(
                 clippy::disallowed_methods,
-                reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes"
+                reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes or handle is aborted"
             )]
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 // Use 1 second interval for rate limit counter sync (faster than other stores)
                 let mut interval = tokio::time::interval(Duration::from_secs(1)); // Send every 1 second
                 let mut sequence_counter: u64 = 0;
@@ -493,8 +493,10 @@ impl Gossip for GossipService {
                         }
                     }
                 }
-            });
-        }
+            }))
+        } else {
+            None
+        };
 
         // Spawn task to handle incoming messages
         let mut sequence: u64 = 0;
@@ -562,9 +564,10 @@ impl Gossip for GossipService {
                 }
             }
 
-            while let Some(msg_result) = incoming.next().await {
-                match msg_result {
-                    Ok(msg) => {
+            const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+            loop {
+                match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming.next()).await {
+                    Ok(Some(Ok(msg))) => {
                         sequence += 1;
                         peer_id.clone_from(&msg.peer_id);
 
@@ -1122,14 +1125,27 @@ impl Gossip for GossipService {
                             }
                         }
                     }
-                    Err(e) => {
+                    Ok(Some(Err(e))) => {
                         log::error!("Error receiving stream message: {}", e);
                         record_nack(&peer_id);
                         update_peer_connections(&peer_id, false);
                         record_peer_reconnect(&peer_id);
                         break;
                     }
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            "sync_stream idle timeout ({STREAM_IDLE_TIMEOUT:?}) — closing"
+                        );
+                        break;
+                    }
                 }
+            }
+            // Abort the incremental sender task to release the tx
+            // channel and allow the stream to close cleanly.
+            if let Some(handle) = incremental_sender_handle {
+                handle.abort();
+                let _ = handle.await;
             }
             log::info!("Stream from {} closed", peer_id);
             update_peer_connections(&peer_id, false);

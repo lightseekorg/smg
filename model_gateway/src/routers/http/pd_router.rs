@@ -584,11 +584,8 @@ impl PDRouter {
 
         events::RequestReceivedEvent {}.emit();
 
-        let (prefill_result, decode_result): (
-            Result<reqwest::Response, reqwest::Error>,
-            Result<reqwest::Response, reqwest::Error>,
-        ) = match pd_result {
-            Ok((prefill_resp, decode_resp)) => (Ok(prefill_resp), Ok(decode_resp)),
+        let (prefill_response, decode_response) = match pd_result {
+            Ok((prefill_resp, decode_resp)) => (prefill_resp, decode_resp),
             Err(e) => {
                 error!("PD request transport error, both sides aborted: {e}");
                 // Don't record_outcome here — the caller (execute_dual_dispatch)
@@ -601,113 +598,82 @@ impl PDRouter {
         };
 
         // Process decode response
-        match decode_result {
-            Ok(res) => {
-                let status = StatusCode::from_u16(res.status().as_u16())
-                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                debug!("Decode response status: {}", status);
+        let status = StatusCode::from_u16(decode_response.status().as_u16())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        debug!("Decode response status: {}", status);
 
-                if !status.is_success() {
-                    error!(
-                        "Decode server returned error status decode_url={} status={}",
-                        decode.url(),
-                        status
-                    );
+        if !status.is_success() {
+            error!(
+                "Decode server returned error status decode_url={} status={}",
+                decode.url(),
+                status
+            );
 
-                    return self
-                        .handle_decode_error_response(res, &context, prefill, decode)
-                        .await;
-                }
+            return self
+                .handle_decode_error_response(decode_response, &context, prefill, decode)
+                .await;
+        }
 
-                // Process prefill response
-                let prefill_body = if context.return_logprob {
-                    match self
-                        .process_prefill_response(
-                            prefill_result,
-                            prefill.url(),
-                            context.return_logprob,
-                        )
-                        .await
-                    {
-                        Ok((_, body)) => body,
-                        Err(error_response) => return error_response,
+        // Process prefill response
+        let prefill_body = match self
+            .process_prefill_response(prefill_response, prefill.url(), context.return_logprob)
+            .await
+        {
+            Ok((_, body)) => body,
+            Err(error_response) => return error_response,
+        };
+
+        if context.is_stream {
+            // Streaming response
+            let prefill_logprobs = if context.return_logprob {
+                prefill_body
+                    .as_ref()
+                    .and_then(|body| serde_json::from_slice::<Value>(body).ok())
+                    .and_then(|json| json.pointer("/meta_info/input_token_logprobs").cloned())
+            } else {
+                None
+            };
+
+            let response_headers =
+                header_utils::preserve_response_headers(decode_response.headers());
+
+            self.create_streaming_response(
+                decode_response.bytes_stream(),
+                status,
+                prefill_logprobs,
+                context.return_logprob,
+                None,
+                Some(response_headers),
+                prefill,
+                decode,
+            )
+        } else {
+            // Non-streaming response
+            if context.return_logprob {
+                self.process_non_streaming_response(
+                    decode_response,
+                    status,
+                    context.return_logprob,
+                    prefill_body,
+                )
+                .await
+            } else {
+                // Direct passthrough when no logprobs needed
+                let response_headers =
+                    header_utils::preserve_response_headers(decode_response.headers());
+
+                match decode_response.bytes().await {
+                    Ok(decode_body) => {
+                        let mut response = Response::new(Body::from(decode_body));
+                        *response.status_mut() = status;
+                        *response.headers_mut() = response_headers;
+                        response
                     }
-                } else {
-                    // Even if we don't need logprobs, we should check prefill status
-                    match self
-                        .process_prefill_response(prefill_result, prefill.url(), false)
-                        .await
-                    {
-                        Ok((_, body)) => body,
-                        Err(error_response) => return error_response,
-                    }
-                };
-
-                if context.is_stream {
-                    // Streaming response
-                    let prefill_logprobs = if context.return_logprob {
-                        prefill_body
-                            .as_ref()
-                            .and_then(|body| serde_json::from_slice::<Value>(body).ok())
-                            .and_then(|json| {
-                                json.pointer("/meta_info/input_token_logprobs").cloned()
-                            })
-                    } else {
-                        None
-                    };
-
-                    let response_headers = header_utils::preserve_response_headers(res.headers());
-
-                    self.create_streaming_response(
-                        res.bytes_stream(),
-                        status,
-                        prefill_logprobs,
-                        context.return_logprob,
-                        None,
-                        Some(response_headers),
-                        prefill,
-                        decode,
-                    )
-                } else {
-                    // Non-streaming response
-                    if context.return_logprob {
-                        self.process_non_streaming_response(
-                            res,
-                            status,
-                            context.return_logprob,
-                            prefill_body,
-                        )
-                        .await
-                    } else {
-                        // Direct passthrough when no logprobs needed
-                        let response_headers =
-                            header_utils::preserve_response_headers(res.headers());
-
-                        match res.bytes().await {
-                            Ok(decode_body) => {
-                                let mut response = Response::new(Body::from(decode_body));
-                                *response.status_mut() = status;
-                                *response.headers_mut() = response_headers;
-                                response
-                            }
-                            Err(e) => {
-                                error!("Failed to read decode response: {}", e);
-                                error::internal_error(
-                                    "read_response_failed",
-                                    "Failed to read response",
-                                )
-                            }
-                        }
+                    Err(e) => {
+                        error!("Failed to read decode response: {}", e);
+                        error::internal_error("read_response_failed", "Failed to read response")
                     }
                 }
-            }
-            Err(e) => {
-                error!(
-                    decode_url = %decode.url(),
-                    error = %e,
-                    "Decode request failed"
-                );
-                error::bad_gateway("decode_server_error", format!("Decode server error: {e}"))
             }
         }
     }
@@ -977,28 +943,10 @@ impl PDRouter {
     // Helper to process prefill response and extract body if needed for logprobs
     async fn process_prefill_response(
         &self,
-        prefill_result: Result<reqwest::Response, reqwest::Error>,
+        prefill_response: reqwest::Response,
         prefill_url: &str,
         return_logprob: bool,
     ) -> Result<(StatusCode, Option<bytes::Bytes>), Response> {
-        // Check prefill result first - it's critical for disaggregated mode
-        let prefill_response = match prefill_result {
-            Ok(response) => response,
-            Err(e) => {
-                error!(
-                    "Prefill server failed (CRITICAL) prefill_url={} error={}. Decode will timeout without prefill KV cache.",
-                    prefill_url,
-                    e
-                );
-
-                // Return error immediately - don't wait for decode to timeout
-                return Err(error::bad_gateway(
-                    "prefill_server_error",
-                    format!("Prefill server error: {e}. This will cause decode timeout."),
-                ));
-            }
-        };
-
         let prefill_status = StatusCode::from_u16(prefill_response.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 

@@ -436,6 +436,10 @@ impl MeshSyncManager {
     /// The policy store version is bumped so the generation-based collector
     /// detects the change, but the `config` blob is NOT updated on every call.
     /// It is rebuilt lazily by the collector when a full-state fallback is needed.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Public API — callers handle Result; changing return type is a cross-crate break"
+    )]
     pub fn sync_tree_operation(
         &self,
         model_id: String,
@@ -443,41 +447,27 @@ impl MeshSyncManager {
     ) -> Result<(), String> {
         let key = tree_state_key(&model_id);
 
-        // Append to pending buffer for delta sync. The collector reads this
-        // buffer to build deltas or full-state messages for peers.
-        //
-        // We do NOT update the policy store config blob here — doing so
-        // requires deserializing and re-serializing the entire TreeState
-        // on every request, which caused multi-GB memory usage at 200+ rps.
-        // The policy store entry is created (if missing) with an empty config
-        // so the collector detects it, but the config is only materialized
-        // lazily by the collector when a full-state fallback is needed.
+        // Append to pending buffer for delta sync (O(1)).
         self.stores
             .tree_ops_pending
             .entry(key.clone())
             .or_default()
             .push(operation);
 
-        // Ensure the policy store has an entry for this tree key so the
-        // generation-based collector detects changes. `update` creates the
-        // entry if absent or bumps its version if present, without touching
-        // the config blob.
-        self.stores
-            .policy
-            .update(key, |current| {
-                let (current_version, config) = match current {
-                    Some(existing) => (existing.version, existing.config),
-                    None => (0, Vec::new()),
-                };
-                PolicyState {
-                    model_id: model_id.clone(),
-                    policy_type: "tree_state".to_string(),
-                    config,
-                    version: current_version + 1,
-                }
-            })
-            .map(|_| ())
-            .map_err(|e| format!("Failed to update policy store: {e}"))
+        // Bump the lightweight atomic version counter (O(1), no serialization).
+        //
+        // Previously this called `stores.policy.update()` which goes through
+        // the full CRDT machinery: deserialize PolicyState (including the
+        // potentially large config blob), re-serialize, clone for operation
+        // log — costing ~5× the config size per request.  After checkpoint
+        // materializes the TreeState (~1 MB), this was ~1 GB/s of allocation
+        // churn at 200 rps.
+        //
+        // The collector now detects tree changes via `tree_generation` and
+        // reads version from `tree_versions` instead of PolicyState.version.
+        self.stores.bump_tree_version(&key);
+
+        Ok(())
     }
 
     /// Materialize a TreeState for the given tree key by combining the
@@ -487,7 +477,16 @@ impl MeshSyncManager {
         let mut tree_state = match policy_state {
             Some(ps) if !ps.config.is_empty() => TreeState::from_bytes(&ps.config).ok()?,
             Some(_) => TreeState::new(model_id.to_string()),
-            None => return None,
+            None => {
+                // No policy store entry yet — tree may only exist in the
+                // pending buffer (sync_tree_operation no longer creates
+                // policy entries on the hot path).
+                if self.stores.tree_ops_pending.contains_key(key) {
+                    TreeState::new(model_id.to_string())
+                } else {
+                    return None;
+                }
+            }
         };
         if let Some(pending) = self.stores.tree_ops_pending.get(key) {
             for op in pending.iter() {
@@ -504,18 +503,34 @@ impl MeshSyncManager {
     }
 
     pub fn get_all_tree_states(&self) -> Vec<TreeState> {
-        self.stores
-            .policy
-            .all()
-            .into_iter()
-            .filter_map(|(key, state)| {
-                if state.policy_type != "tree_state" {
-                    return None;
-                }
-                let model_id = state.model_id.clone();
-                self.materialize_tree_state(&key, &model_id)
-            })
-            .collect()
+        let mut seen = std::collections::HashSet::new();
+        let mut results = Vec::new();
+
+        // Collect from policy store (checkpointed trees)
+        for (key, state) in self.stores.policy.all() {
+            if state.policy_type != "tree_state" {
+                continue;
+            }
+            seen.insert(key.clone());
+            if let Some(ts) = self.materialize_tree_state(&key, &state.model_id) {
+                results.push(ts);
+            }
+        }
+
+        // Also collect trees that only exist in the pending buffer
+        // (not yet checkpointed into policy store)
+        for entry in &self.stores.tree_ops_pending {
+            let key = entry.key();
+            if seen.contains(key.as_str()) {
+                continue;
+            }
+            let model_id = key.strip_prefix("tree:").unwrap_or(key);
+            if let Some(ts) = self.materialize_tree_state(key, model_id) {
+                results.push(ts);
+            }
+        }
+
+        results
     }
 
     /// Apply remote tree operation to local policy
@@ -564,6 +579,9 @@ impl MeshSyncManager {
                     "Applied remote tree state update: model={} (version: {} -> {})",
                     model_id, current_version, tree_state.version
                 );
+                // Advance atomic tree version so subsequent local ops
+                // start above the remote baseline.
+                self.stores.advance_tree_version(&key, tree_state.version);
                 self.notify_tree_state_subscribers(&model_id, &tree_state);
             }
             Ok((_, false)) => {
@@ -659,6 +677,12 @@ impl MeshSyncManager {
                     "Applied remote tree delta: model={} (version: {} -> +{} ops)",
                     model_id, old_version, ops_count
                 );
+
+                // Advance atomic tree version so subsequent local ops
+                // start above the remote baseline.
+                if let Some(ps) = self.stores.policy.get(&key) {
+                    self.stores.advance_tree_version(&key, ps.version);
+                }
 
                 // Re-read the committed state for subscriber notification
                 if let Some(policy_state) = self.stores.policy.get(&key) {
@@ -1864,10 +1888,10 @@ mod tests {
 
     #[test]
     fn test_delta_reconnect_falls_back_to_full_state() {
-        // Simulate: add ops via sync_tree_operation, clear tree_ops_pending
-        // (simulating buffer trim after another peer's mark_sent drained old
-        // entries), then create a new collector (simulating reconnected peer).
-        // The collector should produce a full PolicyState, not a delta.
+        // Simulate: add ops via sync_tree_operation, checkpoint (materializes
+        // config in policy store), then clear tree_ops_pending (simulating
+        // buffer trim), then create a new collector (simulating reconnected
+        // peer).  The collector should produce a full PolicyState, not a delta.
         use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
@@ -1881,6 +1905,9 @@ mod tests {
                 )
                 .unwrap();
         }
+
+        // Checkpoint to materialize into policy store (like production)
+        manager.checkpoint_tree_states();
 
         // Clear tree_ops_pending to simulate buffer drain
         stores.tree_ops_pending.remove("tree:model1");
@@ -2057,12 +2084,11 @@ mod tests {
                 .unwrap();
         }
         let tree_b = manager.get_tree_state("model1").unwrap();
-        // tree_b.version may differ from the policy version because
-        // sync_tree_operation re-reads, adds op, and re-stores.
-        // Policy version = 5 (seed) + 2 (B ops) = 7.
-        let key = tree_state_key("model1");
-        let policy_version_b = manager.stores.policy.get(&key).unwrap().version;
-        assert_eq!(policy_version_b, 7);
+        // sync_tree_operation bumps the atomic tree_version counter (not
+        // PolicyState.version). The seed was at version 5 (from remote),
+        // then 2 local ops bumped tree_version to 2.  The materialized
+        // tree version is 7 (seed 5 + 2 pending ops).
+        assert_eq!(tree_b.version, 7);
 
         // A's delta: base=5, new=8, 3 ops
         let a_ops: Vec<_> = (0..3)
@@ -2153,21 +2179,24 @@ mod tests {
 
     #[test]
     fn test_delta_empty_pending_vec() {
-        // Insert an empty Vec into tree_ops_pending for a key.  The
-        // collector should NOT produce a delta for it — it should fall back
-        // to full state if the policy store has data.
+        // Add an op, checkpoint (materializes config in policy store), then
+        // replace pending with empty vec.  The collector should NOT produce
+        // a delta — it should fall back to full state from the policy store.
         use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
 
-        // Add one op via normal path, then replace pending with empty vec
+        // Add one op via normal path
         manager
             .sync_tree_operation(
                 "model1".to_string(),
                 make_insert_op("real_op", "http://w:8000"),
             )
             .unwrap();
+
+        // Checkpoint to materialize into policy store
+        manager.checkpoint_tree_states();
 
         // Overwrite pending buffer with empty vec
         stores
