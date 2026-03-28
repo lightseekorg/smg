@@ -555,8 +555,6 @@ pub(super) async fn handle_simple_streaming_passthrough(
         return (status_code, error_body).into_response();
     }
 
-    circuit_breaker.record_success();
-
     if let Some(metrics_store) = req.storage.metrics_store.as_ref() {
         if let Some(snapshot) = extract_piggyback_metrics(response.headers(), &req.worker_url) {
             metrics_store.update(snapshot);

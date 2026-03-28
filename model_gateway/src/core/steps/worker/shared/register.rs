@@ -12,7 +12,7 @@ use crate::{
     core::{
         steps::workflow_data::WorkerRegistrationData,
         worker::{ConnectionModeExt, WorkerTypeExt},
-        WorkerGroupKey, WorkerRegistry,
+        WorkerRegistry,
     },
     observability::metrics::Metrics,
 };
