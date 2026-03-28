@@ -6,8 +6,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use openai_protocol::{
-    chat::ChatCompletionRequest, classify::ClassifyRequest, embedding::EmbeddingRequest,
-    generate::GenerateRequest, messages::CreateMessageRequest, responses::ResponsesRequest,
+    chat::ChatCompletionRequest, classify::ClassifyRequest, completion::CompletionRequest,
+    embedding::EmbeddingRequest, generate::GenerateRequest, messages::CreateMessageRequest,
+    responses::ResponsesRequest,
 };
 use tracing::debug;
 
@@ -38,6 +39,7 @@ pub struct GrpcRouter {
     embedding_pipeline: RequestPipeline,
     classify_pipeline: RequestPipeline,
     messages_pipeline: RequestPipeline,
+    completion_pipeline: RequestPipeline,
     shared_components: Arc<SharedComponents>,
     responses_context: ResponsesContext,
     harmony_responses_context: ResponsesContext,
@@ -119,6 +121,10 @@ impl GrpcRouter {
             ctx.configured_reasoning_parser.clone(),
         );
 
+        // Create Completion pipeline
+        let completion_pipeline =
+            RequestPipeline::new_completion(worker_registry.clone(), _policy_registry.clone());
+
         // Extract shared dependencies for responses contexts
         let mcp_orchestrator = ctx
             .mcp_orchestrator
@@ -153,6 +159,7 @@ impl GrpcRouter {
             embedding_pipeline,
             classify_pipeline,
             messages_pipeline,
+            completion_pipeline,
             shared_components,
             responses_context,
             harmony_responses_context,
@@ -414,6 +421,57 @@ impl GrpcRouter {
         .await
     }
 
+    /// Main route_completion implementation
+    async fn route_completion_impl(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &CompletionRequest,
+        model_id: &str,
+    ) -> Response {
+        debug!("Processing completion request for model: {}", model_id);
+
+        let request = Arc::new(body.clone());
+        let headers_cloned = headers.cloned();
+        let model_id_cloned = model_id.to_string();
+        let components = self.shared_components.clone();
+        let pipeline = &self.completion_pipeline;
+
+        let per_model_retry_config = self.worker_registry.get_retry_config(model_id);
+        let retry_config = per_model_retry_config
+            .as_ref()
+            .unwrap_or(&self.retry_config);
+
+        RetryExecutor::execute_response_with_retry(
+            retry_config,
+            |_attempt| {
+                let request = Arc::clone(&request);
+                let headers = headers_cloned.clone();
+                let model_id = model_id_cloned.clone();
+                let components = Arc::clone(&components);
+                async move {
+                    pipeline
+                        .execute_completion(request, headers, model_id, components)
+                        .await
+                }
+            },
+            |res, _attempt| is_retryable_status(res.status()),
+            |delay, attempt| {
+                Metrics::record_worker_retry(
+                    metrics_labels::WORKER_REGULAR,
+                    metrics_labels::ENDPOINT_COMPLETIONS,
+                );
+                Metrics::record_worker_retry_backoff(attempt, delay);
+            },
+            || {
+                Metrics::record_worker_retries_exhausted(
+                    metrics_labels::WORKER_REGULAR,
+                    metrics_labels::ENDPOINT_COMPLETIONS,
+                );
+            },
+        )
+        .await
+    }
+
     /// Main route_classify implementation
     async fn route_classify_impl(
         &self,
@@ -496,6 +554,15 @@ impl RouterTrait for GrpcRouter {
         model_id: &str,
     ) -> Response {
         self.route_classify_impl(headers, body, model_id).await
+    }
+
+    async fn route_completion(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &CompletionRequest,
+        model_id: &str,
+    ) -> Response {
+        self.route_completion_impl(headers, body, model_id).await
     }
 
     async fn route_messages(

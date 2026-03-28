@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Completion request building stage: build proto GenerateRequest from CompletionRequest
 //!
 //! Stage 4 for the `/v1/completions` pipeline, parallel to `MessageRequestBuildingStage`
