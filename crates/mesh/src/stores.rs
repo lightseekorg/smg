@@ -735,6 +735,10 @@ pub struct StateStores {
     /// checks this (in addition to `policy.generation()`) to decide whether
     /// the policy store needs scanning.
     pub tree_generation: Arc<AtomicU64>,
+    /// Materialized tree state config blobs, stored outside the CRDT policy
+    /// store to avoid operation log memory accumulation (~50 MB/min leak).
+    /// Key: tree key (e.g., "tree:model-name"), Value: bincode-serialized TreeState.
+    pub tree_configs: DashMap<String, Vec<u8>>,
 }
 
 impl StateStores {
@@ -748,6 +752,7 @@ impl StateStores {
             tree_ops_pending: DashMap::new(),
             tree_versions: DashMap::new(),
             tree_generation: Arc::new(AtomicU64::new(0)),
+            tree_configs: DashMap::new(),
         }
     }
 
@@ -761,6 +766,7 @@ impl StateStores {
             tree_ops_pending: DashMap::new(),
             tree_versions: DashMap::new(),
             tree_generation: Arc::new(AtomicU64::new(0)),
+            tree_configs: DashMap::new(),
         }
     }
 
@@ -785,9 +791,17 @@ impl StateStores {
             .tree_versions
             .entry(key.to_string())
             .or_insert_with(|| {
-                // Seed from the committed policy version so deltas
+                // Seed from the committed tree config version so deltas
                 // start above any existing remote/checkpointed state.
-                let base = self.policy.get(key).map(|ps| ps.version).unwrap_or(0);
+                let base = self
+                    .tree_configs
+                    .get(key)
+                    .and_then(|bytes| {
+                        super::tree_ops::TreeState::from_bytes(&bytes)
+                            .ok()
+                            .map(|ts| ts.version)
+                    })
+                    .unwrap_or(0);
                 Arc::new(AtomicU64::new(base))
             })
             .fetch_add(1, Ordering::Release)
@@ -813,6 +827,48 @@ impl StateStores {
             + self.app.gc_tombstones()
             + self.worker.gc_tombstones()
             + self.policy.gc_tombstones()
+    }
+
+    /// Remove stale tree entries that have no pending operations.
+    /// Returns the total number of entries removed across all tree maps.
+    ///
+    /// `tree_versions` entries are never removed during normal operation, so
+    /// using `tree_versions.contains_key()` as a liveness signal is
+    /// ineffective — it always returns true for any key that was ever used.
+    /// Instead, we use pending ops as the primary liveness indicator.
+    pub fn gc_stale_tree_entries(&self) -> usize {
+        let before =
+            self.tree_configs.len() + self.tree_versions.len() + self.tree_ops_pending.len();
+
+        // tree_configs is the authoritative store — NEVER remove entries
+        // that still have data. Only remove if the model is truly gone
+        // (no config, no pending ops, no version counter).
+        //
+        // An active tree has: tree_configs entry (from checkpoint or
+        // remote apply). Pending ops drain every 10 rounds via
+        // checkpoint, so empty pending does NOT mean the tree is stale.
+
+        // Remove tree_versions for models with no tree_configs AND no
+        // pending ops (model was fully deregistered).
+        self.tree_versions.retain(|k, _| {
+            self.tree_configs.contains_key(k)
+                || self.tree_ops_pending.get(k).is_some_and(|v| !v.is_empty())
+        });
+
+        // Remove empty pending op buffers for models with no tree_configs.
+        self.tree_ops_pending
+            .retain(|k, v| !v.is_empty() || self.tree_configs.contains_key(k));
+
+        // Only remove tree_configs for models with no version counter
+        // AND no pending ops — these are truly orphaned entries.
+        self.tree_configs.retain(|k, _| {
+            self.tree_versions.contains_key(k)
+                || self.tree_ops_pending.get(k).is_some_and(|v| !v.is_empty())
+        });
+
+        let after =
+            self.tree_configs.len() + self.tree_versions.len() + self.tree_ops_pending.len();
+        before.saturating_sub(after)
     }
 }
 

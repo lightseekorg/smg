@@ -113,18 +113,53 @@ impl GossipService {
                     (k, serialized)
                 })
                 .collect(),
-            LocalStoreType::Policy => stores
-                .policy
-                .all()
-                .into_iter()
-                .map(|(k, v)| {
-                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
-                        log::error!("Failed to serialize policy state: {}", e);
+            LocalStoreType::Policy => {
+                let mut entries: Vec<(String, Vec<u8>)> = stores
+                    .policy
+                    .all()
+                    .into_iter()
+                    .filter(|(k, _)| {
+                        // Tree configs are handled separately below via
+                        // stores.tree_configs — skip stale CRDT policy
+                        // entries with "tree:" keys.
+                        !k.starts_with("tree:")
+                    })
+                    .map(|(k, v)| {
+                        let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
+                            log::error!("Failed to serialize policy state: {}", e);
+                            vec![]
+                        });
+                        (k, serialized)
+                    })
+                    .collect();
+
+                // Also include tree_configs entries (stored outside CRDT
+                // to avoid operation log memory accumulation).
+                for entry in &stores.tree_configs {
+                    let key = entry.key().clone();
+                    let config_bytes = entry.value().clone();
+                    let model_id = key.strip_prefix("tree:").unwrap_or(&key).to_string();
+
+                    // Wrap in PolicyState so the receiver can process it
+                    // the same way as any other tree_state entry.
+                    let version = super::tree_ops::TreeState::from_bytes(&config_bytes)
+                        .ok()
+                        .map(|ts| ts.version)
+                        .unwrap_or(1);
+                    let policy_state = super::stores::PolicyState {
+                        model_id,
+                        policy_type: "tree_state".to_string(),
+                        config: config_bytes,
+                        version,
+                    };
+                    let serialized = bincode::serialize(&policy_state).unwrap_or_else(|e| {
+                        log::error!("Failed to serialize tree config as policy state: {}", e);
                         vec![]
                     });
-                    (k, serialized)
-                })
-                .collect(),
+                    entries.push((key, serialized));
+                }
+                entries
+            }
             LocalStoreType::RateLimit => {
                 // For rate limit, serialize all counters from owners
                 stores
@@ -174,7 +209,21 @@ impl GossipService {
                             stores.worker.get(key).map(|s| s.version).unwrap_or(1)
                         }
                         LocalStoreType::Policy => {
-                            stores.policy.get(key).map(|s| s.version).unwrap_or(1)
+                            // For tree keys, version comes from tree_configs
+                            // (not the CRDT policy store).
+                            if key.starts_with("tree:") {
+                                stores
+                                    .tree_configs
+                                    .get(key)
+                                    .and_then(|bytes| {
+                                        super::tree_ops::TreeState::from_bytes(&bytes)
+                                            .ok()
+                                            .map(|ts| ts.version)
+                                    })
+                                    .unwrap_or(1)
+                            } else {
+                                stores.policy.get(key).map(|s| s.version).unwrap_or(1)
+                            }
                         }
                         LocalStoreType::RateLimit => {
                             // For rate limit, use timestamp as version
@@ -1001,11 +1050,10 @@ impl Gossip for GossipService {
                                                             }
                                                             LocalStoreType::Policy => {
                                                                 if let Ok(policy_state) = bincode::deserialize::<super::stores::PolicyState>(&entry.value) {
-                                                                    if let Some(ref sync_manager) = sync_manager {
-                                                                        if policy_state.policy_type == "tree_state" {
-                                                                            // Let apply_remote_tree_operation handle the store
-                                                                            // update + subscriber notification (avoids version-
-                                                                            // check skip from a prior direct store insert)
+                                                                    if policy_state.policy_type == "tree_state" {
+                                                                        // Tree state entries go to tree_configs
+                                                                        // (plain DashMap, no CRDT operation log).
+                                                                        if let Some(ref sync_manager) = sync_manager {
                                                                             if let Ok(tree_state) = super::tree_ops::TreeState::from_bytes(
                                                                                 &policy_state.config
                                                                             ) {
@@ -1016,11 +1064,14 @@ impl Gossip for GossipService {
                                                                                 );
                                                                             }
                                                                         } else {
-                                                                            let _ = stores.policy.insert(key, policy_state.clone());
-                                                                            sync_manager.apply_remote_policy_state(policy_state, Some(entry.actor.clone()));
+                                                                            // No sync manager — write directly to tree_configs.
+                                                                            stores.tree_configs.insert(key, policy_state.config.clone());
                                                                         }
                                                                     } else {
                                                                         let _ = stores.policy.insert(key, policy_state.clone());
+                                                                        if let Some(ref sync_manager) = sync_manager {
+                                                                            sync_manager.apply_remote_policy_state(policy_state, Some(entry.actor.clone()));
+                                                                        }
                                                                     }
                                                                 }
                                                             }
