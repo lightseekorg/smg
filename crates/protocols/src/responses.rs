@@ -857,38 +857,39 @@ impl GenerationRequest for ResponsesRequest {
                 let mut result = String::with_capacity(256);
                 let mut has_parts = false;
 
-                let append_text = |text: &str, res: &mut String, has_p: &mut bool| {
-                    if *has_p {
-                        res.push(' ');
+                let mut append_text = |text: &str| {
+                    if has_parts {
+                        result.push(' ');
                     }
-                    *has_p = true;
-                    res.push_str(text);
+                    has_parts = true;
+                    result.push_str(text);
                 };
 
                 for item in items {
                     match item {
                         ResponseInputOutputItem::Message { content, .. } => {
                             for part in content {
-                                match part {
+                                let text = match part {
                                     ResponseContentPart::OutputText { text, .. } => {
-                                        append_text(text.as_str(), &mut result, &mut has_parts);
+                                        Some(text.as_str())
                                     }
-                                    ResponseContentPart::InputText { text } => {
-                                        append_text(text.as_str(), &mut result, &mut has_parts);
-                                    }
-                                    ResponseContentPart::Unknown => {}
+                                    ResponseContentPart::InputText { text } => Some(text.as_str()),
+                                    ResponseContentPart::Unknown => None,
+                                };
+                                if let Some(t) = text {
+                                    append_text(t);
                                 }
                             }
                         }
                         ResponseInputOutputItem::SimpleInputMessage { content, .. } => {
                             match content {
                                 StringOrContentParts::String(s) => {
-                                    append_text(s.as_str(), &mut result, &mut has_parts);
+                                    append_text(s.as_str());
                                 }
                                 StringOrContentParts::Array(parts) => {
                                     for part in parts {
                                         if let ResponseContentPart::InputText { text } = part {
-                                            append_text(text.as_str(), &mut result, &mut has_parts);
+                                            append_text(text.as_str());
                                         }
                                     }
                                 }
@@ -898,16 +899,16 @@ impl GenerationRequest for ResponsesRequest {
                             for part in content {
                                 match part {
                                     ResponseReasoningContent::ReasoningText { text } => {
-                                        append_text(text.as_str(), &mut result, &mut has_parts);
+                                        append_text(text.as_str());
                                     }
                                 }
                             }
                         }
                         ResponseInputOutputItem::FunctionToolCall { arguments, .. } => {
-                            append_text(arguments.as_str(), &mut result, &mut has_parts);
+                            append_text(arguments.as_str());
                         }
                         ResponseInputOutputItem::FunctionCallOutput { output, .. } => {
-                            append_text(output.as_str(), &mut result, &mut has_parts);
+                            append_text(output.as_str());
                         }
                         ResponseInputOutputItem::McpApprovalRequest { .. }
                         | ResponseInputOutputItem::McpApprovalResponse { .. } => {}
