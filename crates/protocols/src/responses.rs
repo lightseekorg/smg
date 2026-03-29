@@ -888,8 +888,17 @@ impl GenerationRequest for ResponsesRequest {
                                 }
                                 StringOrContentParts::Array(parts) => {
                                     for part in parts {
-                                        if let ResponseContentPart::InputText { text } = part {
-                                            append_text(text.as_str());
+                                        let text = match part {
+                                            ResponseContentPart::OutputText { text, .. } => {
+                                                Some(text.as_str())
+                                            }
+                                            ResponseContentPart::InputText { text } => {
+                                                Some(text.as_str())
+                                            }
+                                            ResponseContentPart::Unknown => None,
+                                        };
+                                        if let Some(t) = text {
+                                            append_text(t);
                                         }
                                     }
                                 }
