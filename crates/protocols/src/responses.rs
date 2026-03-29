@@ -857,7 +857,7 @@ impl GenerationRequest for ResponsesRequest {
                 let mut result = String::with_capacity(256);
                 let mut has_parts = false;
 
-                let mut append_text = |text: &str, res: &mut String, has_p: &mut bool| {
+                let append_text = |text: &str, res: &mut String, has_p: &mut bool| {
                     if *has_p {
                         res.push(' ');
                     }
