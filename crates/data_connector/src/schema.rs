@@ -43,6 +43,7 @@ pub struct SchemaConfig {
     pub responses: TableConfig,
     pub conversation_items: TableConfig,
     pub conversation_item_links: TableConfig,
+    pub conversation_memories: TableConfig,
 }
 
 /// Per-table schema configuration.
@@ -103,6 +104,7 @@ impl Default for SchemaConfig {
             responses: TableConfig::with_table("responses"),
             conversation_items: TableConfig::with_table("conversation_items"),
             conversation_item_links: TableConfig::with_table("conversation_item_links"),
+            conversation_memories: TableConfig::with_table("conversation_memories"),
         }
     }
 }
@@ -167,6 +169,7 @@ impl SchemaConfig {
             &mut self.responses,
             &mut self.conversation_items,
             &mut self.conversation_item_links,
+            &mut self.conversation_memories,
         ] {
             tc.table.make_ascii_uppercase();
             for val in tc.columns.values_mut() {
@@ -199,6 +202,7 @@ impl SchemaConfig {
         Self::validate_table("responses", &self.responses)?;
         Self::validate_table("conversation_items", &self.conversation_items)?;
         Self::validate_table("conversation_item_links", &self.conversation_item_links)?;
+        Self::validate_table("conversation_memories", &self.conversation_memories)?;
 
         Ok(())
     }
@@ -300,6 +304,24 @@ fn core_columns_for(label: &str) -> &'static [&'static str] {
             "created_at",
         ],
         "conversation_item_links" => &["conversation_id", "item_id", "added_at"],
+        "conversation_memories" => &[
+            "memory_id",
+            "conversation_id",
+            "conversation_version",
+            "response_id",
+            "memory_type",
+            "status",
+            "attempt",
+            "owner_id",
+            "next_run_at",
+            "lease_until",
+            "content",
+            "memory_config",
+            "compartment_id",
+            "error_msg",
+            "created_at",
+            "updated_at",
+        ],
         _ => &[],
     }
 }
@@ -372,6 +394,7 @@ mod tests {
         assert_eq!(cfg.responses.table, "responses");
         assert_eq!(cfg.conversation_items.table, "conversation_items");
         assert_eq!(cfg.conversation_item_links.table, "conversation_item_links");
+        assert_eq!(cfg.conversation_memories.table, "conversation_memories");
         assert!(cfg.owner.is_none());
     }
 
@@ -425,6 +448,7 @@ mod tests {
         assert_eq!(cfg.responses.table, "RESPONSES");
         assert_eq!(cfg.conversation_items.table, "CONVERSATION_ITEMS");
         assert_eq!(cfg.conversation_item_links.table, "CONVERSATION_ITEM_LINKS");
+        assert_eq!(cfg.conversation_memories.table, "CONVERSATION_MEMORIES");
         cfg.validate().expect("uppercased config should be valid");
     }
 
@@ -861,5 +885,33 @@ mod tests {
             err.contains("case-insensitive collision"),
             "unexpected: {err}"
         );
+    }
+
+    #[test]
+    fn validate_accepts_conversation_memories_extra_columns() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversation_memories.extra_columns.insert(
+            "tenant_id".to_string(),
+            ColumnDef {
+                sql_type: "VARCHAR2(128)".to_string(),
+                default_value: None,
+            },
+        );
+        cfg.validate().expect("schema should validate");
+    }
+
+    #[test]
+    fn validate_rejects_conversation_memories_core_column_shadowing() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversation_memories.extra_columns.insert(
+            "memory_id".to_string(),
+            ColumnDef {
+                sql_type: "VARCHAR2(128)".to_string(),
+                default_value: None,
+            },
+        );
+        let err = cfg.validate().expect_err("shadowing should fail");
+        assert!(err.contains("conversation_memories.extra_columns"));
+        assert!(err.contains("shadows a core column name"));
     }
 }
