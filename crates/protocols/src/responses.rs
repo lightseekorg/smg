@@ -913,13 +913,9 @@ impl GenerationRequest for ResponsesRequest {
                                 }
                             }
                         }
-                        ResponseInputOutputItem::FunctionToolCall { arguments, .. } => {
-                            append_text(arguments.as_str());
-                        }
-                        ResponseInputOutputItem::FunctionCallOutput { output, .. } => {
-                            append_text(output.as_str());
-                        }
-                        ResponseInputOutputItem::McpApprovalRequest { .. }
+                        ResponseInputOutputItem::FunctionToolCall { .. }
+                        | ResponseInputOutputItem::FunctionCallOutput { .. }
+                        | ResponseInputOutputItem::McpApprovalRequest { .. }
                         | ResponseInputOutputItem::McpApprovalResponse { .. } => {}
                     }
                 }
