@@ -84,11 +84,11 @@ fn create_bench_request() -> ResponsesRequest {
         let mut content = Vec::new();
         for j in 0..10 {
             content.push(ResponseContentPart::InputText {
-                text: format!("word_{}_{}", i, j),
+                text: format!("word_{i}_{j}"),
             });
         }
         items.push(ResponseInputOutputItem::Message {
-            id: format!("msg_{}", i),
+            id: format!("msg_{i}"),
             role: "user".to_string(),
             content,
             status: None,
