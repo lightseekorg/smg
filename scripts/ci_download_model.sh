@@ -13,7 +13,7 @@
 set -euo pipefail
 
 export HF_HOME="${HF_HOME:-/models}"
-LOCK_DIR="${HF_HOME}/hub/.locks"
+LOCK_DIR="${HF_HOME}/.locks"
 MAX_RETRIES=3
 RETRY_DELAY=30
 
