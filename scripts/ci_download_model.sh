@@ -12,8 +12,8 @@
 
 set -euo pipefail
 
-HF_HOME="${HF_HOME:-/models}"
-LOCK_DIR="${HF_HOME}/.locks"
+export HF_HOME="${HF_HOME:-/models}"
+LOCK_DIR="${HF_HOME}/hub/.locks"
 MAX_RETRIES=3
 RETRY_DELAY=30
 
@@ -24,9 +24,9 @@ resolve_models_for_tier() {
 import sys
 from e2e_test.infra.model_specs import MODEL_SPECS
 for model_id, spec in MODEL_SPECS.items():
-    if spec['tp'] == int('${tier}'):
+    if spec['tp'] == int(sys.argv[1]):
         print(model_id)
-"
+" "$tier"
 }
 
 download_model() {
@@ -48,7 +48,7 @@ download_model() {
         # Re-check after acquiring lock (another pod may have finished downloading)
         if [ -d "${model_dir}/snapshots" ] && [ -n "$(ls -A "${model_dir}/snapshots/" 2>/dev/null)" ]; then
             echo "Model ${model_id} was downloaded by another process, skipping."
-            return 0
+            exit 0
         fi
 
         echo "Downloading ${model_id} to ${HF_HOME}..."
@@ -57,7 +57,7 @@ download_model() {
             attempt=$((attempt + 1))
             if huggingface-cli download "$model_id" --quiet 2>&1; then
                 echo "Successfully downloaded ${model_id}."
-                return 0
+                exit 0
             fi
             echo "Download attempt ${attempt}/${MAX_RETRIES} failed for ${model_id}."
             if [ $attempt -lt $MAX_RETRIES ]; then
@@ -82,6 +82,10 @@ if [ "${1:-}" = "--gpu-tier" ]; then
     while IFS= read -r model; do
         models+=("$model")
     done < <(resolve_models_for_tier "$2")
+    if [ ${#models[@]} -eq 0 ]; then
+        echo "ERROR: No models resolved for GPU tier $2"
+        exit 1
+    fi
     echo "Resolved ${#models[@]} model(s) for GPU tier $2: ${models[*]}"
 elif [ $# -gt 0 ]; then
     models=("$@")
