@@ -43,8 +43,8 @@ _GW_DEFAULTS = {
 
 _WORKER_DEFAULTS = {"count": 1, "prefill": None, "decode": None}
 
-# Track worker startup failures — fail fast after repeated failures for same model/engine
-_worker_start_failures: dict[tuple[str, str], int] = {}  # (model_id, engine) -> count
+# Track worker startup failures — fail fast after repeated failures
+_worker_start_failures: dict[str, int] = {}  # engine -> count
 _MAX_WORKER_START_FAILURES = 3  # fail fast after this many failures (matches --reruns 2)
 
 
@@ -112,10 +112,9 @@ def setup_backend(request: pytest.FixtureRequest):
     workers_config = get_marker_kwargs(request, "workers", defaults=_WORKER_DEFAULTS)
     log_dir = os.environ.get("E2E_LOG_DIR") or gateway_config.get("log_dir")
 
-    worker_key = (model_id, engine)
-    fail_count = _worker_start_failures.get(worker_key, 0)
+    fail_count = _worker_start_failures.get(engine, 0)
     if fail_count >= _MAX_WORKER_START_FAILURES:
-        pytest.fail(f"Worker {model_id}/{engine} failed to start {fail_count} times — giving up")
+        pytest.fail(f"Engine {engine} failed to start workers {fail_count} times — giving up")
 
     gateway = Gateway()
     try:
@@ -176,9 +175,7 @@ def _setup_local(
             log_dir=log_dir,
         )
     except (TimeoutError, RuntimeError):
-        _worker_start_failures[(model_id, engine)] = (
-            _worker_start_failures.get((model_id, engine), 0) + 1
-        )
+        _worker_start_failures[engine] = _worker_start_failures.get(engine, 0) + 1
         raise
     try:
         _start_gateway(
@@ -237,9 +234,7 @@ def _setup_pd(
                 log_dir=log_dir,
             )
         except (TimeoutError, RuntimeError):
-            _worker_start_failures[(model_id, engine)] = (
-                _worker_start_failures.get((model_id, engine), 0) + 1
-            )
+            _worker_start_failures[engine] = _worker_start_failures.get(engine, 0) + 1
             raise
         all_workers.extend(prefill_workers)
 
@@ -256,9 +251,7 @@ def _setup_pd(
                 gpu_offset=decode_gpu_offset,
             )
         except (TimeoutError, RuntimeError):
-            _worker_start_failures[(model_id, engine)] = (
-                _worker_start_failures.get((model_id, engine), 0) + 1
-            )
+            _worker_start_failures[engine] = _worker_start_failures.get(engine, 0) + 1
             raise
         all_workers.extend(decode_workers)
 
