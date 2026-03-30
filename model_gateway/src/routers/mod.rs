@@ -22,7 +22,7 @@ use openai_protocol::{
         RealtimeTranscriptionSessionCreateRequest,
     },
     rerank::RerankRequest,
-    responses::{ResponsesGetParams, ResponsesRequest},
+    responses::ResponsesRequest,
 };
 
 pub mod anthropic;
@@ -38,6 +38,7 @@ pub mod mesh;
 pub mod openai;
 pub mod parse;
 pub mod persistence_utils;
+pub mod responses;
 pub mod router_manager;
 pub mod tokenize;
 pub mod worker_selection;
@@ -88,7 +89,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &GenerateRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (
             StatusCode::NOT_IMPLEMENTED,
@@ -102,7 +103,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &ChatCompletionRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (
             StatusCode::NOT_IMPLEMENTED,
@@ -116,7 +117,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &CompletionRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (
             StatusCode::NOT_IMPLEMENTED,
@@ -130,23 +131,13 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &ResponsesRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (
             StatusCode::NOT_IMPLEMENTED,
             "Responses endpoint not implemented",
         )
             .into_response()
-    }
-
-    /// Retrieve a stored/background response by id
-    async fn get_response(
-        &self,
-        _headers: Option<&HeaderMap>,
-        _response_id: &str,
-        _params: &ResponsesGetParams,
-    ) -> Response {
-        (StatusCode::NOT_IMPLEMENTED, "Get response not implemented").into_response()
     }
 
     /// Cancel a background response by id
@@ -158,34 +149,12 @@ pub trait RouterTrait: Send + Sync + Debug {
             .into_response()
     }
 
-    /// Delete a response by id
-    async fn delete_response(&self, _headers: Option<&HeaderMap>, _response_id: &str) -> Response {
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            "Responses delete endpoint not implemented",
-        )
-            .into_response()
-    }
-
-    /// List input items of a response by id
-    async fn list_response_input_items(
-        &self,
-        _headers: Option<&HeaderMap>,
-        _response_id: &str,
-    ) -> Response {
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            "Responses list input items endpoint not implemented",
-        )
-            .into_response()
-    }
-
     /// Route embedding requests (OpenAI-compatible /v1/embeddings)
     async fn route_embeddings(
         &self,
         _headers: Option<&HeaderMap>,
         _body: &EmbeddingRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (StatusCode::NOT_IMPLEMENTED, "Embeddings not implemented").into_response()
     }
@@ -195,7 +164,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &ClassifyRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (StatusCode::NOT_IMPLEMENTED, "Classify not implemented").into_response()
     }
@@ -205,7 +174,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &RerankRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (StatusCode::NOT_IMPLEMENTED, "Rerank not implemented").into_response()
     }
@@ -300,6 +269,58 @@ pub trait RouterTrait: Send + Sync + Debug {
 
     /// Check if this is a PD router
     fn is_pd_mode(&self) -> bool {
-        self.router_type() == "pd"
+        matches!(self.router_type(), "pd" | "grpc_pd")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal stub implementing RouterTrait so we can test the default
+    /// `is_pd_mode` logic without spinning up a real router.
+    #[derive(Debug)]
+    struct StubRouter {
+        type_name: &'static str,
+    }
+
+    #[async_trait]
+    impl RouterTrait for StubRouter {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn router_type(&self) -> &'static str {
+            self.type_name
+        }
+    }
+
+    #[test]
+    fn test_is_pd_mode_for_pd_router_types() {
+        // "pd" (HTTP PD) and "grpc_pd" should both be recognized as PD mode
+        let pd = StubRouter { type_name: "pd" };
+        assert!(pd.is_pd_mode());
+
+        let grpc_pd = StubRouter {
+            type_name: "grpc_pd",
+        };
+        assert!(grpc_pd.is_pd_mode());
+    }
+
+    #[test]
+    fn test_is_pd_mode_false_for_non_pd_router_types() {
+        for name in &[
+            "openai",
+            "regular",
+            "grpc",
+            "gemini",
+            "anthropic",
+            "manager",
+        ] {
+            let router = StubRouter { type_name: name };
+            assert!(
+                !router.is_pd_mode(),
+                "router_type {name:?} should NOT be pd mode"
+            );
+        }
     }
 }

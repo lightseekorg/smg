@@ -21,7 +21,7 @@ use openai_protocol::{
     common::StringOrArray,
     completion::CompletionRequest,
     generate::GenerateRequest,
-    responses::{ResponseInput, ResponsesGetParams, ResponsesRequest},
+    responses::{ResponseInput, ResponsesRequest},
 };
 use serde_json::json;
 use smg::{
@@ -234,7 +234,9 @@ async fn test_openai_router_responses_with_mock() {
         ..Default::default()
     };
 
-    let response1 = router.route_responses(None, &request1, None).await;
+    let response1 = router
+        .route_responses(None, &request1, &request1.model)
+        .await;
     assert_eq!(response1.status(), StatusCode::OK);
     let body1_bytes = axum::body::to_bytes(response1.into_body(), usize::MAX)
         .await
@@ -251,7 +253,9 @@ async fn test_openai_router_responses_with_mock() {
         ..Default::default()
     };
 
-    let response2 = router.route_responses(None, &request2, None).await;
+    let response2 = router
+        .route_responses(None, &request2, &request2.model)
+        .await;
     assert_eq!(response2.status(), StatusCode::OK);
     let body2_bytes = axum::body::to_bytes(response2.into_body(), usize::MAX)
         .await
@@ -299,25 +303,8 @@ async fn test_openai_router_responses_with_mock() {
     assert_eq!(output_items2.len(), 1);
     assert_eq!(output_items2[0]["content"][0]["text"], "mock_output_2");
 
-    let get1 = router
-        .get_response(None, &stored1.id.0, &ResponsesGetParams::default())
-        .await;
-    assert_eq!(get1.status(), StatusCode::OK);
-    let get1_body_bytes = axum::body::to_bytes(get1.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let get1_json: serde_json::Value = serde_json::from_slice(&get1_body_bytes).unwrap();
-    assert_eq!(get1_json, body1);
-
-    let get2 = router
-        .get_response(None, &stored2.id.0, &ResponsesGetParams::default())
-        .await;
-    assert_eq!(get2.status(), StatusCode::OK);
-    let get2_body_bytes = axum::body::to_bytes(get2.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let get2_json: serde_json::Value = serde_json::from_slice(&get2_body_bytes).unwrap();
-    assert_eq!(get2_json, body2);
+    assert_eq!(stored1.raw_response, body1);
+    assert_eq!(stored2.raw_response, body2);
 
     server.abort();
 }
@@ -514,7 +501,7 @@ async fn test_openai_router_responses_streaming_with_mock() {
         ..Default::default()
     };
 
-    let response = router.route_responses(None, &request, None).await;
+    let response = router.route_responses(None, &request, &request.model).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     let headers = response.headers();
@@ -616,7 +603,7 @@ async fn test_unsupported_endpoints() {
 
     let generate_request = GenerateRequest {
         text: Some("Hello world".to_string()),
-        model: None,
+        model: "unknown".to_string(),
         input_ids: None,
         input_embeds: None,
         image_data: None,
@@ -652,12 +639,14 @@ async fn test_unsupported_endpoints() {
         rid: None,
     };
 
-    let response = router.route_generate(None, &generate_request, None).await;
+    let response = router
+        .route_generate(None, &generate_request, &generate_request.model)
+        .await;
     assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
 
     let completion_request = create_minimal_completion_request();
     let response = router
-        .route_completion(None, &completion_request, None)
+        .route_completion(None, &completion_request, &completion_request.model)
         .await;
     assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
 }
@@ -683,7 +672,9 @@ async fn test_openai_router_chat_completion_with_mock() {
     chat_request.temperature = Some(0.7);
 
     // Route the request
-    let response = router.route_chat(None, &chat_request, None).await;
+    let response = router
+        .route_chat(None, &chat_request, &chat_request.model)
+        .await;
 
     // Should get a successful response from mock server
     assert_eq!(response.status(), StatusCode::OK);
@@ -726,7 +717,7 @@ async fn test_openai_e2e_with_server() {
                         serde_json::from_str(&body_str).unwrap();
 
                     router
-                        .route_chat(Some(&parts.headers), &chat_request, None)
+                        .route_chat(Some(&parts.headers), &chat_request, &chat_request.model)
                         .await
                 }
             }
@@ -786,7 +777,9 @@ async fn test_openai_router_chat_streaming_with_mock() {
     });
     let chat_request: ChatCompletionRequest = serde_json::from_value(val).unwrap();
 
-    let response = router.route_chat(None, &chat_request, None).await;
+    let response = router
+        .route_chat(None, &chat_request, &chat_request.model)
+        .await;
     assert_eq!(response.status(), StatusCode::OK);
 
     // Should be SSE
@@ -819,7 +812,9 @@ async fn test_openai_router_circuit_breaker() {
 
     // First few requests should fail and record failures
     for _ in 0..3 {
-        let response = router.route_chat(None, &chat_request, None).await;
+        let response = router
+            .route_chat(None, &chat_request, &chat_request.model)
+            .await;
         // Should get either an error or circuit breaker response
         assert!(
             response.status() == StatusCode::INTERNAL_SERVER_ERROR

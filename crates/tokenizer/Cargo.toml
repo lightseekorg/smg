@@ -32,7 +32,7 @@ aho-corasick = "1.1"
 base64 = "0.22"
 rustc-hash = "1.1"
 hf-hub = { version = "0.5.0", features = ["tokio"] }
-minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader"] }
+minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls"] }
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
 rayon = "1.10"
 tiktoken-rs = "0.9.1"

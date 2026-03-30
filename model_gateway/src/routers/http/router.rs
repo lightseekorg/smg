@@ -16,7 +16,7 @@ use openai_protocol::{
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
     rerank::{RerankRequest, RerankResponse, RerankResult},
-    responses::{ResponsesGetParams, ResponsesRequest},
+    responses::ResponsesRequest,
 };
 use reqwest::Client;
 use tokio::sync::mpsc;
@@ -28,7 +28,7 @@ use crate::{
     config::types::RetryConfig,
     core::{
         is_retryable_status, AttachedBody, ConnectionMode, RetryExecutor, Worker, WorkerLoadGuard,
-        WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID,
+        WorkerRegistry, WorkerType,
     },
     observability::{
         events::{self, Event},
@@ -48,7 +48,6 @@ pub struct Router {
     worker_registry: Arc<WorkerRegistry>,
     policy_registry: Arc<PolicyRegistry>,
     client: Client,
-    enable_igw: bool,
     retry_config: RetryConfig,
 }
 
@@ -58,7 +57,6 @@ impl std::fmt::Debug for Router {
             .field("worker_registry", &self.worker_registry)
             .field("policy_registry", &self.policy_registry)
             .field("client", &self.client)
-            .field("enable_igw", &self.enable_igw)
             .field("retry_config", &self.retry_config)
             .finish()
     }
@@ -75,7 +73,6 @@ impl Router {
             worker_registry: ctx.worker_registry.clone(),
             policy_registry: ctx.policy_registry.clone(),
             client: ctx.client.clone(),
-            enable_igw: ctx.router_config.enable_igw,
             retry_config: ctx.router_config.effective_retry_config(),
         })
     }
@@ -131,18 +128,23 @@ impl Router {
         }
     }
 
-    /// Select worker for a specific model considering circuit breaker state
+    /// Select worker considering circuit breaker state.
+    /// Filters to workers serving the specified model. When model is "unknown"
+    /// (generate endpoint without model), considers all HTTP workers.
     fn select_worker_for_model(
         &self,
-        model_id: Option<&str>,
+        model_id: &str,
         text: Option<&str>,
         headers: Option<&HeaderMap>,
     ) -> Option<Arc<dyn Worker>> {
-        let effective_model_id = if self.enable_igw { model_id } else { None };
-
-        // Get workers for the specified model O(1), filtered by connection mode
+        // UNKNOWN_MODEL_ID means caller didn't specify a model — find any available worker
+        let model_filter = if model_id == crate::core::UNKNOWN_MODEL_ID {
+            None
+        } else {
+            Some(model_id)
+        };
         let workers = self.worker_registry.get_workers_filtered(
-            effective_model_id,
+            model_filter,
             Some(WorkerType::Regular),
             Some(ConnectionMode::Http),
             None,  // any runtime type
@@ -159,15 +161,10 @@ impl Router {
         }
 
         // Get the appropriate policy for this model
-        let policy = match model_id {
-            Some(model) => self.policy_registry.get_policy_or_default(model),
-            None => self.policy_registry.get_default_policy(),
-        };
+        let policy = self.policy_registry.get_policy_or_default(model_id);
 
         // Get cached hash ring for consistent hashing (O(log n) lookup)
-        let hash_ring = self
-            .worker_registry
-            .get_hash_ring(effective_model_id.unwrap_or(UNKNOWN_MODEL_ID));
+        let hash_ring = self.worker_registry.get_hash_ring(model_id);
 
         let idx = policy.select_worker(
             &available,
@@ -183,7 +180,7 @@ impl Router {
         Metrics::record_worker_selection(
             metrics_labels::WORKER_REGULAR,
             metrics_labels::CONNECTION_HTTP,
-            model_id.unwrap_or(UNKNOWN_MODEL_ID),
+            model_id,
             policy.name(),
         );
 
@@ -195,12 +192,12 @@ impl Router {
         headers: Option<&HeaderMap>,
         typed_req: &T,
         route: &'static str,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         let start = Instant::now();
         let is_stream = typed_req.is_stream();
         let text = typed_req.extract_text_for_routing();
-        let model = model_id.unwrap_or(UNKNOWN_MODEL_ID);
+        let model = model_id;
         let endpoint = route_to_endpoint(route);
 
         // Record request start (Layer 2)
@@ -213,8 +210,14 @@ impl Router {
             bool_to_static_str(is_stream),
         );
 
+        // Use per-model retry config if set by a worker, otherwise fall back to router default.
+        let per_model_retry_config = self.worker_registry.get_retry_config(model_id);
+        let retry_config = per_model_retry_config
+            .as_ref()
+            .unwrap_or(&self.retry_config);
+
         let response = RetryExecutor::execute_response_with_retry(
-            &self.retry_config,
+            retry_config,
             // operation per attempt
             |_: u32| async {
                 let res = self
@@ -274,24 +277,38 @@ impl Router {
         headers: Option<&HeaderMap>,
         typed_req: &T,
         route: &'static str,
-        model_id: Option<&str>,
+        model_id: &str,
         is_stream: bool,
         text: &str,
     ) -> Response {
         let worker = match self.select_worker_for_model(model_id, Some(text), headers) {
             Some(w) => w,
             None => {
-                return error::service_unavailable(
-                    "no_available_workers",
-                    "No available workers (all circuits open or unhealthy)",
+                // Distinguish "no workers for this model" from "workers exist but unavailable"
+                let model_filter = if model_id == crate::core::UNKNOWN_MODEL_ID {
+                    None
+                } else {
+                    Some(model_id)
+                };
+                let total = self.worker_registry.get_workers_filtered(
+                    model_filter,
+                    Some(WorkerType::Regular),
+                    Some(ConnectionMode::Http),
+                    None,
+                    false,
                 );
+                return if total.is_empty() {
+                    error::model_not_found(model_id)
+                } else {
+                    error::service_unavailable(
+                        "no_available_workers",
+                        "All workers are unavailable (circuit breaker open or unhealthy)",
+                    )
+                };
             }
         };
 
-        let policy = match model_id {
-            Some(model) => self.policy_registry.get_policy_or_default(model),
-            None => self.policy_registry.get_default_policy(),
-        };
+        let policy = self.policy_registry.get_policy_or_default(model_id);
 
         let load_guard = ["cache_aware", "manual"]
             .contains(&policy.name())
@@ -317,7 +334,7 @@ impl Router {
         events::RequestReceivedEvent {}.emit();
 
         let status = response.status();
-        worker.record_outcome(!is_retryable_status(status));
+        worker.record_outcome(status.as_u16());
 
         // Record worker errors for server errors (5xx)
         if status.is_server_error() {
@@ -431,12 +448,6 @@ impl Router {
 
         last_response
             .unwrap_or_else(|| error::bad_gateway("no_worker_response", "No worker response"))
-    }
-
-    // Route a GET request with provided headers to a specific endpoint
-    async fn route_get_request(&self, headers: Option<&HeaderMap>, endpoint: &str) -> Response {
-        self.route_simple_request(headers, endpoint, Method::GET)
-            .await
     }
 
     // Route a POST request with empty body to a specific endpoint
@@ -679,7 +690,7 @@ impl RouterTrait for Router {
         &self,
         headers: Option<&HeaderMap>,
         body: &GenerateRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_typed_request(headers, body, "/generate", model_id)
             .await
@@ -689,7 +700,7 @@ impl RouterTrait for Router {
         &self,
         headers: Option<&HeaderMap>,
         body: &ChatCompletionRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_typed_request(headers, body, "/v1/chat/completions", model_id)
             .await
@@ -699,7 +710,7 @@ impl RouterTrait for Router {
         &self,
         headers: Option<&HeaderMap>,
         body: &CompletionRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_typed_request(headers, body, "/v1/completions", model_id)
             .await
@@ -709,20 +720,10 @@ impl RouterTrait for Router {
         &self,
         headers: Option<&HeaderMap>,
         body: &ResponsesRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_typed_request(headers, body, "/v1/responses", model_id)
             .await
-    }
-
-    async fn get_response(
-        &self,
-        headers: Option<&HeaderMap>,
-        response_id: &str,
-        _params: &ResponsesGetParams,
-    ) -> Response {
-        let endpoint = format!("v1/responses/{response_id}");
-        self.route_get_request(headers, &endpoint).await
     }
 
     async fn cancel_response(&self, headers: Option<&HeaderMap>, response_id: &str) -> Response {
@@ -734,7 +735,7 @@ impl RouterTrait for Router {
         &self,
         headers: Option<&HeaderMap>,
         body: &EmbeddingRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_typed_request(headers, body, "/v1/embeddings", model_id)
             .await
@@ -744,7 +745,7 @@ impl RouterTrait for Router {
         &self,
         headers: Option<&HeaderMap>,
         body: &ClassifyRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         self.route_typed_request(headers, body, "/v1/classify", model_id)
             .await
@@ -754,7 +755,7 @@ impl RouterTrait for Router {
         &self,
         headers: Option<&HeaderMap>,
         body: &RerankRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         let response = self
             .route_typed_request(headers, body, "/v1/rerank", model_id)
@@ -797,15 +798,14 @@ mod tests {
         let worker2 = BasicWorkerBuilder::new("http://worker2:8080")
             .worker_type(WorkerType::Regular)
             .build();
-        worker_registry.register(Arc::new(worker1));
-        worker_registry.register(Arc::new(worker2));
+        worker_registry.register_or_replace(Arc::new(worker1));
+        worker_registry.register_or_replace(Arc::new(worker2));
 
         Router {
             worker_registry,
             policy_registry,
             client: Client::new(),
             retry_config: RetryConfig::default(),
-            enable_igw: false,
         }
     }
 

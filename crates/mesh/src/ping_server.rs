@@ -17,7 +17,7 @@ use tracing as log;
 use tracing::instrument;
 
 use super::{
-    flow_control::MessageSizeValidator,
+    flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
     incremental::IncrementalUpdateCollector,
     metrics::{
         record_ack, record_batch_sent, record_nack, record_peer_reconnect, record_snapshot_bytes,
@@ -44,7 +44,8 @@ use super::{
 #[derive(Debug)]
 pub struct GossipService {
     state: ClusterState,
-    self_addr: SocketAddr,
+    listen_addr: SocketAddr,
+    advertise_addr: SocketAddr,
     self_name: String,
     stores: Option<Arc<StateStores>>, // Optional state stores for CRDT-based sync
     sync_manager: Option<Arc<MeshSyncManager>>, // Optional sync manager for applying remote updates
@@ -81,7 +82,7 @@ impl GossipService {
                 .all()
                 .into_iter()
                 .map(|(k, v)| {
-                    let serialized = serde_json::to_vec(&v).unwrap_or_else(|e| {
+                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
                         log::error!("Failed to serialize membership state: {}", e);
                         vec![]
                     });
@@ -93,7 +94,7 @@ impl GossipService {
                 .all()
                 .into_iter()
                 .map(|(k, v)| {
-                    let serialized = serde_json::to_vec(&v).unwrap_or_else(|e| {
+                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
                         log::error!("Failed to serialize app state: {}", e);
                         vec![]
                     });
@@ -105,25 +106,60 @@ impl GossipService {
                 .all()
                 .into_iter()
                 .map(|(k, v)| {
-                    let serialized = serde_json::to_vec(&v).unwrap_or_else(|e| {
+                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
                         log::error!("Failed to serialize worker state: {}", e);
                         vec![]
                     });
                     (k, serialized)
                 })
                 .collect(),
-            LocalStoreType::Policy => stores
-                .policy
-                .all()
-                .into_iter()
-                .map(|(k, v)| {
-                    let serialized = serde_json::to_vec(&v).unwrap_or_else(|e| {
-                        log::error!("Failed to serialize policy state: {}", e);
+            LocalStoreType::Policy => {
+                let mut entries: Vec<(String, Vec<u8>)> = stores
+                    .policy
+                    .all()
+                    .into_iter()
+                    .filter(|(k, _)| {
+                        // Tree configs are handled separately below via
+                        // stores.tree_configs — skip stale CRDT policy
+                        // entries with "tree:" keys.
+                        !k.starts_with("tree:")
+                    })
+                    .map(|(k, v)| {
+                        let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
+                            log::error!("Failed to serialize policy state: {}", e);
+                            vec![]
+                        });
+                        (k, serialized)
+                    })
+                    .collect();
+
+                // Also include tree_configs entries (stored outside CRDT
+                // to avoid operation log memory accumulation).
+                for entry in &stores.tree_configs {
+                    let key = entry.key().clone();
+                    let config_bytes = entry.value().clone();
+                    let model_id = key.strip_prefix("tree:").unwrap_or(&key).to_string();
+
+                    // Wrap in PolicyState so the receiver can process it
+                    // the same way as any other tree_state entry.
+                    let version = super::tree_ops::TreeState::from_bytes(&config_bytes)
+                        .ok()
+                        .map(|ts| ts.version)
+                        .unwrap_or(1);
+                    let policy_state = super::stores::PolicyState {
+                        model_id,
+                        policy_type: "tree_state".to_string(),
+                        config: config_bytes,
+                        version,
+                    };
+                    let serialized = bincode::serialize(&policy_state).unwrap_or_else(|e| {
+                        log::error!("Failed to serialize tree config as policy state: {}", e);
                         vec![]
                     });
-                    (k, serialized)
-                })
-                .collect(),
+                    entries.push((key, serialized));
+                }
+                entries
+            }
             LocalStoreType::RateLimit => {
                 // For rate limit, serialize all counters from owners
                 stores
@@ -134,7 +170,7 @@ impl GossipService {
                         if stores.rate_limit.is_owner(&key) {
                             stores.rate_limit.get_counter(&key).map(|counter_value| {
                                 let serialized =
-                                    serde_json::to_vec(&counter_value).unwrap_or_else(|e| {
+                                    bincode::serialize(&counter_value).unwrap_or_else(|e| {
                                         log::error!(
                                             "Failed to serialize rate limit counter: {}",
                                             e
@@ -173,7 +209,21 @@ impl GossipService {
                             stores.worker.get(key).map(|s| s.version).unwrap_or(1)
                         }
                         LocalStoreType::Policy => {
-                            stores.policy.get(key).map(|s| s.version).unwrap_or(1)
+                            // For tree keys, version comes from tree_configs
+                            // (not the CRDT policy store).
+                            if key.starts_with("tree:") {
+                                stores
+                                    .tree_configs
+                                    .get(key)
+                                    .and_then(|bytes| {
+                                        super::tree_ops::TreeState::from_bytes(&bytes)
+                                            .ok()
+                                            .map(|ts| ts.version)
+                                    })
+                                    .unwrap_or(1)
+                            } else {
+                                stores.policy.get(key).map(|s| s.version).unwrap_or(1)
+                            }
                         }
                         LocalStoreType::RateLimit => {
                             // For rate limit, use timestamp as version
@@ -232,10 +282,16 @@ impl GossipService {
 }
 
 impl GossipService {
-    pub fn new(state: ClusterState, self_addr: SocketAddr, self_name: &str) -> Self {
+    pub fn new(
+        state: ClusterState,
+        listen_addr: SocketAddr,
+        advertise_addr: SocketAddr,
+        self_name: &str,
+    ) -> Self {
         Self {
             state,
-            self_addr,
+            listen_addr,
+            advertise_addr,
             self_name: self_name.to_string(),
             stores: None,
             sync_manager: None,
@@ -277,12 +333,13 @@ impl GossipService {
         self,
         signal: F,
     ) -> Result<()> {
-        let listen_addr = self.self_addr;
-        let service = GossipServer::new(self);
+        let listen_addr = self.listen_addr;
+        let service = GossipServer::new(self)
+            .max_decoding_message_size(MAX_MESSAGE_SIZE)
+            .max_encoding_message_size(MAX_MESSAGE_SIZE)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip);
 
-        // For now, start without TLS support
-        // TODO: Implement TLS support using tonic's transport layer
-        // The mTLS manager is available but needs proper integration with tonic's transport
         Server::builder()
             .add_service(service)
             .serve_with_shutdown(listen_addr, signal)
@@ -296,7 +353,11 @@ impl GossipService {
         signal: F,
     ) -> Result<()> {
         let incoming = TcpIncoming::from(listener);
-        let service = GossipServer::new(self);
+        let service = GossipServer::new(self)
+            .max_decoding_message_size(MAX_MESSAGE_SIZE)
+            .max_encoding_message_size(MAX_MESSAGE_SIZE)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip);
         Server::builder()
             .add_service(service)
             .serve_with_incoming_shutdown(incoming, signal)
@@ -356,7 +417,7 @@ impl Gossip for GossipService {
                 };
                 Ok(Response::new(NodeUpdate {
                     name: self.self_name.clone(),
-                    address: self.self_addr.to_string(),
+                    address: self.advertise_addr.to_string(),
                     status: current_status,
                 }))
             }
@@ -394,15 +455,15 @@ impl Gossip for GossipService {
         });
 
         // Spawn task to periodically send incremental updates
-        if let Some(collector) = collector {
+        let incremental_sender_handle = if let Some(collector) = collector {
             let tx_incremental = tx.clone();
             let self_name_incremental = self_name.clone();
             let size_validator_clone = size_validator.clone();
             #[expect(
                 clippy::disallowed_methods,
-                reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes"
+                reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes or handle is aborted"
             )]
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 // Use 1 second interval for rate limit counter sync (faster than other stores)
                 let mut interval = tokio::time::interval(Duration::from_secs(1)); // Send every 1 second
                 let mut sequence_counter: u64 = 0;
@@ -423,10 +484,16 @@ impl Gossip for GossipService {
                             // Validate message size
                             if let Err(e) = size_validator_clone.validate(batch_size) {
                                 log::warn!(
-                                    "Incremental update too large, skipping: {} (max: {} bytes)",
+                                    "Incremental update too large, skipping store {:?}: {} (max: {} bytes)",
+                                    store_type,
                                     e,
                                     size_validator_clone.max_size()
                                 );
+                                // Mark as sent to prevent infinite retry loop.
+                                // Without this, the same oversized update is re-collected,
+                                // re-serialized, and re-skipped every second forever,
+                                // burning CPU and memory.
+                                collector.mark_sent(store_type, &updates);
                                 continue;
                             }
 
@@ -475,16 +542,20 @@ impl Gossip for GossipService {
                         }
                     }
                 }
-            });
-        }
+            }))
+        } else {
+            None
+        };
 
         // Spawn task to handle incoming messages
         let mut sequence: u64 = 0;
         let _convergence_tracker = ConvergenceTracker::new();
 
-        // Track snapshot reception state: (store_type, total_chunks) -> received_chunks
+        // Track snapshot reception state: store_type -> (received_chunks, expected_total)
+        // Keyed by store_type only — a new snapshot request for the same store
+        // replaces any incomplete previous attempt (prevents stale chunk mixing).
         use std::collections::HashMap;
-        let mut snapshot_state: HashMap<(LocalStoreType, u64), Vec<SnapshotChunk>> = HashMap::new();
+        let mut snapshot_state: HashMap<LocalStoreType, (Vec<SnapshotChunk>, u64)> = HashMap::new();
 
         #[expect(
             clippy::disallowed_methods,
@@ -542,9 +613,10 @@ impl Gossip for GossipService {
                 }
             }
 
-            while let Some(msg_result) = incoming.next().await {
-                match msg_result {
-                    Ok(msg) => {
+            const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+            loop {
+                match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming.next()).await {
+                    Ok(Some(Ok(msg))) => {
                         sequence += 1;
                         peer_id.clone_from(&msg.peer_id);
 
@@ -594,7 +666,7 @@ impl Gossip for GossipService {
                                             match store_type {
                                                 LocalStoreType::Worker => {
                                                     // Deserialize and apply worker state
-                                                    if let Ok(worker_state) = serde_json::from_slice::<
+                                                    if let Ok(worker_state) = bincode::deserialize::<
                                                         super::stores::WorkerState,
                                                     >(
                                                         &state_update.value
@@ -610,24 +682,35 @@ impl Gossip for GossipService {
                                                 }
                                                 LocalStoreType::Policy => {
                                                     // Deserialize and apply policy state
-                                                    if let Ok(policy_state) = serde_json::from_slice::<
+                                                    if let Ok(policy_state) = bincode::deserialize::<
                                                         super::stores::PolicyState,
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        // Extract actor from StateUpdate
                                                         let actor =
                                                             Some(state_update.actor.clone());
 
-                                                        // Check if this is a tree state update
-                                                        if policy_state.policy_type == "tree_state"
+                                                        if policy_state.policy_type
+                                                            == "tree_state_delta"
                                                         {
-                                                            // Deserialize tree state
+                                                            // Delta: apply only the new operations
+                                                            if let Ok(delta) =
+                                                                super::tree_ops::TreeStateDelta::from_bytes(
+                                                                    &policy_state.config,
+                                                                )
+                                                            {
+                                                                sync_manager
+                                                                    .apply_remote_tree_delta(
+                                                                        delta, actor,
+                                                                    );
+                                                            }
+                                                        } else if policy_state.policy_type
+                                                            == "tree_state"
+                                                        {
+                                                            // Full state: replace (backward compatible)
                                                             if let Ok(tree_state) =
-                                                                serde_json::from_slice::<
-                                                                    super::tree_ops::TreeState,
-                                                                >(
-                                                                    &policy_state.config
+                                                                super::tree_ops::TreeState::from_bytes(
+                                                                    &policy_state.config,
                                                                 )
                                                             {
                                                                 sync_manager
@@ -650,7 +733,7 @@ impl Gossip for GossipService {
                                                 }
                                                 LocalStoreType::App => {
                                                     // Deserialize and apply app state
-                                                    if let Ok(app_state) = serde_json::from_slice::<
+                                                    if let Ok(app_state) = bincode::deserialize::<
                                                         super::stores::AppState,
                                                     >(
                                                         &state_update.value
@@ -678,7 +761,7 @@ impl Gossip for GossipService {
                                                 LocalStoreType::Membership => {
                                                     // Deserialize and apply membership state
                                                     if let Ok(membership_state) =
-                                                        serde_json::from_slice::<
+                                                        bincode::deserialize::<
                                                             super::stores::MembershipState,
                                                         >(
                                                             &state_update.value
@@ -698,7 +781,7 @@ impl Gossip for GossipService {
                                                     }
                                                 }
                                                 LocalStoreType::RateLimit => {
-                                                    if let Ok(op_log) = serde_json::from_slice::<
+                                                    if let Ok(op_log) = bincode::deserialize::<
                                                         super::crdt_kv::OperationLog,
                                                     >(
                                                         &state_update.value
@@ -723,7 +806,7 @@ impl Gossip for GossipService {
                                                             );
                                                         }
                                                     } else if let Ok(counter_value) =
-                                                        serde_json::from_slice::<i64>(
+                                                        bincode::deserialize::<i64>(
                                                             &state_update.value,
                                                         )
                                                     {
@@ -776,7 +859,8 @@ impl Gossip for GossipService {
                                     // Generate and send snapshot chunks
                                     let service = GossipService {
                                         state: state.clone(),
-                                        self_addr: SocketAddr::from(([0, 0, 0, 0], 0)), // Not used in snapshot generation
+                                        listen_addr: SocketAddr::from(([0, 0, 0, 0], 0)), // Not used in snapshot generation
+                                        advertise_addr: SocketAddr::from(([0, 0, 0, 0], 0)), // Not used in snapshot generation
                                         self_name: self_name.clone(),
                                         stores: stores.clone(),
                                         sync_manager: sync_manager.clone(),
@@ -893,25 +977,48 @@ impl Gossip for GossipService {
                                         chunk.entries.iter().map(|e| e.value.len()).sum();
                                     record_snapshot_bytes(store_name, "received", chunk_bytes);
 
-                                    // Store chunk for later application
-                                    let chunk_key = (store_type, chunk.total_chunks);
-                                    snapshot_state
-                                        .entry(chunk_key)
-                                        .or_default()
-                                        .push(chunk.clone());
+                                    // Store chunk. Reset on chunk_index == 0 (start of a
+                                    // new snapshot transfer) to prevent stale chunks from a
+                                    // previous attempt mixing with new ones — even if
+                                    // total_chunks is the same.
+                                    let (chunks, expected) = snapshot_state
+                                        .entry(store_type)
+                                        .or_insert_with(|| (Vec::new(), chunk.total_chunks));
+                                    if chunk.chunk_index == 0 && !chunks.is_empty() {
+                                        log::info!(
+                                            "New snapshot transfer for {:?}, discarding {} partial chunks",
+                                            store_type, chunks.len()
+                                        );
+                                        chunks.clear();
+                                    }
+                                    *expected = chunk.total_chunks;
+                                    chunks.push(chunk.clone());
 
-                                    // Check if we've received all chunks
-                                    if let Some(received_chunks) = snapshot_state.get(&chunk_key) {
-                                        if received_chunks.len() as u64 == chunk.total_chunks {
-                                            // All chunks received, apply snapshot
+                                    // Check if we've received all chunks with valid indices
+                                    if let Some((received_chunks, total)) =
+                                        snapshot_state.get(&store_type)
+                                    {
+                                        if received_chunks.len() as u64 == *total {
+                                            // Verify all indices 0..total are present (no duplicates/gaps)
+                                            let mut sorted_chunks = received_chunks.to_vec();
+                                            sorted_chunks.sort_by_key(|c| c.chunk_index);
+                                            let indices_valid = sorted_chunks
+                                                .iter()
+                                                .enumerate()
+                                                .all(|(i, c)| c.chunk_index == i as u64);
+                                            if !indices_valid {
+                                                log::warn!(
+                                                    "Snapshot for {:?} has {} chunks but indices are not contiguous 0..{}, discarding",
+                                                    store_type, sorted_chunks.len(), total
+                                                );
+                                                snapshot_state.remove(&store_type);
+                                                continue;
+                                            }
+
                                             log::info!("All {} chunks received for store {:?}, applying snapshot",
-                                                chunk.total_chunks, store_type);
+                                                total, store_type);
 
                                             if let Some(ref stores) = stores {
-                                                // Sort chunks by index
-                                                let mut sorted_chunks = received_chunks.clone();
-                                                sorted_chunks.sort_by_key(|c| c.chunk_index);
-
                                                 // Apply all entries from chunks
                                                 for chunk in &sorted_chunks {
                                                     for entry in &chunk.entries {
@@ -919,12 +1026,12 @@ impl Gossip for GossipService {
 
                                                         match store_type {
                                                             LocalStoreType::Membership => {
-                                                                if let Ok(membership_state) = serde_json::from_slice::<super::stores::MembershipState>(&entry.value) {
+                                                                if let Ok(membership_state) = bincode::deserialize::<super::stores::MembershipState>(&entry.value) {
                                                                     let _ = stores.membership.insert(key, membership_state);
                                                                 }
                                                             }
                                                             LocalStoreType::App => {
-                                                                if let Ok(app_state) = serde_json::from_slice::<super::stores::AppState>(&entry.value) {
+                                                                if let Ok(app_state) = bincode::deserialize::<super::stores::AppState>(&entry.value) {
                                                                     let dominated = stores.app.get(&key)
                                                                         .is_some_and(|existing| existing.version >= app_state.version);
                                                                     if !dominated {
@@ -933,7 +1040,7 @@ impl Gossip for GossipService {
                                                                 }
                                                             }
                                                             LocalStoreType::Worker => {
-                                                                if let Ok(worker_state) = serde_json::from_slice::<super::stores::WorkerState>(&entry.value) {
+                                                                if let Ok(worker_state) = bincode::deserialize::<super::stores::WorkerState>(&entry.value) {
                                                                     let _ = stores.worker.insert(key, worker_state.clone());
                                                                     // Also update sync manager if available
                                                                     if let Some(ref sync_manager) = sync_manager {
@@ -942,15 +1049,12 @@ impl Gossip for GossipService {
                                                                 }
                                                             }
                                                             LocalStoreType::Policy => {
-                                                                if let Ok(policy_state) = serde_json::from_slice::<super::stores::PolicyState>(&entry.value) {
-                                                                    if let Some(ref sync_manager) = sync_manager {
-                                                                        if policy_state.policy_type == "tree_state" {
-                                                                            // Let apply_remote_tree_operation handle the store
-                                                                            // update + subscriber notification (avoids version-
-                                                                            // check skip from a prior direct store insert)
-                                                                            if let Ok(tree_state) = serde_json::from_slice::<
-                                                                                super::tree_ops::TreeState,
-                                                                            >(
+                                                                if let Ok(policy_state) = bincode::deserialize::<super::stores::PolicyState>(&entry.value) {
+                                                                    if policy_state.policy_type == "tree_state" {
+                                                                        // Tree state entries go to tree_configs
+                                                                        // (plain DashMap, no CRDT operation log).
+                                                                        if let Some(ref sync_manager) = sync_manager {
+                                                                            if let Ok(tree_state) = super::tree_ops::TreeState::from_bytes(
                                                                                 &policy_state.config
                                                                             ) {
                                                                                 sync_manager.apply_remote_tree_operation(
@@ -960,17 +1064,20 @@ impl Gossip for GossipService {
                                                                                 );
                                                                             }
                                                                         } else {
-                                                                            let _ = stores.policy.insert(key, policy_state.clone());
-                                                                            sync_manager.apply_remote_policy_state(policy_state, Some(entry.actor.clone()));
+                                                                            // No sync manager — write directly to tree_configs.
+                                                                            stores.tree_configs.insert(key, policy_state.config.clone());
                                                                         }
                                                                     } else {
                                                                         let _ = stores.policy.insert(key, policy_state.clone());
+                                                                        if let Some(ref sync_manager) = sync_manager {
+                                                                            sync_manager.apply_remote_policy_state(policy_state, Some(entry.actor.clone()));
+                                                                        }
                                                                     }
                                                                 }
                                                             }
                                                             LocalStoreType::RateLimit => {
                                                                 if let Some(ref sync_manager) = sync_manager {
-                                                                    if let Ok(op_log) = serde_json::from_slice::<super::crdt_kv::OperationLog>(&entry.value) {
+                                                                    if let Ok(op_log) = bincode::deserialize::<super::crdt_kv::OperationLog>(&entry.value) {
                                                                         if let Some(counter_value) = op_log
                                                                             .latest_counter_value(&entry.key)
                                                                             .or_else(|| op_log.latest_counter_value_any())
@@ -988,7 +1095,7 @@ impl Gossip for GossipService {
                                                                                 "Snapshot OperationLog does not contain a decodable rate-limit counter"
                                                                             );
                                                                         }
-                                                                    } else if let Ok(counter_value) = serde_json::from_slice::<i64>(&entry.value) {
+                                                                    } else if let Ok(counter_value) = bincode::deserialize::<i64>(&entry.value) {
                                                                         sync_manager
                                                                             .apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
                                                                                 entry.key.clone(),
@@ -1009,7 +1116,7 @@ impl Gossip for GossipService {
                                                 }
 
                                                 // Clear snapshot state
-                                                snapshot_state.remove(&chunk_key);
+                                                snapshot_state.remove(&store_type);
                                                 log::info!(
                                                     "Snapshot applied successfully for store {:?}",
                                                     store_type
@@ -1069,14 +1176,27 @@ impl Gossip for GossipService {
                             }
                         }
                     }
-                    Err(e) => {
+                    Ok(Some(Err(e))) => {
                         log::error!("Error receiving stream message: {}", e);
                         record_nack(&peer_id);
                         update_peer_connections(&peer_id, false);
                         record_peer_reconnect(&peer_id);
                         break;
                     }
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            "sync_stream idle timeout ({STREAM_IDLE_TIMEOUT:?}) — closing"
+                        );
+                        break;
+                    }
                 }
+            }
+            // Abort the incremental sender task to release the tx
+            // channel and allow the stream to close cleanly.
+            if let Some(handle) = incremental_sender_handle {
+                handle.abort();
+                let _ = handle.await;
             }
             log::info!("Stream from {} closed", peer_id);
             update_peer_connections(&peer_id, false);

@@ -5,7 +5,7 @@ import dataclasses
 import logging
 import os
 
-from smg.smg_rs import get_available_tool_call_parsers
+from smg.smg_rs import get_available_reasoning_parsers, get_available_tool_call_parsers
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,8 @@ class RouterArgs:
     prometheus_duration_buckets: list[float] | None = None
     # Request ID headers configuration
     request_id_headers: list[str] | None = None
+    # HTTP header to storage hook context mapping
+    storage_context_headers: dict[str, str] = dataclasses.field(default_factory=dict)
     # Request timeout in seconds
     request_timeout_secs: int = 1800
     # Grace period in seconds to wait for in-flight requests during shutdown
@@ -92,6 +94,7 @@ class RouterArgs:
     health_check_interval_secs: int = 60
     health_check_endpoint: str = "/health"
     disable_health_check: bool = False
+    remove_unhealthy_workers: bool = False
     # Circuit breaker configuration
     cb_failure_threshold: int = 10
     cb_success_threshold: int = 3
@@ -101,11 +104,14 @@ class RouterArgs:
     model_path: str | None = None
     tokenizer_path: str | None = None
     chat_template: str | None = None
+    # Disable automatic tokenizer loading at startup and worker registration
+    disable_tokenizer_autoload: bool = False
     # Tokenizer cache configuration
     tokenizer_cache_enable_l0: bool = False
     tokenizer_cache_l0_max_entries: int = 10000
     tokenizer_cache_enable_l1: bool = False
     tokenizer_cache_l1_max_memory: int = 50 * 1024 * 1024  # 50MB
+    # Parser configuration
     reasoning_parser: str | None = None
     tool_call_parser: str | None = None
     # MCP server configuration
@@ -150,6 +156,13 @@ class RouterArgs:
     jwt_audience: str | None = None
     jwt_jwks_uri: str | None = None
     jwt_role_mapping: dict[str, str] = dataclasses.field(default_factory=dict)
+    # Mesh server configuration
+    enable_mesh: bool = False
+    mesh_server_name: str | None = None
+    mesh_host: str = "0.0.0.0"
+    mesh_advertise_host: str | None = None
+    mesh_port: int = 39527
+    mesh_peer_urls: list[str] = dataclasses.field(default_factory=list)
 
     @staticmethod
     def add_cli_args(
@@ -542,6 +555,16 @@ class RouterArgs:
             ),
         )
         request_group.add_argument(
+            f"--{prefix}storage-context-headers",
+            type=str,
+            nargs="*",
+            default=[],
+            help=(
+                "Map HTTP headers into storage hook request context using HEADER=CONTEXT_KEY "
+                "entries, for example x-tenant-id=tenant_id"
+            ),
+        )
+        request_group.add_argument(
             f"--{prefix}request-timeout-secs",
             type=int,
             default=RouterArgs.request_timeout_secs,
@@ -703,6 +726,12 @@ class RouterArgs:
             default=RouterArgs.disable_health_check,
             help="Disable all worker health checks at startup",
         )
+        health_group.add_argument(
+            f"--{prefix}remove-unhealthy-workers",
+            action="store_true",
+            default=RouterArgs.remove_unhealthy_workers,
+            help="Remove workers from the registry when they are marked unhealthy",
+        )
         # Tokenizer configuration
         tokenizer_group.add_argument(
             f"--{prefix}model-path",
@@ -722,6 +751,13 @@ class RouterArgs:
             type=str,
             default=None,
             help="Chat template path (optional)",
+        )
+        tokenizer_group.add_argument(
+            f"--{prefix}disable-tokenizer-autoload",
+            action="store_true",
+            default=RouterArgs.disable_tokenizer_autoload,
+            help="Disable automatic tokenizer loading at startup. "
+            "Use this when tokenizers are not needed (e.g., pure load balancing).",
         )
         tokenizer_group.add_argument(
             f"--{prefix}tokenizer-cache-enable-l0",
@@ -749,11 +785,13 @@ class RouterArgs:
         )
 
         # Parser configuration
+        reasoning_parser_choices = get_available_reasoning_parsers()
         parser_group.add_argument(
             f"--{prefix}reasoning-parser",
             type=str,
             default=None,
-            help="Specify the parser for reasoning models (e.g., deepseek-r1, qwen3)",
+            choices=reasoning_parser_choices,
+            help="Specify the parser for reasoning models (e.g., deepseek_r1, qwen3)",
         )
         tool_call_parser_choices = get_available_tool_call_parsers()
         parser_group.add_argument(
@@ -1008,6 +1046,49 @@ class RouterArgs:
             ),
         )
 
+        # Mesh server configuration
+        mesh_group = parser.add_argument_group("Mesh Server")
+        mesh_group.add_argument(
+            f"--{prefix}enable-mesh",
+            action="store_true",
+            default=False,
+            help="Enable mesh server for HA multi-router coordination",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-server-name",
+            type=str,
+            default=None,
+            help="Mesh server name (default: auto-generated random name)",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-host",
+            type=str,
+            default="0.0.0.0",
+            help="Mesh server bind address (default: 0.0.0.0)",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-advertise-host",
+            type=str,
+            default=None,
+            help=(
+                "Routable mesh address to advertise to peers."
+                " Required when --mesh-host binds to 0.0.0.0."
+            ),
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-port",
+            type=int,
+            default=39527,
+            help="Mesh server port (default: 39527)",
+        )
+        mesh_group.add_argument(
+            f"--{prefix}mesh-peer-urls",
+            type=str,
+            nargs="*",
+            default=[],
+            help="Peer mesh server addresses to join (format: host:port)",
+        )
+
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace, use_router_prefix: bool = False) -> RouterArgs:
         """
@@ -1030,7 +1111,7 @@ class RouterArgs:
             prefixed_key = f"{prefix}{attr.name}"
             if prefixed_key in cli_args_dict and cli_args_dict[prefixed_key] is not None:
                 args_dict[attr.name] = cli_args_dict[prefixed_key]
-            elif attr.name in cli_args_dict:
+            elif attr.name in cli_args_dict and cli_args_dict[attr.name] not in (None, ""):
                 args_dict[attr.name] = cli_args_dict[attr.name]
 
             # Special handling for CLI args with dashes vs dataclass fields with underscores
@@ -1062,6 +1143,9 @@ class RouterArgs:
         )
         args_dict["router_selector"] = cls._parse_selector(
             cli_args_dict.get(f"{prefix}router_selector", None)
+        )
+        args_dict["storage_context_headers"] = cls._parse_selector(
+            cli_args_dict.get(f"{prefix}storage_context_headers", None)
         )
 
         # Mooncake-specific annotation

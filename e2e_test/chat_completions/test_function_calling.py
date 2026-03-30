@@ -13,7 +13,7 @@ import logging
 
 import openai
 import pytest
-from conftest import smg_compare
+import smg_client
 
 logger = logging.getLogger(__name__)
 
@@ -100,23 +100,20 @@ PYTHONIC_MESSAGES = [
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
-@pytest.mark.skip_for_runtime(
-    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
-)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestOpenAIServerFunctionCalling:
     """Tests for OpenAI-compatible function calling with Llama tool parser."""
 
-    def test_function_calling_format(self, setup_backend, smg):
+    def test_function_calling_format(self, model, api_client):
         """Test: Whether the function call format returned by the AI is correct.
 
         When returning a tool call, message.content should be None, and tool_calls should be a list.
         """
-        _, model, client, _ = setup_backend
 
         tools = [
             {
@@ -146,7 +143,7 @@ class TestOpenAIServerFunctionCalling:
             {"role": "system", "content": LLAMA_SYSTEM_MESSAGE},
             {"role": "user", "content": "Compute (3+5)"},
         ]
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             max_tokens=2048,
             messages=messages,
@@ -165,31 +162,12 @@ class TestOpenAIServerFunctionCalling:
         function_name = tool_calls[0].function.name
         assert function_name == "add", "Function name should be 'add'"
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                max_tokens=2048,
-                messages=messages,
-                temperature=0.8,
-                top_p=0.8,
-                tools=tools,
-            )
-            smg_tool_calls = smg_resp.choices[0].message.tool_calls
-            assert isinstance(smg_tool_calls, list) and len(smg_tool_calls) > 0, (
-                "SmgClient: tool_calls should be a non-empty list"
-            )
-            assert smg_tool_calls[0].function.name == "add", (
-                "SmgClient: Function name should be 'add'"
-            )
-
-    def test_function_calling_streaming_simple(self, setup_backend, smg):
+    def test_function_calling_streaming_simple(self, model, api_client):
         """Test: Whether the function name can be correctly recognized in streaming mode.
 
         - Expect a function call to be found, and the function name to be correct.
         - Verify that streaming mode returns at least multiple chunks.
         """
-        _, model, client, _ = setup_backend
 
         tools = [
             {
@@ -224,7 +202,7 @@ class TestOpenAIServerFunctionCalling:
             },
         ]
 
-        response_stream = client.chat.completions.create(
+        response_stream = api_client.chat.completions.create(
             model=model,
             max_tokens=2048,
             messages=messages,
@@ -259,36 +237,13 @@ class TestOpenAIServerFunctionCalling:
             "Final response of function calling should have finish_reason 'tool_calls'"
         )
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.chat.completions.create(
-                model=model,
-                max_tokens=2048,
-                messages=messages,
-                temperature=0.8,
-                top_p=0.8,
-                tools=tools,
-                stream=True,
-            ) as stream:
-                smg_chunks = list(stream)
-            assert len(smg_chunks) > 0, "SmgClient: streaming should return at least one chunk"
-            smg_found_name = False
-            for chunk in smg_chunks:
-                if chunk.choices and chunk.choices[0].delta.tool_calls:
-                    tc = chunk.choices[0].delta.tool_calls[0]
-                    if tc.function.name:
-                        smg_found_name = True
-                        break
-            assert smg_found_name, "SmgClient: function name not found in streaming chunks"
-
-    def test_function_calling_streaming_args_parsing(self, setup_backend, smg):
+    def test_function_calling_streaming_args_parsing(self, model, api_client):
         """Test: Whether the function call arguments returned in streaming mode can be correctly
         concatenated into valid JSON.
 
         - The user request requires multiple parameters.
         - AI may return the arguments in chunks that need to be concatenated.
         """
-        _, model, client, _ = setup_backend
 
         tools = [
             {
@@ -322,7 +277,7 @@ class TestOpenAIServerFunctionCalling:
             {"role": "user", "content": "Please sum 5 and 7, just call the function."},
         ]
 
-        response_stream = client.chat.completions.create(
+        response_stream = api_client.chat.completions.create(
             model=model,
             max_tokens=2048,
             messages=messages,
@@ -365,39 +320,14 @@ class TestOpenAIServerFunctionCalling:
         assert str(args_obj["a"]) == "5", "Parameter a should be 5"
         assert str(args_obj["b"]) == "7", "Parameter b should be 7"
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.chat.completions.create(
-                model=model,
-                max_tokens=2048,
-                messages=messages,
-                temperature=0.9,
-                top_p=0.9,
-                tools=tools,
-                stream=True,
-            ) as stream:
-                smg_chunks = list(stream)
-            smg_arg_fragments = []
-            smg_func_name = None
-            for chunk in smg_chunks:
-                if chunk.choices and chunk.choices[0].delta.tool_calls:
-                    tc = chunk.choices[0].delta.tool_calls[0]
-                    smg_func_name = tc.function.name or smg_func_name
-                    if tc.function.arguments is not None:
-                        smg_arg_fragments.append(tc.function.arguments)
-            assert smg_func_name == "add", "SmgClient: Function name should be 'add'"
-            smg_joined = "".join(smg_arg_fragments)
-            assert len(smg_joined) > 0, "SmgClient: No parameter fragments returned"
-
     @pytest.mark.skip(
         reason="Skipping function call strict test as it is not supported by the router"
     )
-    def test_function_call_strict(self, setup_backend, smg):
+    def test_function_call_strict(self, model, api_client):
         """Test: Whether the strict mode of function calling works as expected.
 
         - When strict mode is enabled, the AI should not return a function call if the function name is not recognized.
         """
-        _, model, client, _ = setup_backend
 
         tools = [
             {
@@ -425,7 +355,7 @@ class TestOpenAIServerFunctionCalling:
         ]
 
         messages = [{"role": "user", "content": "Please compute 5 - 7, using your tool."}]
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             max_tokens=2048,
             messages=messages,
@@ -444,12 +374,11 @@ class TestOpenAIServerFunctionCalling:
         assert str(args_obj["int_a"]) == "5", "Parameter int_a should be 5"
         assert str(args_obj["int_b"]) == "7", "Parameter int_b should be 7"
 
-    def test_function_call_required(self, setup_backend, smg):
+    def test_function_call_required(self, model, api_client):
         """Test: Whether tool_choice: "required" works as expected.
 
         - When tool_choice == "required", the model should return one or more tool_calls.
         """
-        _, model, client, _ = setup_backend
 
         tools = [
             {
@@ -494,7 +423,7 @@ class TestOpenAIServerFunctionCalling:
         ]
 
         messages = [{"role": "user", "content": "What is the capital of France?"}]
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             max_tokens=2048,
             messages=messages,
@@ -525,27 +454,11 @@ class TestOpenAIServerFunctionCalling:
             f"Parameter city should contain either 'Paris' or 'France', got: {city_value}"
         )
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                max_tokens=2048,
-                messages=messages,
-                temperature=0.8,
-                top_p=0.8,
-                tools=tools,
-                tool_choice="required",
-            )
-            smg_tool_calls = smg_resp.choices[0].message.tool_calls
-            assert smg_tool_calls is not None, "SmgClient: No tool_calls in the response"
-            assert len(smg_tool_calls) > 0, "SmgClient: tool_calls should not be empty"
-
-    def test_function_call_specific(self, setup_backend, smg):
+    def test_function_call_specific(self, model, api_client):
         """Test: Whether tool_choice: ToolChoice works as expected.
 
         - When tool_choice is a specific ToolChoice, the model should return one or more tool_calls.
         """
-        _, model, client, _ = setup_backend
 
         tools = [
             {
@@ -590,7 +503,7 @@ class TestOpenAIServerFunctionCalling:
         ]
 
         messages = [{"role": "user", "content": "What is the capital of France?"}]
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             max_tokens=2048,
             messages=messages,
@@ -610,29 +523,11 @@ class TestOpenAIServerFunctionCalling:
         assert function_name == "get_weather", "Function name should be 'get_weather'"
         assert "city" in args_obj, "Function arguments should have 'city'"
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                max_tokens=2048,
-                messages=messages,
-                temperature=0.8,
-                top_p=0.8,
-                tools=tools,
-                tool_choice={"type": "function", "function": {"name": "get_weather"}},
-            )
-            smg_tool_calls = smg_resp.choices[0].message.tool_calls
-            assert smg_tool_calls is not None, "SmgClient: No tool_calls in the response"
-            assert smg_tool_calls[0].function.name == "get_weather", (
-                "SmgClient: Function name should be 'get_weather'"
-            )
-
-    def test_streaming_multiple_choices_finish_reason(self, setup_backend, smg):
+    def test_streaming_multiple_choices_finish_reason(self, model, api_client):
         """Test: Verify that each choice gets its own finish_reason chunk in streaming mode with n > 1.
 
         This tests the fix for the bug where only the last index got a finish_reason chunk.
         """
-        _, model, client, _ = setup_backend
 
         tools = [
             {
@@ -661,7 +556,7 @@ class TestOpenAIServerFunctionCalling:
         messages = [{"role": "user", "content": "What is the weather like in Los Angeles?"}]
 
         # Request with n=2 to get multiple choices
-        response_stream = client.chat.completions.create(
+        response_stream = api_client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=2048,
@@ -700,37 +595,12 @@ class TestOpenAIServerFunctionCalling:
                 f"Expected finish_reason 'tool_calls' for index {index}, got {reasons[-1]}"
             )
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=2048,
-                temperature=0.8,
-                tools=tools,
-                tool_choice="required",
-                n=2,
-                stream=True,
-            ) as stream:
-                smg_chunks = list(stream)
-            smg_finish_chunks = {}
-            for chunk in smg_chunks:
-                if chunk.choices:
-                    for choice in chunk.choices:
-                        if choice.finish_reason is not None:
-                            idx = choice.index
-                            smg_finish_chunks.setdefault(idx, []).append(choice.finish_reason)
-            assert len(smg_finish_chunks) == 2, (
-                f"SmgClient: Expected finish_reason for 2 indices, got {len(smg_finish_chunks)}"
-            )
-
-    def test_function_calling_streaming_no_tool_call(self, setup_backend, smg):
+    def test_function_calling_streaming_no_tool_call(self, model, api_client):
         """Test: Whether the finish_reason is stop in streaming mode when no tool call is given.
 
         - Expect no function call to be found.
         - Verify that finish_reason is stop
         """
-        _, model, client, _ = setup_backend
 
         tools = [
             {
@@ -759,7 +629,7 @@ class TestOpenAIServerFunctionCalling:
 
         messages = [{"role": "user", "content": "Who are you?"}]
 
-        response_stream = client.chat.completions.create(
+        response_stream = api_client.chat.completions.create(
             model=model,
             max_tokens=2048,
             messages=messages,
@@ -788,37 +658,16 @@ class TestOpenAIServerFunctionCalling:
             "Final response of no function calling should have finish_reason 'stop'"
         )
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.chat.completions.create(
-                model=model,
-                max_tokens=2048,
-                messages=messages,
-                temperature=0.8,
-                top_p=0.8,
-                tools=tools,
-                tool_choice="none",
-                stream=True,
-            ) as stream:
-                smg_chunks = list(stream)
-            smg_found_tool = False
-            for chunk in smg_chunks:
-                if chunk.choices and chunk.choices[0].delta.tool_calls is not None:
-                    smg_found_tool = True
-                    break
-            assert not smg_found_tool, "SmgClient: Shouldn't have any tool_call in streaming chunks"
-
-    def test_streaming_multiple_choices_without_tools(self, setup_backend, smg):
+    def test_streaming_multiple_choices_without_tools(self, model, api_client):
         """Test: Verify that each choice gets its own finish_reason chunk without tool calls.
 
         This tests the fix for regular content streaming with multiple choices.
         """
-        _, model, client, _ = setup_backend
 
         messages = [{"role": "user", "content": "Say hello in one word."}]
 
         # Request with n=2 to get multiple choices, no tools
-        response_stream = client.chat.completions.create(
+        response_stream = api_client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=0.8,
@@ -856,47 +705,25 @@ class TestOpenAIServerFunctionCalling:
                 "length",
             ], f"Expected finish_reason 'stop' or 'length' for index {index}, got {reasons[-1]}"
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.8,
-                max_tokens=10,
-                n=2,
-                stream=True,
-            ) as stream:
-                smg_chunks = list(stream)
-            smg_finish_chunks = {}
-            for chunk in smg_chunks:
-                if chunk.choices:
-                    for choice in chunk.choices:
-                        if choice.finish_reason is not None:
-                            idx = choice.index
-                            smg_finish_chunks.setdefault(idx, []).append(choice.finish_reason)
-            assert len(smg_finish_chunks) == 2, (
-                f"SmgClient: Expected finish_reason for 2 indices, got {len(smg_finish_chunks)}"
-            )
-
 
 # =============================================================================
 # Pythonic Function Calling Tests (Llama 8B with pythonic parser)
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "pythonic", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestOpenAIPythonicFunctionCalling:
     """Tests for pythonic function calling format."""
 
-    def test_pythonic_tool_call_prompt(self, setup_backend, smg):
+    def test_pythonic_tool_call_prompt(self, model, api_client):
         """Test: Explicit prompt for pythonic tool call format without chat template."""
-        _, model, client, _ = setup_backend
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=PYTHONIC_MESSAGES,
             tools=PYTHONIC_TOOLS,
@@ -911,23 +738,10 @@ class TestOpenAIPythonicFunctionCalling:
             f"Function name '{names}' should contain either 'get_weather' or 'get_tourist_attractions'"
         )
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=PYTHONIC_MESSAGES,
-                tools=PYTHONIC_TOOLS,
-                temperature=0.1,
-            )
-            smg_tool_calls = smg_resp.choices[0].message.tool_calls
-            assert isinstance(smg_tool_calls, list), "SmgClient: No tool_calls found"
-            assert len(smg_tool_calls) >= 1
-
-    def test_pythonic_tool_call_streaming(self, setup_backend, smg):
+    def test_pythonic_tool_call_streaming(self, model, api_client):
         """Test: Streaming pythonic tool call format; assert tool_call index is present."""
-        _, model, client, _ = setup_backend
 
-        response_stream = client.chat.completions.create(
+        response_stream = api_client.chat.completions.create(
             model=model,
             messages=PYTHONIC_MESSAGES,
             tools=PYTHONIC_TOOLS,
@@ -953,23 +767,6 @@ class TestOpenAIPythonicFunctionCalling:
         assert "get_weather" in found_names or "get_tourist_attractions" in found_names, (
             f"Function name '{found_names}' should contain either 'get_weather' or 'get_tourist_attractions'"
         )
-
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.chat.completions.create(
-                model=model,
-                messages=PYTHONIC_MESSAGES,
-                tools=PYTHONIC_TOOLS,
-                temperature=0.1,
-                stream=True,
-            ) as stream:
-                smg_chunks = list(stream)
-            smg_found_tool = False
-            for chunk in smg_chunks:
-                if chunk.choices and getattr(chunk.choices[0].delta, "tool_calls", None):
-                    smg_found_tool = True
-                    break
-            assert smg_found_tool, "SmgClient: No tool_calls found in streaming response"
 
 
 # =============================================================================
@@ -1172,14 +969,13 @@ class _TestToolChoiceBase:
         """Check if the current test is marked as flaky for this class."""
         return test_name in self.FLAKY_TESTS
 
-    def test_tool_choice_auto_non_streaming(self, setup_backend, smg):
+    def test_tool_choice_auto_non_streaming(self, model, api_client):
         """Test tool_choice='auto' in non-streaming mode."""
-        _, model, client, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=2048,
@@ -1191,25 +987,13 @@ class _TestToolChoiceBase:
         assert response.choices[0].message is not None
         # With auto, tool calls are optional
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=2048,
-                tools=tools,
-                tool_choice="auto",
-            )
-            assert smg_resp.choices[0].message is not None
-
-    def test_tool_choice_auto_streaming(self, setup_backend, smg):
+    def test_tool_choice_auto_streaming(self, model, api_client):
         """Test tool_choice='auto' in streaming mode."""
-        _, model, client, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=2048,
@@ -1232,27 +1016,13 @@ class _TestToolChoiceBase:
         assert isinstance(content_chunks, list)
         assert isinstance(tool_call_chunks, list)
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=2048,
-                tools=tools,
-                tool_choice="auto",
-                stream=True,
-            ) as stream:
-                smg_chunks = list(stream)
-            assert len(smg_chunks) > 0, "SmgClient: streaming should return at least one chunk"
-
-    def test_tool_choice_required_non_streaming(self, setup_backend, smg):
+    def test_tool_choice_required_non_streaming(self, model, api_client):
         """Test tool_choice='required' in non-streaming mode."""
-        _, model, client, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=2048,
@@ -1267,28 +1037,13 @@ class _TestToolChoiceBase:
         assert tool_calls is not None
         assert len(tool_calls) > 0
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=2048,
-                temperature=0.2,
-                tools=tools,
-                tool_choice="required",
-            )
-            smg_tool_calls = smg_resp.choices[0].message.tool_calls
-            assert smg_tool_calls is not None
-            assert len(smg_tool_calls) > 0
-
-    def test_tool_choice_required_streaming(self, setup_backend, smg):
+    def test_tool_choice_required_streaming(self, model, api_client):
         """Test tool_choice='required' in streaming mode."""
-        _, model, client, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=2048,
@@ -1307,33 +1062,15 @@ class _TestToolChoiceBase:
         # With required, we should get tool call chunks
         assert len(tool_call_chunks) > 0
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=2048,
-                tools=tools,
-                tool_choice="required",
-                stream=True,
-            ) as stream:
-                smg_chunks = list(stream)
-            smg_tc_chunks = []
-            for chunk in smg_chunks:
-                if chunk.choices and chunk.choices[0].delta.tool_calls:
-                    smg_tc_chunks.extend(chunk.choices[0].delta.tool_calls)
-            assert len(smg_tc_chunks) > 0, "SmgClient: should get tool call chunks with required"
-
-    def test_tool_choice_specific_function_non_streaming(self, setup_backend, smg):
+    def test_tool_choice_specific_function_non_streaming(self, model, api_client):
         """Test tool_choice with specific function in non-streaming mode."""
-        _, model, client, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
 
         tool_choice = {"type": "function", "function": {"name": "get_weather"}}
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=2048,
@@ -1350,31 +1087,15 @@ class _TestToolChoiceBase:
         for tool_call in tool_calls:
             assert tool_call.function.name == "get_weather"
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=2048,
-                tools=tools,
-                tool_choice=tool_choice,
-            )
-            smg_tool_calls = smg_resp.choices[0].message.tool_calls
-            assert smg_tool_calls is not None
-            assert len(smg_tool_calls) >= 1
-            for tc in smg_tool_calls:
-                assert tc.function.name == "get_weather"
-
-    def test_tool_choice_specific_function_streaming(self, setup_backend, smg):
+    def test_tool_choice_specific_function_streaming(self, model, api_client):
         """Test tool_choice with specific function in streaming mode."""
-        _, model, client, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
 
         tool_choice = {"type": "function", "function": {"name": "get_weather"}}
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=2048,
@@ -1402,33 +1123,15 @@ class _TestToolChoiceBase:
 
         assert found_name == "get_weather"
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=2048,
-                tools=tools,
-                tool_choice=tool_choice,
-                stream=True,
-            ) as stream:
-                smg_chunks = list(stream)
-            smg_tc_chunks = []
-            for chunk in smg_chunks:
-                if chunk.choices and chunk.choices[0].delta.tool_calls:
-                    smg_tc_chunks.extend(chunk.choices[0].delta.tool_calls)
-            assert len(smg_tc_chunks) > 0, "SmgClient: should get tool call chunks"
-
-    def test_required_streaming_arguments_chunks_json(self, setup_backend, smg):
+    def test_required_streaming_arguments_chunks_json(self, model, api_client):
         """In streaming required mode, complete tool call arguments should be valid JSON when
         all chunks are combined.
         """
-        _, model, client, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=1024,
@@ -1480,38 +1183,8 @@ class _TestToolChoiceBase:
                     f"Invalid JSON in complete tool call arguments: {tool_call['function']['arguments']}"
                 )
 
-        # SmgClient streaming comparison
-        with smg_compare():
-            with smg.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=1024,
-                temperature=0.1,
-                tools=tools,
-                tool_choice="required",
-                stream=True,
-            ) as stream:
-                smg_chunks = list(stream)
-            smg_tool_calls_by_index = {}
-            for chunk in smg_chunks:
-                if chunk.choices and chunk.choices[0].delta.tool_calls:
-                    for tc_delta in chunk.choices[0].delta.tool_calls:
-                        tc = smg_tool_calls_by_index.setdefault(
-                            tc_delta.index,
-                            {"function": {"name": "", "arguments": ""}},
-                        )
-                        if tc_delta.function:
-                            if tc_delta.function.name:
-                                tc["function"]["name"] = tc_delta.function.name
-                            if tc_delta.function.arguments:
-                                tc["function"]["arguments"] += tc_delta.function.arguments
-            assert len(smg_tool_calls_by_index) > 0, "SmgClient: no tool calls found"
-            for tc in smg_tool_calls_by_index.values():
-                json.loads(tc["function"]["arguments"])  # Should not raise
-
-    def test_complex_parameters_required_non_streaming(self, setup_backend, smg):
+    def test_complex_parameters_required_non_streaming(self, model, api_client):
         """Validate complex nested parameter schemas in non-streaming required mode."""
-        _, model, client, _ = setup_backend
 
         complex_tools = [
             {
@@ -1563,7 +1236,7 @@ class _TestToolChoiceBase:
             }
         ]
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=1024,
@@ -1589,30 +1262,13 @@ class _TestToolChoiceBase:
                     f"Invalid JSON in complex tool call arguments: {tool_call.function.arguments}"
                 )
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=1024,
-                temperature=0.1,
-                tools=complex_tools,
-                tool_choice="required",
-            )
-            smg_tool_calls = smg_resp.choices[0].message.tool_calls
-            assert smg_tool_calls is not None
-            assert len(smg_tool_calls) > 0
-            for tc in smg_tool_calls:
-                assert tc.function.name == "analyze_data"
-
-    def test_multi_tool_scenario_auto(self, setup_backend, smg):
+    def test_multi_tool_scenario_auto(self, model, api_client):
         """Test multi-tool scenario with tool_choice='auto'."""
-        _, model, client, _ = setup_backend
 
         tools = get_travel_tools()
         messages = get_travel_messages()
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=2048,
@@ -1644,26 +1300,13 @@ class _TestToolChoiceBase:
                 f"Expected functions {expected_functions}, got {called_functions}"
             )
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=2048,
-                temperature=0.2,
-                tools=tools,
-                tool_choice="auto",
-            )
-            assert smg_resp.choices[0].message is not None
-
-    def test_multi_tool_scenario_required(self, setup_backend, smg):
+    def test_multi_tool_scenario_required(self, model, api_client):
         """Test multi-tool scenario with tool_choice='required'."""
-        _, model, client, _ = setup_backend
 
         tools = get_travel_tools()
         messages = get_travel_messages()
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=2048,
@@ -1700,23 +1343,8 @@ class _TestToolChoiceBase:
                 f"Expected functions {expected_functions}, got {called_functions}"
             )
 
-        # SmgClient comparison
-        with smg_compare():
-            smg_resp = smg.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=2048,
-                temperature=0.2,
-                tools=tools,
-                tool_choice="required",
-            )
-            smg_tool_calls = smg_resp.choices[0].message.tool_calls
-            assert smg_tool_calls is not None
-            assert len(smg_tool_calls) > 0
-
-    def test_error_handling_invalid_tool_choice(self, setup_backend, smg):
+    def test_error_handling_invalid_tool_choice(self, model, api_client):
         """Test error handling for invalid tool_choice."""
-        _, model, client, _ = setup_backend
 
         tools = get_test_tools()
         messages = get_test_messages()
@@ -1725,8 +1353,8 @@ class _TestToolChoiceBase:
         tool_choice = {"type": "function", "function": {"name": "nonexistent_function"}}
 
         # Expect a 400 BadRequestError to be raised for invalid tool_choice
-        with pytest.raises(openai.BadRequestError) as exc_info:
-            client.chat.completions.create(
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)) as exc_info:
+            api_client.chat.completions.create(
                 model=model,
                 messages=messages,
                 max_tokens=2048,
@@ -1738,9 +1366,8 @@ class _TestToolChoiceBase:
         # Verify the error message contains the expected text
         assert "function 'nonexistent_function' not found in" in str(exc_info.value)
 
-    def test_invalid_tool_missing_name(self, setup_backend, smg):
+    def test_invalid_tool_missing_name(self, model, api_client):
         """Test what happens when user doesn't provide a tool name in request."""
-        _, model, client, _ = setup_backend
 
         # Test with malformed JSON in tool parameters - missing required "name" field
         invalid_tools = [
@@ -1771,8 +1398,8 @@ class _TestToolChoiceBase:
         ]
 
         # Should raise BadRequestError due to missing required 'name' field
-        with pytest.raises(openai.BadRequestError) as exc_info:
-            client.chat.completions.create(
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)) as exc_info:
+            api_client.chat.completions.create(
                 model=model,
                 messages=messages,
                 max_tokens=100,
@@ -1786,9 +1413,8 @@ class _TestToolChoiceBase:
         error_msg = str(exc_info.value).lower()
         assert "name" in error_msg
 
-    def test_conflicting_defs_required_tool_choice(self, setup_backend, smg):
+    def test_conflicting_defs_required_tool_choice(self, model, api_client):
         """Test that conflicting $defs with required tool_choice returns 400 error."""
-        _, model, client, _ = setup_backend
 
         conflicting_tools = [
             {
@@ -1843,8 +1469,8 @@ class _TestToolChoiceBase:
         ]
 
         # Should raise BadRequestError due to conflicting $defs
-        with pytest.raises(openai.BadRequestError) as exc_info:
-            client.chat.completions.create(
+        with pytest.raises((openai.BadRequestError, smg_client.BadRequestError)) as exc_info:
+            api_client.chat.completions.create(
                 model=model,
                 messages=messages,
                 max_tokens=100,
@@ -1865,14 +1491,12 @@ class _TestToolChoiceBase:
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
-@pytest.mark.skip_for_runtime(
-    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
-)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestToolChoiceLlama(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Llama model."""
 
@@ -1888,14 +1512,12 @@ class TestToolChoiceLlama(_TestToolChoiceBase):
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
-@pytest.mark.skip_for_runtime(
-    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
-)
 @pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestToolChoiceQwen(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Qwen model."""
 
@@ -1908,14 +1530,21 @@ class TestToolChoiceQwen(_TestToolChoiceBase):
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
-@pytest.mark.skip_for_runtime(
-    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
-)
 @pytest.mark.model("mistralai/Mistral-7B-Instruct-v0.3")
-@pytest.mark.gateway(extra_args=["--tool-call-parser", "mistral", "--history-backend", "memory"])
+@pytest.mark.gateway(
+    extra_args=[
+        "--tool-call-parser",
+        "mistral",
+        "--history-backend",
+        "memory",
+        "--chat-template",
+        "e2e_test/fixtures/chat_templates/tool_chat_template_mistral_parallel.jinja",
+    ]
+)
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestToolChoiceMistral(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Mistral model."""
 
@@ -1926,6 +1555,6 @@ class TestToolChoiceMistral(_TestToolChoiceBase):
     }
 
     @pytest.mark.skip(reason="Fails due to whitespace issue with Mistral - skipping")
-    def test_complex_parameters_required_non_streaming(self, setup_backend, smg):
+    def test_complex_parameters_required_non_streaming(self, model, api_client):
         """Validate complex nested parameter schemas in non-streaming required mode."""
-        super().test_complex_parameters_required_non_streaming(setup_backend, smg)
+        super().test_complex_parameters_required_non_streaming(model, api_client)

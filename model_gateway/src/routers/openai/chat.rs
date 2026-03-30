@@ -34,7 +34,6 @@ pub(super) struct ChatRouterContext<'a> {
     pub worker_registry: &'a WorkerRegistry,
     pub provider_registry: &'a ProviderRegistry,
     pub shared_components: &'a Arc<SharedComponents>,
-    pub client: &'a reqwest::Client,
     pub retry_config: &'a RetryConfig,
 }
 
@@ -43,10 +42,10 @@ pub(super) async fn route_chat(
     deps: &ChatRouterContext<'_>,
     headers: Option<&HeaderMap>,
     body: &ChatCompletionRequest,
-    model_id: Option<&str>,
+    model_id: &str,
 ) -> Response {
     let start = Instant::now();
-    let model = model_id.unwrap_or(body.model.as_str());
+    let model = model_id;
     let streaming = body.stream;
 
     Metrics::record_router_request(
@@ -58,7 +57,7 @@ pub(super) async fn route_chat(
         bool_to_static_str(streaming),
     );
 
-    let selector = WorkerSelector::new(deps.worker_registry, deps.client);
+    let selector = WorkerSelector::new(deps.worker_registry, &deps.shared_components.client);
     let worker = match selector
         .select_worker(&SelectWorkerRequest {
             model_id: model,
@@ -100,11 +99,8 @@ pub(super) async fn route_chat(
         }
     };
 
-    // When model_id overrides the body model, patch the serialized payload
-    // so the upstream request uses the effective model consistently.
-    if model_id.is_some() {
-        payload["model"] = serde_json::Value::String(model.to_owned());
-    }
+    // Patch the serialized payload to use the effective model consistently.
+    payload["model"] = serde_json::Value::String(model.to_owned());
 
     let provider = resolve_provider(deps.provider_registry, worker.as_ref(), model);
     if let Err(e) = provider.transform_request(&mut payload, Endpoint::Chat) {
@@ -122,7 +118,7 @@ pub(super) async fn route_chat(
     let mut ctx = RequestContext::for_chat(
         Arc::new(body.clone()),
         headers.cloned(),
-        model_id.map(String::from),
+        Some(model_id.to_string()),
         ComponentRefs::Shared(Arc::clone(deps.shared_components)),
     );
 
@@ -173,7 +169,7 @@ pub(super) async fn route_chat(
                 let resp = match req.send().await {
                     Ok(r) => r,
                     Err(e) => {
-                        worker.circuit_breaker().record_failure();
+                        worker.record_outcome(503);
                         return error::service_unavailable(
                             "upstream_error",
                             format!("Failed to contact upstream: {e}"),
@@ -184,14 +180,13 @@ pub(super) async fn route_chat(
                 let status = StatusCode::from_u16(resp.status().as_u16())
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-                if !status.is_success() {
-                    worker.circuit_breaker().record_failure();
-                }
+                // Record CB outcome based on HTTP status.
+                // For streaming: status is known upfront (200 = success).
+                // For non-streaming: we record here too — body read errors
+                // are connection issues, not worker health issues.
+                worker.record_outcome(status.as_u16());
 
                 if is_streaming {
-                    if status.is_success() {
-                        worker.circuit_breaker().record_success();
-                    }
                     let stream = resp.bytes_stream();
                     let (tx, rx) = mpsc::unbounded_channel();
                     #[expect(clippy::disallowed_methods, reason = "fire-and-forget stream relay; gateway shutdown need not wait for individual stream forwarding")]
@@ -222,9 +217,6 @@ pub(super) async fn route_chat(
                     let content_type = resp.headers().get(CONTENT_TYPE).cloned();
                     match resp.bytes().await {
                         Ok(body) => {
-                            if status.is_success() {
-                                worker.circuit_breaker().record_success();
-                            }
                             let mut response = Response::new(Body::from(body));
                             *response.status_mut() = status;
                             if let Some(ct) = content_type {
@@ -233,7 +225,6 @@ pub(super) async fn route_chat(
                             response
                         }
                         Err(e) => {
-                            worker.circuit_breaker().record_failure();
                             error::internal_error(
                                 "upstream_error",
                                 format!("Failed to read response: {e}"),

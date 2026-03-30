@@ -66,6 +66,26 @@ pub fn init_mesh_metrics() {
         "Hash of store state for integrity checking"
     );
 
+    // Sync round profiling metrics
+    describe_histogram!(
+        "router_mesh_sync_round_duration_seconds",
+        "Duration of a mesh sync round"
+    );
+    describe_histogram!("router_mesh_sync_batch_bytes", "Size of mesh sync batch");
+    describe_gauge!(
+        "router_mesh_store_workers",
+        "Number of entries in worker store"
+    );
+    describe_gauge!(
+        "router_mesh_store_policies",
+        "Number of entries in policy store"
+    );
+    describe_gauge!(
+        "router_mesh_store_memberships",
+        "Number of entries in membership store"
+    );
+    describe_gauge!("router_mesh_store_apps", "Number of entries in app store");
+
     // Rate-limit and LB drift metrics
     describe_gauge!(
         "router_rl_drift_ratio",
@@ -208,6 +228,36 @@ pub fn update_lb_drift_ratio(model: &str, ratio: f64) {
         "model" => model.to_string()
     )
     .set(ratio);
+}
+
+/// Record a mesh sync round's duration
+pub fn record_sync_round_duration(peer: &str, duration: Duration) {
+    histogram!("router_mesh_sync_round_duration_seconds",
+        "peer" => peer.to_string()
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Record mesh sync batch size in bytes
+pub fn record_sync_batch_bytes(peer: &str, store: &str, bytes: usize) {
+    histogram!("router_mesh_sync_batch_bytes",
+        "peer" => peer.to_string(),
+        "store" => store.to_string()
+    )
+    .record(bytes as f64);
+}
+
+/// Record mesh store sizes for monitoring unbounded growth
+pub fn record_store_sizes(
+    worker_count: usize,
+    policy_count: usize,
+    membership_count: usize,
+    app_count: usize,
+) {
+    gauge!("router_mesh_store_workers").set(worker_count as f64);
+    gauge!("router_mesh_store_policies").set(policy_count as f64);
+    gauge!("router_mesh_store_memberships").set(membership_count as f64);
+    gauge!("router_mesh_store_apps").set(app_count as f64);
 }
 
 /// Helper struct for tracking convergence time

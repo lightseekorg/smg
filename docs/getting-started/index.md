@@ -29,19 +29,32 @@ Shepherd Model Gateway (SMG) routes and manages LLM traffic across workers. This
 
 === "Docker"
 
+    **SMG only** (gateway/router, no inference engine):
+
     Multi-architecture images are available for x86_64 and ARM64.
 
     ```bash
     docker pull lightseekorg/smg:latest
     ```
 
-    Verify:
+    Available tags: `latest` (stable), `v1.3.x` (specific version), `nightly` (development, from `ghcr.io/lightseekorg/smg:nightly`).
+
+    **SMG + Engine** (all-in-one, ready to serve models):
+
+    Engine images bundle SMG with a specific inference engine (x86_64/CUDA only). Use these when you want a single container that can both route and serve.
 
     ```bash
-    docker run --rm lightseekorg/smg:latest --version
+    # SGLang
+    docker pull ghcr.io/lightseekorg/smg:1.3.3-sglang-v0.5.9
+
+    # vLLM
+    docker pull ghcr.io/lightseekorg/smg:1.3.3-vllm-v0.18.0
+
+    # TensorRT-LLM
+    docker pull ghcr.io/lightseekorg/smg:1.3.3-trtllm-1.3.0rc8
     ```
 
-    Available tags: `latest` (stable), `v0.3.x` (specific version), `main` (development).
+    Tag format: `{smg_version}-{engine}-{engine_version}`. Browse all tags at [ghcr.io/lightseekorg/smg](https://github.com/lightseekorg/smg/pkgs/container/smg).
 
 === "From Source"
 
@@ -105,7 +118,7 @@ This starts `--data-parallel-size` worker replicas, waits for readiness, then st
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--backend` | `sglang` | Inference backend: `sglang`, `vllm`, or `trtllm` |
-| `--connection-mode` | `grpc` | Worker connection mode: `grpc` or `http` (vLLM and TensorRT-LLM only support gRPC) |
+| `--connection-mode` | `grpc` | Worker connection mode: `grpc` or `http` (TensorRT-LLM only supports gRPC) |
 | `--data-parallel-size` | `1` | Number of worker replicas (one per GPU) |
 | `--worker-base-port` | `31000` | Base port for worker processes |
 | `--host` | `127.0.0.1` | Router host |
@@ -419,6 +432,29 @@ Verify:
 ```bash
 docker ps | grep smg
 curl http://localhost:30000/health
+```
+
+### All-in-one with engine images
+
+Engine images include both SMG and an inference engine. Use `serve` to launch workers and the gateway together:
+
+```bash
+docker run -d --gpus all \
+  --name smg \
+  -p 30000:30000 \
+  -v /path/to/models:/models \
+  ghcr.io/lightseekorg/smg:1.3.3-sglang-v0.5.9 \
+  serve \
+  --backend sglang \
+  --model-path /models/meta-llama/Llama-3.1-8B-Instruct \
+  --port 30000
+```
+
+Verify:
+
+```bash
+curl http://localhost:30000/health
+curl http://localhost:30000/v1/models
 ```
 
 ## Deploy to Kubernetes (Quick Start)

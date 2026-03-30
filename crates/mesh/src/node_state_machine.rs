@@ -395,6 +395,7 @@ mod tests {
                 health: true,
                 load: 0.5,
                 version: 1,
+                spec: vec![],
             },
         );
 

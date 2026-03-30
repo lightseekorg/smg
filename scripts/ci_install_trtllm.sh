@@ -5,7 +5,7 @@
 # so we build from source (main branch) which compiles the C++
 # extensions properly and includes the gRPC serve command.
 #
-# Cache version: 2 — rebuild to pick up gRPC stop_words fix (#11292)
+# Cache version: 4 — rebuild for torch 2.10+cu130 / cuda-bindings 13.x
 #
 # Prerequisites (expected on k8s-runner-gpu nodes):
 #   - NVIDIA driver 580+ (CUDA 13)
@@ -15,6 +15,8 @@
 # At runtime we use --backend pytorch, which avoids TRT engine compilation.
 
 set -euo pipefail
+
+NCCL_VERSION_CONSTRAINT="nvidia-nccl-cu13>=2.28.9,<=2.29.2"
 
 # Activate venv if it exists
 if [ -f ".venv/bin/activate" ]; then
@@ -56,13 +58,16 @@ if [ -n "$CACHED_WHEEL" ] && [ -f "$CACHED_WHEEL" ]; then
     export PATH="$CUDA_HOME/bin:$PATH"
     export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
 
-    # ── Install NCCL runtime ─────────────────────────────────────────────────
+    # ── Install pip and NCCL runtime ─────────────────────────────────────────
     pip install --upgrade pip
-    pip install --no-cache-dir "nvidia-nccl-cu13>=2.27.7"
+    pip install --no-cache-dir "$NCCL_VERSION_CONSTRAINT"
 
     # ── Install cached wheel ─────────────────────────────────────────────────
+    # Use --extra-index-url for cu130 torch so pip resolves torch 2.10+cu130
+    # (cuda-bindings==13.x) instead of the default PyPI torch (cuda-bindings==12.9.4),
+    # which conflicts with tensorrt-llm's cuda-python>=13 requirement.
     echo "Installing cached wheel..."
-    pip install --no-cache-dir "$CACHED_WHEEL"
+    pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu130 "$CACHED_WHEEL"
 
     # ── Setup LD_LIBRARY_PATH ────────────────────────────────────────────────
     SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
@@ -156,46 +161,7 @@ sudo mkdir -p /usr/local/tensorrt
 sudo ln -sf /usr/include/x86_64-linux-gnu /usr/local/tensorrt/include
 sudo ln -sf /usr/lib/x86_64-linux-gnu /usr/local/tensorrt/lib
 
-# ── NCCL 2.27 setup ──────────────────────────────────────────────────────────
-# Use pip-installed NCCL 2.27+ which has both headers and libraries.
-# This matches the working installation guide approach.
 pip install --upgrade pip
-pip install --no-cache-dir "nvidia-nccl-cu13>=2.27.7"
-
-SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
-
-# Use pip NCCL package as NCCL_ROOT (has both include/ and lib/ directories)
-NCCL_ROOT="$SITE_PACKAGES/nvidia/nccl"
-
-echo "=== NCCL diagnostics ==="
-echo "NCCL_ROOT=$NCCL_ROOT"
-ls -la "$NCCL_ROOT/" 2>/dev/null || echo "WARNING: NCCL_ROOT not found"
-ls -la "$NCCL_ROOT/include/" 2>/dev/null || echo "WARNING: NCCL include not found"
-ls -la "$NCCL_ROOT/lib/" 2>/dev/null || echo "WARNING: NCCL lib not found"
-echo "=== end NCCL diagnostics ==="
-
-# Symlink pip NCCL header to system path for other tools that look there
-NCCL_INCLUDE=$(find "$NCCL_ROOT" -name "nccl.h" 2>/dev/null | head -1)
-if [ -n "$NCCL_INCLUDE" ]; then
-    echo "Found pip NCCL header at: $NCCL_INCLUDE"
-    sudo mv /usr/include/nccl.h /usr/include/nccl.h.bak 2>/dev/null || true
-    sudo ln -sf "$NCCL_INCLUDE" /usr/include/nccl.h
-    echo "Symlinked pip NCCL header to /usr/include/nccl.h"
-else
-    echo "WARNING: Could not find pip-installed NCCL header"
-fi
-
-# Create libnccl.so symlink - pip package only has libnccl.so.2, but CMake looks for libnccl.so
-NCCL_LIB=$(find "$NCCL_ROOT" -name "libnccl.so.2" 2>/dev/null | head -1)
-if [ -n "$NCCL_LIB" ]; then
-    NCCL_LIB_DIR=$(dirname "$NCCL_LIB")
-    echo "Found NCCL library at: $NCCL_LIB"
-    ln -sf "$NCCL_LIB" "$NCCL_LIB_DIR/libnccl.so"
-    echo "Created symlink: $NCCL_LIB_DIR/libnccl.so -> libnccl.so.2"
-    ls -la "$NCCL_LIB_DIR"/libnccl*
-else
-    echo "WARNING: Could not find pip-installed NCCL library"
-fi
 
 # ── Clone TensorRT-LLM ──────────────────────────────────────────────────────
 TRTLLM_DIR="/tmp/tensorrt-llm-src"
@@ -217,6 +183,36 @@ if [ -f "requirements-dev.txt" ]; then
     echo "Installing TensorRT-LLM build requirements..."
     pip install --no-cache-dir -r requirements-dev.txt
 fi
+
+# ── NCCL setup ──────────────────────────────────────────────────────────────
+# build_wheel.py runs pip install internally which can change the NCCL version.
+# Copy headers+libs to a fixed directory that pip can't overwrite, and point
+# NCCL_ROOT there for CMake.
+pip install --no-cache-dir --force-reinstall "$NCCL_VERSION_CONSTRAINT"
+
+SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+NCCL_PIP_ROOT="$SITE_PACKAGES/nvidia/nccl"
+
+# Copy to a stable location that pip won't touch
+NCCL_ROOT="/tmp/nccl-stable"
+rm -rf "$NCCL_ROOT"
+mkdir -p "$NCCL_ROOT/include" "$NCCL_ROOT/lib"
+cp -a "$NCCL_PIP_ROOT/include/"* "$NCCL_ROOT/include/"
+cp -a "$NCCL_PIP_ROOT/lib/"* "$NCCL_ROOT/lib/"
+# Create libnccl.so symlink — pip only ships libnccl.so.2
+if [ -f "$NCCL_ROOT/lib/libnccl.so.2" ] && [ ! -e "$NCCL_ROOT/lib/libnccl.so" ]; then
+    ln -s libnccl.so.2 "$NCCL_ROOT/lib/libnccl.so"
+fi
+
+echo "=== NCCL diagnostics ==="
+echo "NCCL_ROOT=$NCCL_ROOT (stable copy, immune to pip downgrades)"
+ls -la "$NCCL_ROOT/include/" 2>/dev/null | head -5
+ls -la "$NCCL_ROOT/lib/" 2>/dev/null | head -5
+grep "NCCL_MAJOR\|NCCL_MINOR" "$NCCL_ROOT/include/nccl.h" 2>/dev/null | head -3
+echo "=== end NCCL diagnostics ==="
+
+# Symlink stable NCCL header to system path for other tools that look there
+sudo ln -sf "$NCCL_ROOT/include/nccl.h" /usr/include/nccl.h
 
 # ── Patch FindTensorRT.cmake ─────────────────────────────────────────────────
 # CMake needs to find TensorRT in system paths

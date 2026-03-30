@@ -19,7 +19,7 @@ use openai_protocol::{
 };
 use tokio::{sync::OnceCell, time};
 
-use super::{CircuitBreaker, WorkerError, WorkerResult, UNKNOWN_MODEL_ID};
+use super::{CircuitBreaker, ResolvedResilience, WorkerError, WorkerResult, UNKNOWN_MODEL_ID};
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::grpc::client::GrpcClient,
@@ -174,7 +174,10 @@ pub trait Worker: Send + Sync + fmt::Debug {
     /// Get worker-specific metadata
     fn metadata(&self) -> &WorkerMetadata;
 
-    /// Get the circuit breaker for this worker
+    /// Get the circuit breaker for this worker.
+    ///
+    /// **Do not call from routers.** Use `record_outcome(status_code)` to
+    /// record request outcomes and `is_available()` to check worker health.
     fn circuit_breaker(&self) -> &CircuitBreaker;
 
     /// Check if the worker is available (healthy + circuit closed/half-open)
@@ -182,10 +185,28 @@ pub trait Worker: Send + Sync + fmt::Debug {
         self.is_healthy() && self.circuit_breaker().can_execute()
     }
 
-    /// Record the outcome of a request to this worker
-    fn record_outcome(&self, success: bool) {
-        self.circuit_breaker().record_outcome(success);
+    /// Record the outcome of a request based on the HTTP status code.
+    ///
+    /// The worker decides whether the status is a CB failure using its
+    /// per-worker `retryable_status_codes` set (default: 408, 429, 5xx).
+    /// Callers just pass the status — no need to interpret it.
+    ///
+    /// For transport/connection errors where no HTTP response is received,
+    /// pass the status code returned to the client (e.g., 502 for a send
+    /// error, 504 for a timeout).
+    fn record_outcome(&self, status_code: u16) {
+        let is_failure = self
+            .resilience()
+            .retryable_status_codes
+            .contains(&status_code);
+        self.circuit_breaker().record_outcome(!is_failure);
     }
+
+    /// Get the resolved resilience config for this worker.
+    fn resilience(&self) -> &ResolvedResilience;
+
+    /// Get the per-worker HTTP client.
+    fn http_client(&self) -> &reqwest::Client;
 
     /// Check if this worker is DP-aware
     fn is_dp_aware(&self) -> bool {
@@ -490,6 +511,10 @@ pub struct BasicWorker {
     /// When not `Wildcard`, overrides metadata.models for routing decisions.
     /// Uses `ArcSwap` for lock-free reads on the hot path (`supports_model`).
     pub models_override: Arc<ArcSwap<WorkerModels>>,
+    /// Per-worker HTTP client with isolated connection pool.
+    pub http_client: reqwest::Client,
+    /// Resolved resilience config (retry + circuit breaker settings).
+    pub resilience: ResolvedResilience,
 }
 
 impl fmt::Debug for BasicWorker {
@@ -636,6 +661,14 @@ impl Worker for BasicWorker {
 
     fn circuit_breaker(&self) -> &CircuitBreaker {
         &self.circuit_breaker
+    }
+
+    fn resilience(&self) -> &ResolvedResilience {
+        &self.resilience
+    }
+
+    fn http_client(&self) -> &reqwest::Client {
+        &self.http_client
     }
 
     fn models(&self) -> Vec<ModelCard> {
@@ -935,6 +968,7 @@ pub fn worker_to_info(worker: &Arc<dyn Worker>) -> WorkerInfo {
 
     WorkerInfo {
         id: worker.url().to_string(),
+        model_id: spec.models.primary().map(|m| m.id.clone()),
         spec,
         is_healthy: worker.is_healthy(),
         load: worker.load(),
@@ -1443,14 +1477,14 @@ mod tests {
         assert!(worker.is_available());
         assert_eq!(worker.circuit_breaker().state(), CircuitState::Closed);
 
-        worker.record_outcome(false);
-        worker.record_outcome(false);
+        worker.record_outcome(503);
+        worker.record_outcome(503);
 
         assert!(worker.is_available());
 
-        worker.record_outcome(false);
-        worker.record_outcome(false);
-        worker.record_outcome(false);
+        worker.record_outcome(503);
+        worker.record_outcome(503);
+        worker.record_outcome(503);
 
         assert!(!worker.is_available());
         assert!(worker.is_healthy());
@@ -1472,9 +1506,9 @@ mod tests {
             .circuit_breaker_config(config)
             .build();
 
-        worker.record_outcome(false);
+        worker.record_outcome(503);
         assert!(worker.is_available());
-        worker.record_outcome(false);
+        worker.record_outcome(503);
         assert!(!worker.is_available());
 
         thread::sleep(Duration::from_millis(150));
@@ -1482,7 +1516,7 @@ mod tests {
         assert!(worker.is_available());
         assert_eq!(worker.circuit_breaker().state(), CircuitState::HalfOpen);
 
-        worker.record_outcome(true);
+        worker.record_outcome(200);
         assert_eq!(worker.circuit_breaker().state(), CircuitState::Closed);
     }
 
@@ -1496,7 +1530,7 @@ mod tests {
         assert!(dp_worker.is_available());
 
         for _ in 0..5 {
-            dp_worker.record_outcome(false);
+            dp_worker.record_outcome(503);
         }
 
         assert!(!dp_worker.is_available());

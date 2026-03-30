@@ -12,7 +12,7 @@ use crate::{
     core::{
         steps::workflow_data::WorkerRegistrationData,
         worker::{ConnectionModeExt, WorkerTypeExt},
-        WorkerGroupKey,
+        WorkerGroupKey, WorkerRegistry,
     },
     observability::metrics::Metrics,
 };
@@ -41,7 +41,9 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for RegisterWorke
         let mut worker_ids = Vec::with_capacity(workers.len());
 
         for worker in workers {
-            let worker_id = app_context.worker_registry.register(Arc::clone(worker));
+            let worker_id = app_context
+                .worker_registry
+                .register_or_replace(Arc::clone(worker));
             debug!(
                 "Registered worker {} (model: {}) with ID {:?}",
                 worker.url(),
@@ -49,6 +51,30 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for RegisterWorke
                 worker_id
             );
             worker_ids.push(worker_id);
+        }
+
+        // Update per-model retry config (last write wins).
+        // Only update if the worker has non-empty retry overrides in its spec.
+        for worker in workers {
+            let resilience_spec = &worker.metadata().spec.resilience;
+            let has_retry_overrides = resilience_spec.max_retries.is_some()
+                || resilience_spec.initial_backoff_ms.is_some()
+                || resilience_spec.max_backoff_ms.is_some()
+                || resilience_spec.backoff_multiplier.is_some()
+                || resilience_spec.jitter_factor.is_some()
+                || resilience_spec.disable_retry.is_some();
+
+            if has_retry_overrides {
+                let resolved = worker.resilience();
+                let retry_config = resolved.retry.clone();
+                for model_id in WorkerRegistry::worker_model_ids(worker) {
+                    app_context.worker_registry.set_model_retry_config(
+                        &model_id,
+                        retry_config.clone(),
+                        resolved.retry_enabled,
+                    );
+                }
+            }
         }
 
         // Collect unique worker configurations to avoid redundant metric updates

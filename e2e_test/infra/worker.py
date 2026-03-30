@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import IO, Any
@@ -59,8 +60,18 @@ class Worker:
         """HTTP URL (used for health checks even on gRPC workers)."""
         return f"http://{DEFAULT_HOST}:{self.port}"
 
-    def start(self, timeout: int = DEFAULT_STARTUP_TIMEOUT) -> None:
-        """Launch worker process and wait for health."""
+    def start(
+        self,
+        timeout: int = DEFAULT_STARTUP_TIMEOUT,
+        wait_ready: bool = True,
+    ) -> None:
+        """Launch worker process and optionally wait for health.
+
+        Args:
+            timeout: Seconds to wait for health check (only used when wait_ready=True).
+            wait_ready: If True, block until the worker passes health checks.
+                If False, spawn the process and return immediately.
+        """
         cmd = self._build_cmd()
         env = self._build_env()
 
@@ -75,6 +86,15 @@ class Worker:
         logger.debug("Command: %s", " ".join(cmd))
 
         self.process = self._spawn_process(cmd, env)
+
+        if not wait_ready:
+            logger.info(
+                "Worker %s spawned at %s (PID %d) — not waiting for health",
+                self.model_id,
+                self.base_url,
+                self.process.pid,
+            )
+            return
 
         # Wait for health check
         if self.mode == ConnectionMode.GRPC:
@@ -243,6 +263,13 @@ class Worker:
 
     def _build_trtllm_cmd(self, model_path: str, tp_size: int, spec: dict) -> list[str]:
         """Build TensorRT-LLM gRPC server command."""
+        # Create config file to enable xgrammar guided decoding
+        config_path = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False, prefix="trtllm_"
+        )
+        config_path.write("guided_decoding_backend: xgrammar\n")
+        config_path.close()
+
         cmd = [
             "python3",
             "-m",
@@ -258,6 +285,8 @@ class Worker:
             "pytorch",
             "--tp_size",
             str(tp_size),
+            "--extra_llm_api_options",
+            config_path.name,
         ]
         extra = spec.get("trtllm_args", [])
         if extra:
@@ -367,6 +396,7 @@ def start_workers(
     timeout: int = DEFAULT_STARTUP_TIMEOUT,
     log_dir: str | None = None,
     gpu_offset: int = 0,
+    wait_ready: bool = True,
 ) -> list[Worker]:
     """Start N workers for a model. GPU IDs assigned sequentially.
 
@@ -380,6 +410,8 @@ def start_workers(
         timeout: Seconds to wait for each worker to become healthy.
         log_dir: Directory to store worker log files.
         gpu_offset: Starting GPU index for worker assignment.
+        wait_ready: If True (default), block until each worker is healthy.
+            If False, spawn processes and return immediately.
 
     Returns:
         List of started Worker instances.
@@ -389,6 +421,7 @@ def start_workers(
 
     spec = get_model_spec(model_id)
     tp = spec.get("tp", 1)
+    timeout = spec.get("startup_timeout", timeout)
 
     # Detect IB device for PD workers
     has_pd = worker_type in (WorkerType.PREFILL, WorkerType.DECODE)
@@ -420,7 +453,7 @@ def start_workers(
                 logger.info("Staggering launch by %ds", LAUNCH_STAGGER_DELAY)
                 time.sleep(LAUNCH_STAGGER_DELAY)
 
-            worker.start(timeout=timeout)
+            worker.start(timeout=timeout, wait_ready=wait_ready)
             workers.append(worker)
     except Exception:
         stop_workers(workers)

@@ -100,9 +100,9 @@ smg \
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--max-concurrent-requests` | `-1` (unlimited) | Maximum concurrent requests |
-| `--rate-limit-tokens-per-second` | `512` | Token refill rate |
-| `--queue-size` | `128` | Maximum queued requests |
-| `--queue-timeout-secs` | `30` | Maximum queue wait time |
+| `--rate-limit-tokens-per-second` | none | Token refill rate (only active when explicitly set) |
+| `--queue-size` | `100` | Maximum queued requests |
+| `--queue-timeout-secs` | `60` | Maximum queue wait time |
 
 ### Timeout Parameters
 
@@ -235,11 +235,8 @@ The 1.2 factor provides headroom for bursts.
 
 | Metric | Description |
 |--------|-------------|
-| `smg_http_rate_limit_total` | Rate limit decisions by type |
-| `smg_queue_depth` | Current number of queued requests |
-| `smg_queue_wait_seconds` | Queue wait time histogram |
-| `smg_request_duration_seconds` | Request duration histogram |
-| `smg_queue_timeout_total` | Requests that timed out in queue |
+| `smg_http_rate_limit_total` | Rate limit decisions by result (allowed/rejected) |
+| `smg_http_request_duration_seconds` | Request duration histogram |
 
 ### Useful PromQL Queries
 
@@ -254,7 +251,7 @@ The 1.2 factor provides headroom for bursts.
 rate(smg_http_rate_limit_total[5m])
 
 # By decision type (allowed/rejected)
-sum by (decision) (
+sum by (result) (
   rate(smg_http_rate_limit_total[5m])
 )
 ```
@@ -263,15 +260,12 @@ sum by (decision) (
 
 <div class="card" markdown>
 
-#### Queue Metrics
+#### Request Duration
 
 ```promql
-# Queue utilization
-smg_queue_depth / smg_queue_size
-
-# 99th percentile queue wait
+# 99th percentile request duration
 histogram_quantile(0.99,
-  rate(smg_queue_wait_seconds_bucket[5m]))
+  rate(smg_http_request_duration_seconds_bucket[5m]))
 ```
 
 </div>

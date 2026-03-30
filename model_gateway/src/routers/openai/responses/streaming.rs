@@ -37,6 +37,8 @@ use super::{
         rewrite_streaming_block,
     },
 };
+const SSE_DONE: &str = "data: [DONE]\n\n";
+
 use crate::{
     observability::metrics::Metrics,
     routers::{
@@ -78,7 +80,7 @@ pub(super) fn apply_event_transformations_inplace(
             .get_mut("response")
             .and_then(|v| v.as_object_mut())
         {
-            let desired_store = Value::Bool(ctx.original_request.store.unwrap_or(false));
+            let desired_store = Value::Bool(ctx.original_request.store.unwrap_or(true));
             if response_obj.get("store") != Some(&desired_store) {
                 response_obj.insert("store".to_string(), desired_store);
                 changed = true;
@@ -512,7 +514,7 @@ pub(super) fn send_final_response_event(
 /// Simple pass-through streaming without MCP interception
 pub(super) async fn handle_simple_streaming_passthrough(
     client: &reqwest::Client,
-    circuit_breaker: &crate::core::CircuitBreaker,
+    worker: &Arc<dyn crate::core::Worker>,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
 ) -> Response {
@@ -527,7 +529,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let response = match request_builder.send().await {
         Ok(resp) => resp,
         Err(err) => {
-            circuit_breaker.record_failure();
+            worker.record_outcome(502);
             return (
                 StatusCode::BAD_GATEWAY,
                 format!("Failed to forward request to OpenAI: {err}"),
@@ -540,8 +542,9 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let status_code =
         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
+    worker.record_outcome(status.as_u16());
+
     if !status.is_success() {
-        circuit_breaker.record_failure();
         let error_body = response
             .text()
             .await
@@ -550,16 +553,13 @@ pub(super) async fn handle_simple_streaming_passthrough(
         return (status_code, error_body).into_response();
     }
 
-    circuit_breaker.record_success();
-
     let preserved_headers = preserve_response_headers(response.headers());
     let mut upstream_stream = response.bytes_stream();
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
 
-    let should_store = req.original_body.store.unwrap_or(false);
+    let should_store = req.original_body.store.unwrap_or(true);
     let original_request = req.original_body;
-    let persist_needed = original_request.conversation.is_some();
     let previous_response_id = req.previous_response_id;
     let storage = req.storage;
 
@@ -588,7 +588,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                             None => Cow::Borrowed(raw_block.as_str()),
                         };
 
-                        if should_store || persist_needed {
+                        if should_store {
                             accumulator.ingest_block(&block_cow);
                         }
 
@@ -617,7 +617,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
             }
         }
 
-        if (should_store || persist_needed) && !upstream_failed {
+        if should_store && !upstream_failed {
             if chunk_processor.has_remaining() {
                 accumulator.ingest_block(&chunk_processor.take_remaining());
             }
@@ -636,6 +636,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     storage.response.clone(),
                     &response_json,
                     &original_request,
+                    storage.request_context.clone(),
                 )
                 .await
                 {
@@ -676,9 +677,8 @@ pub(super) fn handle_streaming_with_tool_interception(
     let payload = req.payload;
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
-    let should_store = req.original_body.store.unwrap_or(false);
+    let should_store = req.original_body.store.unwrap_or(true);
     let original_request = req.original_body;
-    let persist_needed = original_request.conversation.is_some();
     let previous_response_id = req.previous_response_id;
     let url = req.url;
     let storage = req.storage;
@@ -792,14 +792,21 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         })
                                     };
 
+                                    // Check in_progress before moving parsed into SseEventData
+                                    let is_in_progress = !seen_in_progress
+                                        && parsed.as_ref().is_some_and(|v| {
+                                            v.get("type").and_then(|t| t.as_str())
+                                                == Some(ResponseEvent::IN_PROGRESS)
+                                        });
+
                                     if !should_skip {
-                                        // Forward the event with pre-parsed value
+                                        // Forward the event with pre-parsed value (moved, not cloned)
                                         if !forward_streaming_event(
                                             SseEventData {
                                                 raw_block: &raw_block,
                                                 event_name,
                                                 data: data.as_ref(),
-                                                pre_parsed: parsed.clone(),
+                                                pre_parsed: parsed,
                                             },
                                             &mut handler,
                                             &tx,
@@ -810,31 +817,25 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         }
                                     }
 
-                                    if !seen_in_progress {
-                                        let is_in_progress = parsed.as_ref().is_some_and(|v| {
-                                            v.get("type").and_then(|t| t.as_str())
-                                                == Some(ResponseEvent::IN_PROGRESS)
-                                        });
-                                        if is_in_progress {
-                                            seen_in_progress = true;
-                                            if !mcp_list_tools_sent {
-                                                for binding in session.mcp_servers() {
-                                                    let list_tools_index =
-                                                        handler.allocate_synthetic_output_index();
-                                                    if !send_mcp_list_tools_events(
-                                                        &tx,
-                                                        &session,
-                                                        &binding.label,
-                                                        list_tools_index,
-                                                        &mut sequence_number,
-                                                        &binding.server_key,
-                                                    ) {
-                                                        // Client disconnected
-                                                        return;
-                                                    }
+                                    if is_in_progress {
+                                        seen_in_progress = true;
+                                        if !mcp_list_tools_sent {
+                                            for binding in session.mcp_servers() {
+                                                let list_tools_index =
+                                                    handler.allocate_synthetic_output_index();
+                                                if !send_mcp_list_tools_events(
+                                                    &tx,
+                                                    &session,
+                                                    &binding.label,
+                                                    list_tools_index,
+                                                    &mut sequence_number,
+                                                    &binding.server_key,
+                                                ) {
+                                                    // Client disconnected
+                                                    return;
                                                 }
-                                                mcp_list_tools_sent = true;
                                             }
+                                            mcp_list_tools_sent = true;
                                         }
                                     }
                                 }
@@ -894,7 +895,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     return;
                 }
 
-                let final_response_json = if should_store || persist_needed {
+                let final_response_json = if should_store {
                     handler.accumulator.into_final_response()
                 } else {
                     None
@@ -922,6 +923,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                         storage.response.clone(),
                         &response_json,
                         &original_request,
+                        storage.request_context.clone(),
                     )
                     .await
                     {
@@ -932,7 +934,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     }
                 }
 
-                let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
                 return;
             }
 
@@ -961,7 +963,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     "error",
                     &json!({"error": {"message": "Exceeded max_tool_calls limit"}}),
                 );
-                let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
                 return;
             }
 
@@ -997,7 +999,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                         "error",
                         &json!({"error": {"message": format!("Failed to build resume payload: {}", e)}}),
                     );
-                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                    let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
                     return;
                 }
             }
@@ -1023,7 +1025,6 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
             return error::internal_error("internal_error", "Worker not selected");
         }
     };
-    let circuit_breaker = worker.circuit_breaker();
     let headers = ctx.headers().cloned();
     let original_body = match ctx.responses_request() {
         Some(r) => r,
@@ -1054,13 +1055,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     };
 
     let Some(mcp_servers) = mcp_servers else {
-        return handle_simple_streaming_passthrough(
-            &client,
-            circuit_breaker,
-            headers.as_ref(),
-            req,
-        )
-        .await;
+        return handle_simple_streaming_passthrough(&client, &worker, headers.as_ref(), req).await;
     };
 
     handle_streaming_with_tool_interception(

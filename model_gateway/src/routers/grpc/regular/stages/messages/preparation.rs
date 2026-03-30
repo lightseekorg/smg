@@ -1,16 +1,16 @@
 //! Message API preparation stage: Convert tools, process messages, tokenize, build constraints
-#![allow(dead_code)] // wired in follow-up PR (pipeline factory)
 
 use async_trait::async_trait;
 use axum::response::Response;
 use openai_protocol::{common::StringOrArray, messages::CreateMessageRequest};
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::routers::{
     error,
     grpc::{
         common::stages::PipelineStage,
         context::{PreparationOutput, RequestContext},
+        multimodal,
         utils::{self, message_utils},
     },
 };
@@ -36,10 +36,6 @@ impl PipelineStage for MessagePreparationStage {
 }
 
 impl MessagePreparationStage {
-    #[expect(
-        clippy::unused_async,
-        reason = "multimodal processing will add .await in follow-up PR"
-    )]
     async fn prepare_messages(
         &self,
         ctx: &mut RequestContext,
@@ -75,11 +71,75 @@ impl MessagePreparationStage {
             Some(filtered_tools.as_slice())
         };
 
+        // Resolve multimodal context once (see chat/preparation.rs for details).
+        let is_multimodal = multimodal::has_multimodal_content_messages(&request.messages);
+        let (image_placeholder, mm_context) = if is_multimodal {
+            if let Some(mm_components) = ctx.components.multimodal.as_ref() {
+                let model_id = ctx.input.model_id.as_str();
+                let tokenizer_source = ctx
+                    .components
+                    .tokenizer_registry
+                    .get_by_name(model_id)
+                    .or_else(|| ctx.components.tokenizer_registry.get_by_id(model_id))
+                    .map(|e| e.source)
+                    .unwrap_or_default();
+
+                if tokenizer_source.is_empty() {
+                    error!(
+                        function = "MessagePreparationStage::execute",
+                        model = %model_id,
+                        "Tokenizer source path not found for multimodal processing"
+                    );
+                    return Err(error::bad_request(
+                        "multimodal_config_missing",
+                        format!("Tokenizer source path not found for model: {model_id}"),
+                    ));
+                }
+
+                let placeholder = multimodal::resolve_placeholder_token(
+                    model_id,
+                    &*tokenizer,
+                    mm_components,
+                    &tokenizer_source,
+                )
+                .await
+                .map_err(|e| {
+                    error!(
+                        function = "MessagePreparationStage::execute",
+                        model = %model_id,
+                        error = %e,
+                        "Failed to resolve multimodal placeholder token"
+                    );
+                    error::internal_error(
+                        "multimodal_placeholder_resolution_failed",
+                        format!("Failed to resolve multimodal placeholder token: {e}"),
+                    )
+                })?;
+
+                (
+                    placeholder,
+                    Some((mm_components, model_id, tokenizer_source)),
+                )
+            } else {
+                error!(
+                    function = "MessagePreparationStage::execute",
+                    "Multimodal content detected but multimodal components not initialized"
+                );
+                return Err(error::bad_request(
+                    "multimodal_not_supported",
+                    "Multimodal content detected but multimodal processing is not available",
+                ));
+            }
+        } else {
+            (None, None)
+        };
+
         // Step 2: Process messages and apply chat template
         let processed_messages = match message_utils::process_messages(
             request,
             &*tokenizer,
             tools_for_template,
+            image_placeholder.as_deref(),
         ) {
             Ok(msgs) => msgs,
             Err(e) => {
@@ -100,9 +160,43 @@ impl MessagePreparationStage {
             }
         };
 
-        let token_ids = encoding.token_ids().to_vec();
+        let mut token_ids = encoding.token_ids().to_vec();
 
-        // Multimodal processing — postponed (see design doc appendix)
+        // Step 4: Multimodal processing (fetch + preprocess + expand tokens + hash)
+        let mut multimodal_intermediate = None;
+        if let Some((mm_components, model_id, tokenizer_source)) = mm_context {
+            match multimodal::process_multimodal_messages(
+                &request.messages,
+                model_id,
+                &*tokenizer,
+                token_ids,
+                mm_components,
+                &tokenizer_source,
+            )
+            .await
+            {
+                Ok(output) => {
+                    debug!(
+                        function = "MessagePreparationStage::execute",
+                        expanded_tokens = output.expanded_token_ids.len(),
+                        "Multimodal processing complete"
+                    );
+                    token_ids = output.expanded_token_ids;
+                    multimodal_intermediate = Some(output.intermediate);
+                }
+                Err(e) => {
+                    error!(
+                        function = "MessagePreparationStage::execute",
+                        error = %e,
+                        "Multimodal processing failed"
+                    );
+                    return Err(error::bad_request(
+                        "multimodal_processing_failed",
+                        format!("Multimodal processing failed: {e}"),
+                    ));
+                }
+            }
+        }
 
         // Step 4: Build tool constraints if tools present
         let tool_call_constraint = if filtered_tools.is_empty() {
@@ -132,9 +226,12 @@ impl MessagePreparationStage {
             &tokenizer,
             stop_for_decoder.as_ref(),
             None,  // no stop_token_ids in Messages API
-            false, // skip_special_tokens default
+            true,  // always skip special tokens — Messages API never exposes raw tokens
             false, // no_stop_trim default
         );
+
+        let mut processed_messages = processed_messages;
+        processed_messages.multimodal_intermediate = multimodal_intermediate;
 
         // Store results in context
         ctx.state.preparation = Some(PreparationOutput {

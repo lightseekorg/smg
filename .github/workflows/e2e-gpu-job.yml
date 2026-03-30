@@ -50,7 +50,7 @@ jobs:
       E2E_ENGINE: ${{ inputs.engine }}
       E2E_RUNTIME: ${{ inputs.engine }}
       E2E_GPU_TIER: ${{ inputs.gpu_tier }}
-      ROUTER_LOCAL_MODEL_PATH: /home/ubuntu/models
+      ROUTER_LOCAL_MODEL_PATH: /models
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -107,13 +107,13 @@ jobs:
           bash scripts/ci_agentic_svc_deps.sh create-oracle-user oracle-db
           bash scripts/ci_agentic_svc_deps.sh create-oracle-flyway-user oracle-db
 
+      # Pre-download models with flock to prevent races between pods on same node
+      - name: Download models
+        run: bash scripts/ci_download_model.sh --gpu-tier ${{ inputs.gpu_tier }}
+
       # Run tests
       - name: Run E2E tests
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
           SHOW_WORKER_LOGS: "0"
           SHOW_ROUTER_LOGS: "1"
           BRAVE_MCP_HOST: ${{ inputs.setup_agentic_deps && 'brave-search-mcp' || '' }}

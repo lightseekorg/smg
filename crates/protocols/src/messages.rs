@@ -20,7 +20,7 @@ use crate::validated::Normalizable;
 /// This is the main request type for `/v1/messages` endpoint.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Validate, schemars::JsonSchema)]
-#[validate(schema(function = "validate_mcp_config"))]
+#[validate(schema(function = "validate_message_request"))]
 pub struct CreateMessageRequest {
     /// The model that will complete your prompt.
     #[validate(length(min = 1, message = "model field is required and cannot be empty"))]
@@ -105,13 +105,71 @@ impl CreateMessageRequest {
     }
 }
 
-/// Validate that `mcp_servers` is non-empty when `mcp_toolset` tools are present.
-fn validate_mcp_config(req: &CreateMessageRequest) -> Result<(), validator::ValidationError> {
+impl Tool {
+    fn matches_tool_choice_name(&self, name: &str) -> bool {
+        match self {
+            Self::Custom(tool) => tool.name == name,
+            Self::ToolSearch(tool) => tool.name == name,
+            Self::Bash(tool) => tool.name == name,
+            Self::TextEditor(tool) => tool.name == name,
+            Self::WebSearch(tool) => tool.name == name,
+            Self::McpToolset(toolset) => {
+                let default_enabled = toolset
+                    .default_config
+                    .as_ref()
+                    .and_then(|config| config.enabled)
+                    .unwrap_or(true);
+
+                toolset
+                    .configs
+                    .as_ref()
+                    .and_then(|configs| configs.get(name))
+                    .and_then(|config| config.enabled)
+                    .unwrap_or(default_enabled)
+            }
+        }
+    }
+}
+/// Validate cross-field constraints for Messages API requests.
+fn validate_message_request(req: &CreateMessageRequest) -> Result<(), validator::ValidationError> {
     if req.has_mcp_toolset() && req.mcp_server_configs().is_none() {
         let mut e = validator::ValidationError::new("mcp_servers_required");
         e.message = Some("mcp_servers is required when mcp_toolset tools are present".into());
         return Err(e);
     }
+
+    let Some(tool_choice) = &req.tool_choice else {
+        return Ok(());
+    };
+
+    let has_tools = req.tools.as_ref().is_some_and(|tools| !tools.is_empty());
+    let requires_tools = !matches!(tool_choice, ToolChoice::None);
+
+    if requires_tools && !has_tools {
+        let mut e = validator::ValidationError::new("tool_choice_requires_tools");
+        e.message = Some(
+            "Invalid value for 'tool_choice': 'tool_choice' is only allowed when 'tools' are specified."
+                .into(),
+        );
+        return Err(e);
+    }
+
+    if let ToolChoice::Tool { name, .. } = tool_choice {
+        let tool_exists = req
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.iter().any(|tool| tool.matches_tool_choice_name(name)));
+
+        if !tool_exists {
+            let mut e = validator::ValidationError::new("tool_choice_tool_not_found");
+            e.message = Some(
+                format!("Invalid value for 'tool_choice': tool '{name}' not found in 'tools'.")
+                    .into(),
+            );
+            return Err(e);
+        }
+    }
+
     Ok(())
 }
 
@@ -1764,6 +1822,65 @@ mod tests {
 
     use super::*;
 
+    fn base_request() -> CreateMessageRequest {
+        CreateMessageRequest {
+            model: "claude-test".to_string(),
+            messages: vec![InputMessage {
+                role: Role::User,
+                content: InputContent::String("hello".to_string()),
+            }],
+            max_tokens: 16,
+            metadata: None,
+            service_tier: None,
+            stop_sequences: None,
+            stream: None,
+            system: None,
+            temperature: None,
+            thinking: None,
+            tool_choice: None,
+            tools: None,
+            top_k: None,
+            top_p: None,
+            container: None,
+            mcp_servers: None,
+        }
+    }
+
+    fn custom_tool(name: &str) -> Tool {
+        Tool::Custom(CustomTool {
+            name: name.to_string(),
+            tool_type: None,
+            description: Some("test tool".to_string()),
+            input_schema: InputSchema {
+                schema_type: "object".to_string(),
+                properties: None,
+                required: None,
+                additional: HashMap::new(),
+            },
+            defer_loading: None,
+            cache_control: None,
+        })
+    }
+
+    fn mcp_toolset(configs: Option<HashMap<String, McpToolConfig>>) -> Tool {
+        Tool::McpToolset(McpToolset {
+            toolset_type: "mcp_toolset".to_string(),
+            mcp_server_name: "brave".to_string(),
+            default_config: None,
+            configs,
+            cache_control: None,
+        })
+    }
+
+    fn mcp_server_config() -> McpServerConfig {
+        McpServerConfig {
+            server_type: "url".to_string(),
+            name: "brave".to_string(),
+            url: "https://example.com/mcp".to_string(),
+            authorization_token: None,
+            tool_configuration: None,
+        }
+    }
     #[test]
     fn test_tool_mcp_toolset_defer_loading_deserialization() {
         let json = r#"{
@@ -1874,6 +1991,142 @@ mod tests {
             }
             _ => panic!("Expected ToolReference variant"),
         }
+    }
+
+    #[test]
+    fn test_tool_choice_auto_requires_tools() {
+        let mut request = base_request();
+        request.tool_choice = Some(ToolChoice::Auto {
+            disable_parallel_tool_use: None,
+        });
+
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn test_tool_choice_any_requires_tools() {
+        let mut request = base_request();
+        request.tool_choice = Some(ToolChoice::Any {
+            disable_parallel_tool_use: None,
+        });
+
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn test_tool_choice_auto_with_tools_is_valid() {
+        let mut request = base_request();
+        request.tool_choice = Some(ToolChoice::Auto {
+            disable_parallel_tool_use: None,
+        });
+        request.tools = Some(vec![custom_tool("get_weather")]);
+
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn test_tool_choice_any_with_tools_is_valid() {
+        let mut request = base_request();
+        request.tool_choice = Some(ToolChoice::Any {
+            disable_parallel_tool_use: None,
+        });
+        request.tools = Some(vec![custom_tool("get_weather")]);
+
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn test_tool_choice_specific_tool_requires_tools() {
+        let mut request = base_request();
+        request.tool_choice = Some(ToolChoice::Tool {
+            name: "get_weather".to_string(),
+            disable_parallel_tool_use: None,
+        });
+
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn test_tool_choice_specific_tool_must_exist() {
+        let mut request = base_request();
+        request.tool_choice = Some(ToolChoice::Tool {
+            name: "get_weather".to_string(),
+            disable_parallel_tool_use: None,
+        });
+        request.tools = Some(vec![custom_tool("search_web")]);
+
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn test_tool_choice_none_without_tools_is_valid() {
+        let mut request = base_request();
+        request.tool_choice = Some(ToolChoice::None);
+
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn test_tool_choice_specific_tool_is_valid_when_declared() {
+        let mut request = base_request();
+        request.tool_choice = Some(ToolChoice::Tool {
+            name: "get_weather".to_string(),
+            disable_parallel_tool_use: None,
+        });
+        request.tools = Some(vec![custom_tool("get_weather")]);
+
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn test_tool_choice_specific_tool_is_valid_with_mcp_toolset() {
+        let mut request = base_request();
+        request.tool_choice = Some(ToolChoice::Tool {
+            name: "get_weather".to_string(),
+            disable_parallel_tool_use: None,
+        });
+        request.tools = Some(vec![mcp_toolset(None)]);
+        request.mcp_servers = Some(vec![mcp_server_config()]);
+
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn test_tool_choice_specific_tool_uses_mcp_toolset_default_when_override_missing() {
+        let mut request = base_request();
+        request.tool_choice = Some(ToolChoice::Tool {
+            name: "get_weather".to_string(),
+            disable_parallel_tool_use: None,
+        });
+        request.tools = Some(vec![mcp_toolset(Some(HashMap::from([(
+            "search_web".to_string(),
+            McpToolConfig {
+                enabled: Some(false),
+                defer_loading: None,
+            },
+        )])))]);
+        request.mcp_servers = Some(vec![mcp_server_config()]);
+
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn test_tool_choice_specific_tool_must_be_enabled_in_mcp_toolset_configs() {
+        let mut request = base_request();
+        request.tool_choice = Some(ToolChoice::Tool {
+            name: "get_weather".to_string(),
+            disable_parallel_tool_use: None,
+        });
+        request.tools = Some(vec![mcp_toolset(Some(HashMap::from([(
+            "get_weather".to_string(),
+            McpToolConfig {
+                enabled: Some(false),
+                defer_loading: None,
+            },
+        )])))]);
+        request.mcp_servers = Some(vec![mcp_server_config()]);
+
+        assert!(request.validate().is_err());
     }
 
     #[test]

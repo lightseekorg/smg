@@ -399,6 +399,7 @@ struct Router {
     request_timeout_secs: u64,
     shutdown_grace_period_secs: u64,
     request_id_headers: Option<Vec<String>>,
+    storage_context_headers: HashMap<String, String>,
     pd_disaggregation: bool,
     bucket_adjust_interval_secs: usize,
     prefill_urls: Option<Vec<(String, Option<u16>)>>,
@@ -424,6 +425,7 @@ struct Router {
     health_check_interval_secs: u64,
     health_check_endpoint: String,
     disable_health_check: bool,
+    remove_unhealthy_workers: bool,
     enable_igw: bool,
     queue_size: usize,
     queue_timeout_secs: u64,
@@ -432,6 +434,7 @@ struct Router {
     model_path: Option<String>,
     tokenizer_path: Option<String>,
     chat_template: Option<String>,
+    disable_tokenizer_autoload: bool,
     tokenizer_cache_enable_l0: bool,
     tokenizer_cache_l0_max_entries: usize,
     tokenizer_cache_enable_l1: bool,
@@ -454,6 +457,13 @@ struct Router {
     otlp_traces_endpoint: String,
     control_plane_auth: Option<PyControlPlaneAuthConfig>,
     schema_config: Option<String>,
+    // Mesh server
+    enable_mesh: bool,
+    mesh_server_name: Option<String>,
+    mesh_host: String,
+    mesh_advertise_host: Option<String>,
+    mesh_port: u16,
+    mesh_peer_urls: Vec<String>,
 }
 
 impl Router {
@@ -464,6 +474,19 @@ impl Router {
             }
         }
         core::ConnectionMode::Http
+    }
+
+    fn parse_mesh_socket_addr(
+        host: &str,
+        port: u16,
+        field: &str,
+    ) -> PyResult<std::net::SocketAddr> {
+        let addr = format!("{host}:{port}");
+        addr.parse::<std::net::SocketAddr>().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid value for {field}='{host}': invalid mesh socket address '{addr}': {e}"
+            ))
+        })
     }
 
     pub fn to_router_config(&self) -> config::ConfigResult<config::RouterConfig> {
@@ -671,6 +694,7 @@ impl Router {
                 check_interval_secs: self.health_check_interval_secs,
                 endpoint: self.health_check_endpoint.clone(),
                 disable_health_check: self.disable_health_check,
+                remove_unhealthy_workers: self.remove_unhealthy_workers,
             })
             .tokenizer_cache(config::TokenizerCacheConfig {
                 enable_l0: self.tokenizer_cache_enable_l0,
@@ -678,6 +702,7 @@ impl Router {
                 enable_l1: self.tokenizer_cache_enable_l1,
                 l1_max_memory: self.tokenizer_cache_l1_max_memory,
             })
+            .disable_tokenizer_autoload(self.disable_tokenizer_autoload)
             .history_backend(history_backend)
             .maybe_api_key(self.api_key.as_ref())
             .maybe_discovery(discovery)
@@ -686,6 +711,10 @@ impl Router {
             .maybe_log_dir(self.log_dir.as_ref())
             .maybe_log_level(self.log_level.as_ref())
             .maybe_request_id_headers(self.request_id_headers.clone())
+            .maybe_storage_context_headers(
+                (!self.storage_context_headers.is_empty())
+                    .then(|| self.storage_context_headers.clone()),
+            )
             .maybe_rate_limit_tokens_per_second(self.rate_limit_tokens_per_second)
             .maybe_model_path(self.model_path.as_ref())
             .maybe_tokenizer_path(self.tokenizer_path.as_ref())
@@ -754,6 +783,7 @@ impl Router {
         request_timeout_secs = 1800,
         shutdown_grace_period_secs = 180,
         request_id_headers = None,
+        storage_context_headers = HashMap::new(),
         pd_disaggregation = false,
         bucket_adjust_interval_secs = 5,
         prefill_urls = None,
@@ -779,6 +809,7 @@ impl Router {
         health_check_interval_secs = 60,
         health_check_endpoint = String::from("/health"),
         disable_health_check = false,
+        remove_unhealthy_workers = false,
         enable_igw = false,
         queue_size = 100,
         queue_timeout_secs = 60,
@@ -808,6 +839,13 @@ impl Router {
         otlp_traces_endpoint = String::from("localhost:4317"),
         control_plane_auth = None,
         schema_config = None,
+        disable_tokenizer_autoload = false,
+        enable_mesh = false,
+        mesh_server_name = None,
+        mesh_host = String::from("0.0.0.0"),
+        mesh_port = 39527u16,
+        mesh_peer_urls = vec![],
+        mesh_advertise_host = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -851,6 +889,7 @@ impl Router {
         request_timeout_secs: u64,
         shutdown_grace_period_secs: u64,
         request_id_headers: Option<Vec<String>>,
+        storage_context_headers: HashMap<String, String>,
         pd_disaggregation: bool,
         bucket_adjust_interval_secs: usize,
         prefill_urls: Option<Vec<(String, Option<u16>)>>,
@@ -876,6 +915,7 @@ impl Router {
         health_check_interval_secs: u64,
         health_check_endpoint: String,
         disable_health_check: bool,
+        remove_unhealthy_workers: bool,
         enable_igw: bool,
         queue_size: usize,
         queue_timeout_secs: u64,
@@ -905,6 +945,13 @@ impl Router {
         otlp_traces_endpoint: String,
         control_plane_auth: Option<PyControlPlaneAuthConfig>,
         schema_config: Option<String>,
+        disable_tokenizer_autoload: bool,
+        enable_mesh: bool,
+        mesh_server_name: Option<String>,
+        mesh_host: String,
+        mesh_port: u16,
+        mesh_peer_urls: Vec<String>,
+        mesh_advertise_host: Option<String>,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -957,6 +1004,7 @@ impl Router {
             request_timeout_secs,
             shutdown_grace_period_secs,
             request_id_headers,
+            storage_context_headers,
             pd_disaggregation,
             bucket_adjust_interval_secs,
             prefill_urls,
@@ -982,6 +1030,7 @@ impl Router {
             health_check_interval_secs,
             health_check_endpoint,
             disable_health_check,
+            remove_unhealthy_workers,
             enable_igw,
             queue_size,
             queue_timeout_secs,
@@ -990,6 +1039,7 @@ impl Router {
             model_path,
             tokenizer_path,
             chat_template,
+            disable_tokenizer_autoload,
             tokenizer_cache_enable_l0,
             tokenizer_cache_l0_max_entries,
             tokenizer_cache_enable_l1,
@@ -1012,6 +1062,12 @@ impl Router {
             otlp_traces_endpoint,
             control_plane_auth,
             schema_config,
+            enable_mesh,
+            mesh_server_name,
+            mesh_host,
+            mesh_advertise_host,
+            mesh_port,
+            mesh_peer_urls,
         })
     }
 
@@ -1087,7 +1143,53 @@ impl Router {
                     .control_plane_auth
                     .as_ref()
                     .map(|c| c.to_auth_control_plane_config()),
-                mesh_server_config: None,
+                mesh_server_config: if self.enable_mesh {
+                    let self_name = self.mesh_server_name.clone().unwrap_or_else(|| {
+                        use rand::{distr::Alphanumeric, Rng};
+                        let random_string: String = (0..4)
+                            .map(|_| rand::rng().sample(Alphanumeric) as char)
+                            .collect();
+                        format!("Mesh_{random_string}")
+                    });
+                    let peer = self
+                        .mesh_peer_urls
+                        .first()
+                        .map(|url| {
+                            url.parse::<std::net::SocketAddr>().map_err(|e| {
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "Invalid mesh peer URL '{url}': {e}"
+                                ))
+                            })
+                        })
+                        .transpose()?;
+                    let bind_addr =
+                        Self::parse_mesh_socket_addr(&self.mesh_host, self.mesh_port, "mesh_host")?;
+                    let (advertise_host, advertise_field) =
+                        if let Some(host) = self.mesh_advertise_host.as_deref() {
+                            (host, "mesh_advertise_host")
+                        } else {
+                            (self.mesh_host.as_str(), "mesh_host")
+                        };
+                    let advertise_addr = Self::parse_mesh_socket_addr(
+                        advertise_host,
+                        self.mesh_port,
+                        advertise_field,
+                    )?;
+                    if advertise_addr.ip().is_unspecified() {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "Invalid value for {advertise_field}='{advertise_host}': mesh advertise address cannot be unspecified; set mesh_advertise_host to a routable node IP"
+                        )));
+                    }
+                    Some(smg_mesh::MeshServerConfig {
+                        self_name,
+                        bind_addr,
+                        advertise_addr,
+                        init_peer: peer,
+                        mtls_config: None,
+                    })
+                } else {
+                    None
+                },
                 webrtc_bind_addr: None,
                 webrtc_stun_server: None,
             })
@@ -1127,6 +1229,18 @@ fn get_available_tool_call_parsers() -> Vec<String> {
         .clone()
 }
 
+/// Get the list of available reasoning parsers from the Rust factory.
+#[pyfunction]
+fn get_available_reasoning_parsers() -> Vec<String> {
+    static PARSERS: OnceCell<Vec<String>> = OnceCell::new();
+    PARSERS
+        .get_or_init(|| {
+            let factory = reasoning_parser::ParserFactory::new();
+            factory.list_parsers()
+        })
+        .clone()
+}
+
 #[pymodule]
 fn smg_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PolicyType>()?;
@@ -1144,5 +1258,6 @@ fn smg_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_verbose_version_string, m)?)?;
     m.add_function(wrap_pyfunction!(print_banner, m)?)?;
     m.add_function(wrap_pyfunction!(get_available_tool_call_parsers, m)?)?;
+    m.add_function(wrap_pyfunction!(get_available_reasoning_parsers, m)?)?;
     Ok(())
 }

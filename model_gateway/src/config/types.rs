@@ -33,6 +33,8 @@ pub struct RouterConfig {
     pub log_dir: Option<String>,
     pub log_level: Option<String>,
     pub request_id_headers: Option<Vec<String>>,
+    #[serde(default)]
+    pub storage_context_headers: HashMap<String, String>,
     /// Set to -1 to disable rate limiting
     pub max_concurrent_requests: i32,
     pub queue_size: usize,
@@ -56,6 +58,9 @@ pub struct RouterConfig {
     /// Overrides model_path tokenizer if provided
     pub tokenizer_path: Option<String>,
     pub chat_template: Option<String>,
+    /// Disable automatic tokenizer loading at startup and worker registration
+    #[serde(default)]
+    pub disable_tokenizer_autoload: bool,
     #[serde(default = "default_history_backend")]
     pub history_backend: HistoryBackend,
     /// Required when history_backend = "oracle"
@@ -434,6 +439,8 @@ pub struct HealthCheckConfig {
     pub check_interval_secs: u64,
     pub endpoint: String,
     pub disable_health_check: bool,
+    #[serde(default)]
+    pub remove_unhealthy_workers: bool,
 }
 
 impl Default for HealthCheckConfig {
@@ -445,6 +452,7 @@ impl Default for HealthCheckConfig {
             check_interval_secs: 60,
             endpoint: "/health".to_string(),
             disable_health_check: false,
+            remove_unhealthy_workers: false,
         }
     }
 }
@@ -535,6 +543,7 @@ impl Default for RouterConfig {
             log_dir: None,
             log_level: None,
             request_id_headers: None,
+            storage_context_headers: HashMap::new(),
             max_concurrent_requests: -1,
             queue_size: 100,
             queue_timeout_secs: 60,
@@ -550,6 +559,7 @@ impl Default for RouterConfig {
             model_path: None,
             tokenizer_path: None,
             chat_template: None,
+            disable_tokenizer_autoload: false,
             history_backend: default_history_backend(),
             oracle: None,
             postgres: None,

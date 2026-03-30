@@ -328,6 +328,7 @@ impl PositionalIndexer {
         };
 
         let mut prev_prefix = parent_prefix;
+        let mut num_new_blocks = 0usize;
         for (i, block) in blocks.iter().enumerate() {
             let position = start_pos + i;
             let content_hash = block.content_hash;
@@ -345,13 +346,21 @@ impl PositionalIndexer {
                 .and_modify(|entry| entry.insert(prefix_hash, worker_id))
                 .or_insert_with(|| SeqEntry::new(prefix_hash, worker_id));
 
-            worker_blocks.insert(block.seq_hash, (position, content_hash, prefix_hash));
+            // Only count genuinely new blocks — duplicate store events must not
+            // inflate tree_sizes, which would cause incorrect routing decisions.
+            if worker_blocks
+                .insert(block.seq_hash, (position, content_hash, prefix_hash))
+                .is_none()
+            {
+                num_new_blocks += 1;
+            }
             prev_prefix = Some(prefix_hash);
         }
 
         // Atomically update tree_sizes — lock-free array index.
-        let num_blocks = blocks.len();
-        self.tree_sizes[worker_id as usize].fetch_add(num_blocks, Ordering::Relaxed);
+        if num_new_blocks > 0 {
+            self.tree_sizes[worker_id as usize].fetch_add(num_new_blocks, Ordering::Relaxed);
+        }
 
         Ok(())
     }
@@ -1300,6 +1309,31 @@ mod tests {
         // Verify tree_sizes in query results
         let scores = indexer.find_matches(&hashes(&[10, 20, 30]), false);
         assert_eq!(scores.tree_sizes.get(&w1), Some(&3));
+    }
+
+    #[test]
+    fn test_duplicate_store_does_not_inflate_tree_size() {
+        let indexer = PositionalIndexer::new(64);
+        let blocks = make_blocks(&[10, 20, 30]);
+        let w1 = indexer.intern_worker("http://w1:8000");
+        let mut wb1 = WorkerBlockMap::default();
+
+        // First store: 3 new blocks
+        indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
+        let scores = indexer.find_matches(&hashes(&[10, 20, 30]), false);
+        assert_eq!(scores.tree_sizes.get(&w1), Some(&3));
+
+        // Replay the same store event — tree_size must not change
+        indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
+        let scores = indexer.find_matches(&hashes(&[10, 20, 30]), false);
+        assert_eq!(
+            scores.tree_sizes.get(&w1),
+            Some(&3),
+            "Duplicate store event must not inflate tree_size"
+        );
+
+        // Overlap scores should also be unchanged
+        assert_eq!(scores.scores.get(&w1), Some(&3));
     }
 
     #[test]

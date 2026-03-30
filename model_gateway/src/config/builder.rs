@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use smg_mcp::McpConfig;
 
 use super::{
@@ -344,6 +346,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn storage_context_headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.config.storage_context_headers = headers;
+        self
+    }
+
     // ==================== IGW Mode ====================
 
     pub fn enable_igw(mut self) -> Self {
@@ -382,6 +389,11 @@ impl RouterConfigBuilder {
 
     pub fn chat_template<S: Into<String>>(mut self, path: S) -> Self {
         self.config.chat_template = Some(path.into());
+        self
+    }
+
+    pub fn disable_tokenizer_autoload(mut self, disable: bool) -> Self {
+        self.config.disable_tokenizer_autoload = disable;
         self
     }
 
@@ -519,6 +531,14 @@ impl RouterConfigBuilder {
 
     pub fn maybe_request_id_headers(mut self, headers: Option<Vec<String>>) -> Self {
         self.config.request_id_headers = headers;
+        self
+    }
+
+    pub fn maybe_storage_context_headers(
+        mut self,
+        headers: Option<HashMap<String, String>>,
+    ) -> Self {
+        self.config.storage_context_headers = headers.unwrap_or_default();
         self
     }
 
@@ -790,6 +810,8 @@ impl RouterConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     /// Test that .to_builder() round-trip conversion works correctly
@@ -847,5 +869,18 @@ mod tests {
             }
             _ => panic!("Expected CacheAware policy"),
         }
+    }
+
+    #[test]
+    fn test_builder_storage_context_headers_round_trip() {
+        let headers = HashMap::from([("x-tenant-id".to_string(), "tenant_id".to_string())]);
+
+        let config = RouterConfigBuilder::new()
+            .regular_mode(vec!["http://worker1:8000".to_string()])
+            .storage_context_headers(headers.clone())
+            .build()
+            .unwrap();
+
+        assert_eq!(config.storage_context_headers, headers);
     }
 }

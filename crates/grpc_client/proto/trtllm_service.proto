@@ -127,6 +127,11 @@ message GenerateRequest {
 
   // Bad word token IDs (generation avoids producing these tokens)
   repeated uint32 bad_token_ids = 25;
+
+  // Include stop tokens in output token IDs (default: false).
+  // When true, stop token IDs are retained in output_token_ids instead of
+  // being stripped.
+  bool include_stop_token_in_output = 26;
 }
 
 // Tokenized input from router

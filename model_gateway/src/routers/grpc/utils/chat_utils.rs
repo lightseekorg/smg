@@ -56,16 +56,7 @@ pub(crate) fn resolve_tokenizer(
     ctx: &mut RequestContext,
     stage_name: &str,
 ) -> Result<Arc<dyn Tokenizer>, Box<Response>> {
-    let model_id = ctx.input.model_id.as_deref().ok_or_else(|| {
-        error!(
-            function = %stage_name,
-            "model_id not set in request context"
-        );
-        Box::new(error::internal_error(
-            "model_id_not_set",
-            "model_id not set in request context - this is a bug in request routing",
-        ))
-    })?;
+    let model_id = ctx.input.model_id.as_str();
 
     let tokenizer = ctx
         .components
@@ -131,6 +122,7 @@ pub(crate) fn process_tool_call_arguments(messages: &mut [Value]) -> Result<(), 
 pub(crate) fn process_content_format(
     messages: &[ChatMessage],
     content_format: ChatTemplateContentFormat,
+    image_placeholder: Option<&str>,
 ) -> Result<Vec<Value>, String> {
     messages
         .iter()
@@ -140,7 +132,7 @@ pub(crate) fn process_content_format(
 
             if let Some(obj) = message_json.as_object_mut() {
                 if let Some(content_value) = obj.get_mut("content") {
-                    transform_content_field(content_value, content_format);
+                    transform_content_field(content_value, content_format, image_placeholder);
                 }
             }
 
@@ -149,29 +141,40 @@ pub(crate) fn process_content_format(
         .collect()
 }
 
-/// Transform a single content field based on content format
-fn transform_content_field(content_value: &mut Value, content_format: ChatTemplateContentFormat) {
+/// Transform a single content field based on content format.
+///
+/// When `image_placeholder` is provided and the content format is `String`,
+/// each `image_url` part is replaced with the placeholder string instead of
+/// being stripped.  This mirrors vLLM's behavior of injecting model-specific
+/// placeholder tokens (e.g. `"<|image|>"`) so that the tokenizer produces
+/// token IDs the multimodal expansion step can find and replace.
+fn transform_content_field(
+    content_value: &mut Value,
+    content_format: ChatTemplateContentFormat,
+    image_placeholder: Option<&str>,
+) {
     let Some(content_array) = content_value.as_array() else {
         return; // Not multimodal, keep as-is
     };
 
     match content_format {
         ChatTemplateContentFormat::String => {
-            // Extract and join text parts only
+            // Extract text parts; optionally replace image parts with placeholders
             let text_parts: Vec<String> = content_array
                 .iter()
                 .filter_map(|part| {
-                    part.as_object()?
-                        .get("type")?
-                        .as_str()
-                        .filter(|&t| t == "text")
-                        .and_then(|_| part.as_object()?.get("text")?.as_str())
-                        .map(String::from)
+                    let obj = part.as_object()?;
+                    let type_str = obj.get("type")?.as_str()?;
+                    match type_str {
+                        "text" => obj.get("text")?.as_str().map(String::from),
+                        "image_url" => image_placeholder.map(String::from),
+                        _ => None,
+                    }
                 })
                 .collect();
 
             if !text_parts.is_empty() {
-                *content_value = Value::String(text_parts.join(" "));
+                *content_value = Value::String(text_parts.join("\n"));
             }
         }
         ChatTemplateContentFormat::OpenAI => {
@@ -368,11 +371,13 @@ pub(crate) fn filter_chat_request_by_tool_choice(
 pub fn process_chat_messages(
     request: &ChatCompletionRequest,
     tokenizer: &dyn Tokenizer,
+    image_placeholder: Option<&str>,
 ) -> Result<ProcessedMessages, String> {
     let formatted_text = {
         // Get content format and transform messages accordingly
         let content_format = tokenizer.chat_template_content_format();
-        let mut transformed_messages = process_content_format(&request.messages, content_format)?;
+        let mut transformed_messages =
+            process_content_format(&request.messages, content_format, image_placeholder)?;
 
         // Process tool call arguments in assistant messages
         process_tool_call_arguments(&mut transformed_messages)?;
@@ -700,15 +705,16 @@ mod tests {
             name: None,
         }];
 
-        let result = process_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+        let result =
+            process_content_format(&messages, ChatTemplateContentFormat::String, None).unwrap();
 
         assert_eq!(result.len(), 1);
         let transformed_message = &result[0];
 
-        // Should flatten multimodal content to text only
+        // Should flatten multimodal content to text only (image stripped, no placeholder)
         assert_eq!(
             transformed_message["content"].as_str().unwrap(),
-            "Hello World"
+            "Hello\nWorld"
         );
         assert_eq!(transformed_message["role"].as_str().unwrap(), "user");
     }
@@ -730,7 +736,8 @@ mod tests {
             name: None,
         }];
 
-        let result = process_content_format(&messages, ChatTemplateContentFormat::OpenAI).unwrap();
+        let result =
+            process_content_format(&messages, ChatTemplateContentFormat::OpenAI, None).unwrap();
 
         assert_eq!(result.len(), 1);
         let transformed_message = &result[0];
@@ -754,7 +761,8 @@ mod tests {
             name: None,
         }];
 
-        let result = process_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+        let result =
+            process_content_format(&messages, ChatTemplateContentFormat::String, None).unwrap();
 
         assert_eq!(result.len(), 1);
         let transformed_message = &result[0];
@@ -789,7 +797,8 @@ mod tests {
             },
         ];
 
-        let result = process_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+        let result =
+            process_content_format(&messages, ChatTemplateContentFormat::String, None).unwrap();
 
         assert_eq!(result.len(), 2);
 
@@ -814,7 +823,8 @@ mod tests {
             name: None,
         }];
 
-        let result = process_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+        let result =
+            process_content_format(&messages, ChatTemplateContentFormat::String, None).unwrap();
 
         assert_eq!(result.len(), 1);
         let transformed_message = &result[0];
@@ -847,14 +857,14 @@ mod tests {
         ];
 
         let result_string =
-            process_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+            process_content_format(&messages, ChatTemplateContentFormat::String, None).unwrap();
 
         assert_eq!(result_string.len(), 2);
         assert_eq!(result_string[0]["content"].as_str().unwrap(), "Plain text");
         assert_eq!(result_string[1]["content"].as_str().unwrap(), "With image");
 
         let result_openai =
-            process_content_format(&messages, ChatTemplateContentFormat::OpenAI).unwrap();
+            process_content_format(&messages, ChatTemplateContentFormat::OpenAI, None).unwrap();
 
         assert_eq!(result_openai.len(), 2);
         assert_eq!(result_openai[0]["content"].as_str().unwrap(), "Plain text");

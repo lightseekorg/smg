@@ -75,7 +75,7 @@ pub(super) fn patch_response_with_request_metadata(
     // Always set store
     obj.insert(
         "store".to_string(),
-        Value::Bool(original_body.store.unwrap_or(false)),
+        Value::Bool(original_body.store.unwrap_or(true)),
     );
 
     // Set model if missing/empty
@@ -154,7 +154,7 @@ pub(super) fn rewrite_streaming_block(
     let mut changed = false;
 
     // Update store value if different
-    let desired_store = Value::Bool(original_body.store.unwrap_or(false));
+    let desired_store = Value::Bool(original_body.store.unwrap_or(true));
     if response_obj.get("store") != Some(&desired_store) {
         response_obj.insert("store".to_string(), desired_store);
         changed = true;

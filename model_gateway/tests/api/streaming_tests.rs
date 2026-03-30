@@ -51,7 +51,7 @@ mod tests {
         .await;
 
         let payload = json!({
-            "model": "test-model",
+            "model": "mock-model",
             "messages": [
                 {"role": "user", "content": "Count to 3"}
             ],
@@ -95,7 +95,7 @@ mod tests {
         .await;
 
         let payload = json!({
-            "model": "test-model",
+            "model": "mock-model",
             "prompt": "Once upon a time",
             "stream": true,
             "max_tokens": 15

@@ -74,7 +74,7 @@ Controls how requests are distributed across workers.
 |--------|------------|
 | Environment | - |
 | Default | `cache_aware` |
-| Values | `random`, `round_robin`, `cache_aware`, `power_of_two`, `prefix_hash`, `manual` |
+| Values | `random`, `round_robin`, `cache_aware`, `power_of_two`, `prefix_hash`, `consistent_hashing`, `bucket`, `manual` |
 
 **Policy Comparison**:
 
@@ -85,7 +85,9 @@ Controls how requests are distributed across workers.
 | `power_of_two` | Variable workloads | Poor | Excellent |
 | `cache_aware` | LLM inference | Excellent | Good |
 | `prefix_hash` | Consistent routing by prefix | Good | Good |
-| `manual` | Session affinity | Good | Manual |
+| `consistent_hashing` | Session affinity via hash ring | Good | Good |
+| `bucket` | Load balancing with bucket boundaries | Poor | Excellent |
+| `manual` | Sticky sessions with LRU eviction | Good | Manual |
 
 **Recommendation**: Use `cache_aware` for LLM workloads to maximize KV cache hit rates.
 
@@ -252,6 +254,14 @@ Note: Enabling service discovery automatically enables IGW mode.
 | Default | None |
 | Description | Path to chat template file |
 
+### Disable Tokenizer Autoload
+
+| Option | `--disable-tokenizer-autoload` |
+|--------|-------------------------------|
+| Environment | - |
+| Default | `false` |
+| Description | Disable automatic tokenizer loading at startup and during worker registration. Useful when tokenizers are loaded on-demand via the API. |
+
 ### Tokenizer Cache (L0 - Exact Match)
 
 | Option | Description | Default |
@@ -309,8 +319,8 @@ Note: Enabling service discovery automatically enables IGW mode.
 | Option | `--backend` |
 |--------|-------------|
 | Environment | - |
-| Default | `sglang` |
-| Values | `sglang`, `vllm`, `trtllm`, `openai`, `anthropic` |
+| Default | None (auto-detected) |
+| Values | `sglang`, `vllm`, `trtllm`, `openai`, `anthropic`, `gemini` |
 
 ### History Backend
 
@@ -366,23 +376,25 @@ Note: Enabling service discovery automatically enables IGW mode.
 
 ---
 
-## Mesh/HA Configuration
+## Mesh Server Configuration
 
-High-availability mesh networking for router coordination.
+High-availability mesh networking for multi-router coordination.
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--enable-mesh` | Enable mesh server for HA | `false` |
-| `--mesh-server-name` | Unique name for this mesh node | Auto-generated |
-| `--mesh-host` | Host address for mesh server | `0.0.0.0` |
-| `--mesh-port` | Port for mesh server | `39527` |
-| `--mesh-peer-urls` | URLs of peer mesh nodes | Empty |
+| `--enable-mesh` | Enable mesh server for HA multi-router coordination. Requires at least two SMG instances. | `false` |
+| `--mesh-server-name` | Name for this mesh node. If not set, a random name is generated (e.g., `Mesh_a1b2`). | Auto-generated |
+| `--mesh-host` | Bind address for the mesh server. | `0.0.0.0` |
+| `--mesh-advertise-host` | Routable address advertised to other mesh peers. Required when `--mesh-host` is an unspecified bind address such as `0.0.0.0`. | `--mesh-host` |
+| `--mesh-port` | Port for the mesh server. | `39527` |
+| `--mesh-peer-urls` | Peer mesh node addresses to join (format: `host:port`). Used for initial cluster formation. | (none) |
 
 **Example**:
 ```bash
 smg \
   --enable-mesh \
   --mesh-server-name router-1 \
+  --mesh-advertise-host 192.168.1.10 \
   --mesh-port 39527 \
   --mesh-peer-urls 192.168.1.10:39527
 ```
@@ -440,6 +452,27 @@ smg \
 ```bash
 --request-id-headers x-request-id x-trace-id x-correlation-id
 ```
+
+### Storage Context Headers
+
+| Option | `--storage-context-headers` |
+|--------|-----------------------------|
+| Environment | - |
+| Default | Empty |
+| Format | Space-separated `header=context_key` entries |
+| Description | Maps request headers into storage hook request context |
+
+**Example**:
+
+```bash
+--storage-context-headers x-tenant-id=tenant_id x-user-id=user_id
+```
+
+This lets storage hooks read values such as `tenant_id` and `user_id` from the
+request context without hard-coding specific headers in the gateway.
+
+Only map headers that are injected or sanitized by a trusted upstream. Client-supplied
+headers can otherwise spoof storage hook request context values.
 
 ---
 
@@ -529,6 +562,7 @@ delay = min(initial_backoff * multiplier^attempt, max_backoff) * (1 + random(0, 
 | `--health-check-interval-secs` | Interval between health checks | `60` |
 | `--health-check-endpoint` | Health check endpoint path | `/health` |
 | `--disable-health-check` | Disable all health checks | `false` |
+| `--remove-unhealthy-workers` | Remove workers from the registry when marked unhealthy by health checks. Useful for ephemeral worker pools where failed workers should be deregistered. | `false` |
 
 ---
 
@@ -733,6 +767,7 @@ smg \
 smg \
   --enable-mesh \
   --mesh-server-name router-1 \
+  --mesh-advertise-host 192.168.1.10 \
   --mesh-port 39527 \
   --mesh-peer-urls 192.168.1.11:39527 \
   --worker-urls http://worker1:8000
@@ -741,6 +776,7 @@ smg \
 smg \
   --enable-mesh \
   --mesh-server-name router-2 \
+  --mesh-advertise-host 192.168.1.11 \
   --mesh-port 39527 \
   --mesh-peer-urls 192.168.1.10:39527 \
   --worker-urls http://worker2:8000

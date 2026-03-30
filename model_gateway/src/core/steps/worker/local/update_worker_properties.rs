@@ -78,6 +78,8 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
                 .health_config(updated_health_config.clone())
                 .health_endpoint(&health_endpoint)
                 .models(worker.metadata().spec.models.clone())
+                .http_client(worker.http_client().clone())
+                .resilience(worker.resilience().clone())
                 .priority(updated_priority)
                 .cost(updated_cost);
 
@@ -101,8 +103,10 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
 
             let new_worker: Arc<dyn Worker> = Arc::new(builder.build());
 
-            // Re-register the worker (this replaces the old one)
-            app_context.worker_registry.register(new_worker.clone());
+            // Replace the worker in the registry (overwrite-then-diff)
+            app_context
+                .worker_registry
+                .register_or_replace(new_worker.clone());
 
             updated_workers.push(new_worker);
         }

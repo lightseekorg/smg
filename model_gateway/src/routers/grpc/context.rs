@@ -11,6 +11,7 @@ use llm_tokenizer::{stop::StopSequenceDecoder, traits::Tokenizer, TokenizerRegis
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatCompletionResponse},
     classify::{ClassifyRequest, ClassifyResponse},
+    completion::{CompletionRequest, CompletionResponse},
     embedding::{EmbeddingRequest, EmbeddingResponse},
     generate::{GenerateRequest, GenerateResponse},
     messages::{CreateMessageRequest, Message},
@@ -42,7 +43,7 @@ pub(crate) struct RequestContext {
 pub(crate) struct RequestInput {
     pub request_type: RequestType,
     pub headers: Option<HeaderMap>,
-    pub model_id: Option<String>,
+    pub model_id: String,
 }
 
 /// Request type variants
@@ -50,6 +51,7 @@ pub(crate) struct RequestInput {
 pub(crate) enum RequestType {
     Chat(Arc<ChatCompletionRequest>),
     Generate(Arc<GenerateRequest>),
+    Completion(Arc<CompletionRequest>),
     Responses(Arc<ResponsesRequest>),
     Embedding(Arc<EmbeddingRequest>),
     Classify(Arc<ClassifyRequest>),
@@ -61,7 +63,21 @@ impl std::fmt::Display for RequestType {
         match self {
             Self::Chat(_) => write!(f, "Chat"),
             Self::Generate(_) => write!(f, "Generate"),
+            Self::Completion(_) => write!(f, "Completion"),
             Self::Responses(_) => write!(f, "Responses"),
+            Self::Embedding(_) => write!(f, "Embedding"),
+            Self::Classify(_) => write!(f, "Classify"),
+            Self::Messages(_) => write!(f, "Messages"),
+        }
+    }
+}
+
+impl std::fmt::Display for FinalResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Chat(_) => write!(f, "Chat"),
+            Self::Generate(_) => write!(f, "Generate"),
+            Self::Completion(_) => write!(f, "Completion"),
             Self::Embedding(_) => write!(f, "Embedding"),
             Self::Classify(_) => write!(f, "Classify"),
             Self::Messages(_) => write!(f, "Messages"),
@@ -222,7 +238,7 @@ impl RequestContext {
     pub fn for_chat(
         request: Arc<ChatCompletionRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
         Self {
@@ -240,7 +256,7 @@ impl RequestContext {
     pub fn for_generate(
         request: Arc<GenerateRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
         Self {
@@ -254,11 +270,29 @@ impl RequestContext {
         }
     }
 
+    /// Create context for completion request
+    pub fn for_completion(
+        request: Arc<CompletionRequest>,
+        headers: Option<HeaderMap>,
+        model_id: String,
+        components: Arc<SharedComponents>,
+    ) -> Self {
+        Self {
+            input: RequestInput {
+                request_type: RequestType::Completion(request),
+                headers,
+                model_id,
+            },
+            components,
+            state: ProcessingState::default(),
+        }
+    }
+
     /// Create context for Responses API request
     pub fn for_responses(
         request: Arc<ResponsesRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
         Self {
@@ -276,7 +310,7 @@ impl RequestContext {
     pub fn for_embedding(
         request: Arc<EmbeddingRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
         Self {
@@ -294,7 +328,7 @@ impl RequestContext {
     pub fn for_classify(
         request: Arc<ClassifyRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
         Self {
@@ -309,14 +343,10 @@ impl RequestContext {
     }
 
     /// Create context for messages request
-    #[expect(
-        dead_code,
-        reason = "scaffolding for Messages API pipeline, wired in follow-up PR"
-    )]
     pub fn for_messages(
         request: Arc<CreateMessageRequest>,
         headers: Option<HeaderMap>,
-        model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Self {
         Self {
@@ -378,6 +408,34 @@ impl RequestContext {
         }
     }
 
+    /// Get completion request (panics if not completion)
+    #[expect(
+        dead_code,
+        reason = "ref accessor provided for API completeness alongside Arc accessor"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via RequestType construction"
+    )]
+    pub fn completion_request(&self) -> &CompletionRequest {
+        match &self.input.request_type {
+            RequestType::Completion(req) => req.as_ref(),
+            _ => panic!("Expected completion request"),
+        }
+    }
+
+    /// Get Arc clone of completion request (panics if not completion)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via RequestType construction"
+    )]
+    pub fn completion_request_arc(&self) -> Arc<CompletionRequest> {
+        match &self.input.request_type {
+            RequestType::Completion(req) => Arc::clone(req),
+            _ => panic!("Expected completion request"),
+        }
+    }
+
     /// Get Arc clone of responses request (panics if not responses)
     #[expect(
         clippy::panic,
@@ -423,6 +481,7 @@ impl RequestContext {
         match &self.input.request_type {
             RequestType::Chat(req) => req.stream,
             RequestType::Generate(req) => req.stream,
+            RequestType::Completion(req) => req.stream,
             RequestType::Responses(req) => req.stream.unwrap_or(false),
             RequestType::Messages(req) => req.stream.unwrap_or(false),
             RequestType::Embedding(_) => false, // Embeddings are never streaming
@@ -453,34 +512,34 @@ impl WorkerSelection {
         }
     }
 
-    /// Record circuit breaker outcome for all workers
-    pub fn record_outcome(&self, success: bool) {
+    /// Record circuit breaker outcome for all workers based on HTTP status code.
+    pub fn record_outcome(&self, status_code: u16) {
         match self {
-            Self::Single { worker } => worker.record_outcome(success),
+            Self::Single { worker } => worker.record_outcome(status_code),
             Self::Dual {
                 prefill, decode, ..
             } => {
-                prefill.record_outcome(success);
-                decode.record_outcome(success);
+                prefill.record_outcome(status_code);
+                decode.record_outcome(status_code);
             }
         }
     }
 
     /// Record circuit breaker outcomes for dual dispatch (individual tracking)
-    pub fn record_dual_outcomes(&self, prefill_success: bool, decode_success: bool) {
+    pub fn record_dual_outcomes(&self, prefill_status: u16, decode_status: u16) {
         if let Self::Dual {
             prefill, decode, ..
         } = self
         {
-            prefill.record_outcome(prefill_success);
-            decode.record_outcome(decode_success);
+            prefill.record_outcome(prefill_status);
+            decode.record_outcome(decode_status);
         }
     }
 
     /// Record circuit breaker outcome for prefill worker only (sequential PD)
-    pub fn record_outcome_prefill(&self, success: bool) {
+    pub fn record_outcome_prefill(&self, status_code: u16) {
         match self {
-            Self::Dual { prefill, .. } => prefill.record_outcome(success),
+            Self::Dual { prefill, .. } => prefill.record_outcome(status_code),
             Self::Single { .. } => {
                 debug!("record_outcome_prefill called on Single worker selection, ignoring");
             }
@@ -488,9 +547,9 @@ impl WorkerSelection {
     }
 
     /// Record circuit breaker outcome for decode worker only (sequential PD)
-    pub fn record_outcome_decode(&self, success: bool) {
+    pub fn record_outcome_decode(&self, status_code: u16) {
         match self {
-            Self::Dual { decode, .. } => decode.record_outcome(success),
+            Self::Dual { decode, .. } => decode.record_outcome(status_code),
             Self::Single { .. } => {
                 debug!("record_outcome_decode called on Single worker selection, ignoring");
             }
@@ -605,14 +664,12 @@ pub(crate) enum FinalResponse {
     Chat(ChatCompletionResponse),
     /// Generate response is a Vec of GenerateResponse (n=1 returns single item, n>1 returns multiple)
     Generate(Vec<GenerateResponse>),
+    /// Completion response (OpenAI /v1/completions format)
+    Completion(CompletionResponse),
     /// Embedding response
     Embedding(EmbeddingResponse),
     /// Classification response
     Classify(ClassifyResponse),
     /// Messages API response
-    #[expect(
-        dead_code,
-        reason = "scaffolding for Messages API pipeline, wired in follow-up PR"
-    )]
     Messages(Message),
 }

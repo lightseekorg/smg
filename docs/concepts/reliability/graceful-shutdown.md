@@ -299,9 +299,8 @@ Watch logs for shutdown-related messages:
 
 | Metric | Observation |
 |--------|-------------|
-| `smg_requests_active` | Should decrease towards 0 |
-| `smg_requests_total` | New requests should stop |
-| `smg_shutdown_in_progress` | 1 during graceful shutdown |
+| `smg_worker_requests_active` | Should decrease towards 0 |
+| `smg_http_requests_total` | New requests should stop |
 
 ---
 

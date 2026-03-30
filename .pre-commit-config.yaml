@@ -10,6 +10,7 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
         args: [--allow-multiple-documents, --unsafe]
+        exclude: ^deploy/helm/.*/templates/|^deploy/helm/.*/tests/
       - id: check-toml
       - id: check-added-large-files
       - id: check-merge-conflict
@@ -25,7 +26,7 @@ repos:
     hooks:
       - id: codespell
         additional_dependencies: ['tomli']
-        args: ['-L', 'cann,thi,makro,wil,rouge,PRIS,hel,te,ans,ser,wit,WIT,implementors,caf']
+        args: ['-L', 'cann,thi,makro,wil,rouge,PRIS,hel,te,ans,ser,wit,WIT,implementors,caf,ratatui']
         exclude: |
           (?x)^(
             src/proto/.*\.proto$|
@@ -71,9 +72,8 @@ repos:
 
       - id: dco-check
         name: DCO sign-off check
-        description: Check that the commit message contains a DCO sign-off
-        entry: |
-          bash -c 'grep -q "^Signed-off-by: .* <.*>$" "$1"' --
+        description: Check that the commit message contains a DCO sign-off matching git user config
+        entry: scripts/dco-check.sh
         language: system
         stages: [commit-msg]
         always_run: true

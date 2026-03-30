@@ -24,6 +24,7 @@ use openai_protocol::{
 use smg::{
     core::{
         circuit_breaker::CircuitBreaker,
+        resilience::ResolvedResilience,
         worker::{RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad},
         ConnectionMode, Worker, WorkerResult, WorkerType,
     },
@@ -60,6 +61,8 @@ pub struct GrpcWorker {
     pub(crate) metadata: WorkerMetadata,
     pub(crate) routing_key_load: WorkerRoutingKeyLoad,
     pub(crate) api_key: Option<String>,
+    pub(crate) http_client: reqwest::Client,
+    pub(crate) resilience: ResolvedResilience,
 }
 
 impl GrpcWorker {
@@ -83,6 +86,8 @@ impl GrpcWorker {
             circuit_breaker: CircuitBreaker::new(),
             metadata,
             api_key: None,
+            http_client: reqwest::Client::new(),
+            resilience: ResolvedResilience::default(),
         }
     }
 }
@@ -157,6 +162,14 @@ impl Worker for GrpcWorker {
 
     fn circuit_breaker(&self) -> &CircuitBreaker {
         &self.circuit_breaker
+    }
+
+    fn resilience(&self) -> &ResolvedResilience {
+        &self.resilience
+    }
+
+    fn http_client(&self) -> &reqwest::Client {
+        &self.http_client
     }
 
     async fn get_grpc_client(&self) -> WorkerResult<Option<Arc<GrpcClient>>> {
@@ -486,7 +499,7 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
     };
 
     // Process messages and apply chat template
-    let processed_messages = match process_chat_messages(&chat_request, tokenizer.as_ref()) {
+    let processed_messages = match process_chat_messages(&chat_request, tokenizer.as_ref(), None) {
         Ok(msgs) => msgs,
         Err(e) => {
             set_error_message(error_out, &format!("Failed to process messages: {e}"));

@@ -2,7 +2,7 @@
 """
 vLLM gRPC Servicer
 
-Implements the VllmEngine gRPC service on top of vLLM's AsyncLLM.
+Implements the VllmEngine gRPC service on top of vLLM's EngineClient.
 """
 
 import itertools
@@ -13,7 +13,8 @@ import grpc
 import torch
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from transformers import BatchFeature
-from vllm import SamplingParams, TextPrompt, TokensPrompt
+from vllm import SamplingParams, TokensPrompt
+from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.multimodal.inputs import (
@@ -27,7 +28,6 @@ from vllm.multimodal.inputs import (
 )
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
-from vllm.v1.engine.async_llm import AsyncLLM
 
 logger = init_logger(__name__)
 
@@ -60,15 +60,15 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     - GetServerInfo: Server state
     """
 
-    def __init__(self, async_llm: AsyncLLM, start_time: float):
+    def __init__(self, async_llm: EngineClient, start_time: float):
         """
         Initialize the servicer.
 
         Args:
-            async_llm: The AsyncLLM instance
+            async_llm: The EngineClient instance (e.g. AsyncLLM)
             start_time: The server start time, in seconds since epoch
         """
-        self.async_llm = async_llm
+        self.engine = async_llm
         self.start_time = start_time
         logger.info("VllmEngineServicer initialized")
 
@@ -104,21 +104,21 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         )
 
         try:
+            arrival_time = time.time()
+
             if has_preprocessed_mm and input_type == "tokenized":
                 # Preprocessed multimodal from Rust router.
                 # Token IDs already have expanded placeholders; tensors are
                 # ready for the model. Bypass the renderer entirely.
                 prompt = self._build_preprocessed_mm_inputs(request.tokenized, request.mm_inputs)
-                prompt["arrival_time"] = time.time()
+                prompt["arrival_time"] = arrival_time
             elif input_type == "tokenized":
                 prompt: TokensPrompt = {"prompt_token_ids": list(request.tokenized.input_ids)}
                 if request.tokenized.original_text:
                     prompt["prompt"] = request.tokenized.original_text
-                renderer = self.async_llm.input_processor.input_preprocessor.renderer
-                prompt = renderer.process_for_engine(prompt, arrival_time=time.time())
+                prompt = self.engine.renderer.process_for_engine(prompt, arrival_time=arrival_time)
             else:
-                prompt: TextPrompt = {"prompt": request.text}
-                prompt = self.async_llm.input_processor.input_preprocessor.preprocess(prompt)
+                prompt = request.text
 
             # Build sampling params with detokenize=False
             sampling_params = self._sampling_params_from_proto(
@@ -137,7 +137,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             # Track which indices have sent their first chunk
             seen_indices: set[int] = set()
 
-            async for output in self.async_llm.generate(
+            async for output in self.engine.generate(
                 prompt=prompt,
                 sampling_params=sampling_params,
                 request_id=request_id,
@@ -220,7 +220,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Returns:
             HealthCheckResponse protobuf
         """
-        is_healthy = not self.async_llm.errored
+        is_healthy = not self.engine.errored
         message = "Health" if is_healthy else "Engine is not alive"
 
         logger.info("HealthCheck request: healthy=%s, message=%s", is_healthy, message)
@@ -245,7 +245,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         request_ids = request.request_ids
         logger.info("Abort requests: %s", request_ids)
 
-        await self.async_llm.abort(request_ids)
+        await self.engine.abort(request_ids)
         return vllm_engine_pb2.AbortResponse()
 
     async def GetModelInfo(
@@ -263,7 +263,17 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Returns:
             GetModelInfoResponse protobuf
         """
-        model_config = self.async_llm.model_config
+        model_config = self.engine.model_config
+        hf_config = model_config.hf_config
+
+        # eos_token_id can be int or list[int]
+        eos = getattr(hf_config, "eos_token_id", None)
+        if isinstance(eos, int):
+            eos_token_ids = [eos]
+        elif isinstance(eos, list):
+            eos_token_ids = eos
+        else:
+            eos_token_ids = []
 
         return vllm_engine_pb2.GetModelInfoResponse(
             model_path=model_config.model,
@@ -272,6 +282,13 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             vocab_size=model_config.get_vocab_size(),
             supports_vision=model_config.is_multimodal_model,
             served_model_name=model_config.served_model_name or model_config.model,
+            tokenizer_path=model_config.tokenizer or "",
+            model_type=getattr(hf_config, "model_type", "") or "",
+            architectures=model_config.architectures or [],
+            eos_token_ids=eos_token_ids,
+            pad_token_id=getattr(hf_config, "pad_token_id", None) or 0,
+            bos_token_id=getattr(hf_config, "bos_token_id", None) or 0,
+            max_req_input_len=model_config.max_model_len,
         )
 
     async def GetServerInfo(
@@ -289,22 +306,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Returns:
             GetServerInfoResponse protobuf
         """
-        num_requests = self.async_llm.output_processor.get_num_unfinished_requests()
-
-        # Get KV transfer config if available
         kv_connector = ""
         kv_role = ""
-        kv_transfer_config = self.async_llm.vllm_config.kv_transfer_config
+        kv_transfer_config = self.engine.vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             kv_connector = kv_transfer_config.kv_connector or ""
             kv_role = kv_transfer_config.kv_role or ""
 
         return vllm_engine_pb2.GetServerInfoResponse(
-            active_requests=num_requests,
-            is_paused=False,  # TODO
-            last_receive_timestamp=time.time(),  # TODO looks wrong?
-            uptime_seconds=time.time() - self.start_time,
-            server_type="vllm-grpc",
             kv_connector=kv_connector,
             kv_role=kv_role,
         )
@@ -336,7 +345,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # Cast floating-point tensors to model dtype (e.g. bfloat16).
         # This mirrors _postprocess_output in multimodal/processing/context.py
         # which is skipped when bypassing the HF processor.
-        model_dtype = self.async_llm.model_config.dtype
+        model_dtype = self.engine.model_config.dtype
         for key in hf_dict:
             if hf_dict[key].is_floating_point():
                 hf_dict[key] = hf_dict[key].to(dtype=model_dtype)

@@ -9,7 +9,7 @@ use validator::{Validate, ValidationError};
 
 use super::{
     common::{
-        default_model, default_true, validate_stop, ChatLogProbs, Function, GenerationRequest,
+        default_true, validate_stop, ChatLogProbs, Function, GenerationRequest,
         PromptTokenUsageInfo, StringOrArray, ToolChoice, ToolChoiceValue, ToolReference, UsageInfo,
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
@@ -573,18 +573,6 @@ impl ResponseUsage {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
-pub struct ResponsesGetParams {
-    #[serde(default)]
-    pub include: Vec<String>,
-    #[serde(default)]
-    pub include_obfuscation: Option<bool>,
-    #[serde(default)]
-    pub starting_after: Option<i64>,
-    #[serde(default)]
-    pub stream: Option<bool>,
-}
-
 impl ResponsesUsage {
     pub fn to_response_usage(&self) -> ResponseUsage {
         match self {
@@ -667,7 +655,6 @@ pub struct ResponsesRequest {
     pub metadata: Option<HashMap<String, Value>>,
 
     /// Model to use
-    #[serde(default = "default_model")]
     pub model: String,
 
     /// Optional conversation id to persist input/output as items
@@ -795,7 +782,7 @@ impl Default for ResponsesRequest {
             max_output_tokens: None,
             max_tool_calls: None,
             metadata: None,
-            model: default_model(),
+            model: String::new(),
             conversation: None,
             parallel_tool_calls: None,
             previous_response_id: None,
@@ -866,70 +853,75 @@ impl GenerationRequest for ResponsesRequest {
     fn extract_text_for_routing(&self) -> String {
         match &self.input {
             ResponseInput::Text(text) => text.clone(),
-            ResponseInput::Items(items) => items
-                .iter()
-                .filter_map(|item| match item {
-                    ResponseInputOutputItem::Message { content, .. } => {
-                        let texts: Vec<String> = content
-                            .iter()
-                            .filter_map(|part| match part {
-                                ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
-                                ResponseContentPart::InputText { text } => Some(text.clone()),
-                                ResponseContentPart::Unknown => None,
-                            })
-                            .collect();
-                        if texts.is_empty() {
-                            None
-                        } else {
-                            Some(texts.join(" "))
-                        }
+            ResponseInput::Items(items) => {
+                let mut result = String::with_capacity(256);
+                let mut has_parts = false;
+
+                let mut append_text = |text: &str| {
+                    if has_parts {
+                        result.push(' ');
                     }
-                    ResponseInputOutputItem::SimpleInputMessage { content, .. } => {
-                        match content {
-                            StringOrContentParts::String(s) => Some(s.clone()),
-                            StringOrContentParts::Array(parts) => {
-                                // SimpleInputMessage only supports InputText
-                                let texts: Vec<String> = parts
-                                    .iter()
-                                    .filter_map(|part| match part {
-                                        ResponseContentPart::InputText { text } => {
-                                            Some(text.clone())
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect();
-                                if texts.is_empty() {
-                                    None
-                                } else {
-                                    Some(texts.join(" "))
+                    has_parts = true;
+                    result.push_str(text);
+                };
+
+                for item in items {
+                    match item {
+                        ResponseInputOutputItem::Message { content, .. } => {
+                            for part in content {
+                                let text = match part {
+                                    ResponseContentPart::OutputText { text, .. } => {
+                                        Some(text.as_str())
+                                    }
+                                    ResponseContentPart::InputText { text } => Some(text.as_str()),
+                                    ResponseContentPart::Unknown => None,
+                                };
+                                if let Some(t) = text {
+                                    append_text(t);
                                 }
                             }
                         }
-                    }
-                    ResponseInputOutputItem::Reasoning { content, .. } => {
-                        let texts: Vec<String> = content
-                            .iter()
-                            .map(|part| match part {
-                                ResponseReasoningContent::ReasoningText { text } => text.clone(),
-                            })
-                            .collect();
-                        if texts.is_empty() {
-                            None
-                        } else {
-                            Some(texts.join(" "))
+                        ResponseInputOutputItem::SimpleInputMessage { content, .. } => {
+                            match content {
+                                StringOrContentParts::String(s) => {
+                                    append_text(s.as_str());
+                                }
+                                StringOrContentParts::Array(parts) => {
+                                    for part in parts {
+                                        let text = match part {
+                                            ResponseContentPart::OutputText { text, .. } => {
+                                                Some(text.as_str())
+                                            }
+                                            ResponseContentPart::InputText { text } => {
+                                                Some(text.as_str())
+                                            }
+                                            ResponseContentPart::Unknown => None,
+                                        };
+                                        if let Some(t) = text {
+                                            append_text(t);
+                                        }
+                                    }
+                                }
+                            }
                         }
+                        ResponseInputOutputItem::Reasoning { content, .. } => {
+                            for part in content {
+                                match part {
+                                    ResponseReasoningContent::ReasoningText { text } => {
+                                        append_text(text.as_str());
+                                    }
+                                }
+                            }
+                        }
+                        ResponseInputOutputItem::FunctionToolCall { .. }
+                        | ResponseInputOutputItem::FunctionCallOutput { .. }
+                        | ResponseInputOutputItem::McpApprovalRequest { .. }
+                        | ResponseInputOutputItem::McpApprovalResponse { .. } => {}
                     }
-                    ResponseInputOutputItem::FunctionToolCall { arguments, .. } => {
-                        Some(arguments.clone())
-                    }
-                    ResponseInputOutputItem::FunctionCallOutput { output, .. } => {
-                        Some(output.clone())
-                    }
-                    ResponseInputOutputItem::McpApprovalRequest { .. } => None,
-                    ResponseInputOutputItem::McpApprovalResponse { .. } => None,
-                })
-                .collect::<Vec<String>>()
-                .join(" "),
+                }
+
+                result
+            }
         }
     }
 }

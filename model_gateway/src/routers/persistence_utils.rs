@@ -8,8 +8,9 @@ use openai_protocol::responses::{
 };
 use serde_json::{json, Value};
 use smg_data_connector::{
-    ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
-    ConversationStorage, NewConversationItem, ResponseId, ResponseStorage, StoredResponse,
+    with_request_context, ConversationId, ConversationItem, ConversationItemId,
+    ConversationItemStorage, ConversationStorage, NewConversationItem,
+    RequestContext as StorageRequestContext, ResponseId, ResponseStorage, StoredResponse,
 };
 use tracing::{debug, info, warn};
 
@@ -321,7 +322,33 @@ pub async fn persist_conversation_items(
     response_storage: Arc<dyn ResponseStorage>,
     response_json: &Value,
     original_body: &ResponsesRequest,
+    request_context: Option<StorageRequestContext>,
 ) -> Result<(), String> {
+    let inner = persist_conversation_items_inner(
+        conversation_storage,
+        item_storage,
+        response_storage,
+        response_json,
+        original_body,
+    );
+    match request_context {
+        Some(ctx) => with_request_context(ctx, inner).await,
+        None => inner.await,
+    }
+}
+
+async fn persist_conversation_items_inner(
+    conversation_storage: Arc<dyn ConversationStorage>,
+    item_storage: Arc<dyn ConversationItemStorage>,
+    response_storage: Arc<dyn ResponseStorage>,
+    response_json: &Value,
+    original_body: &ResponsesRequest,
+) -> Result<(), String> {
+    // Respect store=false: skip persistence entirely (matches official API behavior)
+    if !original_body.store.unwrap_or(true) {
+        return Ok(());
+    }
+
     // Extract response ID
     let response_id_str = response_json
         .get("id")

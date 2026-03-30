@@ -107,9 +107,7 @@ async fn test_non_streaming_mcp_minimal_e2e_with_persistence() {
         conversation: None,
     };
 
-    let resp = router
-        .route_responses(None, &req, Some(req.model.as_str()))
-        .await;
+    let resp = router.route_responses(None, &req, req.model.as_str()).await;
 
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -622,7 +620,7 @@ async fn test_multi_turn_loop_with_mcp() {
     };
 
     // Execute the request (this should trigger the multi-turn loop)
-    let response = router.route_responses(None, &req, None).await;
+    let response = router.route_responses(None, &req, req.model.as_str()).await;
 
     // Check status
     assert_eq!(response.status(), StatusCode::OK, "Request should succeed");
@@ -774,7 +772,7 @@ async fn test_max_tool_calls_limit() {
         conversation: None,
     };
 
-    let response = router.route_responses(None, &req, None).await;
+    let response = router.route_responses(None, &req, req.model.as_str()).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     use axum::body::to_bytes;
@@ -954,7 +952,7 @@ async fn test_streaming_with_mcp_tool_calls() {
         conversation: None,
     };
 
-    let response = router.route_responses(None, &req, None).await;
+    let response = router.route_responses(None, &req, req.model.as_str()).await;
 
     // Verify streaming response
     assert_eq!(
@@ -1232,7 +1230,7 @@ async fn test_streaming_multi_turn_with_mcp() {
         conversation: None,
     };
 
-    let response = router.route_responses(None, &req, None).await;
+    let response = router.route_responses(None, &req, req.model.as_str()).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     use axum::body::to_bytes;

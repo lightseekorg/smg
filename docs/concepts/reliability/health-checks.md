@@ -109,6 +109,7 @@ smg \
 | `--health-check-timeout-secs` | `5` | Timeout for each health check request |
 | `--health-check-endpoint` | `/health` | Endpoint path for health checks |
 | `--disable-health-check` | `false` | Disable background health checks |
+| `--remove-unhealthy-workers` | `false` | Remove workers after being marked unhealthy |
 
 ---
 
@@ -248,8 +249,8 @@ Both are recommended for production deployments.
 
 | Metric | Description |
 |--------|-------------|
-| `smg_health_check_total` | Health check results by worker and status |
-| `smg_worker_health_status` | Current health status per worker (0=unhealthy, 1=healthy) |
+| `smg_worker_health_checks_total` | Health check results by worker type and result |
+| `smg_worker_health` | Current health status per worker (1=healthy, 0=unhealthy) |
 
 ### Useful PromQL Queries
 
@@ -261,10 +262,10 @@ Both are recommended for production deployments.
 
 ```promql
 # Current health status per worker
-smg_worker_health_status
+smg_worker_health
 
 # Count of unhealthy workers
-count(smg_worker_health_status == 0)
+count(smg_worker_health == 0)
 ```
 
 </div>
@@ -275,11 +276,11 @@ count(smg_worker_health_status == 0)
 
 ```promql
 # Health check success rate
-rate(smg_health_check_total{status="success"}[5m]) /
-rate(smg_health_check_total[5m])
+rate(smg_worker_health_checks_total{result="success"}[5m]) /
+rate(smg_worker_health_checks_total[5m])
 
 # Failed checks per minute
-rate(smg_health_check_total{status="failure"}[1m]) * 60
+rate(smg_worker_health_checks_total{result="failure"}[1m]) * 60
 ```
 
 </div>
@@ -301,15 +302,15 @@ groups:
   - name: smg-health-checks
     rules:
       - alert: WorkerUnhealthy
-        expr: smg_worker_health_status == 0
+        expr: smg_worker_health == 0
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Worker {{ $labels.worker_id }} is unhealthy"
+          summary: "Worker {{ $labels.worker }} is unhealthy"
 
       - alert: MajorityUnhealthy
-        expr: count(smg_worker_health_status == 0) > count(smg_worker_health_status) / 2
+        expr: count(smg_worker_health == 0) > count(smg_worker_health) / 2
         for: 1m
         labels:
           severity: critical
