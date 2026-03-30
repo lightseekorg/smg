@@ -182,5 +182,10 @@ name = "wasm_instantiation"
 harness = false
 path = "benches/wasm_instantiation.rs"
 
+[[bench]]
+name = "routing_allocation_bench"
+harness = false
+path = "benches/routing_allocation_bench.rs"
+
 [lints]
 workspace = true
