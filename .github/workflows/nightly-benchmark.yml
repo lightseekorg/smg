@@ -24,7 +24,7 @@ permissions:
 env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
-  GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.3
+  GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.4
   # Fast test mode for PR runs; full benchmark for nightly / manual dispatch
   BENCH_TEST_MODE: ${{ github.event_name == 'pull_request' && '1' || '0' }}
 
