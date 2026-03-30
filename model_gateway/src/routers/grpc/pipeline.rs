@@ -428,6 +428,14 @@ impl RequestPipeline {
             None,
         );
 
+        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
+            ToolParserFactory::default(),
+            ReasoningParserFactory::default(),
+            None,
+            None,
+            metrics_labels::BACKEND_REGULAR,
+        ));
+
         let stages: Vec<Box<dyn PipelineStage>> = vec![
             Box::new(CompletionPreparationStage),
             Box::new(WorkerSelectionStage::new(
@@ -439,7 +447,10 @@ impl RequestPipeline {
             Box::new(CompletionRequestBuildingStage::new(false)), // No PD metadata
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
-            Box::new(CompletionResponseProcessingStage::new(processor)),
+            Box::new(CompletionResponseProcessingStage::new(
+                processor,
+                streaming_processor,
+            )),
         ];
 
         Self {
@@ -460,6 +471,14 @@ impl RequestPipeline {
             None,
         );
 
+        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
+            ToolParserFactory::default(),
+            ReasoningParserFactory::default(),
+            None,
+            None,
+            metrics_labels::BACKEND_PD,
+        ));
+
         let stages: Vec<Box<dyn PipelineStage>> = vec![
             Box::new(CompletionPreparationStage),
             Box::new(WorkerSelectionStage::new(
@@ -471,7 +490,10 @@ impl RequestPipeline {
             Box::new(CompletionRequestBuildingStage::new(true)), // Inject PD metadata
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
-            Box::new(CompletionResponseProcessingStage::new(processor)),
+            Box::new(CompletionResponseProcessingStage::new(
+                processor,
+                streaming_processor,
+            )),
         ];
 
         Self {
