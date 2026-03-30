@@ -127,11 +127,16 @@ jobs:
             --reruns 2 --reruns-delay 5 \
             -s -vv
 
+      - name: Compute log artifact label
+        if: failure() || cancelled()
+        id: log-label
+        run: echo "label=$(echo '${{ inputs.test_dirs }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
       - name: Upload worker logs
         if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${{ inputs.test_dirs }}
+          name: e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${{ steps.log-label.outputs.label }}
           path: e2e-logs/
           retention-days: 7
           if-no-files-found: ignore
