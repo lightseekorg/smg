@@ -20,6 +20,9 @@ router:
   # -- Routing policy: cache_aware, round_robin, power_of_two, manual, random, prefix_hash
   policy: cache_aware
 
+  # -- Enable IGW (Inference Gateway) mode for multi-model support
+  enableIgw: false
+
   # -- Explicit worker URLs
   workerUrls: []
   #   - http://worker-1:8000
@@ -179,6 +182,14 @@ router:
   toolCallParser: ""
 
 # =============================================================================
+# HuggingFace Configuration
+# =============================================================================
+huggingface:
+  # -- HuggingFace API token for downloading gated models (e.g., Llama).
+  #    Creates a Secret and injects HF_TOKEN into all worker pods.
+  token: ""
+
+# =============================================================================
 # Auth Configuration
 # =============================================================================
 auth:
@@ -234,6 +245,42 @@ grafana:
     enabled: false
     labels:
       grafana_dashboard: "1"
+
+# =============================================================================
+# Workers Configuration
+# =============================================================================
+# Each entry creates a Deployment + Service for one model/engine combo.
+# Workers are deployed as standalone engine processes (no SMG router).
+workers: []
+#   - name: llama-8b
+#     engine: vllm                      # vllm, sglang
+#     model: meta-llama/Llama-3.1-8B-Instruct
+#     replicas: 1
+#     workerType: regular               # regular (default), prefill, decode
+#     connectionMode: http              # http (default), grpc
+#     gpu:
+#       count: 1                        # GPUs per replica (tensor parallel size)
+#       type: nvidia.com/gpu            # resource name (default)
+#     image:
+#       tag: ""                         # engine-specific image tag (required)
+#     port: 8000                        # worker serving port
+#     resources: {}
+#     extraArgs: []                     # extra engine CLI args
+#     extraEnv: []
+#     nodeSelector: {}
+#     tolerations: []
+#     affinity: {}
+#     startupProbe:
+#       initialDelaySeconds: 60
+#       periodSeconds: 10
+#       failureThreshold: 30
+
+# Engine default ports (used when worker.port is not set)
+engineDefaults:
+  vllm:
+    port: 8000
+  sglang:
+    port: 30000
 
 # =============================================================================
 # Dependency Sub-Charts (overrides go here)

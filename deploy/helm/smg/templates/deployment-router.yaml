@@ -64,10 +64,19 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.router.extraEnv }}
           env:
+            - name: HF_HOME
+              value: /tmp/hf-cache
+            {{- if .Values.huggingface.token }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "smg.fullname" . }}-hf-token
+                  key: token
+            {{- end }}
+            {{- with .Values.router.extraEnv }}
             {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
