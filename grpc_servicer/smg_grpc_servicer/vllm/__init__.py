@@ -10,7 +10,7 @@ from smg_grpc_servicer.vllm.servicer import VllmEngineServicer
 # handlers and format as native vllm loggers.
 _vllm_logger = logging.getLogger("vllm")
 _pkg_logger = logging.getLogger("smg_grpc_servicer")
-_pkg_logger.handlers = _vllm_logger.handlers
+_pkg_logger.handlers = list(_vllm_logger.handlers)
 _pkg_logger.setLevel(_vllm_logger.level)
 _pkg_logger.propagate = False
 
