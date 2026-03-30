@@ -1057,21 +1057,20 @@ impl Tree {
             .map(|entry| (entry.key().to_string(), *entry.value()))
             .collect();
 
-        let child_count = node.children.len() as u32;
-
-        out.push(crate::snapshot::SnapshotNode {
-            edge,
-            tenants,
-            child_count,
-        });
-
-        // Visit children in sorted order for deterministic snapshots
+        // Capture children list BEFORE writing child_count to ensure
+        // the count matches the actual children we visit.
         let mut children: Vec<(char, NodeRef)> = node
             .children
             .iter()
             .map(|entry| (*entry.key(), entry.value().clone()))
             .collect();
         children.sort_by_key(|(c, _)| *c);
+
+        out.push(crate::snapshot::SnapshotNode {
+            edge,
+            tenants,
+            child_count: children.len() as u32,
+        });
 
         for (_, child) in children {
             Self::snapshot_node(&child, out);
@@ -1279,7 +1278,8 @@ impl Tree {
 
                     let local_remainder_first = local_remainder_text.first_char().unwrap_or('\0');
 
-                    // Create the split node (intermediate)
+                    // Create the split node (intermediate).
+                    // Tenants: union of local and remote at the shared prefix.
                     let split_node = Arc::new(Node {
                         children: new_children_map(),
                         text: RwLock::new(split_text),
@@ -1287,6 +1287,19 @@ impl Tree {
                         parent: RwLock::new(Some(Arc::downgrade(local))),
                         last_tenant: RwLock::new(local_child.last_tenant.read().clone()),
                     });
+                    // Union remote tenants into the split node
+                    for entry in &remote_child.tenant_last_access_time {
+                        let tid = Arc::clone(entry.key());
+                        let epoch = *entry.value();
+                        let should_update = split_node
+                            .tenant_last_access_time
+                            .get(tid.as_ref())
+                            .map(|e| epoch > *e)
+                            .unwrap_or(true);
+                        if should_update {
+                            split_node.tenant_last_access_time.insert(tid, epoch);
+                        }
+                    }
 
                     // Push local child down as child of split node
                     *local_child.text.write() = local_remainder_text;
@@ -1296,15 +1309,24 @@ impl Tree {
                         .insert(local_remainder_first, Arc::clone(&local_child));
 
                     // Create remote remainder as another child of split node
+                    // Use clone_subtree to rewrite parent pointers correctly
                     let remote_remainder = advance_by_chars(&remote_edge, shared);
                     if let Some(rem_first) = remote_remainder.chars().next() {
                         let remote_subtree = Arc::new(Node {
-                            children: remote_child.children.clone(),
+                            children: new_children_map(),
                             text: RwLock::new(NodeText::new(remote_remainder.to_string())),
                             tenant_last_access_time: remote_child.tenant_last_access_time.clone(),
                             parent: RwLock::new(Some(Arc::downgrade(&split_node))),
                             last_tenant: RwLock::new(remote_child.last_tenant.read().clone()),
                         });
+                        // Clone remote children with correct parent pointers
+                        for child_entry in &remote_child.children {
+                            let child_clone =
+                                Self::clone_subtree(child_entry.value(), Some(&remote_subtree));
+                            remote_subtree
+                                .children
+                                .insert(*child_entry.key(), child_clone);
+                        }
                         split_node.children.insert(rem_first, remote_subtree);
                     }
 
