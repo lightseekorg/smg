@@ -41,8 +41,10 @@ download_model() {
 
         # Log whether model appears cached, but always run hf download to verify
         # integrity (a killed download can leave snapshots/ partially populated).
+        local cached=false
         if [ -d "${model_dir}/snapshots" ] && [ -n "$(ls -A "${model_dir}/snapshots/" 2>/dev/null)" ]; then
-            echo "Model ${model_id} found in cache, verifying..."
+            echo "Model ${model_id} found in cache, verifying integrity..."
+            cached=true
         else
             echo "Model ${model_id} not in cache, downloading..."
         fi
@@ -50,15 +52,20 @@ download_model() {
         while [ $attempt -lt $MAX_RETRIES ]; do
             attempt=$((attempt + 1))
             if hf download "$model_id" --quiet 2>&1; then
-                echo "Successfully downloaded ${model_id}."
+                if [ "$cached" = true ]; then
+                    echo "Model ${model_id} already cached, verified OK."
+                else
+                    echo "Model ${model_id} downloaded successfully."
+                fi
                 exit 0
             fi
             echo "Download attempt ${attempt}/${MAX_RETRIES} failed for ${model_id}."
             if [ $attempt -lt $MAX_RETRIES ]; then
-                # Clean up stale HF hub lock files (both legacy and new locations)
-                find "${model_dir}" -name "*.lock" -type f -delete 2>/dev/null || true
+                # Clean up stale HF hub lock files older than 30 min (both legacy and new locations)
+                # Only delete old locks to avoid removing locks held by active processes
+                find "${model_dir}" -name "*.lock" -type f -mmin +30 -delete 2>/dev/null || true
                 local hf_lock_dir="${HF_HOME}/hub/.locks/models--${model_id//\//--}"
-                find "${hf_lock_dir}" -name "*.lock" -type f -delete 2>/dev/null || true
+                find "${hf_lock_dir}" -name "*.lock" -type f -mmin +30 -delete 2>/dev/null || true
                 echo "Retrying in ${RETRY_DELAY}s..."
                 sleep "$RETRY_DELAY"
             fi
@@ -75,9 +82,13 @@ if [ "${1:-}" = "--gpu-tier" ]; then
         echo "Usage: $0 --gpu-tier <tier>"
         exit 1
     fi
+    resolved_output="$(resolve_models_for_tier "$2")" || {
+        echo "ERROR: Failed to resolve models for GPU tier $2"
+        exit 1
+    }
     while IFS= read -r model; do
-        models+=("$model")
-    done < <(resolve_models_for_tier "$2")
+        [ -n "$model" ] && models+=("$model")
+    done <<<"$resolved_output"
     if [ ${#models[@]} -eq 0 ]; then
         echo "ERROR: No models resolved for GPU tier $2"
         exit 1
