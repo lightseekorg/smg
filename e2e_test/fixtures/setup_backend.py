@@ -114,7 +114,10 @@ def setup_backend(request: pytest.FixtureRequest):
 
     fail_count = _worker_start_failures.get(engine, 0)
     if fail_count >= _MAX_WORKER_START_FAILURES:
-        pytest.fail(f"Engine {engine} failed to start workers {fail_count} times — giving up")
+        pytest.exit(
+            f"Engine {engine} failed to start workers {fail_count} times — aborting test session",
+            returncode=1,
+        )
 
     gateway = Gateway()
     try:
