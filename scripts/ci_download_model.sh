@@ -39,14 +39,17 @@ download_model() {
         # Serialize downloads across pods sharing the same volume
         flock -w 1800 200 || { echo "ERROR: Timed out waiting for lock on ${model_id}"; exit 1; }
 
-        # Let huggingface-cli handle its own cache detection — it verifies file
-        # integrity and skips already-complete downloads. We don't check snapshots/
-        # ourselves because a killed download can leave it partially populated.
-        echo "Downloading ${model_id} to ${HF_HOME}..."
+        # Log whether model appears cached, but always run hf download to verify
+        # integrity (a killed download can leave snapshots/ partially populated).
+        if [ -d "${model_dir}/snapshots" ] && [ -n "$(ls -A "${model_dir}/snapshots/" 2>/dev/null)" ]; then
+            echo "Model ${model_id} found in cache, verifying..."
+        else
+            echo "Model ${model_id} not in cache, downloading..."
+        fi
         local attempt=0
         while [ $attempt -lt $MAX_RETRIES ]; do
             attempt=$((attempt + 1))
-            if huggingface-cli download "$model_id" --quiet 2>&1; then
+            if hf download "$model_id" --quiet 2>&1; then
                 echo "Successfully downloaded ${model_id}."
                 exit 0
             fi
