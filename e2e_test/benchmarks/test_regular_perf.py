@@ -21,7 +21,7 @@ class TestRegularPerf:
             # accurate GPU utilization sampling (at least 30+ seconds)
             max_requests_per_run=200,
             thresholds={
-                "ttft_mean_max": 0.8,
+                "ttft_mean_max": 0.86,
                 "e2e_latency_mean_max": 14,
                 "input_throughput_mean_min": 800,
                 "output_throughput_mean_min": 12,

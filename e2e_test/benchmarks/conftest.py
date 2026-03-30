@@ -16,7 +16,7 @@ from .results import BenchmarkResult
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_IMAGE = "ghcr.io/moirai-internal/genai-bench:0.0.3"
+_DEFAULT_IMAGE = "ghcr.io/moirai-internal/genai-bench:0.0.4"
 
 
 def _build_command(

@@ -26,7 +26,7 @@ concurrency:
 env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
-  GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.3
+  GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.4
 
 jobs:
   pre-commit:
@@ -337,7 +337,7 @@ jobs:
             -s -vv
 
       - name: Upload benchmark results
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: genai-bench-results-all-policies
@@ -864,7 +864,7 @@ jobs:
             pytest e2e_test/benchmarks/test_go_bindings_perf.py -s -vv
 
       - name: Upload benchmark results
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: genai-bench-results-go-bindings
