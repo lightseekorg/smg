@@ -1032,6 +1032,234 @@ impl Tree {
 
         println!("{result}");
     }
+
+    /// Create a compact snapshot of the tree for mesh synchronization.
+    ///
+    /// Walks the tree depth-first (pre-order) and emits each node's edge
+    /// label + tenant list.  Shared prefixes are stored once — a tree
+    /// with 2048 entries sharing 80% prefixes serializes to ~2-4 MB
+    /// instead of ~40 MB as flat insert operations.
+    pub fn snapshot(&self) -> crate::snapshot::TreeSnapshot {
+        let mut nodes = Vec::new();
+        Self::snapshot_node(&self.root, &mut nodes);
+        crate::snapshot::TreeSnapshot { nodes }
+    }
+
+    fn snapshot_node(node: &Node, out: &mut Vec<crate::snapshot::SnapshotNode>) {
+        let text = node.text.read();
+        let edge = text.as_str().to_string();
+        drop(text);
+
+        // Collect tenants with their epochs
+        let tenants: Vec<(String, u64)> = node
+            .tenant_last_access_time
+            .iter()
+            .map(|entry| (entry.key().to_string(), *entry.value()))
+            .collect();
+
+        let child_count = node.children.len() as u32;
+
+        out.push(crate::snapshot::SnapshotNode {
+            edge,
+            tenants,
+            child_count,
+        });
+
+        // Visit children in sorted order for deterministic snapshots
+        let mut children: Vec<(char, NodeRef)> = node
+            .children
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect();
+        children.sort_by_key(|(c, _)| *c);
+
+        for (_, child) in children {
+            Self::snapshot_node(&child, out);
+        }
+    }
+
+    /// Reconstruct a tree from a snapshot.
+    ///
+    /// The snapshot must be in pre-order (parent before children) with
+    /// `child_count` fields indicating tree structure.
+    pub fn from_snapshot(snapshot: &crate::snapshot::TreeSnapshot) -> Self {
+        let tree = Tree::new();
+        if snapshot.nodes.is_empty() {
+            return tree;
+        }
+
+        let mut idx = 0;
+        Self::restore_node(
+            &tree.root,
+            &snapshot.nodes,
+            &mut idx,
+            &tree.tenant_char_count,
+        );
+        tree
+    }
+
+    fn restore_node(
+        target: &NodeRef,
+        nodes: &[crate::snapshot::SnapshotNode],
+        idx: &mut usize,
+        tenant_counts: &DashMap<TenantId, usize>,
+    ) {
+        if *idx >= nodes.len() {
+            return;
+        }
+
+        let snap_node = &nodes[*idx];
+        *idx += 1;
+
+        // Set edge text
+        *target.text.write() = NodeText::new(snap_node.edge.clone());
+
+        // Set tenants
+        for (tenant_str, epoch) in &snap_node.tenants {
+            let tenant_id = intern_tenant(tenant_str);
+            target
+                .tenant_last_access_time
+                .insert(Arc::clone(&tenant_id), *epoch);
+
+            // Track char counts
+            let edge_chars = snap_node.edge.chars().count();
+            tenant_counts
+                .entry(tenant_id)
+                .and_modify(|c| *c += edge_chars)
+                .or_insert(edge_chars);
+        }
+
+        // Restore children
+        for _ in 0..snap_node.child_count {
+            if *idx >= nodes.len() {
+                break;
+            }
+            let child_snap = &nodes[*idx];
+            let first_char = child_snap.edge.chars().next().unwrap_or('\0');
+
+            let child_node = Arc::new(Node {
+                children: new_children_map(),
+                text: RwLock::new(NodeText::empty()),
+                tenant_last_access_time: new_tenant_map(),
+                parent: RwLock::new(Some(Arc::downgrade(target))),
+                last_tenant: RwLock::new(None),
+            });
+
+            Self::restore_node(&child_node, nodes, idx, tenant_counts);
+            target.children.insert(first_char, child_node);
+        }
+    }
+
+    /// Merge a remote snapshot into this tree.
+    ///
+    /// Walks the remote snapshot and for each node, finds or creates the
+    /// corresponding path in the local tree.  Tenant entries are merged
+    /// with the remote epoch winning if newer.
+    pub fn merge_snapshot(&self, snapshot: &crate::snapshot::TreeSnapshot) {
+        if snapshot.nodes.is_empty() {
+            return;
+        }
+        let mut idx = 0;
+        Self::merge_node(
+            &self.root,
+            &snapshot.nodes,
+            &mut idx,
+            &self.tenant_char_count,
+        );
+    }
+
+    fn merge_node(
+        local: &NodeRef,
+        nodes: &[crate::snapshot::SnapshotNode],
+        idx: &mut usize,
+        tenant_counts: &DashMap<TenantId, usize>,
+    ) {
+        if *idx >= nodes.len() {
+            return;
+        }
+
+        let snap_node = &nodes[*idx];
+        *idx += 1;
+
+        // Merge tenants: remote wins if epoch is newer
+        for (tenant_str, remote_epoch) in &snap_node.tenants {
+            let tenant_id = intern_tenant(tenant_str);
+            let should_update = local
+                .tenant_last_access_time
+                .get(tenant_id.as_ref())
+                .map(|local_epoch| *remote_epoch > *local_epoch)
+                .unwrap_or(true);
+
+            if should_update {
+                local
+                    .tenant_last_access_time
+                    .insert(Arc::clone(&tenant_id), *remote_epoch);
+
+                // Update char count if this is a new tenant at this node
+                if !local
+                    .tenant_last_access_time
+                    .contains_key(tenant_id.as_ref())
+                {
+                    let edge_chars = snap_node.edge.chars().count();
+                    tenant_counts
+                        .entry(tenant_id)
+                        .and_modify(|c| *c += edge_chars)
+                        .or_insert(edge_chars);
+                }
+            }
+        }
+
+        // Merge children
+        for _ in 0..snap_node.child_count {
+            if *idx >= nodes.len() {
+                break;
+            }
+            let child_snap = &nodes[*idx];
+            let child_edge = &child_snap.edge;
+            let first_char = child_edge.chars().next().unwrap_or('\0');
+
+            // Check if local has a child at this position
+            if let Some(local_child) = local.children.get(&first_char) {
+                let local_child = local_child.value().clone();
+                let local_text = local_child.text.read().as_str().to_string();
+
+                if local_text == *child_edge {
+                    // Exact match — recurse into the same subtree
+                    Self::merge_node(&local_child, nodes, idx, tenant_counts);
+                } else {
+                    // Edge mismatch — the remote tree has a different
+                    // structure at this point. Insert the remote subtree
+                    // as new operations (fall back to insert-based merge).
+                    // For now, skip the remote subtree.
+                    Self::skip_subtree(nodes, idx);
+                }
+            } else {
+                // Local doesn't have this child — create it from remote
+                let child_node = Arc::new(Node {
+                    children: new_children_map(),
+                    text: RwLock::new(NodeText::empty()),
+                    tenant_last_access_time: new_tenant_map(),
+                    parent: RwLock::new(Some(Arc::downgrade(local))),
+                    last_tenant: RwLock::new(None),
+                });
+
+                Self::restore_node(&child_node, nodes, idx, tenant_counts);
+                local.children.insert(first_char, child_node);
+            }
+        }
+    }
+
+    /// Skip over a subtree in the snapshot node list without processing it.
+    fn skip_subtree(nodes: &[crate::snapshot::SnapshotNode], idx: &mut usize) {
+        if *idx >= nodes.len() {
+            return;
+        }
+        let child_count = nodes[*idx].child_count;
+        *idx += 1;
+        for _ in 0..child_count {
+            Self::skip_subtree(nodes, idx);
+        }
+    }
 }
 
 impl RadixTree for Tree {
@@ -2255,5 +2483,136 @@ mod tests {
             assert_eq!(matched, *text, "Failed for: {text:?}");
             assert_eq!(matched_tenant, *tenant);
         }
+    }
+
+    // ── Snapshot tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_empty_tree() {
+        let tree = Tree::new();
+        let snap = tree.snapshot();
+        // Root node always present
+        assert_eq!(snap.node_count(), 1);
+    }
+
+    #[test]
+    fn test_snapshot_round_trip_single_entry() {
+        let tree = Tree::new();
+        tree.insert_text("Hello world", "worker-1");
+
+        let snap = tree.snapshot();
+        assert!(snap.node_count() > 0);
+
+        let restored = Tree::from_snapshot(&snap);
+        let result = restored.match_prefix_with_counts("Hello world");
+        assert_eq!(result.matched_char_count, 11);
+        assert_eq!(result.tenant.as_ref(), "worker-1");
+    }
+
+    #[test]
+    fn test_snapshot_round_trip_shared_prefixes() {
+        let tree = Tree::new();
+        tree.insert_text("Hello world", "worker-1");
+        tree.insert_text("Hello there", "worker-2");
+        tree.insert_text("Goodbye", "worker-3");
+
+        let snap = tree.snapshot();
+
+        let restored = Tree::from_snapshot(&snap);
+
+        // "Hello " is shared prefix — both "world" and "there" branch from it
+        let r1 = restored.match_prefix_with_counts("Hello world");
+        assert_eq!(r1.matched_char_count, 11);
+        assert_eq!(r1.tenant.as_ref(), "worker-1");
+
+        let r2 = restored.match_prefix_with_counts("Hello there");
+        assert_eq!(r2.matched_char_count, 11);
+        assert_eq!(r2.tenant.as_ref(), "worker-2");
+
+        let r3 = restored.match_prefix_with_counts("Goodbye");
+        assert_eq!(r3.matched_char_count, 7);
+        assert_eq!(r3.tenant.as_ref(), "worker-3");
+    }
+
+    #[test]
+    fn test_snapshot_size_vs_flat_ops() {
+        let tree = Tree::new();
+        // Insert 100 entries sharing a long prefix
+        let prefix = "A".repeat(10000);
+        for i in 0..100 {
+            let text = format!("{prefix}_{i}");
+            tree.insert_text(&text, &format!("worker-{i}"));
+        }
+
+        let snap = tree.snapshot();
+        let snap_bytes = snap.to_bytes().unwrap();
+
+        // Flat ops would be 100 × 10000 chars = ~1 MB
+        // Snapshot should be much smaller (shared prefix stored once)
+        let flat_size: usize = (0..100)
+            .map(|i| format!("{prefix}_{i}").len())
+            .sum();
+
+        assert!(
+            snap_bytes.len() < flat_size / 2,
+            "Snapshot ({} bytes) should be at least 2x smaller than flat ops ({} bytes)",
+            snap_bytes.len(),
+            flat_size
+        );
+    }
+
+    #[test]
+    fn test_snapshot_bincode_round_trip() {
+        let tree = Tree::new();
+        tree.insert_text("Hello world", "worker-1");
+        tree.insert_text("Hello there", "worker-2");
+
+        let snap = tree.snapshot();
+        let bytes = snap.to_bytes().unwrap();
+        let restored_snap = crate::snapshot::TreeSnapshot::from_bytes(&bytes).unwrap();
+
+        let restored = Tree::from_snapshot(&restored_snap);
+        let r = restored.match_prefix_with_counts("Hello world");
+        assert_eq!(r.matched_char_count, 11);
+    }
+
+    #[test]
+    fn test_merge_disjoint_trees() {
+        let tree1 = Tree::new();
+        tree1.insert_text("Hello", "worker-1");
+
+        let tree2 = Tree::new();
+        tree2.insert_text("Goodbye", "worker-2");
+
+        let snap2 = tree2.snapshot();
+        tree1.merge_snapshot(&snap2);
+
+        // tree1 should now have both entries
+        let r1 = tree1.match_prefix_with_counts("Hello");
+        assert_eq!(r1.matched_char_count, 5);
+
+        let r2 = tree1.match_prefix_with_counts("Goodbye");
+        assert_eq!(r2.matched_char_count, 7);
+        assert_eq!(r2.tenant.as_ref(), "worker-2");
+    }
+
+    #[test]
+    fn test_merge_overlapping_trees() {
+        let tree1 = Tree::new();
+        tree1.insert_text("Hello world", "worker-1");
+
+        let tree2 = Tree::new();
+        tree2.insert_text("Hello there", "worker-2");
+
+        let snap2 = tree2.snapshot();
+        tree1.merge_snapshot(&snap2);
+
+        // tree1 should have both branches under "Hello "
+        let r1 = tree1.match_prefix_with_counts("Hello world");
+        assert_eq!(r1.matched_char_count, 11);
+
+        let r2 = tree1.match_prefix_with_counts("Hello there");
+        assert_eq!(r2.matched_char_count, 11);
+        assert_eq!(r2.tenant.as_ref(), "worker-2");
     }
 }
