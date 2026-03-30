@@ -254,7 +254,7 @@ class Worker:
             "--max-model-len",
             "16384",
             "--gpu-memory-utilization",
-            "1.1",  # TEMP: intentionally invalid to test log artifact upload
+            "0.9",
         ]
         extra = spec.get("vllm_args", [])
         if extra:
