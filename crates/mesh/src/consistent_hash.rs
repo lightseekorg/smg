@@ -94,7 +94,7 @@ impl ConsistentHashRing {
         let key_hash = Self::hash(key);
         let total_unique_nodes = self.node_hashes.len();
 
-        // TRULY Zero allocation. Stack-allocated array for tracking unique nodes.
+        // Zero allocation. Stack-allocated array for tracking unique nodes.
         let mut seen_nodes = [""; NUM_OWNERS];
         let mut seen_count = 0;
 
@@ -118,7 +118,7 @@ impl ConsistentHashRing {
                 continue;
             };
 
-            // Fast exit!
+            // Fast exit
             if node == node_name {
                 return true;
             }
