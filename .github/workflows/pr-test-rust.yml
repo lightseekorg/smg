@@ -247,8 +247,7 @@ jobs:
       - name: Run grpc_servicer unit tests
         run: |
           python3 -m pip install pytest
-          cd grpc_servicer
-          pytest -q tests/test_sglang_validation.py
+          PYTHONPATH=grpc_servicer pytest -q grpc_servicer/tests/test_sglang_validation.py
 
   unit-tests:
     runs-on: k8s-runner-cpu

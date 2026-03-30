@@ -5,7 +5,6 @@ These tests focus on validating tokenized request input in isolation.
 """
 
 import pytest
-
 from smg_grpc_servicer.sglang.validation import validate_tokenized_input
 
 
