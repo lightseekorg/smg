@@ -578,6 +578,13 @@ pub enum ConversationMemoryStatus {
     Failed,
 }
 
+/// Insert-only payload for creating a new conversation memory row.
+///
+/// `NewConversationMemory` intentionally omits database-managed fields such as
+/// `memory_id`, `created_at`, and `updated_at`. Callers should not set those
+/// values directly; they are created or maintained by the database/write path.
+/// When changing an existing record, use the appropriate update path rather
+/// than reusing this struct.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NewConversationMemory {
     pub conversation_id: ConversationId,
