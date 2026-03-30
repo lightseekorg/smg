@@ -1135,7 +1135,22 @@ impl Tree {
                 break;
             }
             let child_snap = &nodes[*idx];
-            let first_char = child_snap.edge.chars().next().unwrap_or('\0');
+            let Some(first_char) = child_snap.edge.chars().next() else {
+                // Empty edge for a child node — skip it. Advance idx
+                // past this node and all its descendants.
+                fn skip(nodes: &[crate::snapshot::SnapshotNode], idx: &mut usize) {
+                    if *idx >= nodes.len() {
+                        return;
+                    }
+                    let cc = nodes[*idx].child_count;
+                    *idx += 1;
+                    for _ in 0..cc {
+                        skip(nodes, idx);
+                    }
+                }
+                skip(nodes, idx);
+                continue;
+            };
 
             let child_node = Arc::new(Node {
                 children: new_children_map(),
@@ -1152,55 +1167,52 @@ impl Tree {
 
     /// Merge a remote snapshot into this tree.
     ///
-    /// Walks the remote snapshot and for each node, finds or creates the
-    /// corresponding path in the local tree.  Tenant entries are merged
-    /// with the remote epoch winning if newer.
+    /// Reconstructs the remote tree from the snapshot, then walks both
+    /// trees recursively, handling three cases for each child:
+    /// 1. Exact edge match → recurse into both subtrees
+    /// 2. Local edge is prefix of remote → descend into local, continue with remainder
+    /// 3. Shared prefix shorter than both → split local node, attach remote remainder
     pub fn merge_snapshot(&self, snapshot: &crate::snapshot::TreeSnapshot) {
         if snapshot.nodes.is_empty() {
             return;
         }
-        let mut idx = 0;
-        Self::merge_node(
-            &self.root,
-            &snapshot.nodes,
-            &mut idx,
-            &self.tenant_char_count,
-        );
+        // Reconstruct the remote tree, then merge tree-to-tree
+        let remote_tree = Tree::from_snapshot(snapshot);
+        self.merge_tree(&remote_tree);
     }
 
-    fn merge_node(
-        local: &NodeRef,
-        nodes: &[crate::snapshot::SnapshotNode],
-        idx: &mut usize,
-        tenant_counts: &DashMap<TenantId, usize>,
-    ) {
-        if *idx >= nodes.len() {
-            return;
-        }
+    /// Merge another tree into this tree.
+    ///
+    /// Walks both trees recursively. At each node, merges tenant maps
+    /// (remote wins on newer epoch) and reconciles children using the
+    /// three-case edge comparison.
+    pub fn merge_tree(&self, remote: &Tree) {
+        Self::merge_nodes(&self.root, &remote.root, &self.tenant_char_count);
+    }
 
-        let snap_node = &nodes[*idx];
-        *idx += 1;
+    fn merge_nodes(local: &NodeRef, remote: &NodeRef, tenant_counts: &DashMap<TenantId, usize>) {
+        // Merge tenants at this node
+        for entry in &remote.tenant_last_access_time {
+            let tenant_id = Arc::clone(entry.key());
+            let remote_epoch = *entry.value();
 
-        // Merge tenants: remote wins if epoch is newer
-        for (tenant_str, remote_epoch) in &snap_node.tenants {
-            let tenant_id = intern_tenant(tenant_str);
+            let is_new = !local
+                .tenant_last_access_time
+                .contains_key(tenant_id.as_ref());
+
             let should_update = local
                 .tenant_last_access_time
                 .get(tenant_id.as_ref())
-                .map(|local_epoch| *remote_epoch > *local_epoch)
+                .map(|local_epoch| remote_epoch > *local_epoch)
                 .unwrap_or(true);
 
             if should_update {
                 local
                     .tenant_last_access_time
-                    .insert(Arc::clone(&tenant_id), *remote_epoch);
+                    .insert(Arc::clone(&tenant_id), remote_epoch);
 
-                // Update char count if this is a new tenant at this node
-                if !local
-                    .tenant_last_access_time
-                    .contains_key(tenant_id.as_ref())
-                {
-                    let edge_chars = snap_node.edge.chars().count();
+                if is_new {
+                    let edge_chars = local.text.read().char_count();
                     tenant_counts
                         .entry(tenant_id)
                         .and_modify(|c| *c += edge_chars)
@@ -1210,55 +1222,119 @@ impl Tree {
         }
 
         // Merge children
-        for _ in 0..snap_node.child_count {
-            if *idx >= nodes.len() {
-                break;
-            }
-            let child_snap = &nodes[*idx];
-            let child_edge = &child_snap.edge;
-            let first_char = child_edge.chars().next().unwrap_or('\0');
+        for remote_entry in &remote.children {
+            let rc = *remote_entry.key();
+            let remote_child = remote_entry.value().clone();
+            let remote_edge = remote_child.text.read().as_str().to_string();
 
-            // Check if local has a child at this position
-            if let Some(local_child) = local.children.get(&first_char) {
-                let local_child = local_child.value().clone();
-                let local_text = local_child.text.read().as_str().to_string();
+            if let Some(local_entry) = local.children.get(&rc) {
+                let local_child = local_entry.value().clone();
+                drop(local_entry); // release DashMap guard before mutating
 
-                if local_text == *child_edge {
-                    // Exact match — recurse into the same subtree
-                    Self::merge_node(&local_child, nodes, idx, tenant_counts);
+                let local_edge = local_child.text.read().as_str().to_string();
+                let shared = shared_prefix_count(&local_edge, &remote_edge);
+
+                if shared == local_edge.chars().count() && shared == remote_edge.chars().count() {
+                    // Case 1: exact match — recurse
+                    Self::merge_nodes(&local_child, &remote_child, tenant_counts);
+                } else if shared == local_edge.chars().count() {
+                    // Case 2: local edge is a prefix of remote edge.
+                    // Descend into local child. The remote child's edge
+                    // has a remainder that maps to a deeper level.
+                    let remote_remainder = advance_by_chars(&remote_edge, shared);
+                    let Some(rem_first) = remote_remainder.chars().next() else {
+                        continue;
+                    };
+
+                    // Create a virtual remote child with the trimmed edge
+                    let trimmed_remote = Arc::new(Node {
+                        children: remote_child.children.clone(),
+                        text: RwLock::new(NodeText::new(remote_remainder.to_string())),
+                        tenant_last_access_time: remote_child.tenant_last_access_time.clone(),
+                        parent: RwLock::new(None),
+                        last_tenant: RwLock::new(remote_child.last_tenant.read().clone()),
+                    });
+
+                    if let Some(deeper_local) = local_child.children.get(&rem_first) {
+                        let deeper_local = deeper_local.value().clone();
+                        // Recurse: merge trimmed remote into the deeper local child
+                        Self::merge_nodes(&deeper_local, &trimmed_remote, tenant_counts);
+                    } else {
+                        // No local child at this position — insert remote subtree
+                        *trimmed_remote.parent.write() = Some(Arc::downgrade(&local_child));
+                        local_child.children.insert(rem_first, trimmed_remote);
+                    }
                 } else {
-                    // Edge mismatch — the remote tree has a different
-                    // structure at this point. Insert the remote subtree
-                    // as new operations (fall back to insert-based merge).
-                    // For now, skip the remote subtree.
-                    Self::skip_subtree(nodes, idx);
+                    // Case 3: shared prefix shorter than both edges.
+                    // Split local node at the shared prefix point,
+                    // then attach remote remainder as a sibling.
+
+                    // Split local edge: "Hello world" at shared=6 →
+                    //   split_node edge: "Hello "
+                    //   local_child edge becomes: "world"
+                    let (split_text, local_remainder_text) = {
+                        let text = local_child.text.read();
+                        text.split_at_char(shared)
+                    };
+
+                    let local_remainder_first = local_remainder_text.first_char().unwrap_or('\0');
+
+                    // Create the split node (intermediate)
+                    let split_node = Arc::new(Node {
+                        children: new_children_map(),
+                        text: RwLock::new(split_text),
+                        tenant_last_access_time: local_child.tenant_last_access_time.clone(),
+                        parent: RwLock::new(Some(Arc::downgrade(local))),
+                        last_tenant: RwLock::new(local_child.last_tenant.read().clone()),
+                    });
+
+                    // Push local child down as child of split node
+                    *local_child.text.write() = local_remainder_text;
+                    *local_child.parent.write() = Some(Arc::downgrade(&split_node));
+                    split_node
+                        .children
+                        .insert(local_remainder_first, Arc::clone(&local_child));
+
+                    // Create remote remainder as another child of split node
+                    let remote_remainder = advance_by_chars(&remote_edge, shared);
+                    if let Some(rem_first) = remote_remainder.chars().next() {
+                        let remote_subtree = Arc::new(Node {
+                            children: remote_child.children.clone(),
+                            text: RwLock::new(NodeText::new(remote_remainder.to_string())),
+                            tenant_last_access_time: remote_child.tenant_last_access_time.clone(),
+                            parent: RwLock::new(Some(Arc::downgrade(&split_node))),
+                            last_tenant: RwLock::new(remote_child.last_tenant.read().clone()),
+                        });
+                        split_node.children.insert(rem_first, remote_subtree);
+                    }
+
+                    // Replace local's child with the split node
+                    local.children.insert(rc, split_node);
                 }
             } else {
-                // Local doesn't have this child — create it from remote
-                let child_node = Arc::new(Node {
-                    children: new_children_map(),
-                    text: RwLock::new(NodeText::empty()),
-                    tenant_last_access_time: new_tenant_map(),
-                    parent: RwLock::new(Some(Arc::downgrade(local))),
-                    last_tenant: RwLock::new(None),
-                });
-
-                Self::restore_node(&child_node, nodes, idx, tenant_counts);
-                local.children.insert(first_char, child_node);
+                // No local child at this char — copy entire remote subtree
+                let cloned = Self::clone_subtree(&remote_child, Some(local));
+                local.children.insert(rc, cloned);
             }
         }
     }
 
-    /// Skip over a subtree in the snapshot node list without processing it.
-    fn skip_subtree(nodes: &[crate::snapshot::SnapshotNode], idx: &mut usize) {
-        if *idx >= nodes.len() {
-            return;
+    /// Deep clone a subtree, setting parent pointers correctly.
+    fn clone_subtree(node: &NodeRef, parent: Option<&NodeRef>) -> NodeRef {
+        let new_node = Arc::new(Node {
+            children: new_children_map(),
+            text: RwLock::new(node.text.read().clone_text()),
+            tenant_last_access_time: node.tenant_last_access_time.clone(),
+            parent: RwLock::new(parent.map(Arc::downgrade)),
+            last_tenant: RwLock::new(node.last_tenant.read().clone()),
+        });
+
+        for entry in &node.children {
+            let child_clone = Self::clone_subtree(entry.value(), Some(&new_node));
+            new_node.children.insert(*entry.key(), child_clone);
         }
-        let child_count = nodes[*idx].child_count;
-        *idx += 1;
-        for _ in 0..child_count {
-            Self::skip_subtree(nodes, idx);
-        }
+
+        new_node
     }
 }
 
