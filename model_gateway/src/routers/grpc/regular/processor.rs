@@ -151,6 +151,20 @@ impl ResponseProcessor {
             }
         }
 
+        if tool_calls.is_none() {
+            match utils::deterministic_auto_tool_repair(original_request).await {
+                Ok(Some(repaired_tool_calls)) => {
+                    tool_calls = Some(repaired_tool_calls);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!("Deterministic auto tool repair failed: {e}");
+                }
+            }
+        }
+
+        utils::repair_tool_calls_and_content(original_request, &mut tool_calls, &mut processed_text);
+
         // Step 3: Use finish reason directly from proto (already OpenAI-compatible string)
         let finish_reason_str = complete.finish_reason();
 

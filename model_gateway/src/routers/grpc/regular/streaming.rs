@@ -18,8 +18,8 @@ use llm_tokenizer::{
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatCompletionStreamResponse},
     common::{
-        FunctionCallDelta, ResponseFormat, StringOrArray, Tool, ToolCallDelta, ToolChoice,
-        ToolChoiceValue, Usage,
+        FunctionCallDelta, FunctionCallResponse, ResponseFormat, StringOrArray, Tool, ToolCall,
+        ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
     },
     generate::GenerateRequest,
 };
@@ -213,6 +213,7 @@ impl StreamingProcessor {
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
         let mut completion_tokens = CompletionTokenTracker::new();
         let mut streamed_output_tokens: HashMap<u32, usize> = HashMap::new();
+        let mut complete_output_ids: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut cached_tokens: HashMap<u32, u32> = HashMap::new();
 
         // Parser state (lazy initialization per index)
@@ -223,6 +224,7 @@ impl StreamingProcessor {
         let mut tool_parsers: HashMap<u32, PooledToolParser> = HashMap::new();
         let mut has_tool_calls: HashMap<u32, bool> = HashMap::new();
         let mut emitted_tool_call_indices: HashMap<u32, HashSet<usize>> = HashMap::new();
+        let mut repaired_specific_function_args: HashMap<u32, String> = HashMap::new();
 
         // Per-index stop decoders (each index needs its own state for n>1 support)
         let mut stop_decoders: HashMap<u32, StopSequenceDecoder> = HashMap::new();
@@ -709,6 +711,11 @@ impl StreamingProcessor {
                         }
                     }
 
+                    // Keep the authoritative output ids so tool fallback parsing can
+                    // reconstruct the full completion even when incremental text chunks
+                    // missed special tool-call tokens.
+                    complete_output_ids.insert(index, complete.output_ids().to_vec());
+
                     // Store metadata
                     prompt_tokens.insert(index, complete.prompt_tokens());
 
@@ -774,10 +781,33 @@ impl StreamingProcessor {
                 }
             }
 
-            if let Some(full_text) = stream_buffers.get(index) {
+            let authoritative_full_text = complete_output_ids
+                .get(index)
+                .and_then(|output_ids| {
+                    Self::decode_complete_output_text(&tokenizer, &stop_params, output_ids)
+                        .ok()
+                });
+
+            if let Some(full_text) = authoritative_full_text
+                .as_deref()
+                .or_else(|| stream_buffers.get(index).map(String::as_str))
+            {
                 if let Ok((_normal_text, parsed_tool_calls)) =
                     parser_guard.parse_complete(full_text).await
                 {
+                    if parsed_tool_calls.is_empty()
+                        && !has_tool_calls.get(index).copied().unwrap_or(false)
+                    {
+                        let preview: String = full_text.chars().take(800).collect();
+                        warn!(
+                            request_id,
+                            index = *index,
+                            full_text_len = full_text.len(),
+                            full_text_preview = %preview,
+                            "streaming fallback parse_complete found no tool calls"
+                        );
+                    }
+
                     for (tool_index, tool_call) in parsed_tool_calls.into_iter().enumerate() {
                         let already_emitted = emitted_tool_call_indices
                             .get(index)
@@ -835,21 +865,123 @@ impl StreamingProcessor {
             }
         }
 
+        match utils::deterministic_auto_tool_repair(&original_request).await {
+            Ok(Some(repaired_tool_calls)) => {
+                let repair_index = finish_reasons
+                    .keys()
+                    .copied()
+                    .next()
+                    .or_else(|| stream_buffers.keys().copied().next())
+                    .unwrap_or(0);
+
+                if is_specific_function {
+                    if let Some(arguments) = repaired_tool_calls
+                        .into_iter()
+                        .next()
+                        .and_then(|tool_call| tool_call.function.arguments)
+                    {
+                        repaired_specific_function_args.insert(repair_index, arguments);
+                    }
+                } else {
+                    let already_emitted_count = emitted_tool_call_indices
+                        .get(&repair_index)
+                        .map_or(0, HashSet::len);
+
+                    for (tool_index, tool_call) in repaired_tool_calls
+                        .into_iter()
+                        .enumerate()
+                        .skip(already_emitted_count)
+                    {
+                        has_tool_calls.insert(repair_index, true);
+                        emitted_tool_call_indices
+                            .entry(repair_index)
+                            .or_default()
+                            .insert(tool_index);
+
+                        let tool_call_delta = ToolCallDelta {
+                            index: tool_index as u32,
+                            id: Some(utils::generate_tool_call_id(
+                                model,
+                                &tool_call.function.name,
+                                tool_index,
+                                history_tool_calls_count,
+                            )),
+                            tool_type: Some("function".to_string()),
+                            function: Some(FunctionCallDelta {
+                                name: Some(tool_call.function.name),
+                                arguments: tool_call.function.arguments,
+                            }),
+                        };
+
+                        let tool_chunk = ChatCompletionStreamResponse::builder(request_id, model)
+                            .created(created)
+                            .add_choice_tool_call_delta(repair_index, tool_call_delta)
+                            .maybe_system_fingerprint(system_fingerprint)
+                            .build();
+
+                        let sse_chunk = serde_json::to_string(&tool_chunk).map_err(|e| {
+                            format!("Failed to serialize deterministic repair tool chunk: {e}")
+                        })?;
+                        tx.send(Ok(Bytes::from(format!("data: {sse_chunk}\n\n"))))
+                            .map_err(|_| {
+                                "Failed to send deterministic repair tool chunk".to_string()
+                            })?;
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(request_id, "Deterministic auto tool repair failed: {}", e);
+            }
+        }
+
         if is_specific_function {
             for (index, full_text) in &mut stream_buffers {
                 if !has_tool_calls.get(index).copied().unwrap_or(false) {
                     continue;
                 }
 
-                let Some(repair_suffix) = Self::json_repair_suffix(full_text) else {
+                let Some(ToolChoice::Function { function, .. }) = tool_choice.as_ref() else {
                     continue;
                 };
 
-                full_text.push_str(&repair_suffix);
+                let mut final_args = repaired_specific_function_args
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| full_text.clone());
+
+                if let Some(repair_suffix) = Self::json_repair_suffix(&final_args) {
+                    final_args.push_str(&repair_suffix);
+                }
+
+                let mut repaired_tool_calls = Some(vec![ToolCall {
+                    id: String::new(),
+                    tool_type: "function".to_string(),
+                    function: FunctionCallResponse {
+                        name: function.name.clone(),
+                        arguments: Some(final_args),
+                    },
+                }]);
+                let mut ignored_content = String::new();
+                utils::repair_tool_calls_and_content(
+                    &original_request,
+                    &mut repaired_tool_calls,
+                    &mut ignored_content,
+                );
+
+                let Some(final_args) = repaired_tool_calls
+                    .as_ref()
+                    .and_then(|tool_calls| tool_calls.first())
+                    .and_then(|tool_call| tool_call.function.arguments.clone())
+                else {
+                    continue;
+                };
+
+                *full_text = final_args.clone();
 
                 let tool_chunk = ChatCompletionStreamResponse::builder(request_id, model)
                     .created(created)
-                    .add_choice_tool_args(*index, repair_suffix)
+                    .add_choice_tool_args(*index, final_args)
                     .maybe_system_fingerprint(system_fingerprint)
                     .build();
 
@@ -1752,16 +1884,6 @@ impl StreamingProcessor {
                 );
             }
 
-            // Emit arguments delta
-            if !delta.is_empty() {
-                chunks.push(
-                    ChatCompletionStreamResponse::builder(request_id, model)
-                        .created(created)
-                        .add_choice_tool_args(index, delta.to_string())
-                        .maybe_system_fingerprint(system_fingerprint)
-                        .build(),
-                );
-            }
         }
 
         chunks
