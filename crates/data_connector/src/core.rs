@@ -580,9 +580,9 @@ pub enum ConversationMemoryStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NewConversationMemory {
-    pub conversation_id: String,
+    pub conversation_id: ConversationId,
     pub conversation_version: Option<i64>,
-    pub response_id: Option<String>,
+    pub response_id: Option<ResponseId>,
     pub memory_type: ConversationMemoryType,
     pub status: ConversationMemoryStatus,
     pub attempt: i64,
@@ -1086,9 +1086,9 @@ mod tests {
     #[test]
     fn new_conversation_memory_keeps_insert_only_fields() {
         let input = NewConversationMemory {
-            conversation_id: "conv_123".to_string(),
+            conversation_id: ConversationId::from("conv_123"),
             conversation_version: Some(7),
-            response_id: Some("resp_123".to_string()),
+            response_id: Some(ResponseId::from("resp_123")),
             memory_type: ConversationMemoryType::Ltm,
             status: ConversationMemoryStatus::Ready,
             attempt: 0,
@@ -1102,6 +1102,8 @@ mod tests {
         };
 
         assert_eq!(input.attempt, 0);
+        assert_eq!(input.conversation_id, ConversationId::from("conv_123"));
+        assert_eq!(input.response_id, Some(ResponseId::from("resp_123")));
         assert!(input.lease_until.is_none());
     }
 }

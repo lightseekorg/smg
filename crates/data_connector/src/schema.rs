@@ -262,9 +262,9 @@ impl SchemaConfig {
 
         for name in &tc.skip_columns {
             validate_identifier(name).map_err(|e| format!("{label}.skip_columns '{name}': {e}"))?;
-            if name == "id" {
+            if primary_key_columns_for(label).contains(&name.as_str()) {
                 return Err(format!(
-                    "{label}.skip_columns: cannot skip 'id' — it is the primary key"
+                    "{label}.skip_columns: cannot skip '{name}' — it is part of the primary key"
                 ));
             }
             if !core.contains(&name.as_str()) {
@@ -276,6 +276,13 @@ impl SchemaConfig {
         }
 
         Ok(())
+    }
+}
+
+fn primary_key_columns_for(label: &str) -> &'static [&'static str] {
+    match label {
+        "conversation_memories" => &["memory_id"],
+        _ => &["id"],
     }
 }
 
@@ -713,6 +720,19 @@ mod tests {
         let err = cfg.validate().unwrap_err();
         assert!(
             err.contains("cannot skip 'id'") && err.contains("primary key"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_skip_conversation_memory_id() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversation_memories
+            .skip_columns
+            .insert("memory_id".to_string());
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("cannot skip 'memory_id'") && err.contains("primary key"),
             "unexpected: {err}"
         );
     }
