@@ -1066,6 +1066,14 @@ mod tests {
             "\"READY\""
         );
         assert_eq!(
+            serde_json::to_string(&ConversationMemoryStatus::Running).unwrap(),
+            "\"RUNNING\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConversationMemoryStatus::Success).unwrap(),
+            "\"SUCCESS\""
+        );
+        assert_eq!(
             serde_json::to_string(&ConversationMemoryStatus::Failed).unwrap(),
             "\"FAILED\""
         );
@@ -1080,6 +1088,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ConversationMemoryType::Ltm).unwrap(),
             "\"LTM\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConversationMemoryType::Stmo).unwrap(),
+            "\"STMO\""
         );
     }
 
