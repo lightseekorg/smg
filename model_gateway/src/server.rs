@@ -55,7 +55,7 @@ use crate::{
     observability::{
         logging::{self, LoggingConfig},
         metrics::{self, PrometheusConfig},
-        otel_trace,
+        metrics_server, otel_trace,
     },
     routers::{
         conversations,
@@ -878,9 +878,21 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         ))
     };
 
-    if let Some(prometheus_config) = &config.prometheus_config {
-        metrics::start_prometheus(prometheus_config.clone());
-    }
+    // Fire-and-forget: the metrics server runs for the process lifetime.
+    // Graceful shutdown with close frames will be added when the WS endpoint lands.
+    let _metrics_server_handle = if let Some(prometheus_config) = &config.prometheus_config {
+        let handle = metrics::start_prometheus(prometheus_config.clone());
+        Some(
+            metrics_server::start_metrics_server(
+                handle,
+                prometheus_config.host.clone(),
+                prometheus_config.port,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
 
     // Initialize mesh server if configured, it will return a handler for mesh management
     let mesh_handler = if let Some(mesh_server_config) = &config.mesh_server_config {
