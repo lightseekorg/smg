@@ -1,0 +1,24 @@
+{{- range $i, $worker := .Values.workers }}
+{{- $defaults := index $.Values.engineDefaults $worker.engine }}
+{{- $port := $worker.port | default $defaults.port }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "smg.fullname" $ }}-worker-{{ $worker.name }}
+  labels:
+    {{- include "smg.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: worker
+    smg.lightseek.org/worker: {{ $worker.name }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $port }}
+      targetPort: serve
+      protocol: TCP
+      name: serve
+  selector:
+    {{- include "smg.selectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: worker
+    smg.lightseek.org/worker: {{ $worker.name }}
+{{- end }}
