@@ -66,6 +66,7 @@ jobs:
 
       - name: Setup TRT-LLM backend
         if: inputs.engine == 'trtllm'
+        timeout-minutes: 70
         uses: ./.github/actions/setup-trtllm
 
       # Artifact downloads
@@ -113,6 +114,7 @@ jobs:
 
       # Run tests
       - name: Run E2E tests
+        timeout-minutes: 20
         env:
           SHOW_WORKER_LOGS: "0"
           SHOW_ROUTER_LOGS: "1"
