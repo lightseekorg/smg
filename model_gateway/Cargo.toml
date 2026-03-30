@@ -187,5 +187,10 @@ name = "routing_allocation_bench"
 harness = false
 path = "benches/routing_allocation_bench.rs"
 
+[[bench]]
+name = "consistent_hash_bench"
+harness = false
+path = "benches/consistent_hash_bench.rs"
+
 [lints]
 workspace = true
