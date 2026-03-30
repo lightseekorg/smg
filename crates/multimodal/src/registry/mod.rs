@@ -11,8 +11,6 @@ use once_cell::sync::Lazy;
 use phi3_v::Phi3VisionSpec;
 use qwen3_vl::Qwen3VLVisionSpec;
 use qwen_vl::QwenVLVisionSpec;
-// Re-export for use by spec modules within the crate.
-pub(crate) use traits::image_sizes_hw;
 // Re-export public API from traits.
 pub use traits::{ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult};
 
@@ -151,11 +149,6 @@ pub(super) mod test_helpers {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
-    }
-
-    /// Build a minimal `PreprocessedImages` for testing prompt_replacements.
-    pub fn test_preprocessed(image_sizes: &[ImageSize]) -> PreprocessedImages {
-        test_preprocessed_with_tokens(image_sizes, &vec![0; image_sizes.len()])
     }
 
     pub fn test_preprocessed_with_tokens(

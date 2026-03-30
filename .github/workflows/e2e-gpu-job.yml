@@ -107,6 +107,10 @@ jobs:
           bash scripts/ci_agentic_svc_deps.sh create-oracle-user oracle-db
           bash scripts/ci_agentic_svc_deps.sh create-oracle-flyway-user oracle-db
 
+      # Pre-download models with flock to prevent races between pods on same node
+      - name: Download models
+        run: bash scripts/ci_download_model.sh --gpu-tier ${{ inputs.gpu_tier }}
+
       # Run tests
       - name: Run E2E tests
         env:
