@@ -317,7 +317,7 @@ fn core_columns_for(label: &str) -> &'static [&'static str] {
             "lease_until",
             "content",
             "memory_config",
-            "compartment_id",
+            "scope_id",
             "error_msg",
             "created_at",
             "updated_at",

@@ -591,7 +591,7 @@ pub struct NewConversationMemory {
     pub lease_until: Option<DateTime<Utc>>,
     pub content: Option<String>,
     pub memory_config: Option<String>,
-    pub compartment_id: Option<String>,
+    pub scope_id: Option<String>,
     pub error_msg: Option<String>,
 }
 
@@ -1097,7 +1097,7 @@ mod tests {
             lease_until: None,
             content: None,
             memory_config: None,
-            compartment_id: None,
+            scope_id: None,
             error_msg: None,
         };
 
