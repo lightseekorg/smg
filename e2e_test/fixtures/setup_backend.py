@@ -48,8 +48,9 @@ _worker_start_failures: dict[str, int] = {}  # engine -> count
 _MAX_WORKER_START_FAILURES = 3  # fail fast after this many failures (matches --reruns 2)
 
 
-def _start_workers_tracked(engine: str, **kwargs) -> list:
+def _start_workers_tracked(**kwargs) -> list:
     """Start workers and track failures by engine for fail-fast."""
+    engine = kwargs.get("engine") or get_runtime()
     try:
         return start_workers(**kwargs)
     except (TimeoutError, RuntimeError):
@@ -179,7 +180,6 @@ def _setup_local(
     logger.info("Starting %s backend: model=%s, workers=%d", backend_name, model_id, num_workers)
 
     workers = _start_workers_tracked(
-        engine,
         model_id=model_id,
         engine=engine,
         mode=connection_mode,
@@ -234,7 +234,6 @@ def _setup_pd(
     all_workers: list = []
     try:
         prefill_workers = _start_workers_tracked(
-            engine,
             model_id=model_id,
             engine=engine,
             mode=connection_mode,
@@ -247,7 +246,6 @@ def _setup_pd(
         # Decode workers start on GPUs after prefill workers
         decode_gpu_offset = num_prefill * spec.get("tp", 1)
         decode_workers = _start_workers_tracked(
-            engine,
             model_id=model_id,
             engine=engine,
             mode=connection_mode,
