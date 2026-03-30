@@ -61,8 +61,10 @@ download_model() {
             fi
             echo "Download attempt ${attempt}/${MAX_RETRIES} failed for ${model_id}."
             if [ $attempt -lt $MAX_RETRIES ]; then
-                # Clean up any stale lock files from HF hub internals
+                # Clean up stale HF hub lock files (both legacy and new locations)
                 find "${model_dir}" -name "*.lock" -type f -delete 2>/dev/null || true
+                local hf_lock_dir="${HF_HOME}/hub/.locks/models--${model_id//\//--}"
+                find "${hf_lock_dir}" -name "*.lock" -type f -delete 2>/dev/null || true
                 echo "Retrying in ${RETRY_DELAY}s..."
                 sleep "$RETRY_DELAY"
             fi
