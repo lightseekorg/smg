@@ -625,6 +625,7 @@ async fn execute_tool_loop_streaming_internal(
             // Process each MCP tool call
             for tool_call in mcp_tool_calls {
                 state.total_calls += 1;
+                let is_internal = session.is_internal_tool(&tool_call.name);
 
                 trace!(
                     "Executing tool call {}/{}: {} (call_id: {})",
@@ -644,57 +645,59 @@ async fn execute_tool_loop_streaming_internal(
                     ResponseStreamEventEmitter::output_item_type_for_format(Some(&response_format));
                 let resolved_label = session.resolve_tool_server_label(&tool_call.name);
 
-                // Allocate output_index with correct type (generates appropriate item_id prefix)
-                let (output_index, item_id) = emitter.allocate_output_index(output_item_type);
+                // Allocate visible response state only for non-internal tools.
+                let visible_output = if is_internal {
+                    None
+                } else {
+                    let (output_index, item_id) = emitter.allocate_output_index(output_item_type);
 
-                // Build initial tool call item
-                let mut item = json!({
-                    "id": item_id,
-                    "type": item_type,
-                    "name": tool_call.name,
-                    "status": "in_progress",
-                    "arguments": ""
-                });
-                attach_mcp_server_label(
-                    &mut item,
-                    Some(resolved_label.as_str()),
-                    Some(&response_format),
-                );
+                    let mut item = json!({
+                        "id": item_id,
+                        "type": item_type,
+                        "name": tool_call.name,
+                        "status": "in_progress",
+                        "arguments": ""
+                    });
+                    attach_mcp_server_label(
+                        &mut item,
+                        Some(resolved_label.as_str()),
+                        Some(&response_format),
+                    );
 
-                // Emit output_item.added
-                let event = emitter.emit_output_item_added(output_index, &item);
-                emitter.send_event(&event, &tx)?;
+                    let event = emitter.emit_output_item_added(output_index, &item);
+                    emitter.send_event(&event, &tx)?;
 
-                // Emit tool_call.in_progress
-                let event =
-                    emitter.emit_tool_call_in_progress(output_index, &item_id, &response_format);
-                emitter.send_event(&event, &tx)?;
-
-                // Emit arguments events for mcp_call only (skip for builtin tools)
-                if matches!(response_format, ResponseFormat::Passthrough) {
-                    // Emit mcp_call_arguments.delta (simulate streaming by sending full arguments)
-                    let event = emitter.emit_mcp_call_arguments_delta(
+                    let event = emitter.emit_tool_call_in_progress(
                         output_index,
                         &item_id,
-                        &tool_call.arguments,
+                        &response_format,
                     );
                     emitter.send_event(&event, &tx)?;
 
-                    // Emit mcp_call_arguments.done
-                    let event = emitter.emit_mcp_call_arguments_done(
-                        output_index,
-                        &item_id,
-                        &tool_call.arguments,
-                    );
-                    emitter.send_event(&event, &tx)?;
-                }
+                    if matches!(response_format, ResponseFormat::Passthrough) {
+                        let event = emitter.emit_mcp_call_arguments_delta(
+                            output_index,
+                            &item_id,
+                            &tool_call.arguments,
+                        );
+                        emitter.send_event(&event, &tx)?;
 
-                // Emit searching/interpreting event for builtin tools
-                if let Some(event) =
-                    emitter.emit_tool_call_searching(output_index, &item_id, &response_format)
-                {
-                    emitter.send_event(&event, &tx)?;
-                }
+                        let event = emitter.emit_mcp_call_arguments_done(
+                            output_index,
+                            &item_id,
+                            &tool_call.arguments,
+                        );
+                        emitter.send_event(&event, &tx)?;
+                    }
+
+                    if let Some(event) =
+                        emitter.emit_tool_call_searching(output_index, &item_id, &response_format)
+                    {
+                        emitter.send_event(&event, &tx)?;
+                    }
+
+                    Some((output_index, item_id))
+                };
 
                 // Execute the MCP tool
                 trace!(
@@ -719,61 +722,60 @@ async fn execute_tool_loop_streaming_internal(
                 let success = !tool_output.is_error;
                 let output_str = tool_output.output.to_string();
 
-                if success {
-                    // Emit tool_call.completed
-                    let event =
-                        emitter.emit_tool_call_completed(output_index, &item_id, &response_format);
-                    emitter.send_event(&event, &tx)?;
+                if let Some((output_index, item_id)) = visible_output {
+                    if success {
+                        let event = emitter.emit_tool_call_completed(
+                            output_index,
+                            &item_id,
+                            &response_format,
+                        );
+                        emitter.send_event(&event, &tx)?;
 
-                    // Build complete item with output
-                    let mut item_done = json!({
-                        "id": item_id,
-                        "type": item_type,
-                        "name": tool_output.tool_name,
-                        "status": "completed",
-                        "arguments": tool_output.arguments_str,
-                        "output": output_str
-                    });
-                    attach_mcp_server_label(
-                        &mut item_done,
-                        Some(tool_output.server_label.as_str()),
-                        Some(&response_format),
-                    );
+                        let mut item_done = json!({
+                            "id": item_id,
+                            "type": item_type,
+                            "name": tool_output.tool_name,
+                            "status": "completed",
+                            "arguments": tool_output.arguments_str,
+                            "output": output_str
+                        });
+                        attach_mcp_server_label(
+                            &mut item_done,
+                            Some(tool_output.server_label.as_str()),
+                            Some(&response_format),
+                        );
 
-                    // Emit output_item.done
-                    let event = emitter.emit_output_item_done(output_index, &item_done);
-                    emitter.send_event(&event, &tx)?;
-                    emitter.complete_output_item(output_index);
-                } else {
-                    let err_text = tool_output
-                        .error_message
-                        .clone()
-                        .unwrap_or_else(|| output_str.clone());
-                    warn!("Tool execution returned error: {}", err_text);
+                        let event = emitter.emit_output_item_done(output_index, &item_done);
+                        emitter.send_event(&event, &tx)?;
+                        emitter.complete_output_item(output_index);
+                    } else {
+                        let err_text = tool_output
+                            .error_message
+                            .clone()
+                            .unwrap_or_else(|| output_str.clone());
+                        warn!("Tool execution returned error: {}", err_text);
 
-                    // Emit mcp_call.failed (no web_search_call.failed event exists)
-                    let event = emitter.emit_mcp_call_failed(output_index, &item_id, &err_text);
-                    emitter.send_event(&event, &tx)?;
+                        let event = emitter.emit_mcp_call_failed(output_index, &item_id, &err_text);
+                        emitter.send_event(&event, &tx)?;
 
-                    // Build failed item
-                    let mut item_done = json!({
-                        "id": item_id,
-                        "type": item_type,
-                        "name": tool_output.tool_name,
-                        "status": "failed",
-                        "arguments": tool_output.arguments_str,
-                        "error": err_text
-                    });
-                    attach_mcp_server_label(
-                        &mut item_done,
-                        Some(tool_output.server_label.as_str()),
-                        Some(&response_format),
-                    );
+                        let mut item_done = json!({
+                            "id": item_id,
+                            "type": item_type,
+                            "name": tool_output.tool_name,
+                            "status": "failed",
+                            "arguments": tool_output.arguments_str,
+                            "error": err_text
+                        });
+                        attach_mcp_server_label(
+                            &mut item_done,
+                            Some(tool_output.server_label.as_str()),
+                            Some(&response_format),
+                        );
 
-                    // Emit output_item.done
-                    let event = emitter.emit_output_item_done(output_index, &item_done);
-                    emitter.send_event(&event, &tx)?;
-                    emitter.complete_output_item(output_index);
+                        let event = emitter.emit_output_item_done(output_index, &item_done);
+                        emitter.send_event(&event, &tx)?;
+                        emitter.complete_output_item(output_index);
+                    }
                 }
 
                 // Record MCP tool metrics
@@ -793,17 +795,25 @@ async fn execute_tool_loop_streaming_internal(
                 );
 
                 // Use the centralized tool output transformer from MCP crate output type.
-                let output_item = tool_output.to_response_item();
+                if is_internal {
+                    state.record_internal_call(
+                        tool_output.call_id,
+                        tool_output.tool_name,
+                        tool_output.arguments_str,
+                        output_str,
+                    );
+                } else {
+                    let output_item = tool_output.to_response_item();
 
-                // Record the call in state with transformed output item
-                state.record_call(
-                    tool_output.call_id,
-                    tool_output.tool_name,
-                    tool_output.arguments_str,
-                    output_str,
-                    output_item,
-                    success,
-                );
+                    state.record_call(
+                        tool_output.call_id,
+                        tool_output.tool_name,
+                        tool_output.arguments_str,
+                        output_str,
+                        output_item,
+                        success,
+                    );
+                }
             }
 
             // If there are function tool calls, emit events and exit MCP loop

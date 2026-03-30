@@ -80,6 +80,7 @@ pub async fn connect_mcp_servers(
                 tools: None,
                 builtin_type: None,
                 builtin_tool_name: None,
+                internal: false,
             };
 
             let server_key = McpOrchestrator::server_key(&server_config);
@@ -236,6 +237,21 @@ pub async fn ensure_mcp_servers(
         }
     }
 
+    // Add internal servers (auto-injected, hidden from response)
+    for server_name in orchestrator.internal_server_names() {
+        if !mcp_servers.iter().any(|b| b.server_key == server_name) {
+            debug!(
+                server = %server_name,
+                "Adding internal server (hidden from response)"
+            );
+            mcp_servers.push(McpServerBinding {
+                label: server_name.clone(),
+                server_key: server_name,
+                allowed_tools: None,
+            });
+        }
+    }
+
     if mcp_servers.is_empty() {
         None
     } else {
@@ -309,6 +325,7 @@ mod tests {
                 tools: Some(tools_config),
                 builtin_type: Some(BuiltinToolType::WebSearchPreview),
                 builtin_tool_name: Some("web_search".to_string()),
+                internal: false,
             }],
             pool: Default::default(),
             proxy: None,
@@ -449,6 +466,7 @@ mod tests {
                     tools: Some(web_search_tools),
                     builtin_type: Some(BuiltinToolType::WebSearchPreview),
                     builtin_tool_name: Some("web_search".to_string()),
+                    internal: false,
                 },
                 McpServerConfig {
                     name: "code-server".to_string(),
@@ -462,6 +480,7 @@ mod tests {
                     tools: Some(code_interp_tools),
                     builtin_type: Some(BuiltinToolType::CodeInterpreter),
                     builtin_tool_name: Some("run_code".to_string()),
+                    internal: false,
                 },
             ],
             pool: Default::default(),

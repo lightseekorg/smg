@@ -1,6 +1,6 @@
 //! Streaming tool call handling for MCP interception.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use openai_protocol::event_types::{
     is_function_call_type, FunctionCallEvent, OutputItemEvent, ResponseEvent,
@@ -101,6 +101,8 @@ pub(crate) struct StreamingToolHandler {
     output_index_mapper: OutputIndexMapper,
     /// Original response id captured from the first response.created event
     pub original_response_id: Option<String>,
+    /// Output indices of internal tool calls whose events should be suppressed.
+    internal_output_indices: HashSet<usize>,
 }
 
 impl StreamingToolHandler {
@@ -110,7 +112,18 @@ impl StreamingToolHandler {
             pending_calls: Vec::new(),
             output_index_mapper: OutputIndexMapper::with_start(start),
             original_response_id: None,
+            internal_output_indices: HashSet::new(),
         }
+    }
+
+    /// Mark an output_index as belonging to an internal (hidden) tool call.
+    pub fn mark_internal_output_index(&mut self, output_index: usize) {
+        self.internal_output_indices.insert(output_index);
+    }
+
+    /// Check if an output_index belongs to an internal tool call.
+    pub fn is_internal_output_index(&self, output_index: usize) -> bool {
+        self.internal_output_indices.contains(&output_index)
     }
 
     pub fn ensure_output_index(&mut self, upstream_index: usize) -> usize {

@@ -57,13 +57,23 @@ use crate::{
     },
 };
 
+/// Result of applying event transformations.
+pub(super) enum EventTransformResult {
+    /// No changes were made to the event.
+    Unchanged,
+    /// The event was modified in place.
+    Changed,
+    /// The event should be suppressed (not sent to the client).
+    /// Used for internal tool calls that must be hidden from the response.
+    Suppress,
+}
+
 /// Apply all transformations to event data in-place (rewrite + transform)
 /// Optimized to parse JSON only once instead of multiple times
-/// Returns true if any changes were made
 pub(super) fn apply_event_transformations_inplace(
     parsed_data: &mut Value,
     ctx: &StreamingEventContext<'_>,
-) -> bool {
+) -> EventTransformResult {
     let mut changed = false;
 
     // 1. Apply rewrite_streaming_block logic (store, previous_response_id, tools masking)
@@ -136,6 +146,11 @@ pub(super) fn apply_event_transformations_inplace(
                             .unwrap_or("")
                             .to_string();
 
+                        // Suppress events for internal tool calls
+                        if ctx.session.is_some_and(|s| s.is_internal_tool(&tool_name)) {
+                            return EventTransformResult::Suppress;
+                        }
+
                         // Only transform if this is an MCP tool; keep function_call unchanged
                         if let Some(session) =
                             ctx.session.filter(|s| s.has_exposed_tool(&tool_name))
@@ -184,7 +199,11 @@ pub(super) fn apply_event_transformations_inplace(
         _ => {}
     }
 
-    changed
+    if changed {
+        EventTransformResult::Changed
+    } else {
+        EventTransformResult::Unchanged
+    }
 }
 
 /// Helper to build MCP tools value
@@ -352,6 +371,30 @@ pub(super) fn forward_streaming_event(
         return true;
     }
 
+    // Detect and suppress events for internal tool calls.
+    // When an output_item.added event arrives for a function_call, check if
+    // the tool belongs to an internal server and mark the output_index.
+    if let Some(output_index) = extract_output_index(&parsed_data) {
+        if let Some(session) = ctx.session {
+            if matches!(event_type, OutputItemEvent::ADDED | OutputItemEvent::DONE) {
+                if let Some(item) = parsed_data.get("item") {
+                    if let Some(item_type) = item.get("type").and_then(|v| v.as_str()) {
+                        if is_function_call_type(item_type) {
+                            let tool_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            if session.is_internal_tool(tool_name) {
+                                handler.mark_internal_output_index(output_index);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Suppress all events for internal tool output indices
+        if handler.is_internal_output_index(output_index) {
+            return true; // Silently skip
+        }
+    }
+
     // Handle function_call_arguments.done - send buffered args first
     let mut mapped_output_index: Option<usize> = None;
     if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
@@ -375,7 +418,10 @@ pub(super) fn forward_streaming_event(
         parsed_data["output_index"] = json!(mapped);
     }
 
-    apply_event_transformations_inplace(&mut parsed_data, ctx);
+    let transform_result = apply_event_transformations_inplace(&mut parsed_data, ctx);
+    if matches!(transform_result, EventTransformResult::Suppress) {
+        return true; // Silently skip
+    }
 
     if let Some(response_obj) = parsed_data
         .get_mut("response")
@@ -1039,11 +1085,12 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         }
     };
 
-    // Check for MCP tools and create request context if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
+    // Check for MCP tools and create request context if needed.
+    // Also enters the tool interception path when internal servers are configured,
+    // even if the user did not request any MCP tools.
+    let mcp_servers = {
+        let tools = original_body.tools.as_deref().unwrap_or(&[]);
         ensure_request_mcp_client(&mcp_orchestrator, tools).await
-    } else {
-        None
     };
 
     let client = ctx.components.client().clone();

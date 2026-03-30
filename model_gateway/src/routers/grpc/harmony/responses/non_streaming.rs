@@ -219,6 +219,7 @@ async fn execute_with_mcp_loop(
                         usage,
                         request_id,
                         Arc::new(response_request),
+                        Some(&session),
                     );
 
                     // Mark as completed with incomplete_details
@@ -268,6 +269,7 @@ async fn execute_with_mcp_loop(
                         usage,
                         request_id,
                         Arc::new(response_request),
+                        Some(&session),
                     );
 
                     // Inject MCP metadata for all executed calls
@@ -360,6 +362,7 @@ async fn execute_without_mcp_loop(
                 usage,
                 request_id,
                 Arc::new(current_request),
+                None,
             ))
         }
         ResponsesIterationResult::Completed { response, usage: _ } => {
@@ -381,6 +384,7 @@ fn build_tool_response(
     usage: Usage,
     request_id: String,
     responses_request: Arc<ResponsesRequest>,
+    session: Option<&McpToolSession<'_>>,
 ) -> ResponsesResponse {
     let mut output: Vec<ResponseOutputItem> = Vec::new();
 
@@ -412,6 +416,9 @@ fn build_tool_response(
 
     // Add MCP tool calls WITH output (these were executed)
     for (tool_call, result) in mcp_tool_calls.iter().zip(mcp_results.iter()) {
+        if session.is_some_and(|s| s.is_internal_tool(&tool_call.function.name)) {
+            continue;
+        }
         let output_str = to_string(&result.output)
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize tool output: {e}\"}}"));
 
@@ -432,6 +439,9 @@ fn build_tool_response(
 
     // Add function tool calls WITHOUT output (need caller execution)
     for tool_call in function_tool_calls {
+        if session.is_some_and(|s| s.is_internal_tool(&tool_call.function.name)) {
+            continue;
+        }
         let call_id = tool_call.id.clone();
         let arguments = tool_call.function.arguments.unwrap_or_default();
         output.push(ResponseOutputItem::FunctionToolCall {

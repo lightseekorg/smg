@@ -72,11 +72,10 @@ pub(super) async fn execute_mcp_tools(
     let results: Vec<ToolResult> = outputs
         .into_iter()
         .map(|output| {
-            // Transform to correctly-typed ResponseOutputItem
-            let output_item = output.to_response_item();
-
-            // Record this call in tracking
-            tracking.record_call(output_item.clone());
+            if !session.is_internal_tool(&output.tool_name) {
+                let output_item = output.to_response_item();
+                tracking.record_call(output_item);
+            }
 
             // Record MCP tool metrics
             Metrics::record_mcp_tool_duration(model_id, &output.tool_name, output.duration);

@@ -920,6 +920,30 @@ impl McpOrchestrator {
         names
     }
 
+    /// Returns the names of servers marked as `internal: true`.
+    ///
+    /// Internal servers have their tools auto-injected into requests,
+    /// but tool calls and results are hidden from the final response.
+    pub fn internal_server_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+
+        // Check connected static servers first
+        for entry in &self.static_servers {
+            if entry.config.internal {
+                names.push(entry.config.name.clone());
+            }
+        }
+
+        // Also check initial config (covers not-yet-connected servers and tests)
+        for server_config in &self.config.servers {
+            if server_config.internal && !names.contains(&server_config.name) {
+                names.push(server_config.name.clone());
+            }
+        }
+
+        names
+    }
+
     /// Execute a single tool using an already-resolved qualified binding.
     ///
     /// This path does not perform tool-name reverse lookup. Callers must provide
@@ -2356,6 +2380,7 @@ mod tests {
                 tools: None,
                 builtin_type: Some(BuiltinToolType::WebSearchPreview),
                 builtin_tool_name: Some("brave_web_search".to_string()),
+                internal: false,
             }],
             ..Default::default()
         };
@@ -2425,6 +2450,7 @@ mod tests {
                 tools: Some(tools),
                 builtin_type: Some(BuiltinToolType::WebSearchPreview),
                 builtin_tool_name: Some("my_search".to_string()),
+                internal: false,
             }],
             ..Default::default()
         };
@@ -2496,6 +2522,7 @@ mod tests {
                 tools: None, // No explicit tool config
                 builtin_type: Some(BuiltinToolType::WebSearchPreview),
                 builtin_tool_name: Some("brave_search".to_string()),
+                internal: false,
             }],
             ..Default::default()
         };
@@ -2573,6 +2600,7 @@ mod tests {
                 tools: Some(tools),
                 builtin_type: Some(BuiltinToolType::WebSearchPreview),
                 builtin_tool_name: Some("brave_search".to_string()),
+                internal: false,
             }],
             ..Default::default()
         };

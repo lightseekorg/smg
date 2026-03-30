@@ -656,6 +656,10 @@ impl HarmonyStreamingProcessor {
                                     .map(|n| n.as_str())
                                     .unwrap_or("");
 
+                                if session.is_some_and(|s| s.is_internal_tool(tool_name)) {
+                                    continue;
+                                }
+
                                 // Determine response_format based on MCP context.
                                 let response_format = session.and_then(|s| {
                                     if s.has_exposed_tool(tool_name) {

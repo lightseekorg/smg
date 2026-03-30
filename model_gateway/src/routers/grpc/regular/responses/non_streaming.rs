@@ -8,7 +8,9 @@
 use std::sync::Arc;
 
 use axum::response::Response;
-use openai_protocol::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse};
+use openai_protocol::responses::{
+    ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse,
+};
 use serde_json::json;
 use smg_mcp::{McpServerBinding, McpToolSession, ToolExecutionInput};
 use tracing::{debug, error, trace, warn};
@@ -234,6 +236,8 @@ pub(super) async fn execute_tool_loop(
                 );
             }
 
+            strip_internal_tool_calls(&mut responses_response, &session);
+
             return Ok(responses_response);
         } else {
             state.iteration += 1;
@@ -281,6 +285,9 @@ pub(super) async fn execute_tool_loop(
                     )
                 })?;
 
+                let mut responses_response = responses_response;
+                strip_internal_tool_calls(&mut responses_response, &session);
+
                 // Return response with function tool calls to caller
                 return Ok(responses_response);
             }
@@ -324,6 +331,7 @@ pub(super) async fn execute_tool_loop(
                 // Mark as completed but with incomplete details
                 responses_response.status = ResponseStatus::Completed;
                 responses_response.incomplete_details = Some(json!({ "reason": "max_tool_calls" }));
+                strip_internal_tool_calls(&mut responses_response, &session);
 
                 return Ok(responses_response);
             }
@@ -370,14 +378,23 @@ pub(super) async fn execute_tool_loop(
                 // Record the call in state with transformed output item
                 let output_item = result.to_response_item();
                 let output_str = result.output.to_string();
-                state.record_call(
-                    result.call_id,
-                    result.tool_name,
-                    result.arguments_str,
-                    output_str,
-                    output_item,
-                    !result.is_error,
-                );
+                if session.is_internal_tool(&result.tool_name) {
+                    state.record_internal_call(
+                        result.call_id,
+                        result.tool_name,
+                        result.arguments_str,
+                        output_str,
+                    );
+                } else {
+                    state.record_call(
+                        result.call_id,
+                        result.tool_name,
+                        result.arguments_str,
+                        output_str,
+                        output_item,
+                        !result.is_error,
+                    );
+                }
 
                 // Increment total calls counter
                 state.total_calls += 1;
@@ -389,4 +406,16 @@ pub(super) async fn execute_tool_loop(
             // Continue to next iteration
         }
     }
+}
+
+fn strip_internal_tool_calls(
+    responses_response: &mut ResponsesResponse,
+    session: &McpToolSession<'_>,
+) {
+    responses_response.output.retain(|item| {
+        !matches!(
+            item,
+            ResponseOutputItem::FunctionToolCall { name, .. } if session.is_internal_tool(name)
+        )
+    });
 }

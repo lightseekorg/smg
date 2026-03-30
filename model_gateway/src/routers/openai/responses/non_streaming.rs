@@ -57,11 +57,12 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         }
     };
 
-    // Check for MCP tools and create session if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
+    // Check for MCP tools and create session if needed.
+    // Also enters the agent loop when internal servers are configured,
+    // even if the user did not request any MCP tools.
+    let mcp_servers = {
+        let tools = original_body.tools.as_deref().unwrap_or(&[]);
         ensure_request_mcp_client(mcp_orchestrator, tools).await
-    } else {
-        None
     };
 
     let mut response_json: Value;

@@ -63,13 +63,15 @@ struct ExposedToolBinding {
 pub struct McpToolSession<'a> {
     orchestrator: &'a McpOrchestrator,
     request_ctx: McpRequestContext<'a>,
-    /// All MCP servers in this session (including builtin).
+    /// All MCP servers in this session (including builtin and internal).
     all_mcp_servers: Vec<McpServerBinding>,
-    /// Non-builtin MCP servers only — used for `mcp_list_tools` output.
+    /// Non-builtin, non-internal MCP servers — used for `mcp_list_tools` output.
     mcp_servers: Vec<McpServerBinding>,
     mcp_tools: Vec<ToolEntry>,
     exposed_name_map: HashMap<String, ExposedToolBinding>,
     exposed_name_by_qualified: HashMap<QualifiedToolName, String>,
+    /// Server keys of internal servers (hidden from response output).
+    internal_server_keys: HashSet<String>,
 }
 
 impl<'a> McpToolSession<'a> {
@@ -116,11 +118,16 @@ impl<'a> McpToolSession<'a> {
         let (exposed_name_map, exposed_name_by_qualified) =
             Self::build_exposed_function_tools(&mcp_tools, &mcp_servers);
 
-        // Filter out servers configured with builtin_type from the visible list.
+        // Filter out builtin and internal servers from the visible list.
         let builtin_names = orchestrator.builtin_server_names();
+        let internal_names = orchestrator.internal_server_names();
+        let internal_server_keys: HashSet<String> = internal_names.into_iter().collect();
         let visible_mcp_servers: Vec<McpServerBinding> = mcp_servers
             .iter()
-            .filter(|b| !builtin_names.contains(&b.server_key))
+            .filter(|b| {
+                !builtin_names.contains(&b.server_key)
+                    && !internal_server_keys.contains(&b.server_key)
+            })
             .cloned()
             .collect();
 
@@ -132,6 +139,7 @@ impl<'a> McpToolSession<'a> {
             mcp_tools,
             exposed_name_map,
             exposed_name_by_qualified,
+            internal_server_keys,
         }
     }
 
@@ -162,6 +170,22 @@ impl<'a> McpToolSession<'a> {
     /// Returns true if the name is exposed to the model for this session.
     pub fn has_exposed_tool(&self, tool_name: &str) -> bool {
         self.exposed_name_map.contains_key(tool_name)
+    }
+
+    /// Returns true if the tool belongs to an internal (hidden) server.
+    ///
+    /// Internal tool calls are executed normally but stripped from
+    /// the response output sent to the client.
+    pub fn is_internal_tool(&self, tool_name: &str) -> bool {
+        self.exposed_name_map
+            .get(tool_name)
+            .map(|binding| self.internal_server_keys.contains(&binding.server_key))
+            .unwrap_or(false)
+    }
+
+    /// Returns true if the given server key is an internal server.
+    pub fn is_internal_server(&self, server_key: &str) -> bool {
+        self.internal_server_keys.contains(server_key)
     }
 
     /// Returns the session's qualified-name -> exposed-name mapping.
@@ -664,6 +688,7 @@ mod tests {
                     tools: None,
                     builtin_type: Some(BuiltinToolType::WebSearchPreview),
                     builtin_tool_name: Some("brave_web_search".to_string()),
+                    internal: false,
                 },
                 McpServerConfig {
                     name: "regular-server".to_string(),
@@ -677,6 +702,7 @@ mod tests {
                     tools: None,
                     builtin_type: None,
                     builtin_tool_name: None,
+                    internal: false,
                 },
             ],
             ..Default::default()

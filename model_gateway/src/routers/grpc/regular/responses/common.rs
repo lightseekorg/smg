@@ -64,7 +64,29 @@ impl ToolLoopState {
         output_item: ResponseOutputItem,
         _success: bool,
     ) {
-        // Add function_tool_call item with both arguments and output
+        self.push_conversation_history(call_id, tool_name, args_json_str, output_str);
+
+        // Add transformed output item (respects tool's response_format)
+        self.mcp_call_items.push(output_item);
+    }
+
+    pub fn record_internal_call(
+        &mut self,
+        call_id: String,
+        tool_name: String,
+        args_json_str: String,
+        output_str: String,
+    ) {
+        self.push_conversation_history(call_id, tool_name, args_json_str, output_str);
+    }
+
+    fn push_conversation_history(
+        &mut self,
+        call_id: String,
+        tool_name: String,
+        args_json_str: String,
+        output_str: String,
+    ) {
         let id = call_id.clone();
         self.conversation_history
             .push(ResponseInputOutputItem::FunctionToolCall {
@@ -75,9 +97,6 @@ impl ToolLoopState {
                 output: Some(output_str),
                 status: Some("completed".to_string()),
             });
-
-        // Add transformed output item (respects tool's response_format)
-        self.mcp_call_items.push(output_item);
     }
 }
 

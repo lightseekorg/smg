@@ -50,40 +50,39 @@ pub(crate) async fn ensure_mcp_connection(
         })
         .unwrap_or(false);
 
-    // Only process if we have MCP or builtin tools
-    if !has_explicit_mcp_tools && !has_builtin_tools {
+    // Also check for internal servers that should be auto-injected
+    let has_internal_servers = !mcp_orchestrator.internal_server_names().is_empty();
+
+    // Only process if we have MCP, builtin, or internal tools
+    if !has_explicit_mcp_tools && !has_builtin_tools && !has_internal_servers {
         return Ok((false, Vec::new()));
     }
 
-    if let Some(tools) = tools {
-        match ensure_request_mcp_client(mcp_orchestrator, tools).await {
-            Some(mcp_servers) => {
-                return Ok((true, mcp_servers));
-            }
-            None => {
-                // No MCP servers available
-                if has_explicit_mcp_tools {
-                    // Explicit MCP tools MUST have working connections
-                    error!(
-                        function = "ensure_mcp_connection",
-                        "Failed to connect to MCP servers"
-                    );
-                    return Err(error::failed_dependency(
-                        "connect_mcp_server_failed",
-                        "Failed to connect to MCP servers. Check server_url and authorization.",
-                    ));
-                }
-                // Builtin tools without MCP routing - pass through to model
+    let tools_slice = tools.unwrap_or(&[]);
+    match ensure_request_mcp_client(mcp_orchestrator, tools_slice).await {
+        Some(mcp_servers) => Ok((true, mcp_servers)),
+        None => {
+            // No MCP servers available
+            if has_explicit_mcp_tools {
+                // Explicit MCP tools MUST have working connections
+                error!(
+                    function = "ensure_mcp_connection",
+                    "Failed to connect to MCP servers"
+                );
+                Err(error::failed_dependency(
+                    "connect_mcp_server_failed",
+                    "Failed to connect to MCP servers. Check server_url and authorization.",
+                ))
+            } else {
+                // Builtin/internal tools without MCP routing - pass through to model
                 debug!(
                     function = "ensure_mcp_connection",
                     "No MCP routing configured for builtin tools, passing through to model"
                 );
-                return Ok((false, Vec::new()));
+                Ok((false, Vec::new()))
             }
         }
     }
-
-    Ok((false, Vec::new()))
 }
 
 /// Validate that workers are available for the requested model

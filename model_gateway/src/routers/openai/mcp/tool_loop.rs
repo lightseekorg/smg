@@ -67,6 +67,32 @@ impl ToolLoopState {
         output_str: String,
         transformed_item: Value,
     ) {
+        self.push_conversation_history(&call_id, &tool_name, &args_json_str, &output_str);
+        self.mcp_call_items.push(transformed_item);
+    }
+
+    /// Record an internal (hidden) tool call.
+    ///
+    /// The call is added to conversation_history so the LLM can see the
+    /// result in subsequent turns, but it is NOT added to mcp_call_items
+    /// so it will not appear in the response output sent to the client.
+    pub fn record_internal_call(
+        &mut self,
+        call_id: String,
+        tool_name: String,
+        args_json_str: String,
+        output_str: String,
+    ) {
+        self.push_conversation_history(&call_id, &tool_name, &args_json_str, &output_str);
+    }
+
+    fn push_conversation_history(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        args_json_str: &str,
+        output_str: &str,
+    ) {
         let func_item = json!({
             "type": ItemType::FUNCTION_CALL,
             "call_id": call_id,
@@ -81,8 +107,6 @@ impl ToolLoopState {
             "output": output_str
         });
         self.conversation_history.push(output_item);
-
-        self.mcp_call_items.push(transformed_item);
     }
 }
 
@@ -116,6 +140,7 @@ pub(crate) async fn execute_streaming_tool_calls(
             &call.arguments_buffer
         };
 
+        let is_internal = session.is_internal_tool(&call.name);
         let response_format = session.tool_response_format(&call.name);
         let server_label = session.resolve_tool_server_label(&call.name);
 
@@ -125,29 +150,44 @@ pub(crate) async fn execute_streaming_tool_calls(
                 let err_str = format!("Failed to parse tool arguments: {e}");
                 warn!("{}", err_str);
                 let error_output = json!({ "error": &err_str });
-                let mcp_call_item = build_transformed_mcp_call_item(
-                    &error_output,
-                    &response_format,
-                    &call.call_id,
-                    &server_label,
-                    &call.name,
-                    &call.arguments_buffer,
-                );
-                if !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number) {
-                    return false;
+
+                if is_internal {
+                    // Internal tools: record but don't send events to client
+                    state.record_internal_call(
+                        call.call_id,
+                        call.name,
+                        call.arguments_buffer,
+                        error_output.to_string(),
+                    );
+                } else {
+                    let mcp_call_item = build_transformed_mcp_call_item(
+                        &error_output,
+                        &response_format,
+                        &call.call_id,
+                        &server_label,
+                        &call.name,
+                        &call.arguments_buffer,
+                    );
+                    if !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number)
+                    {
+                        return false;
+                    }
+                    state.record_call(
+                        call.call_id,
+                        call.name,
+                        call.arguments_buffer,
+                        error_output.to_string(),
+                        mcp_call_item,
+                    );
                 }
-                state.record_call(
-                    call.call_id,
-                    call.name,
-                    call.arguments_buffer,
-                    error_output.to_string(),
-                    mcp_call_item,
-                );
                 continue;
             }
         };
 
-        if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
+        // Internal tools: execute silently without sending SSE events
+        if !is_internal
+            && !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number)
+        {
             return false;
         }
 
@@ -172,22 +212,28 @@ pub(crate) async fn execute_streaming_tool_calls(
         );
 
         let output_str = tool_output.output.to_string();
-        let mcp_call_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
-            warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
-            json!({})
-        });
 
-        if !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number) {
-            return false;
+        if is_internal {
+            // Internal tools: record to conversation_history only
+            state.record_internal_call(call.call_id, call.name, call.arguments_buffer, output_str);
+        } else {
+            let mcp_call_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
+                warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
+                json!({})
+            });
+
+            if !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number) {
+                return false;
+            }
+
+            state.record_call(
+                call.call_id,
+                call.name,
+                call.arguments_buffer,
+                output_str,
+                mcp_call_item,
+            );
         }
-
-        state.record_call(
-            call.call_id,
-            call.name,
-            call.arguments_buffer,
-            output_str,
-            mcp_call_item,
-        );
     }
     true
 }
@@ -472,7 +518,19 @@ pub(crate) fn inject_mcp_metadata_streaming(
 
     if let Some(output_array) = response.get_mut("output").and_then(|v| v.as_array_mut()) {
         output_array.retain(|item| {
-            item.get("type").and_then(|t| t.as_str()) != Some(ItemType::MCP_LIST_TOOLS)
+            let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            // Remove mcp_list_tools (will be re-added below)
+            if item_type == ItemType::MCP_LIST_TOOLS {
+                return false;
+            }
+            // Remove function_call items for internal tools
+            if is_function_call_type(item_type) {
+                let tool_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if session.is_internal_tool(tool_name) {
+                    return false;
+                }
+            }
+            true
         });
 
         let mut prefix = Vec::with_capacity(mcp_servers.len() + state.mcp_call_items.len());
@@ -580,22 +638,13 @@ pub(crate) async fn execute_tool_loop(
                     original_body,
                 );
             }
+            let is_internal = session.is_internal_tool(&call.name);
+
             let arguments: Value = match serde_json::from_str(&call.arguments) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(tool = %call.name, error = %e, "Failed to parse tool arguments as JSON");
                     let error_output = format!("Invalid tool arguments: {e}");
-                    let response_format = session.tool_response_format(&call.name);
-                    let server_label = session.resolve_tool_server_label(&call.name);
-                    let error_json = json!({ "error": &error_output });
-                    let transformed_item = build_transformed_mcp_call_item(
-                        &error_json,
-                        &response_format,
-                        &call.call_id,
-                        &server_label,
-                        &call.name,
-                        &call.arguments,
-                    );
 
                     Metrics::record_mcp_tool_call(
                         &original_body.model,
@@ -603,13 +652,33 @@ pub(crate) async fn execute_tool_loop(
                         metrics_labels::RESULT_ERROR,
                     );
 
-                    state.record_call(
-                        call.call_id,
-                        call.name,
-                        call.arguments,
-                        error_output,
-                        transformed_item,
-                    );
+                    if is_internal {
+                        state.record_internal_call(
+                            call.call_id,
+                            call.name,
+                            call.arguments,
+                            error_output,
+                        );
+                    } else {
+                        let response_format = session.tool_response_format(&call.name);
+                        let server_label = session.resolve_tool_server_label(&call.name);
+                        let error_json = json!({ "error": &error_output });
+                        let transformed_item = build_transformed_mcp_call_item(
+                            &error_json,
+                            &response_format,
+                            &call.call_id,
+                            &server_label,
+                            &call.name,
+                            &call.arguments,
+                        );
+                        state.record_call(
+                            call.call_id,
+                            call.name,
+                            call.arguments,
+                            error_output,
+                            transformed_item,
+                        );
+                    }
                     continue;
                 }
             };
@@ -642,18 +711,23 @@ pub(crate) async fn execute_tool_loop(
             );
 
             let output_str = tool_output.output.to_string();
-            let transformed_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
-                warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
-                json!({})
-            });
 
-            state.record_call(
-                call.call_id,
-                call.name,
-                call.arguments,
-                output_str,
-                transformed_item,
-            );
+            if is_internal {
+                state.record_internal_call(call.call_id, call.name, call.arguments, output_str);
+            } else {
+                let transformed_item =
+                    to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
+                        warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
+                        json!({})
+                    });
+                state.record_call(
+                    call.call_id,
+                    call.name,
+                    call.arguments,
+                    output_str,
+                    transformed_item,
+                );
+            }
         }
 
         current_payload = build_resume_payload(
@@ -690,12 +764,17 @@ fn build_incomplete_response(
 
     // Convert any function_call in output to mcp_call format
     if let Some(output_array) = obj.get_mut("output").and_then(|v| v.as_array_mut()) {
-        // Find any function_call items and convert them to mcp_call (incomplete)
+        // Find any function_call items and convert them to mcp_call (incomplete),
+        // skipping internal tools which should be hidden from the response.
         let mut incomplete_items = Vec::new();
         for item in output_array.iter() {
             let item_type = item.get("type").and_then(|t| t.as_str());
             if item_type.is_some_and(is_function_call_type) {
                 let tool_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                // Skip internal tools — they should not appear in the response
+                if session.is_internal_tool(tool_name) {
+                    continue;
+                }
                 let args = item
                     .get("arguments")
                     .and_then(|v| v.as_str())

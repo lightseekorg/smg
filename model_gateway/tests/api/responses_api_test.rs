@@ -218,6 +218,107 @@ async fn test_non_streaming_mcp_minimal_e2e_with_persistence() {
 }
 
 #[tokio::test]
+async fn test_non_streaming_internal_mcp_tools_are_hidden() {
+    let mut mcp = MockMCPServer::start().await.expect("start mcp");
+
+    let mcp_yaml = format!(
+        "servers:\n  - name: memory\n    protocol: streamable\n    url: {}\n    internal: true\n",
+        mcp.url()
+    );
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let cfg_path = dir.path().join("mcp.yaml");
+    std::fs::write(&cfg_path, mcp_yaml).expect("write mcp cfg");
+
+    let mut worker = MockWorker::new(MockWorkerConfig {
+        port: 0,
+        worker_type: WorkerType::Regular,
+        health_status: HealthStatus::Healthy,
+        response_delay_ms: 0,
+        fail_rate: 0.0,
+    });
+    let worker_url = worker.start().await.expect("start worker");
+
+    let router_cfg = RouterConfig::builder()
+        .openai_mode(vec![worker_url])
+        .random_policy()
+        .host("127.0.0.1")
+        .port(0)
+        .max_payload_size(8 * 1024 * 1024)
+        .request_timeout_secs(60)
+        .worker_startup_timeout_secs(5)
+        .worker_startup_check_interval_secs(1)
+        .log_level("warn")
+        .max_concurrent_requests(32)
+        .queue_timeout_secs(5)
+        .build_unchecked();
+
+    let ctx =
+        crate::common::create_test_context_with_mcp_config(router_cfg, cfg_path.to_str().unwrap())
+            .await;
+    let router = RouterFactory::create_router(&ctx).await.expect("router");
+
+    let req = ResponsesRequest {
+        background: Some(false),
+        include: None,
+        input: ResponseInput::Text("search something privately".to_string()),
+        instructions: Some("Use tools when useful".to_string()),
+        max_output_tokens: Some(64),
+        max_tool_calls: None,
+        metadata: None,
+        model: "mock-model".to_string(),
+        parallel_tool_calls: Some(true),
+        previous_response_id: None,
+        reasoning: None,
+        service_tier: Some(ServiceTier::Auto),
+        store: Some(false),
+        stream: Some(false),
+        temperature: Some(0.2),
+        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+        tools: None,
+        top_logprobs: Some(0),
+        top_p: None,
+        truncation: Some(Truncation::Disabled),
+        text: None,
+        user: None,
+        request_id: Some("resp_internal_hidden_non_streaming".to_string()),
+        priority: 0,
+        frequency_penalty: Some(0.0),
+        presence_penalty: Some(0.0),
+        stop: None,
+        top_k: -1,
+        min_p: 0.0,
+        repetition_penalty: 1.0,
+        conversation: None,
+    };
+
+    let resp = router.route_responses(None, &req, req.model.as_str()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read response body");
+    let body_json: serde_json::Value =
+        serde_json::from_slice(&body_bytes).expect("Failed to parse response JSON");
+
+    let output = body_json["output"]
+        .as_array()
+        .expect("output should be array");
+    assert!(
+        output.iter().all(|item| {
+            !matches!(
+                item.get("type").and_then(|value| value.as_str()),
+                Some("mcp_list_tools") | Some("mcp_call") | Some("function_call")
+            )
+        }),
+        "internal MCP tools should not appear in output: {}",
+        serde_json::to_string_pretty(&body_json).unwrap()
+    );
+
+    worker.stop().await;
+    mcp.stop().await;
+}
+
+#[tokio::test]
 async fn test_conversations_crud_basic() {
     // Router in OpenAI mode (no actual upstream calls in these tests)
     let router_cfg = RouterConfig::builder()
@@ -861,6 +962,57 @@ async fn setup_streaming_mcp_test() -> (
     (mcp, worker, router, dir)
 }
 
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
+async fn setup_streaming_internal_mcp_test() -> (
+    MockMCPServer,
+    MockWorker,
+    Box<dyn smg::routers::RouterTrait>,
+    tempfile::TempDir,
+) {
+    let mcp = MockMCPServer::start().await.expect("start mcp");
+    let mcp_yaml = format!(
+        "servers:\n  - name: memory\n    protocol: streamable\n    url: {}\n    internal: true\n",
+        mcp.url()
+    );
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let cfg_path = dir.path().join("mcp.yaml");
+    std::fs::write(&cfg_path, mcp_yaml).expect("write mcp cfg");
+
+    let mut worker = MockWorker::new(MockWorkerConfig {
+        port: 0,
+        worker_type: WorkerType::Regular,
+        health_status: HealthStatus::Healthy,
+        response_delay_ms: 0,
+        fail_rate: 0.0,
+    });
+    let worker_url = worker.start().await.expect("start worker");
+
+    let router_cfg = RouterConfig::builder()
+        .openai_mode(vec![worker_url])
+        .random_policy()
+        .host("127.0.0.1")
+        .port(0)
+        .max_payload_size(8 * 1024 * 1024)
+        .request_timeout_secs(60)
+        .worker_startup_timeout_secs(5)
+        .worker_startup_check_interval_secs(1)
+        .log_level("info")
+        .max_concurrent_requests(32)
+        .queue_timeout_secs(5)
+        .build_unchecked();
+
+    let ctx =
+        crate::common::create_test_context_with_mcp_config(router_cfg, cfg_path.to_str().unwrap())
+            .await;
+    let router = RouterFactory::create_router(&ctx).await.expect("router");
+
+    (mcp, worker, router, dir)
+}
+
 /// Parse SSE (Server-Sent Events) stream into structured events
 fn parse_sse_events(body: &str) -> Vec<(Option<String>, serde_json::Value)> {
     let mut events = Vec::new();
@@ -1177,6 +1329,110 @@ async fn test_streaming_with_mcp_tool_calls() {
     // Verify no error events
     let has_error = body_text.contains("event: error");
     assert!(!has_error, "Should not have error events");
+
+    worker.stop().await;
+    mcp.stop().await;
+}
+
+#[tokio::test]
+async fn test_streaming_internal_mcp_tools_are_hidden() {
+    let (mut mcp, mut worker, router, _dir) = setup_streaming_internal_mcp_test().await;
+
+    let req = ResponsesRequest {
+        background: Some(false),
+        include: None,
+        input: ResponseInput::Text("search for something private".to_string()),
+        instructions: Some("Use tools when needed".to_string()),
+        max_output_tokens: Some(256),
+        max_tool_calls: Some(3),
+        metadata: None,
+        model: "mock-model".to_string(),
+        parallel_tool_calls: Some(true),
+        previous_response_id: None,
+        reasoning: None,
+        service_tier: Some(ServiceTier::Auto),
+        store: Some(false),
+        stream: Some(true),
+        temperature: Some(0.7),
+        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+        tools: None,
+        top_logprobs: Some(0),
+        top_p: Some(1.0),
+        truncation: Some(Truncation::Disabled),
+        text: None,
+        user: None,
+        request_id: Some("resp_streaming_internal_hidden".to_string()),
+        priority: 0,
+        frequency_penalty: Some(0.0),
+        presence_penalty: Some(0.0),
+        stop: None,
+        top_k: 50,
+        min_p: 0.0,
+        repetition_penalty: 1.0,
+        conversation: None,
+    };
+
+    let response = router.route_responses(None, &req, req.model.as_str()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body_bytes);
+    let events = parse_sse_events(&body_text);
+
+    assert!(
+        body_text.contains("data: [DONE]"),
+        "stream should end with [DONE]"
+    );
+    assert!(
+        events.iter().all(|(_, data)| {
+            let event_type = data
+                .get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if matches!(
+                event_type,
+                "response.mcp_call.in_progress"
+                    | "response.mcp_call.completed"
+                    | "response.mcp_call_arguments.delta"
+                    | "response.mcp_call_arguments.done"
+                    | "response.mcp_list_tools.in_progress"
+                    | "response.mcp_list_tools.completed"
+            ) {
+                return false;
+            }
+
+            if matches!(
+                event_type,
+                "response.output_item.added" | "response.output_item.done"
+            ) {
+                return !matches!(
+                    data.get("item")
+                        .and_then(|item| item.get("type"))
+                        .and_then(|value| value.as_str()),
+                    Some("mcp_list_tools") | Some("mcp_call") | Some("function_call")
+                );
+            }
+
+            true
+        }),
+        "internal MCP SSE should be hidden: {body_text}"
+    );
+    assert!(
+        events.iter().any(
+            |(_, data)| data.get("type").and_then(|value| value.as_str())
+                == Some("response.completed")
+        ),
+        "stream should still complete successfully"
+    );
 
     worker.stop().await;
     mcp.stop().await;

@@ -212,6 +212,25 @@ pub struct McpServerConfig {
     /// to invoke (e.g., "brave_web_search", "execute", "search").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builtin_tool_name: Option<String>,
+
+    /// Mark this server as internal (hidden from user responses).
+    ///
+    /// Internal servers' tools are auto-injected into every request that
+    /// enters the agent loop, but their tool calls and results are stripped
+    /// from the final response sent to the client.
+    ///
+    /// Use this for gateway-managed capabilities (e.g., long-term memory)
+    /// that the LLM can invoke but the end user should not see.
+    ///
+    /// Example:
+    /// ```yaml
+    /// servers:
+    ///   - name: long-term-memory
+    ///     url: "http://localhost:8080/mcp"
+    ///     internal: true
+    /// ```
+    #[serde(default)]
+    pub internal: bool,
 }
 
 impl McpServerConfig {
@@ -1272,6 +1291,7 @@ servers:
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         };
 
         assert!(config.validate().is_ok());
@@ -1291,6 +1311,7 @@ servers:
             tools: None,
             builtin_type: Some(BuiltinToolType::WebSearchPreview),
             builtin_tool_name: Some("brave_web_search".to_string()),
+            internal: false,
         };
 
         assert!(config.validate().is_ok());
@@ -1310,6 +1331,7 @@ servers:
             tools: None,
             builtin_type: Some(BuiltinToolType::WebSearchPreview),
             builtin_tool_name: None, // Missing!
+            internal: false,
         };
 
         let err = config.validate().unwrap_err();
@@ -1335,6 +1357,7 @@ servers:
             tools: None,
             builtin_type: None, // Missing!
             builtin_tool_name: Some("brave_web_search".to_string()),
+            internal: false,
         };
 
         let err = config.validate().unwrap_err();
@@ -1362,6 +1385,7 @@ servers:
                     tools: None,
                     builtin_type: Some(BuiltinToolType::WebSearchPreview),
                     builtin_tool_name: Some("search".to_string()),
+                    internal: false,
                 },
                 McpServerConfig {
                     name: "code-runner".to_string(),
@@ -1375,6 +1399,7 @@ servers:
                     tools: None,
                     builtin_type: Some(BuiltinToolType::CodeInterpreter),
                     builtin_tool_name: Some("execute".to_string()),
+                    internal: false,
                 },
             ],
             ..Default::default()
@@ -1399,6 +1424,7 @@ servers:
                     tools: None,
                     builtin_type: Some(BuiltinToolType::WebSearchPreview),
                     builtin_tool_name: Some("search1".to_string()),
+                    internal: false,
                 },
                 McpServerConfig {
                     name: "brave2".to_string(),
@@ -1412,6 +1438,7 @@ servers:
                     tools: None,
                     builtin_type: Some(BuiltinToolType::WebSearchPreview), // Duplicate!
                     builtin_tool_name: Some("search2".to_string()),
+                    internal: false,
                 },
             ],
             ..Default::default()
