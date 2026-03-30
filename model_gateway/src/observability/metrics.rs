@@ -1,7 +1,6 @@
-use std::{borrow::Cow, sync::Arc, time::Duration};
-
 #[cfg(test)]
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::{borrow::Cow, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};

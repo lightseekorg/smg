@@ -55,8 +55,7 @@ use crate::{
     observability::{
         logging::{self, LoggingConfig},
         metrics::{self, PrometheusConfig},
-        metrics_server,
-        otel_trace,
+        metrics_server, otel_trace,
     },
     routers::{
         conversations,
