@@ -125,14 +125,7 @@ impl ConsistentHashRing {
 
             // Linear scan over a tiny array is much faster than HashSet lookups
             let node_str = node.as_str();
-            let mut already_seen = false;
-
-            for i in 0..seen_count {
-                if seen_nodes[i] == node_str {
-                    already_seen = true;
-                    break;
-                }
-            }
+            let already_seen = seen_nodes[..seen_count].contains(&node_str);
 
             if !already_seen && seen_count < NUM_OWNERS {
                 seen_nodes[seen_count] = node_str;
