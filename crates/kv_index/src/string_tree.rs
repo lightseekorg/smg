@@ -1039,6 +1039,14 @@ impl Tree {
     /// label + tenant list.  Shared prefixes are stored once — a tree
     /// with 2048 entries sharing 80% prefixes serializes to ~2-4 MB
     /// instead of ~40 MB as flat insert operations.
+    ///
+    /// # Concurrency
+    ///
+    /// This traversal is NOT atomic — concurrent `insert_text` calls may
+    /// split or replace nodes during the walk.  The per-node DashMap and
+    /// RwLock guards ensure individual reads are safe, but the snapshot
+    /// may reflect a mix of pre-split and post-split state.  This is
+    /// acceptable for mesh sync (eventual consistency).
     pub fn snapshot(&self) -> crate::snapshot::TreeSnapshot {
         let mut nodes = Vec::new();
         Self::snapshot_node(&self.root, &mut nodes);
@@ -1240,6 +1248,34 @@ impl Tree {
                     // Case 2: local edge is a prefix of remote edge.
                     // Descend into local child. The remote child's edge
                     // has a remainder that maps to a deeper level.
+                    //
+                    // First, merge remote tenants into local_child (the prefix node).
+                    // The remote tenant owns the full path including this prefix.
+                    for entry in &remote_child.tenant_last_access_time {
+                        let tid = Arc::clone(entry.key());
+                        let epoch = *entry.value();
+                        let is_new = !local_child
+                            .tenant_last_access_time
+                            .contains_key(tid.as_ref());
+                        let should_update = local_child
+                            .tenant_last_access_time
+                            .get(tid.as_ref())
+                            .map(|e| epoch > *e)
+                            .unwrap_or(true);
+                        if should_update {
+                            local_child
+                                .tenant_last_access_time
+                                .insert(Arc::clone(&tid), epoch);
+                            if is_new {
+                                let edge_chars = local_edge.chars().count();
+                                tenant_counts
+                                    .entry(tid)
+                                    .and_modify(|c| *c += edge_chars)
+                                    .or_insert(edge_chars);
+                            }
+                        }
+                    }
+
                     let remote_remainder = advance_by_chars(&remote_edge, shared);
                     let Some(rem_first) = remote_remainder.chars().next() else {
                         continue;
@@ -1286,7 +1322,10 @@ impl Tree {
                         text.split_at_char(shared)
                     };
 
-                    let local_remainder_first = local_remainder_text.first_char().unwrap_or('\0');
+                    // Case 3 guarantees shared < local_edge, so remainder is non-empty.
+                    let Some(local_remainder_first) = local_remainder_text.first_char() else {
+                        continue;
+                    };
 
                     // Create the split node (intermediate).
                     // Tenants: union of local and remote at the shared prefix.
@@ -1297,17 +1336,30 @@ impl Tree {
                         parent: RwLock::new(Some(Arc::downgrade(local))),
                         last_tenant: RwLock::new(local_child.last_tenant.read().clone()),
                     });
-                    // Union remote tenants into the split node
+                    // Union remote tenants into the split node, updating
+                    // tenant_char_count for newly added tenants.
+                    let split_chars = shared;
                     for entry in &remote_child.tenant_last_access_time {
                         let tid = Arc::clone(entry.key());
                         let epoch = *entry.value();
+                        let is_new = !split_node
+                            .tenant_last_access_time
+                            .contains_key(tid.as_ref());
                         let should_update = split_node
                             .tenant_last_access_time
                             .get(tid.as_ref())
                             .map(|e| epoch > *e)
                             .unwrap_or(true);
                         if should_update {
-                            split_node.tenant_last_access_time.insert(tid, epoch);
+                            split_node
+                                .tenant_last_access_time
+                                .insert(Arc::clone(&tid), epoch);
+                            if is_new {
+                                tenant_counts
+                                    .entry(tid)
+                                    .and_modify(|c| *c += split_chars)
+                                    .or_insert(split_chars);
+                            }
                         }
                     }
 
