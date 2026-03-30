@@ -108,9 +108,8 @@ impl ConsistentHashRing {
             && seen_count < total_unique_nodes
             && iterations < max_iterations
         {
-            iterations += 1;
-
             let node = if let Some((_, node)) = iter.next() {
+                iterations += 1;
                 node
             } else {
                 // Reached the end of the ring, wrap around
