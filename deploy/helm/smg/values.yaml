@@ -23,6 +23,14 @@ router:
   # -- Enable IGW (Inference Gateway) mode for multi-model support
   enableIgw: false
 
+  # -- Mesh HA (multi-gateway synchronization)
+  #    Requires replicas > 1. Converts Deployment to StatefulSet for
+  #    stable pod names used in mesh peer discovery.
+  mesh:
+    enabled: false
+    port: 39527               # mesh gossip port
+    # peerUrls: []            # auto-generated from StatefulSet pod DNS
+
   # -- Explicit worker URLs
   workerUrls: []
   #   - http://worker-1:8000

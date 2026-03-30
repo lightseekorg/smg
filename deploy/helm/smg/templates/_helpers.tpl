@@ -81,12 +81,46 @@ Called from the router Deployment template.
 {{- if .Values.router.enableIgw }}
 - "--enable-igw"
 {{- end }}
+{{- if .Values.router.mesh.enabled }}
+- "--enable-mesh"
+- "--mesh-host"
+- "$(POD_IP)"
+- "--mesh-port"
+- {{ .Values.router.mesh.port | quote }}
+- "--mesh-server-name"
+- "$(POD_NAME)"
+{{- if .Values.router.mesh.peerUrls }}
+{{- range .Values.router.mesh.peerUrls }}
+- "--mesh-peer-urls"
+- {{ . | quote }}
+{{- end }}
+{{- else }}
+{{/* Use K8s service discovery to find other router pods by label.
+     Each router pod is annotated with the mesh port so peers can connect.
+     This avoids the SocketAddr limitation that prevents DNS hostnames
+     in --mesh-peer-urls. */}}
+- "--service-discovery"
+- "--selector"
+- "app.kubernetes.io/instance={{ .Release.Name }}"
+- "app.kubernetes.io/component=worker"
+- "--router-selector"
+- "app.kubernetes.io/component=router"
+- "--service-discovery-namespace"
+- {{ .Release.Namespace | quote }}
+{{- if .Values.workers }}
+{{- $firstWorker := index .Values.workers 0 }}
+{{- $workerDefaults := index .Values.engineDefaults $firstWorker.engine }}
+- "--service-discovery-port"
+- {{ $firstWorker.port | default $workerDefaults.port | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if .Values.router.workerUrls }}
 - "--worker-urls"
 {{- range .Values.router.workerUrls }}
 - {{ . | quote }}
 {{- end }}
-{{- else if and .Values.workers (not .Values.router.serviceDiscovery.enabled) }}
+{{- else if and .Values.workers (not .Values.router.serviceDiscovery.enabled) (not (and .Values.router.mesh.enabled (not .Values.router.mesh.peerUrls))) }}
 - "--worker-urls"
 {{- range $i, $worker := .Values.workers }}
 {{- $defaults := index $.Values.engineDefaults $worker.engine }}

@@ -1,5 +1,9 @@
 apiVersion: apps/v1
+{{- if .Values.router.mesh.enabled }}
+kind: StatefulSet
+{{- else }}
 kind: Deployment
+{{- end }}
 metadata:
   name: {{ include "smg.fullname" . }}-router
   labels:
@@ -9,16 +13,23 @@ spec:
   {{- if not .Values.router.autoscaling.enabled }}
   replicas: {{ .Values.router.replicas }}
   {{- end }}
+  {{- if .Values.router.mesh.enabled }}
+  serviceName: {{ include "smg.fullname" . }}-router-headless
+  podManagementPolicy: Parallel
+  {{- end }}
   selector:
     matchLabels:
       {{- include "smg.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: router
   template:
     metadata:
-      {{- with .Values.router.podAnnotations }}
       annotations:
+        {{- if .Values.router.mesh.enabled }}
+        sglang.ai/mesh-port: {{ .Values.router.mesh.port | quote }}
+        {{- end }}
+        {{- with .Values.router.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "smg.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: router
@@ -44,6 +55,11 @@ spec:
             - name: metrics
               containerPort: {{ .Values.router.metrics.port }}
               protocol: TCP
+            {{- if .Values.router.mesh.enabled }}
+            - name: mesh
+              containerPort: {{ .Values.router.mesh.port }}
+              protocol: TCP
+            {{- end }}
           {{- with .Values.router.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
@@ -67,6 +83,16 @@ spec:
           env:
             - name: HF_HOME
               value: /tmp/hf-cache
+            {{- if .Values.router.mesh.enabled }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            {{- end }}
             {{- if .Values.huggingface.token }}
             - name: HF_TOKEN
               valueFrom:
