@@ -1245,26 +1245,36 @@ impl Tree {
                         continue;
                     };
 
-                    // Create a virtual remote child with the trimmed edge
+                    // Create a virtual remote node with the trimmed edge.
+                    // Use clone_subtree for children to rewrite parent pointers.
                     let trimmed_remote = Arc::new(Node {
-                        children: remote_child.children.clone(),
+                        children: new_children_map(),
                         text: RwLock::new(NodeText::new(remote_remainder.to_string())),
                         tenant_last_access_time: remote_child.tenant_last_access_time.clone(),
                         parent: RwLock::new(None),
                         last_tenant: RwLock::new(remote_child.last_tenant.read().clone()),
                     });
+                    for child_entry in &remote_child.children {
+                        let child_clone =
+                            Self::clone_subtree(child_entry.value(), Some(&trimmed_remote));
+                        trimmed_remote
+                            .children
+                            .insert(*child_entry.key(), child_clone);
+                    }
 
                     if let Some(deeper_local) = local_child.children.get(&rem_first) {
                         let deeper_local = deeper_local.value().clone();
                         // Recurse: merge trimmed remote into the deeper local child
                         Self::merge_nodes(&deeper_local, &trimmed_remote, tenant_counts);
                     } else {
-                        // No local child at this position — insert remote subtree
+                        // No local child at this position — graft remote subtree
                         *trimmed_remote.parent.write() = Some(Arc::downgrade(&local_child));
+                        Self::accumulate_tenant_counts(&trimmed_remote, tenant_counts);
                         local_child.children.insert(rem_first, trimmed_remote);
                     }
                 } else {
-                    // Case 3: shared prefix shorter than both edges.
+                    // Case 3: shared prefix shorter than at least one edge.
+                    // Covers both "shorter than both" and "remote is prefix of local".
                     // Split local node at the shared prefix point,
                     // then attach remote remainder as a sibling.
 
@@ -1327,6 +1337,7 @@ impl Tree {
                                 .children
                                 .insert(*child_entry.key(), child_clone);
                         }
+                        Self::accumulate_tenant_counts(&remote_subtree, tenant_counts);
                         split_node.children.insert(rem_first, remote_subtree);
                     }
 
@@ -1336,8 +1347,27 @@ impl Tree {
             } else {
                 // No local child at this char — copy entire remote subtree
                 let cloned = Self::clone_subtree(&remote_child, Some(local));
+                Self::accumulate_tenant_counts(&cloned, tenant_counts);
                 local.children.insert(rc, cloned);
             }
+        }
+    }
+
+    /// Walk a subtree and accumulate tenant char counts into the
+    /// tree-level `tenant_char_count` map.  Called after grafting a
+    /// remote subtree into the local tree so that size tracking and
+    /// eviction remain correct.
+    fn accumulate_tenant_counts(node: &NodeRef, tenant_counts: &DashMap<TenantId, usize>) {
+        let edge_chars = node.text.read().char_count();
+        for entry in &node.tenant_last_access_time {
+            let tid = Arc::clone(entry.key());
+            tenant_counts
+                .entry(tid)
+                .and_modify(|c| *c += edge_chars)
+                .or_insert(edge_chars);
+        }
+        for child_entry in &node.children {
+            Self::accumulate_tenant_counts(child_entry.value(), tenant_counts);
         }
     }
 
