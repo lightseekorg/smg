@@ -453,10 +453,10 @@ jobs:
         include:
           - engine: sglang
             timeout: 15
-            runner: 1-gpu
+            runner: 1-gpu-h100
           - engine: vllm
             timeout: 15
-            runner: 1-gpu
+            runner: 1-gpu-h100
           - engine: trtllm
             timeout: 90
             runner: 1-gpu-h100
