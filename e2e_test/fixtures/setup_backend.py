@@ -48,6 +48,15 @@ _worker_start_failures: dict[str, int] = {}  # engine -> count
 _MAX_WORKER_START_FAILURES = 3  # fail fast after this many failures (matches --reruns 2)
 
 
+def _start_workers_tracked(engine: str, **kwargs) -> list:
+    """Start workers and track failures by engine for fail-fast."""
+    try:
+        return start_workers(**kwargs)
+    except (TimeoutError, RuntimeError):
+        _worker_start_failures[engine] = _worker_start_failures.get(engine, 0) + 1
+        raise
+
+
 def _start_gateway(gateway: Gateway, gateway_config: dict, **mode_kwargs) -> None:
     """Start gateway with mode-specific kwargs and shared config."""
     gateway.start(
@@ -169,17 +178,14 @@ def _setup_local(
     num_workers = workers_config.get("count") or 1
     logger.info("Starting %s backend: model=%s, workers=%d", backend_name, model_id, num_workers)
 
-    try:
-        workers = start_workers(
-            model_id,
-            engine=engine,
-            mode=connection_mode,
-            count=num_workers,
-            log_dir=log_dir,
-        )
-    except (TimeoutError, RuntimeError):
-        _worker_start_failures[engine] = _worker_start_failures.get(engine, 0) + 1
-        raise
+    workers = _start_workers_tracked(
+        engine,
+        model_id=model_id,
+        engine=engine,
+        mode=connection_mode,
+        count=num_workers,
+        log_dir=log_dir,
+    )
     try:
         _start_gateway(
             gateway,
@@ -227,35 +233,29 @@ def _setup_pd(
 
     all_workers: list = []
     try:
-        try:
-            prefill_workers = start_workers(
-                model_id,
-                engine=engine,
-                mode=connection_mode,
-                count=num_prefill,
-                worker_type=WorkerType.PREFILL,
-                log_dir=log_dir,
-            )
-        except (TimeoutError, RuntimeError):
-            _worker_start_failures[engine] = _worker_start_failures.get(engine, 0) + 1
-            raise
+        prefill_workers = _start_workers_tracked(
+            engine,
+            model_id=model_id,
+            engine=engine,
+            mode=connection_mode,
+            count=num_prefill,
+            worker_type=WorkerType.PREFILL,
+            log_dir=log_dir,
+        )
         all_workers.extend(prefill_workers)
 
         # Decode workers start on GPUs after prefill workers
         decode_gpu_offset = num_prefill * spec.get("tp", 1)
-        try:
-            decode_workers = start_workers(
-                model_id,
-                engine=engine,
-                mode=connection_mode,
-                count=num_decode,
-                worker_type=WorkerType.DECODE,
-                log_dir=log_dir,
-                gpu_offset=decode_gpu_offset,
-            )
-        except (TimeoutError, RuntimeError):
-            _worker_start_failures[engine] = _worker_start_failures.get(engine, 0) + 1
-            raise
+        decode_workers = _start_workers_tracked(
+            engine,
+            model_id=model_id,
+            engine=engine,
+            mode=connection_mode,
+            count=num_decode,
+            worker_type=WorkerType.DECODE,
+            log_dir=log_dir,
+            gpu_offset=decode_gpu_offset,
+        )
         all_workers.extend(decode_workers)
 
         _start_gateway(
