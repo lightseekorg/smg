@@ -2549,9 +2549,7 @@ mod tests {
 
         // Flat ops would be 100 × 10000 chars = ~1 MB
         // Snapshot should be much smaller (shared prefix stored once)
-        let flat_size: usize = (0..100)
-            .map(|i| format!("{prefix}_{i}").len())
-            .sum();
+        let flat_size: usize = (0..100).map(|i| format!("{prefix}_{i}").len()).sum();
 
         assert!(
             snap_bytes.len() < flat_size / 2,
