@@ -34,23 +34,14 @@ download_model() {
     local model_dir="${HF_HOME}/hub/models--${model_id//\//--}"
     local lock_file="${LOCK_DIR}/${model_id//\//_}.lock"
 
-    # Fast path: model already fully downloaded (has snapshots)
-    if [ -d "${model_dir}/snapshots" ] && [ -n "$(ls -A "${model_dir}/snapshots/" 2>/dev/null)" ]; then
-        echo "Model ${model_id} already cached, skipping download."
-        return 0
-    fi
-
     echo "Acquiring lock for ${model_id}..."
     (
         # Serialize downloads across pods sharing the same volume
         flock -w 1800 200 || { echo "ERROR: Timed out waiting for lock on ${model_id}"; exit 1; }
 
-        # Re-check after acquiring lock (another pod may have finished downloading)
-        if [ -d "${model_dir}/snapshots" ] && [ -n "$(ls -A "${model_dir}/snapshots/" 2>/dev/null)" ]; then
-            echo "Model ${model_id} was downloaded by another process, skipping."
-            exit 0
-        fi
-
+        # Let huggingface-cli handle its own cache detection — it verifies file
+        # integrity and skips already-complete downloads. We don't check snapshots/
+        # ourselves because a killed download can leave it partially populated.
         echo "Downloading ${model_id} to ${HF_HOME}..."
         local attempt=0
         while [ $attempt -lt $MAX_RETRIES ]; do
