@@ -16,7 +16,28 @@ use super::otel_trace::get_otel_layer;
 use crate::config::TraceConfig;
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
-const DEFAULT_LOG_TARGET: &str = "smg";
+
+/// All workspace crate names (hyphens → underscores to match tracing targets).
+/// When no explicit log targets are configured, these crates get the configured
+/// log level while all external deps default to WARN.
+///
+/// Update this list when adding a new workspace crate.
+const WORKSPACE_CRATES: &[&str] = &[
+    "data_connector",
+    "kv_index",
+    "llm_multimodal",
+    "llm_tokenizer",
+    "openai_protocol",
+    "reasoning_parser",
+    "smg",
+    "smg_auth",
+    "smg_grpc_client",
+    "smg_mcp",
+    "smg_mesh",
+    "smg_wasm",
+    "tool_parser",
+    "wfaas",
+];
 
 #[derive(Debug, Clone)]
 pub struct LoggingConfig {
@@ -37,7 +58,7 @@ impl Default for LoggingConfig {
             log_dir: None,
             colorize: true,
             log_file_name: "smg".to_string(),
-            log_targets: Some(vec![DEFAULT_LOG_TARGET.to_string()]),
+            log_targets: None, // None = use workspace crate filter
         }
     }
 }
@@ -78,6 +99,28 @@ fn build_filter_string(targets: &[String], level_filter: &str) -> String {
     filter_string
 }
 
+/// Build a filter string that sets all workspace crates to the given level
+/// and defaults everything else to WARN.
+///
+/// Example output: `"warn,smg=info,tool_parser=info,kv_index=info,..."`
+#[inline]
+fn build_workspace_filter(level_filter: &str) -> String {
+    // "warn," prefix + each crate entry
+    let capacity = 5 + WORKSPACE_CRATES
+        .iter()
+        .map(|c| c.len() + 1 + level_filter.len() + 1) // "crate=level,"
+        .sum::<usize>();
+    let mut filter = String::with_capacity(capacity);
+    filter.push_str("warn");
+    for crate_name in WORKSPACE_CRATES {
+        filter.push(',');
+        filter.push_str(crate_name);
+        filter.push('=');
+        filter.push_str(level_filter);
+    }
+    filter
+}
+
 pub fn init_logging(config: LoggingConfig, otel_layer_config: Option<TraceConfig>) -> LogGuard {
     let _ = LogTracer::init();
 
@@ -87,12 +130,10 @@ pub fn init_logging(config: LoggingConfig, otel_layer_config: Option<TraceConfig
         let filter_string = match &config.log_targets {
             Some(targets) if !targets.is_empty() => build_filter_string(targets, level_filter),
             _ => {
-                let mut s =
-                    String::with_capacity(DEFAULT_LOG_TARGET.len() + 1 + level_filter.len());
-                s.push_str(DEFAULT_LOG_TARGET);
-                s.push('=');
-                s.push_str(level_filter);
-                s
+                // Default: external deps at WARN, all workspace crates at configured level.
+                // This ensures logs from imported crates (tool_parser, kv_index, etc.)
+                // are visible while suppressing noisy external deps (hyper, h2, tonic, etc.).
+                build_workspace_filter(level_filter)
             }
         };
 

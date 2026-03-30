@@ -125,6 +125,8 @@ def make_prompt(pad_to: int = 0) -> str:
 
 
 _prompt_pad_size = 0
+_model_name = "mock-model"
+_gateway_host = "127.0.0.1"
 
 
 _retry_timeout = 0.0  # seconds; 0 = no retry
@@ -136,7 +138,7 @@ async def send_request(
 ):
     prompt = make_prompt(pad_to=_prompt_pad_size)
     payload = {
-        "model": "mock-model",
+        "model": _model_name,
         "messages": [{"role": "user", "content": prompt}],
         "stream": True,
     }
@@ -175,7 +177,7 @@ async def run_load(
     rps: int,
     duration: int,
 ):
-    urls = [f"http://127.0.0.1:{p}/v1/chat/completions" for p in gateway_ports]
+    urls = [f"http://{_gateway_host}:{p}/v1/chat/completions" for p in gateway_ports]
 
     stats = {"success": 0, "errors": 0, "retries": 0, "total_latency": 0.0}
     interval = 1.0 / rps if rps > 0 else 0.01
@@ -256,13 +258,27 @@ def main():
         default=3,
         help="Max retries per request when --retry-timeout is set (default: 3)",
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="mock-model",
+        help="Model name to use in requests (default: mock-model)",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Gateway host (default: 127.0.0.1)",
+    )
     args = parser.parse_args()
 
     ports = [int(p) for p in args.gateway_ports.split(",")]
-    global _prompt_pad_size, _retry_timeout, _max_retries
+    global _prompt_pad_size, _retry_timeout, _max_retries, _model_name, _gateway_host
     _prompt_pad_size = args.prompt_size
     _retry_timeout = args.retry_timeout
     _max_retries = args.max_retries
+    _model_name = args.model
+    _gateway_host = args.host
     asyncio.run(run_load(ports, args.rps, args.duration))
 
 
