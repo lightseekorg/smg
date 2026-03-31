@@ -53,17 +53,16 @@ impl SseEncoder {
 
     /// Encode `event: {type}\ndata: {json}\n\n` (Anthropic/Responses format).
     ///
-    /// # Panics (debug only)
-    /// Panics if `event_type` contains newline characters, which would break SSE framing.
+    /// Returns `Err(SseEncodeError::InvalidEventType)` if `event_type` contains
+    /// newline characters, which would break SSE framing.
     pub fn encode_event<T: Serialize>(
         &mut self,
         event_type: &str,
         value: &T,
-    ) -> Result<Bytes, serde_json::Error> {
-        debug_assert!(
-            !event_type.contains(['\r', '\n']),
-            "event_type must not contain newlines: {event_type:?}"
-        );
+    ) -> Result<Bytes, SseEncodeError> {
+        if event_type.contains(['\r', '\n']) {
+            return Err(SseEncodeError::InvalidEventType);
+        }
         self.buf.clear();
         self.buf.extend_from_slice(b"event: ");
         self.buf.extend_from_slice(event_type.as_bytes());
@@ -82,6 +81,41 @@ impl SseEncoder {
 impl Default for SseEncoder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Errors that can occur during SSE encoding.
+#[derive(Debug)]
+pub enum SseEncodeError {
+    /// The event type contains newline characters, which would break SSE framing.
+    InvalidEventType,
+    /// JSON serialization failed.
+    Json(serde_json::Error),
+}
+
+impl std::fmt::Display for SseEncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SseEncodeError::InvalidEventType => {
+                write!(f, "event_type must not contain newline characters")
+            }
+            SseEncodeError::Json(e) => write!(f, "JSON serialization error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SseEncodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SseEncodeError::Json(e) => Some(e),
+            SseEncodeError::InvalidEventType => None,
+        }
+    }
+}
+
+impl From<serde_json::Error> for SseEncodeError {
+    fn from(e: serde_json::Error) -> Self {
+        SseEncodeError::Json(e)
     }
 }
 
@@ -147,7 +181,14 @@ impl std::fmt::Display for SseDecodeError {
     }
 }
 
-impl std::error::Error for SseDecodeError {}
+impl std::error::Error for SseDecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SseDecodeError::InvalidUtf8(e) => Some(e),
+            SseDecodeError::BufferOverflow => None,
+        }
+    }
+}
 
 impl SseDecoder {
     pub fn new() -> Self {
@@ -183,21 +224,25 @@ impl SseDecoder {
     /// Returns borrowed references into the internal buffer.
     /// Call in a loop until `None`, then call `compact()`.
     pub fn next_frame(&mut self) -> Option<Result<SseFrame<'_>, SseDecodeError>> {
-        let remaining = &self.buf[self.consumed..];
-        let (pos, delim_len) = find_frame_boundary(remaining)?;
-        let frame_bytes = &remaining[..pos];
+        loop {
+            let remaining = &self.buf[self.consumed..];
+            let (pos, delim_len) = find_frame_boundary(remaining)?;
+            let frame_bytes = &remaining[..pos];
 
-        let frame_str = match std::str::from_utf8(frame_bytes) {
-            Ok(s) => s,
-            Err(e) => {
-                self.consumed += pos + delim_len;
-                return Some(Err(SseDecodeError::InvalidUtf8(e)));
+            let frame_str = match std::str::from_utf8(frame_bytes) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.consumed += pos + delim_len;
+                    return Some(Err(SseDecodeError::InvalidUtf8(e)));
+                }
+            };
+
+            self.consumed += pos + delim_len;
+            if let Some(frame) = parse_frame(frame_str) {
+                return Some(Ok(frame));
             }
-        };
-
-        let result = parse_frame(frame_str);
-        self.consumed += pos + delim_len;
-        Some(Ok(result))
+            // Control-only block (comment, event-only, id/retry) — skip it
+        }
     }
 
     /// Compact: shift unconsumed bytes to front. Call after draining frames.
@@ -228,7 +273,7 @@ impl SseDecoder {
             return None;
         }
         self.consumed = self.buf.len();
-        Some(Ok(parse_frame(frame_str.trim_end_matches(['\r', '\n']))))
+        parse_frame(frame_str.trim_end_matches(['\r', '\n'])).map(Ok)
     }
 
     /// Unconsumed byte count (for DoS monitoring).
@@ -251,7 +296,7 @@ impl Default for SseDecoder {
 ///
 /// Use this when you already have a complete SSE block as a string (e.g. from
 /// an accumulator or rewrite path) and don't need the full [`SseDecoder`] machinery.
-pub fn parse_block(block: &str) -> SseFrame<'_> {
+pub fn parse_block(block: &str) -> Option<SseFrame<'_>> {
     parse_frame(block.trim_end_matches(['\r', '\n']))
 }
 
@@ -352,10 +397,11 @@ fn split_sse_lines(s: &str) -> impl Iterator<Item = &str> {
 ///
 /// Per the SSE spec, each line is split at the first colon to determine
 /// the field name and value. A single leading space after the colon is stripped.
-fn parse_frame(frame: &str) -> SseFrame<'_> {
+fn parse_frame(frame: &str) -> Option<SseFrame<'_>> {
     let mut event_type: Option<&str> = None;
     let mut first_data: Option<&str> = None;
     let mut extra_data: Option<Vec<&str>> = None;
+    let mut saw_data = false;
 
     for line in split_sse_lines(frame) {
         if line.is_empty() || line.starts_with(':') {
@@ -369,17 +415,24 @@ fn parse_frame(frame: &str) -> SseFrame<'_> {
         };
 
         match field {
-            "data" => match first_data {
-                None => first_data = Some(value),
-                Some(_) => {
-                    extra_data.get_or_insert_with(Vec::new).push(value);
+            "data" => {
+                saw_data = true;
+                match first_data {
+                    None => first_data = Some(value),
+                    Some(_) => extra_data.get_or_insert_with(Vec::new).push(value),
                 }
-            },
+            }
             "event" => {
                 event_type = Some(value);
             }
             _ => {} // id, retry, etc. — silently ignored
         }
+    }
+
+    // Per SSE spec: blocks without data lines (comments, event-only, id/retry)
+    // should be silently skipped, not surfaced as empty frames.
+    if !saw_data {
+        return None;
     }
 
     let data = match (first_data, extra_data) {
@@ -398,7 +451,7 @@ fn parse_frame(frame: &str) -> SseFrame<'_> {
         }
     };
 
-    SseFrame { event_type, data }
+    Some(SseFrame { event_type, data })
 }
 
 // ============================================================================
@@ -607,9 +660,18 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_empty_data() {
+    fn test_decode_event_only_block_skipped() {
+        // Per SSE spec, blocks without data lines are control-only and should be skipped
         let mut dec = SseDecoder::new();
         dec.push(b"event: ping\n\n").unwrap();
+        assert!(dec.next_frame().is_none());
+    }
+
+    #[test]
+    fn test_decode_empty_data_value() {
+        // A block with an explicit `data:` line (empty value) IS a valid frame
+        let mut dec = SseDecoder::new();
+        dec.push(b"event: ping\ndata:\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
         assert_eq!(frame.event_type, Some("ping"));
         assert_eq!(frame.data.as_ref(), "");
@@ -697,11 +759,8 @@ mod tests {
     fn test_decode_flush_whitespace_only() {
         let mut dec = SseDecoder::new();
         dec.push(b"  \n  ").unwrap();
-        // flush trims trailing newlines but not spaces — this still has content
-        // after trim_end_matches for \r\n, so parse_frame sees "  \n  " trimmed to "  \n  "
-        // parse_frame will see empty lines and return empty data
-        let frame = dec.flush().unwrap().unwrap();
-        assert_eq!(frame.data.as_ref(), "");
+        // No data: lines, so this is a control-only block — flush returns None
+        assert!(dec.flush().is_none());
     }
 
     #[test]
@@ -766,14 +825,11 @@ mod tests {
     fn test_decode_empty_lines_between_fields() {
         let mut dec = SseDecoder::new();
         dec.push(b"event: test\n\ndata: value\n\n").unwrap();
-        // First frame: just event, no data
-        let f1 = dec.next_frame().unwrap().unwrap();
-        assert_eq!(f1.event_type, Some("test"));
-        assert_eq!(f1.data.as_ref(), "");
-        drop(f1);
-        // Second frame: just data
-        let f2 = dec.next_frame().unwrap().unwrap();
-        assert_eq!(f2.data.as_ref(), "value");
+        // First block (event: test) has no data line — skipped per SSE spec
+        // Second block (data: value) is returned as the first frame
+        let frame = dec.next_frame().unwrap().unwrap();
+        assert_eq!(frame.data.as_ref(), "value");
+        assert_eq!(frame.event_type, None);
     }
 
     // --- Roundtrip tests ---
@@ -858,48 +914,46 @@ mod tests {
 
     #[test]
     fn test_parse_frame_basic() {
-        let frame = parse_frame("event: message_start\ndata: {\"type\":\"message_start\"}");
+        let frame = parse_frame("event: message_start\ndata: {\"type\":\"message_start\"}").unwrap();
         assert_eq!(frame.event_type, Some("message_start"));
         assert_eq!(frame.data.as_ref(), "{\"type\":\"message_start\"}");
     }
 
     #[test]
     fn test_parse_frame_data_only() {
-        let frame = parse_frame("data: hello");
+        let frame = parse_frame("data: hello").unwrap();
         assert_eq!(frame.event_type, None);
         assert_eq!(frame.data.as_ref(), "hello");
     }
 
     #[test]
     fn test_parse_frame_empty() {
-        let frame = parse_frame("");
-        assert_eq!(frame.event_type, None);
-        assert_eq!(frame.data.as_ref(), "");
+        assert!(parse_frame("").is_none());
     }
 
     #[test]
     fn test_parse_frame_multiline_data() {
-        let frame = parse_frame("data: line1\ndata: line2");
+        let frame = parse_frame("data: line1\ndata: line2").unwrap();
         assert_eq!(frame.data.as_ref(), "line1\nline2");
     }
 
     #[test]
     fn test_parse_frame_comment_only() {
-        let frame = parse_frame(": heartbeat");
-        assert_eq!(frame.event_type, None);
-        assert_eq!(frame.data.as_ref(), "");
+        // Comment-only blocks have no data line — should return None
+        assert!(parse_frame(": heartbeat").is_none());
     }
 
     #[test]
     fn test_parse_frame_field_without_colon() {
-        let frame = parse_frame("data");
+        // "data" with no colon = field name "data", empty value — still has a data line
+        let frame = parse_frame("data").unwrap();
         assert_eq!(frame.data.as_ref(), "");
     }
 
     #[test]
     fn test_parse_frame_bare_cr_lines() {
         // Lines separated by bare \r — str::lines() would fail here
-        let frame = parse_frame("event: ping\rdata: {}");
+        let frame = parse_frame("event: ping\rdata: {}").unwrap();
         assert_eq!(frame.event_type, Some("ping"));
         assert_eq!(frame.data.as_ref(), "{}");
     }
