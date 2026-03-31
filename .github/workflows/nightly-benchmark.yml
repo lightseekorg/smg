@@ -217,7 +217,7 @@ jobs:
 
       - name: Cleanup
         if: always() && steps.filter.outputs.skip != 'true'
-        run: bash scripts/ci_killall_sglang.sh || true
+        run: bash scripts/ci_killall_sglang.sh "nuk_gpus" || true
 
   # ---------------------------------------------------------------------------
   # Multi-worker (H100): one model per job on k8s H100 runners.
@@ -330,7 +330,7 @@ jobs:
 
       - name: Cleanup
         if: always() && steps.filter.outputs.skip != 'true'
-        run: bash scripts/ci_killall_sglang.sh || true
+        run: bash scripts/ci_killall_sglang.sh "nuk_gpus" || true
 
   # ---------------------------------------------------------------------------
   # Single-worker (H200): models requiring 8-gpu-h200 runners.
@@ -450,7 +450,7 @@ jobs:
 
       - name: Cleanup
         if: always() && steps.filter.outputs.skip != 'true'
-        run: bash scripts/ci_killall_sglang.sh || true
+        run: bash scripts/ci_killall_sglang.sh "nuk_gpus" || true
 
   # ---------------------------------------------------------------------------
   # Multi-worker (H200): models requiring 8-gpu-h200 runners.
