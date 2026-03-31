@@ -517,7 +517,7 @@ class TestToolCallingCloud:
 
 
 @pytest.mark.engine("sglang", "vllm", "trtllm")
-@pytest.mark.gpu(1)
+@pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
@@ -634,7 +634,6 @@ class TestToolChoiceGptOss:
             ),
             tools=tools,
             tool_choice="auto",
-            max_tool_calls=5,
             stream=False,
         )
 
@@ -655,7 +654,6 @@ class TestToolChoiceGptOss:
             input="Search for information about Python",
             tools=tools,
             tool_choice={"type": "function", "function": {"name": "local_search"}},
-            max_tool_calls=5,
             stream=False,
         )
 
@@ -1010,7 +1008,6 @@ class TestToolChoiceLocal:
             ),
             tools=tools,
             tool_choice="auto",
-            max_tool_calls=5,
             stream=False,
         )
 
@@ -1031,7 +1028,6 @@ class TestToolChoiceLocal:
             input="Search for information about Python",
             tools=tools,
             tool_choice={"type": "function", "function": {"name": "local_search"}},
-            max_tool_calls=5,
             stream=False,
         )
 

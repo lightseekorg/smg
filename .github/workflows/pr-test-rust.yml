@@ -520,7 +520,27 @@ jobs:
 
   # === 2 GPU ===
 
-  # e2e-2gpu-chat removed: no gpu(2) chat tests remain
+  e2e-2gpu-chat:
+    name: e2e-2gpu-chat (${{ matrix.engine }})
+    needs: [e2e-1gpu-chat]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sglang
+            timeout: 20
+          - engine: vllm
+            timeout: 20
+          - engine: trtllm
+            timeout: 30
+    uses: ./.github/workflows/e2e-gpu-job.yml
+    with:
+      engine: ${{ matrix.engine }}
+      gpu_tier: "2"
+      runner: 2-gpu-h100
+      timeout: ${{ matrix.timeout }}
+      test_dirs: e2e_test/chat_completions
+    secrets: inherit
 
   e2e-2gpu-responses:
     needs: [build-wheel, detect-changes]
@@ -887,7 +907,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-responses, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-2gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-4gpu-gateway, e2e-vendor, go-unit-tests, go-bindings-e2e]
+    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-responses, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-2gpu-chat, e2e-2gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-4gpu-gateway, e2e-vendor, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -905,6 +925,7 @@ jobs:
                 "${{ needs.e2e-1gpu-responses.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-embeddings.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-gateway.result }}" == "failure" || \
+                "${{ needs.e2e-2gpu-chat.result }}" == "failure" || \
                 "${{ needs.e2e-2gpu-responses.result }}" == "failure" || \
                 "${{ needs.e2e-2gpu-pd.result }}" == "failure" || \
                 "${{ needs.e2e-4gpu-chat.result }}" == "failure" || \
