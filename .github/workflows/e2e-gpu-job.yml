@@ -120,7 +120,7 @@ jobs:
           E2E_LOG_DIR: e2e-logs
           BRAVE_MCP_HOST: ${{ inputs.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          bash scripts/ci_killall_sglang.sh "nuke_gpus"
           pytest ${{ inputs.test_dirs }} \
             --ignore=e2e_test/benchmarks \
             --ignore=e2e_test/bindings_go \
@@ -135,7 +135,7 @@ jobs:
 
       - name: Upload worker logs
         if: failure() || cancelled()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${{ steps.log-label.outputs.label }}
           path: e2e-logs/
