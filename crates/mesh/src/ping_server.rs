@@ -1082,7 +1082,9 @@ impl Gossip for GossipService {
                                                                                 );
                                                                             }
                                                                         } else {
-                                                                            stores.tree_configs.insert(key, policy_state.config.clone());
+                                                                            // No sync manager — store bytes and advance version.
+                                                                            stores.tree_configs.insert(key.clone(), policy_state.config.clone());
+                                                                            stores.advance_tree_version(&key, policy_state.version);
                                                                         }
                                                                     } else if policy_state.policy_type == "tree_state" {
                                                                         // Old format: backward compatible — convert to snapshot before storing
@@ -1107,7 +1109,8 @@ impl Gossip for GossipService {
                                                                                 }
                                                                             }
                                                                             if let Ok(snap_bytes) = tree.snapshot().to_bytes() {
-                                                                                stores.tree_configs.insert(key, snap_bytes);
+                                                                                stores.tree_configs.insert(key.clone(), snap_bytes);
+                                                                                stores.advance_tree_version(&key, policy_state.version);
                                                                             }
                                                                         }
                                                                     } else {

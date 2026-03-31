@@ -309,6 +309,10 @@ impl IncrementalUpdateCollector {
                                 }
                                 _ => kv_index::Tree::new(),
                             };
+                            // Only Insert(Text) ops are materialized into the snapshot.
+                            // Remove ops and Insert(Tokens) are intentionally skipped —
+                            // the snapshot format only represents text-key insert state.
+                            // Token tree sync is deferred to a future phase.
                             for op in &**pending {
                                 if let super::tree_ops::TreeOperation::Insert(ref insert_op) = op {
                                     if let super::tree_ops::TreeKey::Text(ref text) = insert_op.key

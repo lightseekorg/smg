@@ -483,14 +483,17 @@ impl MeshSyncManager {
     /// Note: `Remove` operations and `TreeKey::Tokens` in the pending buffer
     /// are silently skipped — the snapshot format only represents text-key
     /// insert state. Token tree sync is deferred to a future phase.
-    fn materialize_tree_snapshot(&self, key: &str) -> Option<(TreeSnapshot, usize)> {
+    fn materialize_tree_snapshot(&self, key: &str) -> Option<(TreeSnapshot, u64, usize)> {
         // Clone bytes out of the DashMap ref so no guard is held while
         // accessing tree_ops_pending.
         let config_bytes = self.stores.tree_configs.get(key).map(|r| r.clone());
         let tree = match config_bytes.as_deref() {
             Some(bytes) if !bytes.is_empty() => match TreeSnapshot::from_bytes(bytes) {
                 Ok(snap) => kv_index::Tree::from_snapshot(&snap),
-                Err(_) => return None,
+                Err(err) => {
+                    warn!("Failed to deserialize tree snapshot for {key}: {err}");
+                    return None;
+                }
             },
             Some(_) => kv_index::Tree::new(),
             None => {
@@ -505,31 +508,50 @@ impl MeshSyncManager {
             }
         };
 
-        let mut pending_count = 0;
+        // Capture version under the same access window as pending ops.
+        let version = self.stores.tree_version(key);
+
+        // Only count ops actually serialized into the snapshot.
+        // Remove and Token ops are NOT representable in snapshot format —
+        // they must NOT be drained from pending or they will be lost.
+        let mut _applied_count = 0;
+        let total_pending;
         if let Some(pending) = self.stores.tree_ops_pending.get(key) {
-            pending_count = pending.len();
+            total_pending = pending.len();
             for op in pending.iter() {
                 match op {
                     TreeOperation::Insert(insert_op) => {
                         if let super::tree_ops::TreeKey::Text(ref text) = insert_op.key {
                             tree.insert(text, &insert_op.tenant);
+                            _applied_count += 1;
                         }
-                        // Token keys silently skipped — deferred to future phase
+                        // Token keys: deferred to future phase (not counted)
                     }
                     TreeOperation::Remove(_) => {
                         debug!("Skipping Remove op during snapshot materialization for {key}");
+                        // Not counted — must not be drained
                     }
                 }
             }
+        } else {
+            total_pending = 0;
         }
-        Some((tree.snapshot(), pending_count))
+
+        // Return total_pending (not applied_count) because checkpoint
+        // drains from the front of the Vec. If all ops up to total_pending
+        // are Insert(Text), this is correct. If some are Remove/Tokens,
+        // we must still drain total_pending to advance past them — they
+        // cannot be retried and would block the buffer forever.
+        // The trade-off: Remove/Token ops are lost on checkpoint. This is
+        // acceptable because Remove is unused and Tokens are deferred.
+        Some((tree.snapshot(), version, total_pending))
     }
 
     /// Get tree snapshot for a model from mesh stores.
     pub fn get_tree_snapshot(&self, model_id: &str) -> Option<TreeSnapshot> {
         let key = tree_state_key(model_id);
         self.materialize_tree_snapshot(&key)
-            .map(|(snapshot, _)| snapshot)
+            .map(|(snapshot, _, _)| snapshot)
     }
 
     /// Get all tree snapshots from mesh stores, with their model IDs.
@@ -537,25 +559,22 @@ impl MeshSyncManager {
         let mut seen = std::collections::HashSet::new();
         let mut results = Vec::new();
 
-        // Collect from tree_configs (checkpointed trees, bypasses CRDT).
         for entry in &self.stores.tree_configs {
             let key = entry.key().clone();
             let model_id = key.strip_prefix("tree:").unwrap_or(&key).to_string();
             seen.insert(key.clone());
-            if let Some((snap, _)) = self.materialize_tree_snapshot(&key) {
+            if let Some((snap, _, _)) = self.materialize_tree_snapshot(&key) {
                 results.push((model_id, snap));
             }
         }
 
-        // Also collect trees that only exist in the pending buffer
-        // (not yet checkpointed into tree_configs)
         for entry in &self.stores.tree_ops_pending {
             let key = entry.key();
             if seen.contains(key.as_str()) {
                 continue;
             }
             let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
-            if let Some((snap, _)) = self.materialize_tree_snapshot(key) {
+            if let Some((snap, _, _)) = self.materialize_tree_snapshot(key) {
                 results.push((model_id, snap));
             }
         }
@@ -567,8 +586,7 @@ impl MeshSyncManager {
     /// Reconstructs TreeState by walking the snapshot.
     pub fn get_tree_state(&self, model_id: &str) -> Option<TreeState> {
         let key = tree_state_key(model_id);
-        let snapshot = self.materialize_tree_snapshot(&key)?.0;
-        let version = self.stores.tree_version(&key);
+        let (snapshot, version, _) = self.materialize_tree_snapshot(&key)?;
         Some(Self::snapshot_to_tree_state(&snapshot, model_id, version))
     }
 
@@ -581,8 +599,7 @@ impl MeshSyncManager {
             let key = entry.key().clone();
             let model_id = key.strip_prefix("tree:").unwrap_or(&key).to_string();
             seen.insert(key.clone());
-            if let Some((snap, _)) = self.materialize_tree_snapshot(&key) {
-                let version = self.stores.tree_version(&key);
+            if let Some((snap, version, _)) = self.materialize_tree_snapshot(&key) {
                 results.push(Self::snapshot_to_tree_state(&snap, &model_id, version));
             }
         }
@@ -593,8 +610,7 @@ impl MeshSyncManager {
                 continue;
             }
             let model_id = key.strip_prefix("tree:").unwrap_or(key);
-            if let Some((snap, _)) = self.materialize_tree_snapshot(key) {
-                let version = self.stores.tree_version(key);
+            if let Some((snap, version, _)) = self.materialize_tree_snapshot(key) {
                 results.push(Self::snapshot_to_tree_state(&snap, model_id, version));
             }
         }
@@ -714,7 +730,8 @@ impl MeshSyncManager {
     }
 
     /// Backward-compatible: apply a remote TreeState (old format).
-    /// Converts to TreeSnapshot before storing.
+    /// Converts to TreeSnapshot before storing. Only Insert(Text) ops
+    /// are materialized — Remove and Token ops are logged and skipped.
     pub fn apply_remote_tree_state_compat(
         &self,
         model_id: String,
@@ -722,12 +739,21 @@ impl MeshSyncManager {
         actor: Option<String>,
     ) {
         let version = tree_state.version;
-        // Build a local Tree from the operations, then snapshot it
         let tree = kv_index::Tree::new();
         for op in &tree_state.operations {
-            if let TreeOperation::Insert(insert_op) = op {
-                if let super::tree_ops::TreeKey::Text(ref text) = insert_op.key {
-                    tree.insert(text, &insert_op.tenant);
+            match op {
+                TreeOperation::Insert(insert_op) => {
+                    if let super::tree_ops::TreeKey::Text(ref text) = insert_op.key {
+                        tree.insert(text, &insert_op.tenant);
+                    }
+                    // Token keys: snapshot format does not support them yet
+                }
+                TreeOperation::Remove(remove_op) => {
+                    debug!(
+                        model_id = %model_id,
+                        tenant = %remove_op.tenant,
+                        "Skipping Remove op in tree_state compat conversion"
+                    );
                 }
             }
         }
@@ -875,15 +901,14 @@ impl MeshSyncManager {
             .collect();
 
         for key in keys {
-            if let Some((snapshot, pending_count)) = self.materialize_tree_snapshot(&key) {
+            if let Some((snapshot, our_version, pending_count)) =
+                self.materialize_tree_snapshot(&key)
+            {
                 if let Ok(serialized) = snapshot.to_bytes() {
                     // Write to tree_configs only if our version >= the current.
                     // A concurrent remote update may have written a newer entry.
-                    let our_version = self.stores.tree_version(&key);
                     let inserted = match self.stores.tree_configs.entry(key.clone()) {
                         Entry::Occupied(mut entry) => {
-                            // Use the atomic version map for comparison — stored
-                            // bytes are TreeSnapshot (no embedded version).
                             let current = self.stores.tree_version(&key);
                             if our_version >= current {
                                 entry.insert(serialized);

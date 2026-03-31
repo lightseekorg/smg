@@ -334,10 +334,14 @@ impl CacheAwarePolicy {
     /// to efficiently combine remote state without losing local routing state.
     pub fn apply_remote_tree_snapshot(&self, model_id: &str, snapshot: &smg_mesh::TreeSnapshot) {
         let model_id = Self::normalize_mesh_model_id(model_id);
+        // Clone the Arc to release the DashMap shard guard before merging.
+        // merge_snapshot walks the entire tree and can be expensive — holding
+        // the guard would block concurrent routing on the same shard.
         let tree = self
             .string_trees
             .entry(model_id.to_string())
-            .or_insert_with(|| Arc::new(Tree::new()));
+            .or_insert_with(|| Arc::new(Tree::new()))
+            .clone();
         tree.merge_snapshot(snapshot);
     }
 
