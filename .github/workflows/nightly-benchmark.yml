@@ -190,7 +190,7 @@ jobs:
           E2E_LOG_DIR: nightly_gateway_logs
         run: |
           mkdir -p nightly_gateway_logs
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          bash scripts/ci_killall_sglang.sh "nuke_gpus"
 
           K_FILTER="${{ matrix.model.test_class }}"
           if [ "${{ matrix.variant.grpc_only }}" == "true" ]; then
@@ -213,7 +213,7 @@ jobs:
 
       - name: Cleanup
         if: always() && steps.filter.outputs.skip != 'true'
-        run: bash scripts/ci_killall_sglang.sh || true
+        run: bash scripts/ci_killall_sglang.sh "nuke_gpus" || true
 
   # ---------------------------------------------------------------------------
   # Multi-worker (H100): one model per job on k8s H100 runners.
@@ -303,7 +303,7 @@ jobs:
           E2E_LOG_DIR: nightly_gateway_logs
         run: |
           mkdir -p nightly_gateway_logs
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          bash scripts/ci_killall_sglang.sh "nuke_gpus"
 
           K_FILTER="${{ matrix.model.test_class }}"
           if [ "${{ matrix.variant.grpc_only }}" == "true" ]; then
@@ -326,7 +326,7 @@ jobs:
 
       - name: Cleanup
         if: always() && steps.filter.outputs.skip != 'true'
-        run: bash scripts/ci_killall_sglang.sh || true
+        run: bash scripts/ci_killall_sglang.sh "nuke_gpus" || true
 
   # ---------------------------------------------------------------------------
   # Single-worker (H200): models requiring 8-gpu-h200 runners.
@@ -423,7 +423,7 @@ jobs:
           HF_HOME: /raid/models
         run: |
           mkdir -p nightly_gateway_logs
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          bash scripts/ci_killall_sglang.sh "nuke_gpus"
 
           K_FILTER="${{ matrix.model.test_class }}"
           if [ "${{ matrix.variant.grpc_only }}" == "true" ]; then
@@ -446,7 +446,7 @@ jobs:
 
       - name: Cleanup
         if: always() && steps.filter.outputs.skip != 'true'
-        run: bash scripts/ci_killall_sglang.sh || true
+        run: bash scripts/ci_killall_sglang.sh "nuke_gpus" || true
 
   # ---------------------------------------------------------------------------
   # Multi-worker (H200): models requiring 8-gpu-h200 runners.

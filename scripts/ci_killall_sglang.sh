@@ -31,4 +31,20 @@ else
 
     # Show GPU status after clean up
     nvidia-smi
+
+    NODE_INFO="${NODE_IP:-$(hostname)}"
+    echo "Running on node: $NODE_INFO"
+    if [ $# -gt 0 ]; then
+        sleep 2
+        if ! DIRTY_GPUS=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null); then
+            echo "::error::Unable to query GPU memory on node '$NODE_INFO'."
+            exit 1
+        fi
+        DIRTY_GPUS=$(echo "$DIRTY_GPUS" | awk -F', ' '$2 > 100 {print "GPU " $1 ": " $2 " MiB used"}')
+        if [ -n "$DIRTY_GPUS" ]; then
+            echo "::error::GPU not clean on node '$NODE_INFO':"
+            echo "$DIRTY_GPUS"
+            exit 1
+        fi
+    fi
 fi
