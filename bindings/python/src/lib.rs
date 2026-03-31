@@ -461,6 +461,7 @@ struct Router {
     enable_mesh: bool,
     mesh_server_name: Option<String>,
     mesh_host: String,
+    mesh_advertise_host: Option<String>,
     mesh_port: u16,
     mesh_peer_urls: Vec<String>,
 }
@@ -473,6 +474,19 @@ impl Router {
             }
         }
         core::ConnectionMode::Http
+    }
+
+    fn parse_mesh_socket_addr(
+        host: &str,
+        port: u16,
+        field: &str,
+    ) -> PyResult<std::net::SocketAddr> {
+        let addr = format!("{host}:{port}");
+        addr.parse::<std::net::SocketAddr>().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid value for {field}='{host}': invalid mesh socket address '{addr}': {e}"
+            ))
+        })
     }
 
     pub fn to_router_config(&self) -> config::ConfigResult<config::RouterConfig> {
@@ -831,6 +845,7 @@ impl Router {
         mesh_host = String::from("0.0.0.0"),
         mesh_port = 39527u16,
         mesh_peer_urls = vec![],
+        mesh_advertise_host = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -936,6 +951,7 @@ impl Router {
         mesh_host: String,
         mesh_port: u16,
         mesh_peer_urls: Vec<String>,
+        mesh_advertise_host: Option<String>,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -1049,6 +1065,7 @@ impl Router {
             enable_mesh,
             mesh_server_name,
             mesh_host,
+            mesh_advertise_host,
             mesh_port,
             mesh_peer_urls,
         })
@@ -1145,15 +1162,28 @@ impl Router {
                             })
                         })
                         .transpose()?;
-                    let self_addr_str = format!("{}:{}", self.mesh_host, self.mesh_port);
-                    let self_addr = self_addr_str.parse::<std::net::SocketAddr>().map_err(|e| {
-                        pyo3::exceptions::PyValueError::new_err(format!(
-                            "Invalid mesh address '{self_addr_str}': {e}"
-                        ))
-                    })?;
+                    let bind_addr =
+                        Self::parse_mesh_socket_addr(&self.mesh_host, self.mesh_port, "mesh_host")?;
+                    let (advertise_host, advertise_field) =
+                        if let Some(host) = self.mesh_advertise_host.as_deref() {
+                            (host, "mesh_advertise_host")
+                        } else {
+                            (self.mesh_host.as_str(), "mesh_host")
+                        };
+                    let advertise_addr = Self::parse_mesh_socket_addr(
+                        advertise_host,
+                        self.mesh_port,
+                        advertise_field,
+                    )?;
+                    if advertise_addr.ip().is_unspecified() {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "Invalid value for {advertise_field}='{advertise_host}': mesh advertise address cannot be unspecified; set mesh_advertise_host to a routable node IP"
+                        )));
+                    }
                     Some(smg_mesh::MeshServerConfig {
                         self_name,
-                        self_addr,
+                        bind_addr,
+                        advertise_addr,
                         init_peer: peer,
                         mtls_config: None,
                     })

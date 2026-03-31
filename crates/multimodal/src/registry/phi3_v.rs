@@ -4,19 +4,11 @@ use serde_json::{json, Value};
 
 use crate::{
     registry::{ModelMetadata, ModelProcessorSpec, RegistryResult},
-    types::{Modality, PromptReplacement, TokenId},
+    types::{FieldLayout, Modality, PromptReplacement, TokenId},
     vision::image_processor::PreprocessedImages,
 };
 
 pub(super) struct Phi3VisionSpec;
-
-impl Phi3VisionSpec {
-    fn tokens_per_image(metadata: &ModelMetadata) -> usize {
-        metadata
-            .config_u32(&["img_processor", "num_img_tokens"])
-            .unwrap_or(256) as usize
-    }
-}
 
 impl ModelProcessorSpec for Phi3VisionSpec {
     fn name(&self) -> &'static str {
@@ -32,11 +24,11 @@ impl ModelProcessorSpec for Phi3VisionSpec {
     }
 
     fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {
-        Ok("<image>".to_owned())
+        Ok("<|image|>".to_owned())
     }
 
     fn placeholder_token_id(&self, metadata: &ModelMetadata) -> RegistryResult<TokenId> {
-        metadata.token_id("<image>")
+        metadata.token_id("<|image|>")
     }
 
     fn modality_limits(
@@ -50,6 +42,13 @@ impl ModelProcessorSpec for Phi3VisionSpec {
         Ok(json!({}))
     }
 
+    fn field_layouts(&self) -> HashMap<String, FieldLayout> {
+        HashMap::from([
+            ("pixel_values".to_string(), FieldLayout::Batched),
+            ("image_sizes".to_string(), FieldLayout::Batched),
+        ])
+    }
+
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
@@ -57,11 +56,10 @@ impl ModelProcessorSpec for Phi3VisionSpec {
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let token_id = self.placeholder_token_id(metadata)?;
         let token = self.placeholder_token(metadata)?;
-        let count = Self::tokens_per_image(metadata);
         Ok(preprocessed
-            .image_sizes
+            .num_img_tokens
             .iter()
-            .map(|_| PromptReplacement::repeated(Modality::Image, &token, token_id, count))
+            .map(|&count| PromptReplacement::repeated(Modality::Image, &token, token_id, count))
             .collect())
     }
 }
@@ -77,7 +75,7 @@ mod tests {
 
     #[test]
     fn phi3_uses_num_img_tokens() {
-        let tokenizer = TestTokenizer::new(&[("<image>", 555)]);
+        let tokenizer = TestTokenizer::new(&[("<|image|>", 555)]);
         let config = json!({
             "model_type": "phi3_v",
             "img_processor": {"num_img_tokens": 144}
@@ -90,7 +88,10 @@ mod tests {
         let registry = ModelRegistry::new();
         let spec = registry.lookup(&metadata).expect("phi3 spec");
         let replacements = spec
-            .prompt_replacements(&metadata, &test_preprocessed(&[ImageSize::new(336, 336)]))
+            .prompt_replacements(
+                &metadata,
+                &test_preprocessed_with_tokens(&[ImageSize::new(336, 336)], &[144]),
+            )
             .unwrap();
         assert_eq!(replacements[0].tokens.len(), 144);
         assert_eq!(replacements[0].tokens[0], 555);
@@ -98,7 +99,7 @@ mod tests {
 
     #[test]
     fn phi3_matches_alias_via_model_type() {
-        let tokenizer = TestTokenizer::new(&[("<image>", 555)]);
+        let tokenizer = TestTokenizer::new(&[("<|image|>", 555)]);
         let config = json!({
             "model_type": "phi3_v",
             "img_processor": {"num_img_tokens": 144}

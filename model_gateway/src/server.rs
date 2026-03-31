@@ -28,7 +28,7 @@ use openai_protocol::{
         RealtimeTranscriptionSessionCreateRequest,
     },
     rerank::{RerankRequest, V1RerankReqInput},
-    responses::{ResponsesGetParams, ResponsesRequest},
+    responses::ResponsesRequest,
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
     validated::ValidatedJson,
     worker::{WorkerSpec, WorkerUpdateRequest},
@@ -36,7 +36,7 @@ use openai_protocol::{
 use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
+use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler, WorkerStateSubscriber};
 use tokio::{signal, spawn, sync::mpsc};
 use tracing::{debug, error, info, warn, Level};
 use wfaas::LoggingSubscriber;
@@ -55,7 +55,7 @@ use crate::{
     observability::{
         logging::{self, LoggingConfig},
         metrics::{self, PrometheusConfig},
-        otel_trace,
+        metrics_server, otel_trace,
     },
     routers::{
         conversations,
@@ -65,7 +65,7 @@ use crate::{
             get_worker_states, set_global_rate_limit, trigger_graceful_shutdown, update_app_config,
         },
         openai::realtime::ws::RealtimeQueryParams,
-        parse,
+        parse, responses as response_handlers,
         router_manager::RouterManager,
         tokenize, RouterTrait,
     },
@@ -290,13 +290,8 @@ async fn v1_classify(
 async fn v1_responses_get(
     State(state): State<Arc<AppState>>,
     Path(response_id): Path<String>,
-    headers: http::HeaderMap,
-    Query(params): Query<ResponsesGetParams>,
 ) -> Response {
-    state
-        .router
-        .get_response(Some(&headers), &response_id, &params)
-        .await
+    response_handlers::get_response(&state.context.response_storage, &response_id).await
 }
 
 async fn v1_responses_cancel(
@@ -313,22 +308,15 @@ async fn v1_responses_cancel(
 async fn v1_responses_delete(
     State(state): State<Arc<AppState>>,
     Path(response_id): Path<String>,
-    headers: http::HeaderMap,
 ) -> Response {
-    state
-        .router
-        .delete_response(Some(&headers), &response_id)
-        .await
+    response_handlers::delete_response(&state.context.response_storage, &response_id).await
 }
 
 async fn v1_responses_list_input_items(
     State(state): State<Arc<AppState>>,
     Path(response_id): Path<String>,
-    headers: http::HeaderMap,
 ) -> Response {
-    state
-        .router
-        .list_response_input_items(Some(&headers), &response_id)
+    response_handlers::list_response_input_items(&state.context.response_storage, &response_id)
         .await
 }
 
@@ -890,9 +878,21 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         ))
     };
 
-    if let Some(prometheus_config) = &config.prometheus_config {
-        metrics::start_prometheus(prometheus_config.clone());
-    }
+    // Fire-and-forget: the metrics server runs for the process lifetime.
+    // Graceful shutdown with close frames will be added when the WS endpoint lands.
+    let _metrics_server_handle = if let Some(prometheus_config) = &config.prometheus_config {
+        let handle = metrics::start_prometheus(prometheus_config.clone());
+        Some(
+            metrics_server::start_metrics_server(
+                handle,
+                prometheus_config.host.clone(),
+                prometheus_config.port,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
 
     // Initialize mesh server if configured, it will return a handler for mesh management
     let mesh_handler = if let Some(mesh_server_config) = &config.mesh_server_config {
@@ -1071,6 +1071,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         let hc = app_context.worker_registry.start_health_checker(
             config.router_config.health_check.check_interval_secs,
             config.router_config.health_check.remove_unhealthy_workers,
+            app_context.worker_job_queue.get().cloned(),
         );
         debug!(
             "Started health checker for workers with {}s interval",
@@ -1123,6 +1124,14 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         app_context
             .worker_registry
             .set_mesh_sync(Some(handle.sync_manager.clone()));
+        handle
+            .sync_manager
+            .register_worker_state_subscriber(app_context.worker_registry.clone());
+        // Replay workers already in the CRDT store — they arrived between
+        // mesh server start and subscriber registration above.
+        for state in handle.sync_manager.get_all_worker_states() {
+            app_context.worker_registry.on_remote_worker_state(&state);
+        }
         info!("Mesh sync manager set on worker registry");
 
         handle
@@ -1139,7 +1148,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let mesh_port = config
         .mesh_server_config
         .as_ref()
-        .map(|c| c.self_addr.port());
+        .map(|c| c.advertise_addr.port());
 
     let app_state = Arc::new(AppState {
         router,

@@ -39,6 +39,7 @@ fn apply_chat_template_impl(
         tools: Some(tools.unwrap_or(&empty_tools)),
         documents: Some(&empty_docs),
         template_kwargs: None,
+        ..Default::default()
     };
 
     tokenizer

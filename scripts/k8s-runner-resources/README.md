@@ -139,3 +139,58 @@ helm uninstall <runner-set-name> -n actions-runner-system
 # Remove the controller (after all runner sets are removed)
 helm uninstall arc -n actions-runner-system
 ```
+
+---
+
+## Alternative: Using `actions.summerwind.dev` ARC
+
+Instead of the official GitHub ARC controller above, you can use the community [actions-runner-controller](https://github.com/actions/actions-runner-controller) (`actions.summerwind.dev`). This uses `RunnerDeployment` CRDs instead of runner scale sets.
+
+### 1. Install the Controller
+
+```bash
+helm repo add actions-runner-controller https://actions-runner-controller.github.io/actions-runner-controller
+helm repo update
+helm install actions-runner-controller actions-runner-controller/actions-runner-controller \
+  --namespace actions-runner-system \
+  --create-namespace
+```
+
+### 2. Create a GitHub App
+
+Follow the same steps as [Section 1](#1-create-a-github-app) and [Section 2](#2-install-the-github-app) above to create and install a GitHub App.
+
+### 3. Create the Kubernetes Secret
+
+Create a secret named `controller-manager` in the `actions-runner-system` namespace with your GitHub App credentials:
+
+```bash
+kubectl create secret generic controller-manager \
+  -n actions-runner-system \
+  --from-literal=github_app_id=<your-app-id> \
+  --from-literal=github_app_installation_id=<your-installation-id> \
+  --from-file=github_app_private_key=<path-to-your-pem-file>
+```
+
+### 4. Apply Runner Resources
+
+```bash
+# RBAC for runner pods
+kubectl apply -f scripts/k8s-runner-resources/arc-runner-rbac.yaml
+
+# CPU runner deployment
+kubectl apply -f scripts/k8s-runner-resources/arc-runner-cpu.yaml
+
+# GPU runner deployment
+kubectl apply -f scripts/k8s-runner-resources/arc-runner-gpu.yaml
+
+# Autoscaler
+kubectl apply -f scripts/k8s-runner-resources/arc-runner-autoscaler.yaml
+```
+
+### 5. Verify
+
+```bash
+kubectl get runnerdeployments -n actions-runner-system
+kubectl get pods -n actions-runner-system
+```

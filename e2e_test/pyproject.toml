@@ -6,12 +6,19 @@ requires-python = ">=3.12"
 
 dependencies = [
   "anthropic",
+  "datasets",
   "grpcio",
   "grpcio-health-checking",
   "httpx",
+  "jinja2",
+  "numpy",
   "openai",
+  "pandas",
+  "pillow",
   "pytest",
   "pytest-rerunfailures",
+  "requests",
+  "tqdm",
   "websockets",
 ]
 
@@ -20,6 +27,12 @@ dev = [
   "mypy",
   "ruff",
 ]
+
+[tool.setuptools]
+# No Python packages to build — this project is a test suite.
+# Dependencies are declared here so CI can `pip install e2e_test/`.
+py-modules = []
+packages = []
 
 [tool.pytest.ini_options]
 testpaths = ["."]

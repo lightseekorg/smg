@@ -273,8 +273,11 @@ impl Llama4VisionProcessor {
         let black = Rgb([0u8, 0, 0]);
         let mut padded = RgbImage::from_pixel(target_w, target_h, black);
 
-        // Copy image to top-left using efficient overlay
-        image::imageops::overlay(&mut padded, &image.to_rgb8(), 0, 0);
+        // Copy image to top-left — avoid to_rgb8() if already RGB8
+        match image {
+            DynamicImage::ImageRgb8(rgb) => image::imageops::overlay(&mut padded, rgb, 0, 0),
+            _ => image::imageops::overlay(&mut padded, &image.to_rgb8(), 0, 0),
+        }
 
         DynamicImage::ImageRgb8(padded)
     }
@@ -309,10 +312,8 @@ impl Llama4VisionProcessor {
     /// Create global image by bilinear interpolation to tile size.
     fn create_global_image(&self, image: &DynamicImage) -> Array3<f32> {
         let tile = self.tile_size;
-        let resized = image.resize_exact(tile, tile, FilterType::Triangle);
-        let mut tensor = transforms::to_tensor(&resized);
-        transforms::normalize(&mut tensor, &self.mean, &self.std);
-        tensor
+        let resized = transforms::resize(image, tile, tile, FilterType::Triangle);
+        transforms::to_tensor_and_normalize(&resized, &self.mean, &self.std)
     }
 
     /// Process a single image.
@@ -339,14 +340,13 @@ impl Llama4VisionProcessor {
         let new_size = Self::get_max_res_without_distortion(image_size, resize_target);
         let (new_h, new_w) = (new_size.0.max(1), new_size.1.max(1));
 
-        let resized = image.resize_exact(new_w, new_h, FilterType::Triangle);
+        let resized = transforms::resize(image, new_w, new_h, FilterType::Triangle);
 
         // Step 4: Pad to target_size (the canvas from get_best_fit, not resize_target)
         let padded = self.pad_image(&resized, target_w, target_h);
 
         // Step 5: Convert to tensor and normalize
-        let mut tensor = transforms::to_tensor(&padded);
-        transforms::normalize(&mut tensor, &self.mean, &self.std);
+        let tensor = transforms::to_tensor_and_normalize(&padded, &self.mean, &self.std);
 
         // Step 6: Calculate tile counts based on target_size (canvas size)
         let tile = self.tile_size as usize;
@@ -411,14 +411,16 @@ impl ImagePreProcessor for Llama4VisionProcessor {
             });
         }
 
+        let owned_processor;
         let processor = if config.max_image_tiles.is_some()
             || config.image_mean.is_some()
             || config.image_std.is_some()
             || config.size.is_some()
         {
-            Self::from_preprocessor_config(config)
+            owned_processor = Self::from_preprocessor_config(config);
+            &owned_processor
         } else {
-            self.clone()
+            self
         };
 
         let mut all_outputs = Vec::new();
@@ -436,13 +438,21 @@ impl ImagePreProcessor for Llama4VisionProcessor {
             num_img_tokens.push(tokens);
         }
 
+        // Per-image tile counts (must be computed before remove/concatenate)
+        let patches_per_image: Vec<i64> = all_outputs.iter().map(|o| o.shape()[0] as i64).collect();
+
         // Concatenate all tiles from all images into a single 4D tensor
         // [total_tiles, C, H, W] — no batch dimension, no zero-padding.
         // This matches what sglang and vLLM vision models expect.
-        let tile_views: Vec<ndarray::ArrayView4<f32>> =
-            all_outputs.iter().map(|o| o.view()).collect();
-        let pixel_values = ndarray::concatenate(ndarray::Axis(0), &tile_views)
-            .map_err(|e| TransformError::ShapeError(format!("Failed to concatenate tiles: {e}")))?;
+        let pixel_values = if all_outputs.len() == 1 {
+            all_outputs.remove(0)
+        } else {
+            let tile_views: Vec<ndarray::ArrayView4<f32>> =
+                all_outputs.iter().map(|o| o.view()).collect();
+            ndarray::concatenate(ndarray::Axis(0), &tile_views).map_err(|e| {
+                TransformError::ShapeError(format!("Failed to concatenate tiles: {e}"))
+            })?
+        };
 
         // Store aspect ratios and patches_per_image as model-specific data
         let mut model_specific = std::collections::HashMap::new();
@@ -459,9 +469,6 @@ impl ImagePreProcessor for Llama4VisionProcessor {
                 shape: vec![batch_size, 2],
             },
         );
-
-        // Per-image tile counts for flat slicing of pixel_values.
-        let patches_per_image: Vec<i64> = all_outputs.iter().map(|o| o.shape()[0] as i64).collect();
         model_specific.insert(
             "patches_per_image".to_string(),
             ModelSpecificValue::int_1d(patches_per_image),

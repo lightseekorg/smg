@@ -9,7 +9,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use dashmap::DashMap;
@@ -20,6 +23,7 @@ use tracing::debug;
 use super::{
     consistent_hash::ConsistentHashRing,
     crdt_kv::{CrdtOrMap, Operation, OperationLog, ReplicaId},
+    tree_ops::TreeOperation,
 };
 
 // ============================================================================
@@ -182,10 +186,6 @@ impl<T: CrdtValue> CrdtStore<T> {
         self.len() == 0
     }
 
-    // fn contains_key(&self, key: &str) -> bool {
-    //     self.inner.contains_key(key)
-    // }
-
     fn merge(&self, log: &OperationLog) {
         self.inner.merge(log);
     }
@@ -303,7 +303,12 @@ pub const GLOBAL_RATE_LIMIT_KEY: &str = "global_rate_limit";
 /// Key for global rate limit counter in RateLimitStore
 pub const GLOBAL_RATE_LIMIT_COUNTER_KEY: &str = "global";
 
-/// Worker state entry
+/// Worker state entry synced across mesh nodes.
+///
+/// Contains runtime state (`health`, `load`) plus an opaque `spec` blob
+/// carrying the full worker configuration. The mesh crate doesn't interpret
+/// `spec` — the gateway serializes `WorkerSpec` into it on the sending side
+/// and deserializes on the receiving side.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct WorkerState {
     pub worker_id: String,
@@ -312,6 +317,10 @@ pub struct WorkerState {
     pub health: bool,
     pub load: f64,
     pub version: u64,
+    /// Opaque worker specification (bincode-serialized WorkerSpec from the
+    /// gateway). Empty on old nodes that don't populate this field.
+    #[serde(default)]
+    pub spec: Vec<u8>,
 }
 
 // Implement Hash manually for WorkerState (excluding f64)
@@ -321,9 +330,9 @@ impl std::hash::Hash for WorkerState {
         self.model_id.hash(state);
         self.url.hash(state);
         self.health.hash(state);
-        // f64 cannot be hashed directly, use a workaround
         (self.load as i64).hash(state);
         self.version.hash(state);
+        self.spec.hash(state);
     }
 }
 
@@ -714,6 +723,22 @@ pub struct StateStores {
     pub worker: WorkerStore,
     pub policy: PolicyStore,
     pub rate_limit: RateLimitStore,
+    /// Pending tree operations for delta sync.
+    /// Key: tree key (e.g., "tree:model-name"), Value: operations since last successful send.
+    pub tree_ops_pending: DashMap<String, Vec<TreeOperation>>,
+    /// Per-key version counters for tree state, bumped atomically on every
+    /// `sync_tree_operation` call.  Replaces the expensive CRDT
+    /// `policy.update()` that previously serialized the entire TreeState
+    /// config blob (~1 MB) on every request.
+    pub tree_versions: DashMap<String, Arc<AtomicU64>>,
+    /// Global generation counter for tree changes.  The incremental collector
+    /// checks this (in addition to `policy.generation()`) to decide whether
+    /// the policy store needs scanning.
+    pub tree_generation: Arc<AtomicU64>,
+    /// Materialized tree state config blobs, stored outside the CRDT policy
+    /// store to avoid operation log memory accumulation (~50 MB/min leak).
+    /// Key: tree key (e.g., "tree:model-name"), Value: bincode-serialized TreeState.
+    pub tree_configs: DashMap<String, Vec<u8>>,
 }
 
 impl StateStores {
@@ -724,6 +749,10 @@ impl StateStores {
             worker: WorkerStore::new(),
             policy: PolicyStore::new(),
             rate_limit: RateLimitStore::new("default".to_string()),
+            tree_ops_pending: DashMap::new(),
+            tree_versions: DashMap::new(),
+            tree_generation: Arc::new(AtomicU64::new(0)),
+            tree_configs: DashMap::new(),
         }
     }
 
@@ -734,7 +763,61 @@ impl StateStores {
             worker: WorkerStore::new(),
             policy: PolicyStore::new(),
             rate_limit: RateLimitStore::new(self_name),
+            tree_ops_pending: DashMap::new(),
+            tree_versions: DashMap::new(),
+            tree_generation: Arc::new(AtomicU64::new(0)),
+            tree_configs: DashMap::new(),
         }
+    }
+
+    /// Get the current version for a tree key.
+    pub fn tree_version(&self, key: &str) -> u64 {
+        self.tree_versions
+            .get(key)
+            .map(|v| v.load(Ordering::Acquire))
+            .unwrap_or(0)
+    }
+
+    /// Atomically bump the version for a tree key and the global tree
+    /// generation.  Returns the new version.  This is O(1) with no
+    /// serialization — unlike `policy.update()` which deserializes and
+    /// re-serializes the entire config blob.
+    ///
+    /// On the first call for a given key the counter is seeded from the
+    /// existing PolicyState version (if any) so that local ops don't
+    /// regress the advertised version below a remote/checkpointed baseline.
+    pub fn bump_tree_version(&self, key: &str) -> u64 {
+        let version = self
+            .tree_versions
+            .entry(key.to_string())
+            .or_insert_with(|| {
+                // Seed from the committed tree config version so deltas
+                // start above any existing remote/checkpointed state.
+                let base = self
+                    .tree_configs
+                    .get(key)
+                    .and_then(|bytes| {
+                        super::tree_ops::TreeState::from_bytes(&bytes)
+                            .ok()
+                            .map(|ts| ts.version)
+                    })
+                    .unwrap_or(0);
+                Arc::new(AtomicU64::new(base))
+            })
+            .fetch_add(1, Ordering::Release)
+            + 1;
+        self.tree_generation.fetch_add(1, Ordering::Release);
+        version
+    }
+
+    /// Advance the tree version counter to at least `version`.
+    /// Called after applying remote deltas/full-state updates so that
+    /// subsequent local ops start above the remote baseline.
+    pub fn advance_tree_version(&self, key: &str, version: u64) {
+        self.tree_versions
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .fetch_max(version, Ordering::Release);
     }
 
     /// Run garbage collection across all stores, removing tombstoned CRDT
@@ -744,6 +827,48 @@ impl StateStores {
             + self.app.gc_tombstones()
             + self.worker.gc_tombstones()
             + self.policy.gc_tombstones()
+    }
+
+    /// Remove stale tree entries that have no pending operations.
+    /// Returns the total number of entries removed across all tree maps.
+    ///
+    /// `tree_versions` entries are never removed during normal operation, so
+    /// using `tree_versions.contains_key()` as a liveness signal is
+    /// ineffective — it always returns true for any key that was ever used.
+    /// Instead, we use pending ops as the primary liveness indicator.
+    pub fn gc_stale_tree_entries(&self) -> usize {
+        let before =
+            self.tree_configs.len() + self.tree_versions.len() + self.tree_ops_pending.len();
+
+        // tree_configs is the authoritative store — NEVER remove entries
+        // that still have data. Only remove if the model is truly gone
+        // (no config, no pending ops, no version counter).
+        //
+        // An active tree has: tree_configs entry (from checkpoint or
+        // remote apply). Pending ops drain every 10 rounds via
+        // checkpoint, so empty pending does NOT mean the tree is stale.
+
+        // Remove tree_versions for models with no tree_configs AND no
+        // pending ops (model was fully deregistered).
+        self.tree_versions.retain(|k, _| {
+            self.tree_configs.contains_key(k)
+                || self.tree_ops_pending.get(k).is_some_and(|v| !v.is_empty())
+        });
+
+        // Remove empty pending op buffers for models with no tree_configs.
+        self.tree_ops_pending
+            .retain(|k, v| !v.is_empty() || self.tree_configs.contains_key(k));
+
+        // Only remove tree_configs for models with no version counter
+        // AND no pending ops — these are truly orphaned entries.
+        self.tree_configs.retain(|k, _| {
+            self.tree_versions.contains_key(k)
+                || self.tree_ops_pending.get(k).is_some_and(|v| !v.is_empty())
+        });
+
+        let after =
+            self.tree_configs.len() + self.tree_versions.len() + self.tree_ops_pending.len();
+        before.saturating_sub(after)
     }
 }
 
@@ -804,6 +929,7 @@ mod tests {
             health: true,
             load: 0.5,
             version: 1,
+            spec: vec![],
         };
 
         let _ = store.insert(key.clone(), state.clone());

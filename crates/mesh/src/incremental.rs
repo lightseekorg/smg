@@ -4,7 +4,7 @@
 
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{atomic::Ordering, Arc},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -14,6 +14,7 @@ use tracing::{debug, trace};
 use super::{
     service::gossip::StateUpdate,
     stores::{AppState, MembershipState, PolicyState, StateStores, StoreType, WorkerState},
+    tree_ops::{TreeState, TreeStateDelta},
 };
 
 /// Trait for extracting version from state types
@@ -62,6 +63,9 @@ struct LastScannedGenerations {
     policy: u64,
     app: u64,
     membership: u64,
+    /// Separate generation for tree state changes (bumped by
+    /// `sync_tree_operation` via atomic counter instead of CRDT).
+    tree: u64,
 }
 
 /// Incremental update collector
@@ -70,6 +74,10 @@ pub struct IncrementalUpdateCollector {
     self_name: String,
     last_sent: Arc<RwLock<LastSentVersions>>,
     last_scanned: Arc<RwLock<LastScannedGenerations>>,
+    /// Snapshot of `tree_generation` captured during the last collection.
+    /// Used in `mark_sent` instead of re-reading the atomic to avoid
+    /// advancing `last_scanned.tree` past the batch boundary.
+    collected_tree_gen: Arc<RwLock<u64>>,
 }
 
 impl IncrementalUpdateCollector {
@@ -79,6 +87,7 @@ impl IncrementalUpdateCollector {
             self_name,
             last_sent: Arc::new(RwLock::new(LastSentVersions::default())),
             last_scanned: Arc::new(RwLock::new(LastScannedGenerations::default())),
+            collected_tree_gen: Arc::new(RwLock::new(0)),
         }
     }
 
@@ -159,17 +168,230 @@ impl IncrementalUpdateCollector {
                 );
             }
             StoreType::Policy => {
-                let gen = self.stores.policy.generation();
-                if gen == last_scanned.policy {
+                let policy_gen = self.stores.policy.generation();
+                let tree_gen = self.stores.tree_generation.load(Ordering::Acquire);
+                let policy_changed = policy_gen != last_scanned.policy;
+                let tree_changed = tree_gen != last_scanned.tree;
+
+                if !policy_changed && !tree_changed {
                     return vec![];
                 }
-                let all_policies = self.stores.policy.all();
-                updates = self.collect_serializable_updates(
-                    all_policies,
-                    &last_sent.policy,
-                    "policy",
-                    |state: &PolicyState| state.model_id.clone(),
-                );
+
+                // Snapshot tree_gen for mark_sent — avoids advancing
+                // last_scanned.tree past this batch if new ops arrive
+                // between collection and mark_sent.
+                *self.collected_tree_gen.write() = tree_gen;
+
+                let timestamp = Self::current_timestamp();
+
+                // --- Policy store scan (only if CRDT generation changed) ---
+                // Handles non-tree policy keys only. Tree keys are stored
+                // in tree_configs (plain DashMap) and handled by the tree-
+                // specific scan below.
+                if policy_changed {
+                    let all_policies = self.stores.policy.all();
+                    for (key, state) in &all_policies {
+                        // Tree keys are no longer in the CRDT policy store;
+                        // skip any stale entries that may remain from before
+                        // the migration.
+                        if key.starts_with("tree:") {
+                            continue;
+                        }
+
+                        let current_version = state.version();
+                        let last_sent_version =
+                            last_sent.policy.get(key.as_str()).copied().unwrap_or(0);
+                        if current_version <= last_sent_version {
+                            continue;
+                        }
+
+                        if let Ok(serialized) = bincode::serialize(state) {
+                            updates.push(StateUpdate {
+                                key: key.clone(),
+                                value: serialized,
+                                version: current_version,
+                                actor: self.self_name.clone(),
+                                timestamp,
+                            });
+                            debug!(
+                                "Collected policy update: {} (version: {})",
+                                state.model_id, current_version
+                            );
+                        }
+                    }
+                }
+
+                // --- Tree keys (driven by atomic tree_versions, not CRDT) ---
+                if tree_changed {
+                    let mut emitted_tree_keys = std::collections::HashSet::new();
+
+                    // Phase 1: Scan tree_ops_pending for keys with pending ops.
+                    for entry in &self.stores.tree_ops_pending {
+                        let key = entry.key();
+                        let pending = entry.value();
+                        if pending.is_empty() {
+                            continue;
+                        }
+
+                        let current_version = self.stores.tree_version(key);
+                        let last_sent_version =
+                            last_sent.policy.get(key.as_str()).copied().unwrap_or(0);
+
+                        if current_version <= last_sent_version {
+                            continue;
+                        }
+
+                        // Try to send a delta with only the unsent pending ops
+                        let mut sent_delta = false;
+                        let total_pending = pending.len() as u64;
+                        let base_version = current_version.saturating_sub(total_pending);
+
+                        if last_sent_version >= base_version {
+                            let already_sent =
+                                last_sent_version.saturating_sub(base_version) as usize;
+                            let unsent_start = already_sent.min(pending.len());
+                            let unsent_ops = &pending[unsent_start..];
+                            if !unsent_ops.is_empty() {
+                                let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
+                                let delta = TreeStateDelta {
+                                    model_id: model_id.clone(),
+                                    operations: unsent_ops.to_vec(),
+                                    base_version: last_sent_version,
+                                    new_version: current_version,
+                                };
+                                if let Ok(delta_bytes) = delta.to_bytes() {
+                                    let delta_policy = PolicyState {
+                                        model_id,
+                                        policy_type: "tree_state_delta".to_string(),
+                                        config: delta_bytes,
+                                        version: current_version,
+                                    };
+                                    if let Ok(serialized) = bincode::serialize(&delta_policy) {
+                                        updates.push(StateUpdate {
+                                            key: key.clone(),
+                                            value: serialized,
+                                            version: current_version,
+                                            actor: self.self_name.clone(),
+                                            timestamp,
+                                        });
+                                        debug!(
+                                            "Collected tree delta: {} ({} ops, version: {})",
+                                            key,
+                                            unsent_ops.len(),
+                                            current_version
+                                        );
+                                        sent_delta = true;
+                                        emitted_tree_keys.insert(key.clone());
+                                    }
+                                }
+                            }
+                        }
+
+                        if !sent_delta {
+                            // Full-state fallback: build TreeState from
+                            // tree_configs (if checkpointed) + pending ops.
+                            let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
+                            // Clone bytes out of the DashMap ref so no guard
+                            // is held while iterating tree_ops_pending.
+                            let config_bytes = self
+                                .stores
+                                .tree_configs
+                                .get(key.as_str())
+                                .map(|r| r.clone());
+                            let mut tree_state = match config_bytes.as_deref() {
+                                Some(bytes) if !bytes.is_empty() => {
+                                    match TreeState::from_bytes(bytes) {
+                                        Ok(ts) => ts,
+                                        Err(_) => {
+                                            debug!("Skipping full-state fallback for {} — config corrupted", key);
+                                            continue;
+                                        }
+                                    }
+                                }
+                                _ => TreeState::new(model_id.clone()),
+                            };
+                            for op in &**pending {
+                                tree_state.add_operation(op.clone());
+                            }
+                            let tree_version = tree_state.version;
+                            let full_state = PolicyState {
+                                model_id,
+                                policy_type: "tree_state".to_string(),
+                                config: tree_state.to_bytes().unwrap_or_default(),
+                                version: tree_version,
+                            };
+                            if let Ok(serialized) = bincode::serialize(&full_state) {
+                                updates.push(StateUpdate {
+                                    key: key.clone(),
+                                    value: serialized,
+                                    version: current_version,
+                                    actor: self.self_name.clone(),
+                                    timestamp,
+                                });
+                                debug!(
+                                    "Collected full tree state fallback: {} (version: {})",
+                                    key, current_version
+                                );
+                                emitted_tree_keys.insert(key.clone());
+                            }
+                        }
+                    }
+
+                    // Phase 2: Scan tree_configs for keys not yet emitted
+                    // (e.g., after checkpoint + buffer drain, or remote-only entries).
+                    // tree_configs already stores serialized TreeState bytes, so
+                    // we use them directly as the PolicyState config instead of
+                    // round-tripping through deserialize + re-serialize.
+                    for entry in &self.stores.tree_configs {
+                        let key = entry.key();
+                        if emitted_tree_keys.contains(key.as_str()) {
+                            continue;
+                        }
+                        let current_version = self.stores.tree_version(key);
+                        let last_sent_version =
+                            last_sent.policy.get(key.as_str()).copied().unwrap_or(0);
+                        if current_version <= last_sent_version {
+                            continue;
+                        }
+                        let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
+                        let config_bytes = entry.value().clone();
+                        if config_bytes.is_empty() {
+                            continue;
+                        }
+                        // Validate the bytes are a valid TreeState and extract
+                        // the version, but use the raw bytes directly as the
+                        // config payload to avoid redundant re-serialization.
+                        let tree_version = match TreeState::from_bytes(&config_bytes) {
+                            Ok(ts) => ts.version,
+                            Err(_) => {
+                                debug!(
+                                    "Skipping tree_configs full-state for {} — config corrupted",
+                                    key
+                                );
+                                continue;
+                            }
+                        };
+                        let full_state = PolicyState {
+                            model_id,
+                            policy_type: "tree_state".to_string(),
+                            config: config_bytes,
+                            version: tree_version,
+                        };
+                        if let Ok(serialized) = bincode::serialize(&full_state) {
+                            updates.push(StateUpdate {
+                                key: key.clone(),
+                                value: serialized,
+                                version: current_version,
+                                actor: self.self_name.clone(),
+                                timestamp,
+                            });
+                            debug!(
+                                "Collected tree_configs full state: {} (version: {})",
+                                key, current_version
+                            );
+                        }
+                    }
+                }
             }
             StoreType::App => {
                 let gen = self.stores.app.generation();
@@ -271,7 +493,13 @@ impl IncrementalUpdateCollector {
         // this store if nothing has changed since.
         match store_type {
             StoreType::Worker => last_scanned.worker = self.stores.worker.generation(),
-            StoreType::Policy => last_scanned.policy = self.stores.policy.generation(),
+            StoreType::Policy => {
+                last_scanned.policy = self.stores.policy.generation();
+                // Use the snapshot captured during collection, not a
+                // live re-read — prevents skipping ops that arrived
+                // between collect and mark_sent.
+                last_scanned.tree = *self.collected_tree_gen.read();
+            }
             StoreType::App => last_scanned.app = self.stores.app.generation(),
             StoreType::Membership => {
                 last_scanned.membership = self.stores.membership.generation();
@@ -286,6 +514,24 @@ impl IncrementalUpdateCollector {
                 }
                 StoreType::Policy => {
                     last_sent.policy.insert(update.key.clone(), update.version);
+                    // Trim pending tree ops that have been sent by THIS collector.
+                    // Do NOT remove the entire buffer — other peer collectors may
+                    // not have sent yet.  Instead, only drain operations that are
+                    // fully covered by the version we just acknowledged.  When the
+                    // buffer exceeds a safety threshold we trim unconditionally to
+                    // bound memory usage (peers that are that far behind will
+                    // receive a full-state fallback on next collection).
+                    if update.key.starts_with("tree:") {
+                        const PENDING_TRIM_THRESHOLD: usize = 4096;
+                        if let Some(mut pending) = self.stores.tree_ops_pending.get_mut(&update.key)
+                        {
+                            if pending.len() > PENDING_TRIM_THRESHOLD {
+                                // Safety trim: discard the oldest half
+                                let drain_count = pending.len() / 2;
+                                pending.drain(..drain_count);
+                            }
+                        }
+                    }
                 }
                 StoreType::App => {
                     last_sent.app.insert(update.key.clone(), update.version);
@@ -330,6 +576,7 @@ mod tests {
             health: true,
             load: 0.5,
             version: 1,
+            spec: vec![],
         };
         let _ = stores.worker.insert(key, worker_state);
 
@@ -358,6 +605,7 @@ mod tests {
             health: false,
             load: 0.8,
             version: 2,
+            spec: vec![],
         };
         let _ = stores.worker.insert(key2, worker_state2);
 
@@ -440,6 +688,7 @@ mod tests {
                 health: true,
                 load: 0.5,
                 version: 1,
+                spec: vec![],
             },
         );
 
@@ -474,6 +723,7 @@ mod tests {
                 health: true,
                 load: 0.5,
                 version: 1,
+                spec: vec![],
             },
         );
 
@@ -538,6 +788,7 @@ mod tests {
                 health: true,
                 load: 0.5,
                 version: 1,
+                spec: vec![],
             },
         );
 
@@ -556,6 +807,7 @@ mod tests {
                 health: false,
                 load: 0.8,
                 version: 2,
+                spec: vec![],
             },
         );
 
@@ -574,6 +826,7 @@ mod tests {
                 health: true,
                 load: 0.3,
                 version: 3,
+                spec: vec![],
             },
         );
 

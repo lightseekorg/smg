@@ -146,7 +146,7 @@ impl PixtralProcessor {
         let (target_h, target_w) = self.get_resize_output_size(orig_height, orig_width);
 
         // Step 2: Resize image using bicubic interpolation
-        let resized = image.resize_exact(target_w, target_h, FilterType::CatmullRom);
+        let resized = transforms::resize(image, target_w, target_h, FilterType::CatmullRom);
 
         // Step 3: Convert to tensor (0-1 range) and normalize
         let mut tensor = transforms::to_tensor(&resized);

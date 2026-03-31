@@ -645,8 +645,6 @@ mod router_policy_tests {
 
 #[cfg(test)]
 mod responses_endpoint_tests {
-    use reqwest::Client as HttpClient;
-
     use super::*;
 
     #[tokio::test]
@@ -742,24 +740,24 @@ mod responses_endpoint_tests {
 
         let app = ctx.create_app();
 
-        // First create a response to obtain an id
         let resp_id = "test-get-resp-id-123";
-        let payload = json!({
-            "input": "Hello Responses API",
+        use smg_data_connector::{ResponseId, StoredResponse};
+        let mut stored_response = StoredResponse::new(None);
+        stored_response.id = ResponseId::from(resp_id);
+        stored_response.raw_response = json!({
+            "id": resp_id,
+            "object": "response",
+            "created_at": 123,
             "model": "mock-model",
-            "stream": false,
-            "store": true,
-            "background": true,
-            "request_id": resp_id
+            "output": [],
+            "status": "completed"
         });
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/responses")
-            .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_string(&payload).unwrap()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+
+        ctx.app_context
+            .response_storage
+            .store_response(stored_response)
+            .await
+            .expect("Failed to store response");
 
         // Retrieve the response
         let req = Request::builder()
@@ -828,7 +826,7 @@ mod responses_endpoint_tests {
     }
 
     #[tokio::test]
-    async fn test_v1_responses_delete_not_implemented() {
+    async fn test_v1_responses_delete() {
         let ctx = AppTestContext::new(vec![MockWorkerConfig {
             port: 18954,
             worker_type: WorkerType::Regular,
@@ -840,8 +838,24 @@ mod responses_endpoint_tests {
 
         let app = ctx.create_app();
 
-        // Test DELETE is not implemented
         let resp_id = "resp-test-123";
+        use smg_data_connector::{ResponseId, StoredResponse};
+        let mut stored_response = StoredResponse::new(None);
+        stored_response.id = ResponseId::from(resp_id);
+        stored_response.raw_response = json!({
+            "id": resp_id,
+            "object": "response",
+            "created_at": 123,
+            "model": "mock-model",
+            "output": [],
+            "status": "completed"
+        });
+
+        ctx.app_context
+            .response_storage
+            .store_response(stored_response)
+            .await
+            .expect("Failed to store response");
 
         let req = Request::builder()
             .method("DELETE")
@@ -849,7 +863,22 @@ mod responses_endpoint_tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let delete_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(delete_json["id"], resp_id);
+        assert_eq!(delete_json["object"], "response.deleted");
+        assert_eq!(delete_json["deleted"], true);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/responses/{resp_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         ctx.shutdown().await;
     }
@@ -926,7 +955,7 @@ mod responses_endpoint_tests {
     }
 
     #[tokio::test]
-    async fn test_v1_responses_get_multi_worker_fanout() {
+    async fn test_v1_responses_get_multi_worker_uses_shared_storage() {
         // Start two mock workers
         let ctx = AppTestContext::new(vec![
             MockWorkerConfig {
@@ -948,26 +977,26 @@ mod responses_endpoint_tests {
 
         let app = ctx.create_app();
 
-        // Create a background response with a known id
         let rid = format!("resp_{}", 18960); // arbitrary unique id
-        let payload = json!({
-            "input": "Hello Responses API",
+        use smg_data_connector::{ResponseId, StoredResponse};
+        let mut stored_response = StoredResponse::new(None);
+        stored_response.id = ResponseId::from(rid.as_str());
+        stored_response.raw_response = json!({
+            "id": rid,
+            "object": "response",
+            "created_at": 123,
             "model": "mock-model",
-            "background": true,
-            "store": true,
-            "request_id": rid,
+            "output": [],
+            "status": "completed"
         });
 
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/responses")
-            .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_string(&payload).unwrap()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        ctx.app_context
+            .response_storage
+            .store_response(stored_response)
+            .await
+            .expect("Failed to store response");
 
-        // Using the router, GET should succeed by fanning out across workers
+        // Retrieval should succeed regardless of worker count because data layer is authoritative.
         let req = Request::builder()
             .method("GET")
             .uri(format!("/v1/responses/{rid}"))
@@ -976,22 +1005,190 @@ mod responses_endpoint_tests {
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // Validate only one worker holds the metadata: direct calls
-        let client = HttpClient::new();
-        let mut ok_count = 0usize;
-        // Get the actual worker URLs from the context
-        let worker_urls: Vec<String> = vec![
-            "http://127.0.0.1:18960".to_string(),
-            "http://127.0.0.1:18961".to_string(),
-        ];
-        for url in worker_urls {
-            let get_url = format!("{url}/v1/responses/{rid}");
-            let res = client.get(get_url).send().await.unwrap();
-            if res.status() == StatusCode::OK {
-                ok_count += 1;
-            }
-        }
-        assert_eq!(ok_count, 1, "exactly one worker should store the response");
+        ctx.shutdown().await;
+    }
+
+    async fn create_openai_ctx(port: u16) -> AppTestContext {
+        use smg::config::RouterConfig;
+        let config = RouterConfig::builder()
+            .openai_mode(vec![])
+            .random_policy()
+            .host("127.0.0.1")
+            .port(3100)
+            .max_payload_size(256 * 1024 * 1024)
+            .request_timeout_secs(600)
+            .worker_startup_timeout_secs(10)
+            .worker_startup_check_interval_secs(1)
+            .max_concurrent_requests(64)
+            .queue_size(0)
+            .queue_timeout_secs(60)
+            .build_unchecked();
+
+        AppTestContext::new_with_config(
+            config,
+            vec![MockWorkerConfig {
+                port,
+                worker_type: WorkerType::Regular,
+                health_status: HealthStatus::Healthy,
+                response_delay_ms: 0,
+                fail_rate: 0.0,
+            }],
+        )
+        .await
+    }
+
+    async fn create_response(
+        app: &axum::Router,
+        payload: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn test_v1_responses_store_false_retrieve_404() {
+        let ctx = create_openai_ctx(18970).await;
+        let app = ctx.create_app();
+
+        let (status, body) = create_response(
+            &app,
+            json!({
+                "input": "Hello",
+                "model": "mock-model",
+                "stream": false,
+                "store": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resp_id = body["id"].as_str().expect("response should have id");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/responses/{resp_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        ctx.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_v1_responses_store_true_retrieve_200() {
+        let ctx = create_openai_ctx(18971).await;
+        let app = ctx.create_app();
+
+        let (status, body) = create_response(
+            &app,
+            json!({
+                "input": "Hello",
+                "model": "mock-model",
+                "stream": false,
+                "store": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resp_id = body["id"].as_str().expect("response should have id");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/responses/{resp_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let get_body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+        assert_eq!(get_json["store"], true);
+
+        ctx.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_v1_responses_store_omitted_retrieve_200() {
+        let ctx = create_openai_ctx(18973).await;
+        let app = ctx.create_app();
+
+        let (status, body) = create_response(
+            &app,
+            json!({
+                "input": "Hello",
+                "model": "mock-model",
+                "stream": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resp_id = body["id"].as_str().expect("response should have id");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/responses/{resp_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let get_body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+        assert_eq!(get_json["store"], true);
+
+        ctx.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_v1_responses_store_false_as_previous_response_id() {
+        let ctx = create_openai_ctx(18972).await;
+        let app = ctx.create_app();
+
+        let (status, body) = create_response(
+            &app,
+            json!({
+                "input": "Hello",
+                "model": "mock-model",
+                "stream": false,
+                "store": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resp_id = body["id"].as_str().expect("response should have id");
+
+        let (status, err_body) = create_response(
+            &app,
+            json!({
+                "input": "Follow up",
+                "model": "mock-model",
+                "stream": false,
+                "previous_response_id": resp_id
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        assert_eq!(
+            err_body["error"]["code"].as_str(),
+            Some("previous_response_not_found"),
+            "Expected error code 'previous_response_not_found', got: {err_body}"
+        );
 
         ctx.shutdown().await;
     }

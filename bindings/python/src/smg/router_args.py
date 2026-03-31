@@ -160,6 +160,7 @@ class RouterArgs:
     enable_mesh: bool = False
     mesh_server_name: str | None = None
     mesh_host: str = "0.0.0.0"
+    mesh_advertise_host: str | None = None
     mesh_port: int = 39527
     mesh_peer_urls: list[str] = dataclasses.field(default_factory=list)
 
@@ -1066,6 +1067,15 @@ class RouterArgs:
             help="Mesh server bind address (default: 0.0.0.0)",
         )
         mesh_group.add_argument(
+            f"--{prefix}mesh-advertise-host",
+            type=str,
+            default=None,
+            help=(
+                "Routable mesh address to advertise to peers."
+                " Required when --mesh-host binds to 0.0.0.0."
+            ),
+        )
+        mesh_group.add_argument(
             f"--{prefix}mesh-port",
             type=int,
             default=39527,
@@ -1101,7 +1111,7 @@ class RouterArgs:
             prefixed_key = f"{prefix}{attr.name}"
             if prefixed_key in cli_args_dict and cli_args_dict[prefixed_key] is not None:
                 args_dict[attr.name] = cli_args_dict[prefixed_key]
-            elif attr.name in cli_args_dict:
+            elif attr.name in cli_args_dict and cli_args_dict[attr.name] not in (None, ""):
                 args_dict[attr.name] = cli_args_dict[attr.name]
 
             # Special handling for CLI args with dashes vs dataclass fields with underscores

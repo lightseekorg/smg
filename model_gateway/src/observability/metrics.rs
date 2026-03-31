@@ -1,13 +1,10 @@
-use std::{
-    borrow::Cow,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+#[cfg(test)]
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::{borrow::Cow, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
-use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use once_cell::sync::Lazy;
 
 // =============================================================================
@@ -144,6 +141,10 @@ impl Default for PrometheusConfig {
         }
     }
 }
+
+/// Upkeep interval for histogram maintenance. Must match the value passed to
+/// `PrometheusBuilder::upkeep_timeout()` in `start_prometheus`.
+pub(crate) const UPKEEP_INTERVAL_SECS: u64 = 5 * 60;
 
 pub(crate) fn init_metrics() {
     // Layer 1: HTTP metrics
@@ -338,30 +339,24 @@ pub(crate) fn init_metrics() {
     clippy::expect_used,
     reason = "startup initialization — metrics exporter must be installed or the process cannot serve metrics"
 )]
-pub fn start_prometheus(config: PrometheusConfig) {
+pub fn start_prometheus(config: PrometheusConfig) -> PrometheusHandle {
     init_metrics();
 
     let duration_matcher = Matcher::Suffix(String::from("duration_seconds"));
     let duration_bucket: Vec<f64> = config.duration_buckets.unwrap_or_else(|| {
         vec![
             0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 45.0,
-            60.0, 90.0, 120.0, 180.0, 240.0,
+            60.0, 90.0, 120.0, 180.0, 240.0, 300.0, 480.0, 900.0, 1200.0, 1800.0, 2700.0, 3600.0,
+            5400.0, 7200.0,
         ]
     });
 
-    let ip_addr: IpAddr = config
-        .host
-        .parse()
-        .unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
-    let socket_addr = SocketAddr::new(ip_addr, config.port);
-
     PrometheusBuilder::new()
-        .with_http_listener(socket_addr)
-        .upkeep_timeout(Duration::from_secs(5 * 60))
+        .upkeep_timeout(Duration::from_secs(UPKEEP_INTERVAL_SECS))
         .set_buckets_for_metric(duration_matcher, &duration_bucket)
         .expect("failed to set duration bucket")
-        .install()
-        .expect("failed to install Prometheus metrics exporter");
+        .install_recorder()
+        .expect("failed to install Prometheus recorder")
 }
 
 /// Label constants for consistent metric labeling

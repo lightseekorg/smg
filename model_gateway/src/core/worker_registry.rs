@@ -26,7 +26,7 @@ use crate::{
     core::{
         circuit_breaker::CircuitState,
         worker::{HealthChecker, RuntimeType, WorkerType},
-        ConnectionMode, Worker,
+        ConnectionMode, Job, JobQueue, Worker,
     },
     observability::metrics::Metrics,
 };
@@ -237,22 +237,6 @@ impl WorkerRegistry {
         }
     }
 
-    /// Create a cheap handle that shares all internal Arc state.
-    /// Unlike `Clone`, this is private so the singleton semantics are preserved.
-    fn shallow_clone(&self) -> Self {
-        Self {
-            workers: self.workers.clone(),
-            model_index: self.model_index.clone(),
-            hash_rings: self.hash_rings.clone(),
-            type_workers: self.type_workers.clone(),
-            connection_workers: self.connection_workers.clone(),
-            url_to_id: self.url_to_id.clone(),
-            worker_mutation_locks: self.worker_mutation_locks.clone(),
-            mesh_sync: self.mesh_sync.clone(),
-            model_retry_configs: self.model_retry_configs.clone(),
-        }
-    }
-
     /// Rebuild the hash ring for a model based on current workers in the model index
     fn rebuild_hash_ring(&self, model_id: &str) {
         if let Some(workers) = self.model_index.get(model_id) {
@@ -358,6 +342,29 @@ impl WorkerRegistry {
     /// pre-reserved via `reserve_id_for_url()` but has no worker yet is
     /// treated as a new registration (reuses the reserved ID).
     pub fn register(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
+        let worker_id = self.register_inner(worker.clone())?;
+
+        // Sync to mesh if enabled (no-op if mesh is not enabled)
+        {
+            let guard = self.mesh_sync.read();
+            if let Some(ref mesh_sync) = *guard {
+                mesh_sync.sync_worker_state(
+                    worker_id.as_str().to_string(),
+                    worker.model_id().to_string(),
+                    worker.url().to_string(),
+                    worker.is_healthy(),
+                    0.0,
+                    bincode::serialize(&worker.metadata().spec).unwrap_or_default(),
+                );
+            }
+        }
+
+        Some(worker_id)
+    }
+
+    /// Core registration logic shared by local and mesh paths.
+    /// Does NOT sync to mesh — callers that need mesh sync do it themselves.
+    fn register_inner(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
         // Atomic check-and-insert via entry API to avoid TOCTOU races.
         // If URL already has an ID AND a worker object, it's a duplicate.
         // If URL has a reserved ID but no worker, it's a pre-reserved slot.
@@ -400,20 +407,6 @@ impl WorkerRegistry {
             .entry(*worker.connection_mode())
             .or_default()
             .push(worker_id.clone());
-
-        // Sync to mesh if enabled (no-op if mesh is not enabled)
-        {
-            let guard = self.mesh_sync.read();
-            if let Some(ref mesh_sync) = *guard {
-                mesh_sync.sync_worker_state(
-                    worker_id.as_str().to_string(),
-                    worker.model_id().to_string(),
-                    worker.url().to_string(),
-                    worker.is_healthy(),
-                    0.0,
-                );
-            }
-        }
 
         Some(worker_id)
     }
@@ -506,6 +499,7 @@ impl WorkerRegistry {
                     new_worker.url().to_string(),
                     new_worker.is_healthy(),
                     0.0,
+                    bincode::serialize(&new_worker.metadata().spec).unwrap_or_default(),
                 );
             }
         }
@@ -683,6 +677,7 @@ impl WorkerRegistry {
                         worker.url().to_string(),
                         is_healthy,
                         0.0, // TODO: Get actual load
+                        bincode::serialize(&worker.metadata().spec).unwrap_or_default(),
                     );
                 }
             }
@@ -920,15 +915,12 @@ impl WorkerRegistry {
         &self,
         default_interval_secs: u64,
         remove_unhealthy: bool,
+        job_queue: Option<Arc<JobQueue>>,
     ) -> HealthChecker {
         let shutdown_notify = Arc::new(tokio::sync::Notify::new());
         let shutdown_clone = shutdown_notify.clone();
         let workers_ref = self.workers.clone();
-        let registry = if remove_unhealthy {
-            Some(self.shallow_clone())
-        } else {
-            None
-        };
+        let job_queue = if remove_unhealthy { job_queue } else { None };
 
         #[expect(
             clippy::disallowed_methods,
@@ -994,8 +986,10 @@ impl WorkerRegistry {
                         .collect();
                     let checked_workers = futures::future::join_all(futs).await;
 
-                    // Remove workers that transitioned to unhealthy
-                    if let Some(ref registry) = registry {
+                    // Submit removal jobs for workers that transitioned to unhealthy.
+                    // Goes through the full removal workflow (policy registry,
+                    // worker registry, metrics, load monitor).
+                    if let Some(ref job_queue) = job_queue {
                         for worker in &checked_workers {
                             if !worker.is_healthy() {
                                 let url = worker.url().to_string();
@@ -1004,7 +998,16 @@ impl WorkerRegistry {
                                     "Removing unhealthy worker from registry"
                                 );
                                 next_check.remove(&url);
-                                registry.remove_by_url(&url);
+                                if let Err(e) = job_queue
+                                    .submit(Job::RemoveWorker { url: url.clone() })
+                                    .await
+                                {
+                                    tracing::error!(
+                                        worker_url = %url,
+                                        error = %e,
+                                        "Failed to submit worker removal job"
+                                    );
+                                }
                             }
                         }
                     }
@@ -1034,6 +1037,51 @@ impl WorkerRegistry {
 impl Default for WorkerRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl smg_mesh::WorkerStateSubscriber for WorkerRegistry {
+    fn on_remote_worker_state(&self, state: &smg_mesh::WorkerState) {
+        use openai_protocol::model_card::ModelCard;
+
+        // If worker already exists at this URL, update its health status
+        // from the mesh state. Don't re-register — the existing worker has
+        // full config from its creation workflow.
+        if let Some(existing) = self.get_by_url(&state.url) {
+            existing.set_healthy(state.health);
+            tracing::debug!(
+                url = %state.url,
+                healthy = state.health,
+                "Updated health for existing mesh-synced worker"
+            );
+            return;
+        }
+
+        // New worker — build from the full WorkerSpec if available,
+        // otherwise fall back to minimal builder (old nodes / rolling upgrade).
+        let worker = match bincode::deserialize::<openai_protocol::worker::WorkerSpec>(&state.spec)
+        {
+            Ok(spec) if !state.spec.is_empty() => {
+                super::worker_builder::BasicWorkerBuilder::from_spec(spec).build()
+            }
+            _ => super::worker_builder::BasicWorkerBuilder::new(&state.url)
+                .model(ModelCard::new(&state.model_id))
+                .build(),
+        };
+
+        worker.set_healthy(state.health);
+
+        // register_inner skips mesh sync to avoid version-bump loop.
+        if let Some(id) = self.register_inner(Arc::new(worker)) {
+            tracing::info!(
+                worker_id = %id.as_str(),
+                url = %state.url,
+                model = %state.model_id,
+                healthy = state.health,
+                has_spec = !state.spec.is_empty(),
+                "Registered mesh-synced worker into local registry"
+            );
+        }
     }
 }
 
@@ -1202,16 +1250,18 @@ mod tests {
         registry.register(Arc::from(worker)).unwrap();
         assert_eq!(registry.stats().total_workers, 1);
 
-        // Start health checker with remove_unhealthy=true and 1s interval
-        let _hc = registry.start_health_checker(1, true);
+        // Start health checker with remove_unhealthy=true but no job queue.
+        // Without a job queue the removal job can't be submitted, but the worker
+        // should still be marked unhealthy by the health check.
+        let _hc = registry.start_health_checker(1, true, None);
 
-        // Wait for the health check to run and remove the worker
+        // Wait for the health check to run and mark the worker unhealthy
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
         assert_eq!(
-            registry.stats().total_workers,
+            registry.stats().healthy_workers,
             0,
-            "Unhealthy worker should have been removed from the registry"
+            "Worker should be marked unhealthy after failed health checks"
         );
     }
 
@@ -1242,7 +1292,7 @@ mod tests {
         assert_eq!(registry.stats().total_workers, 1);
 
         // Start health checker with remove_unhealthy=false (default behavior)
-        let _hc = registry.start_health_checker(1, false);
+        let _hc = registry.start_health_checker(1, false, None);
 
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
@@ -1462,5 +1512,54 @@ mod tests {
         // Remove last worker — config should be cleaned up
         registry.remove(&id2);
         assert!(registry.get_retry_config("llama-3").is_none());
+    }
+
+    #[test]
+    fn test_mesh_worker_state_subscriber() {
+        use smg_mesh::{WorkerState, WorkerStateSubscriber};
+
+        let registry = WorkerRegistry::new();
+
+        // Simulate a remote mesh worker state arriving
+        let state = WorkerState {
+            worker_id: "mesh-w1".into(),
+            model_id: "llama-3".into(),
+            url: "http://mesh-worker1:8080".into(),
+            health: true,
+            load: 0.5,
+            version: 1,
+            spec: vec![],
+        };
+
+        // Should register the worker locally
+        registry.on_remote_worker_state(&state);
+        assert_eq!(registry.get_by_model("llama-3").len(), 1);
+        assert!(registry.get_by_url("http://mesh-worker1:8080").is_some());
+
+        // Duplicate URL: should be a no-op (create-only semantics)
+        let state_v2 = WorkerState {
+            version: 2,
+            ..state.clone()
+        };
+        registry.on_remote_worker_state(&state_v2);
+        assert_eq!(registry.get_by_model("llama-3").len(), 1);
+
+        // Pre-existing k8s worker at the same URL: mesh should not overwrite
+        let registry2 = WorkerRegistry::new();
+        let k8s_worker = Arc::new(
+            BasicWorkerBuilder::new("http://mesh-worker1:8080")
+                .model(ModelCard::new("llama-3"))
+                .label("source", "k8s")
+                .build(),
+        );
+        registry2.register(k8s_worker);
+        registry2.on_remote_worker_state(&state);
+        // Still only one worker, and it's the original k8s one with labels
+        assert_eq!(registry2.get_by_model("llama-3").len(), 1);
+        let w = registry2.get_by_url("http://mesh-worker1:8080").unwrap();
+        assert_eq!(
+            w.metadata().spec.labels.get("source"),
+            Some(&"k8s".to_string())
+        );
     }
 }

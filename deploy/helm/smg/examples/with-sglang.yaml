@@ -1,0 +1,43 @@
+# SMG gateway + SGLang worker
+# Usage: helm install smg deploy/helm/smg -f deploy/helm/smg/examples/with-sglang.yaml
+#
+# Prerequisites:
+#   - GPU nodes with nvidia.com/gpu resource
+#   - HuggingFace token for gated models (set huggingface.token)
+
+global:
+  image:
+    registry: docker.io
+    repository: lightseekorg/smg
+    tag: "1.3.3"
+
+huggingface:
+  token: ""  # set via --set huggingface.token=hf_xxx
+
+router:
+  replicas: 1
+  policy: cache_aware
+  model: meta-llama/Llama-3.1-8B-Instruct
+  healthCheck:
+    enabled: false  # disable until workers are ready
+
+workers:
+  - name: llama-8b
+    engine: sglang
+    model: meta-llama/Llama-3.1-8B-Instruct
+    replicas: 1
+    connectionMode: http
+    gpu:
+      count: 1
+    image:
+      tag: "1.3.3-sglang-v0.5.9"
+    resources:
+      requests:
+        cpu: "4"
+        memory: 32Gi
+      limits:
+        memory: 64Gi
+    startupProbe:
+      initialDelaySeconds: 120
+      periodSeconds: 10
+      failureThreshold: 30

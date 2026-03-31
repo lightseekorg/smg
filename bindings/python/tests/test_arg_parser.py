@@ -43,6 +43,7 @@ class TestRouterArgs:
         assert args.cb_failure_threshold == 10
         assert args.disable_retries is False
         assert args.disable_circuit_breaker is False
+        assert args.mesh_advertise_host is None
 
     def test_parse_selector_valid(self):
         """Test parsing valid selector arguments."""
@@ -594,6 +595,28 @@ class TestParseRouterArgs:
         assert router_args.health_check_timeout_secs == 3
         assert router_args.health_check_interval_secs == 30
         assert router_args.health_check_endpoint == "/healthz"
+
+    def test_parse_mesh_advertise_host_args(self):
+        """Test parsing mesh advertise host arguments."""
+        args = [
+            "--enable-mesh",
+            "--mesh-host",
+            "0.0.0.0",
+            "--mesh-advertise-host",
+            "10.0.0.42",
+            "--mesh-port",
+            "39527",
+            "--mesh-peer-urls",
+            "10.0.0.43:39527",
+        ]
+
+        router_args = parse_router_args(args)
+
+        assert router_args.enable_mesh is True
+        assert router_args.mesh_host == "0.0.0.0"
+        assert router_args.mesh_advertise_host == "10.0.0.42"
+        assert router_args.mesh_port == 39527
+        assert router_args.mesh_peer_urls == ["10.0.0.43:39527"]
 
     def test_parse_cors_args(self):
         """Test parsing CORS arguments."""

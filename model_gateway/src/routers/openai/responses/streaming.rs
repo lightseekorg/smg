@@ -80,7 +80,7 @@ pub(super) fn apply_event_transformations_inplace(
             .get_mut("response")
             .and_then(|v| v.as_object_mut())
         {
-            let desired_store = Value::Bool(ctx.original_request.store.unwrap_or(false));
+            let desired_store = Value::Bool(ctx.original_request.store.unwrap_or(true));
             if response_obj.get("store") != Some(&desired_store) {
                 response_obj.insert("store".to_string(), desired_store);
                 changed = true;
@@ -514,7 +514,7 @@ pub(super) fn send_final_response_event(
 /// Simple pass-through streaming without MCP interception
 pub(super) async fn handle_simple_streaming_passthrough(
     client: &reqwest::Client,
-    circuit_breaker: &crate::core::CircuitBreaker,
+    worker: &Arc<dyn crate::core::Worker>,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
 ) -> Response {
@@ -529,7 +529,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let response = match request_builder.send().await {
         Ok(resp) => resp,
         Err(err) => {
-            circuit_breaker.record_failure();
+            worker.record_outcome(502);
             return (
                 StatusCode::BAD_GATEWAY,
                 format!("Failed to forward request to OpenAI: {err}"),
@@ -542,8 +542,9 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let status_code =
         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
+    worker.record_outcome(status.as_u16());
+
     if !status.is_success() {
-        circuit_breaker.record_failure();
         let error_body = response
             .text()
             .await
@@ -552,16 +553,13 @@ pub(super) async fn handle_simple_streaming_passthrough(
         return (status_code, error_body).into_response();
     }
 
-    circuit_breaker.record_success();
-
     let preserved_headers = preserve_response_headers(response.headers());
     let mut upstream_stream = response.bytes_stream();
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
 
-    let should_store = req.original_body.store.unwrap_or(false);
+    let should_store = req.original_body.store.unwrap_or(true);
     let original_request = req.original_body;
-    let persist_needed = original_request.conversation.is_some();
     let previous_response_id = req.previous_response_id;
     let storage = req.storage;
 
@@ -590,7 +588,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                             None => Cow::Borrowed(raw_block.as_str()),
                         };
 
-                        if should_store || persist_needed {
+                        if should_store {
                             accumulator.ingest_block(&block_cow);
                         }
 
@@ -619,7 +617,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
             }
         }
 
-        if (should_store || persist_needed) && !upstream_failed {
+        if should_store && !upstream_failed {
             if chunk_processor.has_remaining() {
                 accumulator.ingest_block(&chunk_processor.take_remaining());
             }
@@ -679,9 +677,8 @@ pub(super) fn handle_streaming_with_tool_interception(
     let payload = req.payload;
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
-    let should_store = req.original_body.store.unwrap_or(false);
+    let should_store = req.original_body.store.unwrap_or(true);
     let original_request = req.original_body;
-    let persist_needed = original_request.conversation.is_some();
     let previous_response_id = req.previous_response_id;
     let url = req.url;
     let storage = req.storage;
@@ -898,7 +895,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     return;
                 }
 
-                let final_response_json = if should_store || persist_needed {
+                let final_response_json = if should_store {
                     handler.accumulator.into_final_response()
                 } else {
                     None
@@ -1028,7 +1025,6 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
             return error::internal_error("internal_error", "Worker not selected");
         }
     };
-    let circuit_breaker = worker.circuit_breaker();
     let headers = ctx.headers().cloned();
     let original_body = match ctx.responses_request() {
         Some(r) => r,
@@ -1059,13 +1055,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     };
 
     let Some(mcp_servers) = mcp_servers else {
-        return handle_simple_streaming_passthrough(
-            &client,
-            circuit_breaker,
-            headers.as_ref(),
-            req,
-        )
-        .await;
+        return handle_simple_streaming_passthrough(&client, &worker, headers.as_ref(), req).await;
     };
 
     handle_streaming_with_tool_interception(

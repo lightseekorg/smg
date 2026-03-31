@@ -1,0 +1,48 @@
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: arc-runner-cpu
+  namespace: actions-runner-system
+spec:
+  replicas: 4
+  template:
+    spec:
+      ephemeral: true
+      repository: lightseekorg/smg
+      labels:
+        - k8s-runner-cpu
+      serviceAccountName: arc-runner-sa
+
+      containers:
+        - name: runner
+          image: fra.ocir.io/idqj093njucb/action-runner:v0.0.1
+          resources:
+            requests:
+              cpu: "8"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "16Gi"
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HUGGINGFACE_API_KEY
+                  name: huggingface-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: OPENAI_API_KEY
+                  name: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: ANTHROPIC_API_KEY
+                  name: anthropic-api-key
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: XAI_API_KEY
+                  name: xai-api-key
+        - name: docker
+          image: fra.ocir.io/idqj093njucb/docker:dind

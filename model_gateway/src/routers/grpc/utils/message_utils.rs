@@ -36,12 +36,13 @@ pub fn process_messages(
     request: &CreateMessageRequest,
     tokenizer: &dyn Tokenizer,
     chat_tools: Option<&[ChatTool]>,
+    image_placeholder: Option<&str>,
 ) -> Result<ProcessedMessages, String> {
     let content_format = tokenizer.chat_template_content_format();
 
     // Step 1: Convert InputMessages to chat template JSON values
     let mut transformed_messages =
-        process_message_content_format(&request.messages, content_format)?;
+        process_message_content_format(&request.messages, content_format, image_placeholder)?;
 
     // Step 2: Prepend system message if present
     if let Some(system) = &request.system {
@@ -135,11 +136,17 @@ pub fn process_messages(
 pub(crate) fn process_message_content_format(
     messages: &[InputMessage],
     content_format: ChatTemplateContentFormat,
+    image_placeholder: Option<&str>,
 ) -> Result<Vec<Value>, String> {
     messages.iter().try_fold(Vec::new(), |mut result, message| {
         match message.role {
             messages::Role::User => {
-                convert_user_message(&message.content, content_format, &mut result);
+                convert_user_message(
+                    &message.content,
+                    content_format,
+                    image_placeholder,
+                    &mut result,
+                );
             }
             messages::Role::Assistant => {
                 result.push(convert_assistant_message(&message.content, content_format));
@@ -157,6 +164,7 @@ pub(crate) fn process_message_content_format(
 fn convert_user_message(
     content: &InputContent,
     content_format: ChatTemplateContentFormat,
+    image_placeholder: Option<&str>,
     result: &mut Vec<Value>,
 ) {
     match content {
@@ -191,7 +199,7 @@ fn convert_user_message(
             );
 
             if !user_parts.is_empty() {
-                let content = format_content_parts(user_parts, content_format);
+                let content = format_content_parts(user_parts, content_format, image_placeholder);
                 result.push(json!({"role": "user", "content": content}));
             }
             result.extend(tool_msgs);
@@ -276,20 +284,27 @@ fn convert_assistant_message(
 ///
 /// - `String` format: join text parts into a single string
 /// - `OpenAI` format: keep as array of typed parts
-fn format_content_parts(parts: Vec<Value>, content_format: ChatTemplateContentFormat) -> Value {
+fn format_content_parts(
+    parts: Vec<Value>,
+    content_format: ChatTemplateContentFormat,
+    image_placeholder: Option<&str>,
+) -> Value {
     match content_format {
         ChatTemplateContentFormat::String => {
-            // Extract text parts and join
+            // Extract text parts; optionally replace image parts with placeholders
             let text: String = parts
                 .iter()
                 .filter_map(|p| {
-                    p.as_object()
-                        .and_then(|obj| obj.get("type")?.as_str().filter(|&t| t == "text"))
-                        .and_then(|_| p.as_object()?.get("text")?.as_str())
-                        .map(String::from)
+                    let obj = p.as_object()?;
+                    let type_str = obj.get("type")?.as_str()?;
+                    match type_str {
+                        "text" => obj.get("text")?.as_str().map(String::from),
+                        "image" => image_placeholder.map(String::from),
+                        _ => None,
+                    }
                 })
                 .collect::<Vec<_>>()
-                .join(" ");
+                .join("\n");
             Value::String(text)
         }
         ChatTemplateContentFormat::OpenAI => Value::Array(parts),
@@ -418,7 +433,8 @@ mod tests {
         }];
 
         let result =
-            process_message_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+            process_message_content_format(&messages, ChatTemplateContentFormat::String, None)
+                .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["role"], "user");
         assert_eq!(result[0]["content"], "Hello");
@@ -436,7 +452,8 @@ mod tests {
         }];
 
         let result =
-            process_message_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+            process_message_content_format(&messages, ChatTemplateContentFormat::String, None)
+                .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["role"], "assistant");
         assert_eq!(result[0]["content"], "Hi there");
@@ -462,7 +479,8 @@ mod tests {
         }];
 
         let result =
-            process_message_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+            process_message_content_format(&messages, ChatTemplateContentFormat::String, None)
+                .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["role"], "assistant");
         assert_eq!(result[0]["content"], "Let me check.");
@@ -486,7 +504,8 @@ mod tests {
         }];
 
         let result =
-            process_message_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+            process_message_content_format(&messages, ChatTemplateContentFormat::String, None)
+                .unwrap();
         // Tool result becomes a "tool" role message, not a "user" message
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["role"], "tool");
@@ -513,7 +532,8 @@ mod tests {
         }];
 
         let result =
-            process_message_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+            process_message_content_format(&messages, ChatTemplateContentFormat::String, None)
+                .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["role"], "assistant");
         assert_eq!(result[0]["content"], "The answer is 42.");
@@ -540,7 +560,8 @@ mod tests {
         }];
 
         let result =
-            process_message_content_format(&messages, ChatTemplateContentFormat::String).unwrap();
+            process_message_content_format(&messages, ChatTemplateContentFormat::String, None)
+                .unwrap();
         assert_eq!(
             result[0]["reasoning_content"],
             "First thought.\nSecond thought."

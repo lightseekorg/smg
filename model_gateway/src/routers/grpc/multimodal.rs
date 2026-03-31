@@ -9,7 +9,7 @@
 //! functions differ because they work with different input types (`ChatMessage` vs
 //! `InputMessage`).
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -70,7 +70,7 @@ impl MultimodalComponents {
     }
 
     /// Load or retrieve cached model config for a given model and tokenizer source path.
-    pub fn get_or_load_config(
+    pub async fn get_or_load_config(
         &self,
         model_id: &str,
         tokenizer_source: &str,
@@ -79,7 +79,11 @@ impl MultimodalComponents {
             return Ok(cached.clone());
         }
 
-        let base_dir = Path::new(tokenizer_source);
+        let base_dir = llm_multimodal::hub::resolve_model_config_dir(tokenizer_source)
+            .await
+            .with_context(|| {
+                format!("Failed to resolve model config directory for '{tokenizer_source}'")
+            })?;
 
         // Load config.json
         let config_path = base_dir.join("config.json");
@@ -150,6 +154,34 @@ pub(crate) struct MultimodalIntermediate {
     pub field_layouts: HashMap<String, FieldLayout>,
     /// Tensor keys that should remain on CPU (vLLM `keep_on_cpu` hint).
     pub keep_on_cpu_keys: Vec<String>,
+}
+
+/// Resolve the placeholder token string for a multimodal model.
+///
+/// Loads the model config and looks up the model spec to get the placeholder
+/// token (e.g. `"<|image|>"` for Phi-3-vision). Returns `None` if the model
+/// is not recognized as multimodal.
+pub(crate) async fn resolve_placeholder_token(
+    model_id: &str,
+    tokenizer: &dyn TokenizerTrait,
+    components: &MultimodalComponents,
+    tokenizer_source: &str,
+) -> Result<Option<String>> {
+    let model_config = components
+        .get_or_load_config(model_id, tokenizer_source)
+        .await?;
+    let metadata = ModelMetadata {
+        model_id,
+        tokenizer,
+        config: &model_config.config,
+    };
+    let spec = match components.model_registry.lookup(&metadata) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    Ok(Some(spec.placeholder_token(&metadata).map_err(|e| {
+        anyhow::anyhow!("Failed to get placeholder token: {e}")
+    })?))
 }
 
 /// Check if any messages in the request contain multimodal content (images).
@@ -381,7 +413,9 @@ async fn process_multimodal_parts(
     );
 
     // Step 2: Resolve model spec and preprocess images
-    let model_config = components.get_or_load_config(model_id, tokenizer_source)?;
+    let model_config = components
+        .get_or_load_config(model_id, tokenizer_source)
+        .await?;
     let model_type = model_config
         .config
         .get("model_type")
