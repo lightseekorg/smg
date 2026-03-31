@@ -1,3 +1,4 @@
+mod kimi_k25;
 mod llama4;
 mod llava;
 mod phi3_v;
@@ -5,6 +6,7 @@ mod qwen3_vl;
 mod qwen_vl;
 mod traits;
 
+use kimi_k25::KimiK25VisionSpec;
 use llama4::Llama4Spec;
 use llava::{LlavaNextSpec, LlavaSpec};
 use once_cell::sync::Lazy;
@@ -22,6 +24,7 @@ impl ModelRegistry {
     pub fn new() -> Self {
         Self {
             specs: vec![
+                LazySpec::new("kimi_k25", || Box::new(KimiK25VisionSpec)),
                 LazySpec::new("llama4", || Box::new(Llama4Spec)),
                 // LlavaNext must be registered before Llava so "llava_next" model_type matches first.
                 LazySpec::new("llava_next", || Box::new(LlavaNextSpec)),

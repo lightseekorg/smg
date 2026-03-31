@@ -464,6 +464,16 @@ impl ImageProcessorRegistry {
             Box::new(super::processors::Llama4VisionProcessor::new()),
         );
 
+        // Register Kimi-K2.5 Vision
+        registry.register(
+            "kimi-k2",
+            Box::new(super::processors::KimiK25Processor::new()),
+        );
+        registry.register(
+            "kimi_k2",
+            Box::new(super::processors::KimiK25Processor::new()),
+        );
+
         registry
     }
 }
