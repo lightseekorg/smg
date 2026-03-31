@@ -289,59 +289,18 @@ impl IncrementalUpdateCollector {
                         }
 
                         if !sent_delta {
-                            // Full-state fallback: build Tree from stored
-                            // snapshot + pending ops, then snapshot for compact wire format.
-                            let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
-                            let config_bytes = self
-                                .stores
-                                .tree_configs
-                                .get(key.as_str())
-                                .map(|r| r.clone());
-                            let tree = match config_bytes.as_deref() {
-                                Some(bytes) if !bytes.is_empty() => {
-                                    match kv_index::snapshot::TreeSnapshot::from_bytes(bytes) {
-                                        Ok(snap) => kv_index::Tree::from_snapshot(&snap),
-                                        Err(_) => {
-                                            debug!("Skipping full-state fallback for {} — config corrupted", key);
-                                            continue;
-                                        }
-                                    }
-                                }
-                                _ => kv_index::Tree::new(),
-                            };
-                            // Only Insert(Text) ops are materialized into the snapshot.
-                            // Remove ops and Insert(Tokens) are intentionally skipped —
-                            // the snapshot format only represents text-key insert state.
-                            // Token tree sync is deferred to a future phase.
-                            for op in &**pending {
-                                if let super::tree_ops::TreeOperation::Insert(ref insert_op) = op {
-                                    if let super::tree_ops::TreeKey::Text(ref text) = insert_op.key
-                                    {
-                                        tree.insert(text, &insert_op.tenant);
-                                    }
-                                }
-                            }
-                            let snapshot = tree.snapshot();
-                            let full_state = PolicyState {
-                                model_id,
-                                policy_type: "tree_snapshot".to_string(),
-                                config: snapshot.to_bytes().unwrap_or_default(),
-                                version: current_version,
-                            };
-                            if let Ok(serialized) = bincode::serialize(&full_state) {
-                                updates.push(StateUpdate {
-                                    key: key.clone(),
-                                    value: serialized,
-                                    version: current_version,
-                                    actor: self.self_name.clone(),
-                                    timestamp,
-                                });
-                                debug!(
-                                    "Collected full tree snapshot fallback: {} (version: {})",
-                                    key, current_version
-                                );
-                                emitted_tree_keys.insert(key.clone());
-                            }
+                            // No delta available (version gap). Don't send
+                            // full-state — it can be tens of MB with long
+                            // prompts and will exceed the gRPC message limit.
+                            // The next checkpoint cycle will fold pending ops
+                            // into tree_configs, resetting the delta window.
+                            // The peer will receive the snapshot via the
+                            // initial snapshot exchange (ping_server) or
+                            // Phase 2 (tree_configs-only entries) instead.
+                            debug!(
+                                "Skipping full-state fallback for {} (version gap: last_sent={}, current={})",
+                                key, last_sent_version, current_version
+                            );
                         }
                     }
 
