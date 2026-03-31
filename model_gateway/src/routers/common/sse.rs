@@ -300,6 +300,40 @@ fn eol_len_at(buf: &[u8], pos: usize) -> usize {
     }
 }
 
+/// Split a string into lines using all SSE-spec line endings: `\r\n`, `\r`, `\n`.
+///
+/// `str::lines()` handles `\n` and `\r\n` but not bare `\r`. The SSE spec
+/// requires all three forms to be recognized as line terminators.
+fn split_sse_lines(s: &str) -> impl Iterator<Item = &str> {
+    let mut remaining = s;
+    std::iter::from_fn(move || {
+        if remaining.is_empty() {
+            return None;
+        }
+        // Find the next \r or \n
+        let pos = remaining.find(['\r', '\n']);
+        match pos {
+            None => {
+                let line = remaining;
+                remaining = "";
+                Some(line)
+            }
+            Some(i) => {
+                let line = &remaining[..i];
+                // Consume the EOL: \r\n (2), or \r / \n (1)
+                if remaining.as_bytes().get(i) == Some(&b'\r')
+                    && remaining.as_bytes().get(i + 1) == Some(&b'\n')
+                {
+                    remaining = &remaining[i + 2..];
+                } else {
+                    remaining = &remaining[i + 1..];
+                }
+                Some(line)
+            }
+        }
+    })
+}
+
 /// Parse a complete SSE frame into event type and data.
 ///
 /// Returns borrowed references for zero-allocation in the common case
@@ -312,7 +346,7 @@ fn parse_frame(frame: &str) -> SseFrame<'_> {
     let mut first_data: Option<&str> = None;
     let mut extra_data: Option<Vec<&str>> = None;
 
-    for line in frame.lines() {
+    for line in split_sse_lines(frame) {
         if line.is_empty() || line.starts_with(':') {
             continue;
         }
@@ -376,7 +410,6 @@ pub fn build_sse_response(
             HeaderValue::from_static("text/event-stream; charset=utf-8"),
         )
         .header("Cache-Control", HeaderValue::from_static("no-cache"))
-        .header("Connection", HeaderValue::from_static("keep-alive"))
         .body(Body::from_stream(stream))
         .expect("infallible: static headers and valid status code")
 }
@@ -850,6 +883,40 @@ mod tests {
     fn test_parse_frame_field_without_colon() {
         let frame = parse_frame("data");
         assert_eq!(frame.data.as_ref(), "");
+    }
+
+    #[test]
+    fn test_parse_frame_bare_cr_lines() {
+        // Lines separated by bare \r — str::lines() would fail here
+        let frame = parse_frame("event: ping\rdata: {}");
+        assert_eq!(frame.event_type, Some("ping"));
+        assert_eq!(frame.data.as_ref(), "{}");
+    }
+
+    // --- split_sse_lines tests ---
+
+    #[test]
+    fn test_split_sse_lines_lf() {
+        let lines: Vec<_> = split_sse_lines("a\nb\nc").collect();
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_sse_lines_crlf() {
+        let lines: Vec<_> = split_sse_lines("a\r\nb\r\nc").collect();
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_sse_lines_bare_cr() {
+        let lines: Vec<_> = split_sse_lines("a\rb\rc").collect();
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_sse_lines_mixed() {
+        let lines: Vec<_> = split_sse_lines("a\nb\rc\r\nd").collect();
+        assert_eq!(lines, vec!["a", "b", "c", "d"]);
     }
 
     // --- find_frame_boundary tests ---
