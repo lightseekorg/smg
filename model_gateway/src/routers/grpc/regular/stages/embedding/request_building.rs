@@ -32,22 +32,6 @@ impl Default for EmbeddingRequestBuildingStage {
 #[async_trait]
 impl PipelineStage for EmbeddingRequestBuildingStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
-        // Extract log_metrics from embedding or classify request (both use same backend)
-        let log_metrics = match &ctx.input.request_type {
-            RequestType::Embedding(req) => req.log_metrics,
-            RequestType::Classify(req) => req.log_metrics,
-            _ => {
-                error!(
-                    function = "EmbeddingRequestBuildingStage::execute",
-                    "Invalid request type: expected Embedding or Classify"
-                );
-                return Err(error::internal_error(
-                    "invalid_request_type",
-                    "Expected Embedding or Classify request",
-                ));
-            }
-        };
-
         // Preparation output should have tokenized input
         let prep_output = ctx.state.preparation.as_ref().ok_or_else(|| {
             error!(
@@ -89,7 +73,6 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
             request_id.clone(),
             original_text,
             prep_output.token_ids.clone(),
-            log_metrics,
         );
 
         let proto_req = ProtoEmbedRequest::Sglang(Box::new(sglang_req));

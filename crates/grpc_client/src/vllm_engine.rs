@@ -907,7 +907,7 @@ mod tests {
                 "This is a test sentence for embedding"
             );
         }
-        // vLLM: no data_parallel_rank or log_metrics in EmbedRequest
+        // vLLM: no data_parallel_rank in EmbedRequest
     }
 
     #[tokio::test]

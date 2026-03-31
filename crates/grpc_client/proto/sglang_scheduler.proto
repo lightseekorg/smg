@@ -308,7 +308,7 @@ message EmbedRequest {
   // EmbedRequest doesn't use sampling_params
   SamplingParams sampling_params = 5;
 
-  bool log_metrics = 6;
+  reserved 6;  // was log_metrics — removed, SGLang-specific concern
 
   // Token type IDs for models that require them
   repeated int32 token_type_ids = 7;
