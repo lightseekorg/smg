@@ -1,6 +1,13 @@
 # Code Review Guidelines
 
-Use the `/smg:review-pr` skill for all PR reviews. It contains the full subsystem-aware checklist, file-to-section mapping, and anti-patterns.
+## Skills
+
+Use these skills during review:
+
+1. **`/smg:review-pr`** — SMG subsystem-aware checklist. Map changed files to sections, check each applicable section.
+2. **`pr-review-toolkit:silent-failure-hunter`** — Spawn as agent on changed files. Finds swallowed errors, inappropriate fallbacks, missing error propagation.
+3. **`pr-review-toolkit:pr-test-analyzer`** — Spawn as agent. Checks if tests adequately cover new/changed functionality.
+4. **`pr-review-toolkit:type-design-analyzer`** — Spawn as agent only if new types are introduced. Reviews invariants and encapsulation.
 
 ## Severity
 
