@@ -55,6 +55,65 @@ impl TreeStateDelta {
     }
 }
 
+// ── Tenant delta types for efficient two-layer sync ─────────────────
+
+/// Lightweight tenant change set for high-frequency sync (every gossip round).
+/// Contains only which tenants changed at which tree nodes — no tree structure,
+/// no prompt text. ~100 bytes per insert vs ~200KB for full TreeOperation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TenantDelta {
+    pub model_id: String,
+    pub version: u64,
+    pub inserts: Vec<TenantInsert>,
+    pub evictions: Vec<TenantEvict>,
+}
+
+/// A tenant was added or refreshed at a tree node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TenantInsert {
+    /// Full prefix path from tree root to this node (for node identification).
+    pub node_path: String,
+    /// Worker URL that cached this prefix.
+    pub worker_url: String,
+    /// Epoch (timestamp) of the cache event. Max-epoch-wins on merge.
+    pub epoch: u64,
+}
+
+/// A tenant was evicted from a tree node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TenantEvict {
+    /// Full prefix path from tree root to this node.
+    pub node_path: String,
+    /// Worker URL that evicted this prefix.
+    pub worker_url: String,
+}
+
+impl TenantDelta {
+    pub fn new(model_id: String, version: u64) -> Self {
+        Self {
+            model_id,
+            version,
+            inserts: Vec::new(),
+            evictions: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inserts.is_empty() && self.evictions.is_empty()
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        bincode::serialize(self).map_err(|e| format!("Failed to serialize TenantDelta: {e}"))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        bincode::deserialize(bytes)
+            .map_err(|e| format!("Failed to deserialize TenantDelta: {e}"))
+    }
+}
+
+// ── Legacy types (still used for periodic structure snapshots) ───────
+
 /// Maximum number of operations stored in a TreeState before compaction.
 /// Prevents unbounded growth of the operation log, especially with token payloads.
 const MAX_TREE_OPERATIONS: usize = 2048;
@@ -428,5 +487,75 @@ mod tests {
 
         // Same operations should be considered equal
         assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn test_tenant_delta_round_trip() {
+        let mut delta = TenantDelta::new("model1".to_string(), 42);
+        delta.inserts.push(TenantInsert {
+            node_path: "Hello world, how are".to_string(),
+            worker_url: "grpc://w1:8000".to_string(),
+            epoch: 1000,
+        });
+        delta.evictions.push(TenantEvict {
+            node_path: "Hello world, how are".to_string(),
+            worker_url: "grpc://w2:8000".to_string(),
+        });
+
+        assert!(!delta.is_empty());
+
+        let bytes = delta.to_bytes().unwrap();
+        let restored = TenantDelta::from_bytes(&bytes).unwrap();
+
+        assert_eq!(restored.model_id, "model1");
+        assert_eq!(restored.version, 42);
+        assert_eq!(restored.inserts.len(), 1);
+        assert_eq!(restored.inserts[0].worker_url, "grpc://w1:8000");
+        assert_eq!(restored.inserts[0].epoch, 1000);
+        assert_eq!(restored.evictions.len(), 1);
+        assert_eq!(restored.evictions[0].worker_url, "grpc://w2:8000");
+    }
+
+    #[test]
+    fn test_tenant_delta_empty() {
+        let delta = TenantDelta::new("model1".to_string(), 0);
+        assert!(delta.is_empty());
+    }
+
+    #[test]
+    fn test_tenant_delta_size_vs_tree_operation() {
+        // A TenantInsert with a 100-char prefix is ~150 bytes
+        let insert = TenantInsert {
+            node_path: "a".repeat(100),
+            worker_url: "grpc://worker1:8000".to_string(),
+            epoch: 12345,
+        };
+        let delta = TenantDelta {
+            model_id: "model1".to_string(),
+            version: 1,
+            inserts: vec![insert],
+            evictions: vec![],
+        };
+        let delta_bytes = delta.to_bytes().unwrap();
+
+        // A TreeOperation with a 20k-char prompt is ~20KB+
+        let tree_op = TreeOperation::Insert(TreeInsertOp {
+            key: TreeKey::Text("x".repeat(20_000)),
+            tenant: "grpc://worker1:8000".to_string(),
+        });
+        let tree_state = TreeState {
+            model_id: "model1".to_string(),
+            operations: vec![tree_op],
+            version: 1,
+        };
+        let tree_bytes = tree_state.to_bytes().unwrap();
+
+        // TenantDelta should be orders of magnitude smaller
+        assert!(
+            delta_bytes.len() < tree_bytes.len() / 10,
+            "TenantDelta ({} bytes) should be much smaller than TreeState ({} bytes)",
+            delta_bytes.len(),
+            tree_bytes.len()
+        );
     }
 }
