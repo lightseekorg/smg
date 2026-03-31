@@ -118,6 +118,9 @@ target/
 # VSCode
 .vscode
 
+# Cursor
+.cursor/
+
 # Autoenv
 .env.leave
 
