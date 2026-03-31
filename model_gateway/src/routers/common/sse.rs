@@ -248,23 +248,56 @@ pub fn parse_block(block: &str) -> SseFrame<'_> {
 // Shared helpers
 // ============================================================================
 
-/// Find a frame boundary (empty line) in the buffer.
+/// Find a frame boundary (two consecutive end-of-line sequences) in the buffer.
 ///
-/// Supports `\n\n`, `\r\n\r\n`, and `\r\r` per the SSE spec.
-/// Returns `(position, delimiter_length)` of the earliest match.
+/// The SSE spec recognizes three EOL forms: `\r\n`, `\r`, `\n`. A frame
+/// boundary is any two consecutive EOLs (an empty line). This handles all
+/// combinations including mixed delimiters like `\n\r\n` or `\r\n\r`.
+///
+/// Returns `(position, delimiter_length)` where position is the start of
+/// the first EOL and delimiter_length covers both EOLs.
+///
+/// Uses `memchr` to jump to the first CR/LF byte, then inspects locally,
+/// so performance is close to the old `memmem` approach for LF-only streams.
 #[inline]
 fn find_frame_boundary(buf: &[u8]) -> Option<(usize, usize)> {
-    // Check all spec-compliant delimiters and return the earliest match.
-    // memchr::memmem is ~10x faster than windows() for large buffers.
-    // memchr is already a direct dependency of model_gateway.
-    [
-        (&b"\n\n"[..], 2usize),
-        (&b"\r\n\r\n"[..], 4),
-        (&b"\r\r"[..], 2),
-    ]
-    .into_iter()
-    .filter_map(|(needle, len)| memchr::memmem::find(buf, needle).map(|pos| (pos, len)))
-    .min_by_key(|(pos, _)| *pos)
+    let mut i = 0;
+    while i < buf.len() {
+        // Fast-skip to next CR or LF using memchr (avoids scanning ASCII bytes one-by-one).
+        let offset = memchr::memchr2(b'\r', b'\n', &buf[i..])?;
+        i += offset;
+
+        // Measure the first EOL sequence at position i.
+        let eol1_len = eol_len_at(buf, i);
+        debug_assert!(eol1_len > 0);
+
+        // Check if a second EOL immediately follows.
+        let eol2_start = i + eol1_len;
+        let eol2_len = eol_len_at(buf, eol2_start);
+        if eol2_len > 0 {
+            return Some((i, eol1_len + eol2_len));
+        }
+
+        // Not a double-EOL; advance past this single EOL.
+        i += eol1_len;
+    }
+    None
+}
+
+/// Length of the EOL sequence at `buf[pos..]`: 2 for `\r\n`, 1 for `\r` or `\n`, 0 if none.
+#[inline]
+fn eol_len_at(buf: &[u8], pos: usize) -> usize {
+    match buf.get(pos) {
+        Some(b'\r') => {
+            if buf.get(pos + 1) == Some(&b'\n') {
+                2 // \r\n
+            } else {
+                1 // bare \r
+            }
+        }
+        Some(b'\n') => 1,
+        _ => 0,
+    }
 }
 
 /// Parse a complete SSE frame into event type and data.
@@ -509,6 +542,15 @@ mod tests {
         dec.push(b"data: hello\r\r").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
         assert_eq!(frame.data.as_ref(), "hello");
+    }
+
+    #[test]
+    fn test_decode_mixed_eol_frame_boundary() {
+        // Mixed: LF then CRLF (\n\r\n)
+        let mut dec = SseDecoder::new();
+        dec.push(b"data: mixed\n\r\n").unwrap();
+        let frame = dec.next_frame().unwrap().unwrap();
+        assert_eq!(frame.data.as_ref(), "mixed");
     }
 
     #[test]
@@ -813,18 +855,43 @@ mod tests {
     // --- find_frame_boundary tests ---
 
     #[test]
-    fn test_find_frame_boundary_lf() {
+    fn test_find_frame_boundary_lf_lf() {
         assert_eq!(find_frame_boundary(b"data: x\n\n"), Some((7, 2)));
     }
 
     #[test]
-    fn test_find_frame_boundary_crlf() {
+    fn test_find_frame_boundary_crlf_crlf() {
         assert_eq!(find_frame_boundary(b"data: x\r\n\r\n"), Some((7, 4)));
     }
 
     #[test]
-    fn test_find_frame_boundary_cr() {
+    fn test_find_frame_boundary_cr_cr() {
         assert_eq!(find_frame_boundary(b"data: x\r\r"), Some((7, 2)));
+    }
+
+    #[test]
+    fn test_find_frame_boundary_lf_crlf() {
+        // Mixed: LF then CRLF
+        assert_eq!(find_frame_boundary(b"data: x\n\r\n"), Some((7, 3)));
+    }
+
+    #[test]
+    fn test_find_frame_boundary_crlf_lf() {
+        // Mixed: CRLF then LF
+        assert_eq!(find_frame_boundary(b"data: x\r\n\n"), Some((7, 3)));
+    }
+
+    #[test]
+    fn test_find_frame_boundary_crlf_cr() {
+        // Mixed: CRLF then CR
+        assert_eq!(find_frame_boundary(b"data: x\r\n\r"), Some((7, 3)));
+    }
+
+    #[test]
+    fn test_find_frame_boundary_cr_lf_not_crlf_pair() {
+        // \r followed by \n is a single CRLF, not two EOLs.
+        // Need another EOL after to form a boundary.
+        assert_eq!(find_frame_boundary(b"data: x\r\n"), None);
     }
 
     #[test]
@@ -834,7 +901,12 @@ mod tests {
 
     #[test]
     fn test_find_frame_boundary_earliest_wins() {
-        // \n\n at pos 7, \r\r at pos 10 — \n\n should win
+        // \n\n at pos 7, \r\r later — \n\n should win
         assert_eq!(find_frame_boundary(b"data: x\n\ndata: y\r\r"), Some((7, 2)));
+    }
+
+    #[test]
+    fn test_find_frame_boundary_empty() {
+        assert_eq!(find_frame_boundary(b""), None);
     }
 }
