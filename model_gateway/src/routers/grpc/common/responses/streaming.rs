@@ -8,7 +8,8 @@ use openai_protocol::{
     common::{Usage, UsageInfo},
     event_types::{
         CodeInterpreterCallEvent, ContentPartEvent, FileSearchCallEvent, FunctionCallEvent,
-        McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent, WebSearchCallEvent,
+        ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent, OutputTextEvent,
+        ResponseEvent, WebSearchCallEvent,
     },
     responses::{
         ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
@@ -32,6 +33,7 @@ pub(crate) enum OutputItemType {
     WebSearchCall,
     CodeInterpreterCall,
     FileSearchCall,
+    ImageGenerationCall,
 }
 
 /// Status of an output item
@@ -119,34 +121,63 @@ impl ResponseStreamEventEmitter {
     /// Update tool call output items with tool execution results
     ///
     /// After MCP tools are executed, this updates the stored output items
-    /// to include the output field from the tool results.
-    /// Supports mcp_call, web_search_call, code_interpreter_call, and file_search_call item types.
+    /// to include tool result payload fields from execution results.
+    /// Supports mcp_call, web_search_call, code_interpreter_call, file_search_call,
+    /// and image_generation_call item types.
     pub(crate) fn update_mcp_call_outputs(&mut self, tool_results: &[ToolResult]) {
         for tool_result in tool_results {
             // Find the output item with matching call_id
             for item_state in &mut self.output_items {
                 if let Some(ref mut item_data) = item_state.item_data {
                     // Check if this is a tool call item with matching call_id
-                    let item_type = item_data.get("type").and_then(|t| t.as_str());
+                    let item_type = item_data
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .map(str::to_string);
                     let is_tool_call = matches!(
-                        item_type,
-                        Some("mcp_call")
-                            | Some("web_search_call")
-                            | Some("code_interpreter_call")
-                            | Some("file_search_call")
+                        item_type.as_deref(),
+                        Some(ItemType::MCP_CALL)
+                            | Some(ItemType::WEB_SEARCH_CALL)
+                            | Some(ItemType::CODE_INTERPRETER_CALL)
+                            | Some(ItemType::FILE_SEARCH_CALL)
+                            | Some(ItemType::IMAGE_GENERATION_CALL)
                     );
                     if is_tool_call
                         && item_data.get("call_id").and_then(|c| c.as_str())
                             == Some(&tool_result.call_id)
                     {
-                        // Add output field
-                        let output_str = serde_json::to_string(&tool_result.output)
-                            .unwrap_or_else(|_| "{}".to_string());
-                        item_data["output"] = json!(output_str);
+                        // image_generation_call stores image bytes in `result` instead of `output`.
+                        if item_type.as_deref() == Some(ItemType::IMAGE_GENERATION_CALL) {
+                            let result_str = tool_result
+                                .output
+                                .as_object()
+                                .and_then(|obj| obj.get("result"))
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .or_else(|| {
+                                    tool_result
+                                        .output
+                                        .as_object()
+                                        .and_then(|obj| obj.get("error"))
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from)
+                                })
+                                .or_else(|| tool_result.output.as_str().map(String::from))
+                                .unwrap_or_else(|| tool_result.output.to_string());
+                            item_data["result"] = json!(result_str);
+                        } else {
+                            let output_str = serde_json::to_string(&tool_result.output)
+                                .unwrap_or_else(|_| "{}".to_string());
+                            item_data["output"] = json!(output_str);
+                        }
 
-                        // Update status based on success
+                        // Update status based on success.
                         if tool_result.is_error {
-                            item_data["status"] = json!("failed");
+                            if item_type.as_deref() == Some(ItemType::IMAGE_GENERATION_CALL) {
+                                item_data["status"] = json!("failed");
+                            } else {
+                                item_data["status"] = json!("failed");
+                            }
                         }
                         break;
                     }
@@ -475,6 +506,7 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::IN_PROGRESS,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::IN_PROGRESS,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::IN_PROGRESS,
+            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::IN_PROGRESS,
             ResponseFormat::Passthrough => McpEvent::CALL_IN_PROGRESS,
         };
         self.emit_tool_event(event_type, output_index, item_id)
@@ -491,6 +523,7 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
+            ResponseFormat::ImageGenerationCall => return None,
             ResponseFormat::Passthrough => return None,
         };
         Some(self.emit_tool_event(event_type, output_index, item_id))
@@ -507,6 +540,7 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::COMPLETED,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::COMPLETED,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::COMPLETED,
+            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::COMPLETED,
             ResponseFormat::Passthrough => McpEvent::CALL_COMPLETED,
         };
         self.emit_tool_event(event_type, output_index, item_id)
@@ -522,6 +556,7 @@ impl ResponseStreamEventEmitter {
             Some(ResponseFormat::WebSearchCall) => "web_search_call",
             Some(ResponseFormat::CodeInterpreterCall) => "code_interpreter_call",
             Some(ResponseFormat::FileSearchCall) => "file_search_call",
+            Some(ResponseFormat::ImageGenerationCall) => "image_generation_call",
             Some(ResponseFormat::Passthrough) => "mcp_call",
             None => "function_call",
         }
@@ -533,6 +568,7 @@ impl ResponseStreamEventEmitter {
             Some(ResponseFormat::WebSearchCall) => OutputItemType::WebSearchCall,
             Some(ResponseFormat::CodeInterpreterCall) => OutputItemType::CodeInterpreterCall,
             Some(ResponseFormat::FileSearchCall) => OutputItemType::FileSearchCall,
+            Some(ResponseFormat::ImageGenerationCall) => OutputItemType::ImageGenerationCall,
             Some(ResponseFormat::Passthrough) => OutputItemType::McpCall,
             None => OutputItemType::FunctionCall,
         }
@@ -626,6 +662,7 @@ impl ResponseStreamEventEmitter {
             OutputItemType::WebSearchCall => "ws",
             OutputItemType::CodeInterpreterCall => "ci",
             OutputItemType::FileSearchCall => "fs",
+            OutputItemType::ImageGenerationCall => "ig",
         };
 
         let id = Self::generate_item_id(id_prefix);
@@ -1008,5 +1045,120 @@ pub(crate) fn attach_mcp_server_label(
 ) {
     if let (Some(label), Some(ResponseFormat::Passthrough)) = (server_label, response_format) {
         item["server_label"] = json!(label);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn test_emitter() -> ResponseStreamEventEmitter {
+        ResponseStreamEventEmitter::new("resp_test".to_string(), "gpt-test".to_string(), 0)
+    }
+
+    #[test]
+    fn image_generation_stream_events_emit_expected_types() {
+        let mut emitter = test_emitter();
+        let in_progress = emitter.emit_tool_call_in_progress(
+            0,
+            "ig_test",
+            &ResponseFormat::ImageGenerationCall,
+        );
+        let completed = emitter.emit_tool_call_completed(
+            0,
+            "ig_test",
+            &ResponseFormat::ImageGenerationCall,
+        );
+        let searching =
+            emitter.emit_tool_call_searching(0, "ig_test", &ResponseFormat::ImageGenerationCall);
+
+        assert_eq!(
+            in_progress.get("type").and_then(|v| v.as_str()),
+            Some(ImageGenerationCallEvent::IN_PROGRESS)
+        );
+        assert_eq!(
+            completed.get("type").and_then(|v| v.as_str()),
+            Some(ImageGenerationCallEvent::COMPLETED)
+        );
+        assert!(
+            searching.is_none(),
+            "image_generation_call should not emit searching/interpreting event"
+        );
+    }
+
+    #[test]
+    fn update_mcp_call_outputs_writes_image_result_on_success() {
+        let mut emitter = test_emitter();
+        let (output_index, _item_id) = emitter.allocate_output_index(OutputItemType::ImageGenerationCall);
+
+        emitter.store_output_item_data(
+            output_index,
+            json!({
+                "type": "image_generation_call",
+                "call_id": "call_img_1",
+                "status": "in_progress"
+            }),
+        );
+
+        emitter.update_mcp_call_outputs(&[ToolResult {
+            call_id: "call_img_1".to_string(),
+            output: json!({ "result": "base64-image-data" }),
+            is_error: false,
+        }]);
+
+        let stored = emitter
+            .output_items
+            .iter()
+            .find(|i| i.output_index == output_index)
+            .and_then(|i| i.item_data.as_ref())
+            .expect("image output item should be stored");
+
+        assert_eq!(
+            stored.get("result").and_then(|v| v.as_str()),
+            Some("base64-image-data")
+        );
+        assert_eq!(
+            stored.get("status").and_then(|v| v.as_str()),
+            Some("in_progress")
+        );
+    }
+
+    #[test]
+    fn update_mcp_call_outputs_marks_image_failed_on_error() {
+        let mut emitter = test_emitter();
+        let (output_index, _item_id) = emitter.allocate_output_index(OutputItemType::ImageGenerationCall);
+
+        emitter.store_output_item_data(
+            output_index,
+            json!({
+                "type": "image_generation_call",
+                "call_id": "call_img_2",
+                "status": "in_progress"
+            }),
+        );
+
+        emitter.update_mcp_call_outputs(&[ToolResult {
+            call_id: "call_img_2".to_string(),
+            output: json!({ "error": "image generation failed" }),
+            is_error: true,
+        }]);
+
+        let stored = emitter
+            .output_items
+            .iter()
+            .find(|i| i.output_index == output_index)
+            .and_then(|i| i.item_data.as_ref())
+            .expect("image output item should be stored");
+
+        assert_eq!(
+            stored.get("status").and_then(|v| v.as_str()),
+            Some("failed")
+        );
+        assert_eq!(
+            stored.get("result").and_then(|v| v.as_str()),
+            Some("image generation failed")
+        );
     }
 }

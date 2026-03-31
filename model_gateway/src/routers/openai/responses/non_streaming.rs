@@ -2,6 +2,8 @@
 //!
 //! This module handles non-streaming Responses API requests with MCP tool support.
 
+use std::collections::HashMap;
+
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -15,7 +17,7 @@ use super::utils::{patch_response_with_request_metadata, restore_original_tools}
 use crate::routers::{
     error,
     header_utils::{apply_provider_headers, extract_auth_header},
-    mcp_utils::ensure_request_mcp_client,
+    mcp_utils::ensure_request_mcp_client_with_headers,
     openai::{
         context::{PayloadState, RequestContext},
         mcp::{execute_tool_loop, prepare_mcp_tools_as_functions},
@@ -56,10 +58,20 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             return error::internal_error("internal_error", "MCP orchestrator required");
         }
     };
+    let mut default_mcp_headers = HashMap::new();
+    if let Some(v) = ctx
+        .headers()
+        .and_then(|h| h.get("opc-compartment-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        default_mcp_headers.insert("opc-compartment-id".to_string(), v.to_string());
+    }
 
     // Check for MCP tools and create session if needed
     let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(mcp_orchestrator, tools).await
+        ensure_request_mcp_client_with_headers(mcp_orchestrator, tools, &default_mcp_headers).await
     } else {
         None
     };

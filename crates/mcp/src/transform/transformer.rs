@@ -2,7 +2,8 @@
 
 use openai_protocol::responses::{
     CodeInterpreterCallStatus, CodeInterpreterOutput, FileSearchCallStatus, FileSearchResult,
-    ResponseOutputItem, WebSearchAction, WebSearchCallStatus, WebSearchSource,
+    ImageGenerationCallStatus, ResponseOutputItem, WebSearchAction, WebSearchCallStatus,
+    WebSearchSource,
 };
 
 use super::ResponseFormat;
@@ -29,6 +30,9 @@ impl ResponseTransformer {
             ResponseFormat::WebSearchCall => Self::to_web_search_call(result, tool_call_id),
             ResponseFormat::CodeInterpreterCall => {
                 Self::to_code_interpreter_call(result, tool_call_id)
+            }
+            ResponseFormat::ImageGenerationCall => {
+                Self::to_image_generation_call(result, tool_call_id)
             }
             ResponseFormat::FileSearchCall => Self::to_file_search_call(result, tool_call_id),
         }
@@ -96,6 +100,60 @@ impl ResponseTransformer {
             container_id,
             code,
             outputs: (!outputs.is_empty()).then_some(outputs),
+        }
+    }
+
+    /// Transform MCP image generation results to OpenAI image_generation_call format.
+    fn to_image_generation_call(
+        result: &serde_json::Value,
+        tool_call_id: &str,
+    ) -> ResponseOutputItem {
+        let obj = result.as_object();
+        let explicit_status = obj
+            .and_then(|o| o.get("status"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_ascii_lowercase());
+        let error_message = obj
+            .and_then(|o| o.get("error"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let extracted = result
+            .as_object()
+            .and_then(|obj| obj.get("result"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| result.as_str().map(String::from))
+            .unwrap_or_else(|| result.to_string());
+
+        let status = match explicit_status.as_deref() {
+            Some("in_progress") | Some("in-progress") => ImageGenerationCallStatus::InProgress,
+            Some("generating") => ImageGenerationCallStatus::Generating,
+            Some("incomplete") | Some("partial") => ImageGenerationCallStatus::Failed,
+            Some("completed") | Some("complete") | Some("success") | Some("succeeded") => {
+                ImageGenerationCallStatus::Completed
+            }
+            Some("failed") | Some("error") => ImageGenerationCallStatus::Failed,
+            _ if error_message.is_some() => ImageGenerationCallStatus::Failed,
+            _ => ImageGenerationCallStatus::Completed,
+        };
+
+        let output_result = match status {
+            ImageGenerationCallStatus::InProgress | ImageGenerationCallStatus::Generating => None,
+            ImageGenerationCallStatus::Failed => {
+                if let Some(err) = error_message {
+                    Some(err)
+                } else {
+                    Some(extracted)
+                }
+            }
+            ImageGenerationCallStatus::Completed => Some(extracted),
+        };
+
+        ResponseOutputItem::ImageGenerationCall {
+            id: format!("ig_{tool_call_id}"),
+            status,
+            result: output_result,
         }
     }
 
@@ -367,6 +425,102 @@ mod tests {
                 assert_eq!(results[0].score, Some(0.95));
             }
             _ => panic!("Expected FileSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform() {
+        let result = json!({
+            "result": "ZmFrZV9iYXNlNjQ="
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-999",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall { id, status, result } => {
+                assert_eq!(id, "ig_req-999");
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+                assert_eq!(result.as_deref(), Some("ZmFrZV9iYXNlNjQ="));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_direct_string() {
+        let result = json!("ZmFrZV9iYXNlNjQ=");
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-1000",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall { id, status, result } => {
+                assert_eq!(id, "ig_req-1000");
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+                assert_eq!(result.as_deref(), Some("ZmFrZV9iYXNlNjQ="));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_non_string_payload() {
+        let result = json!(42);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-1001",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall { id, status, result } => {
+                assert_eq!(id, "ig_req-1001");
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+                assert_eq!(result.as_deref(), Some("42"));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_error_payload() {
+        let result = json!({
+            "error": "generation failed"
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-1002",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall { id, status, result } => {
+                assert_eq!(id, "ig_req-1002");
+                assert_eq!(status, ImageGenerationCallStatus::Failed);
+                assert_eq!(result.as_deref(), Some("generation failed"));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
         }
     }
 }

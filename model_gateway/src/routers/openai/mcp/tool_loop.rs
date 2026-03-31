@@ -8,16 +8,19 @@
 //! - Payload transformation for MCP tool interception
 //! - Metadata injection for MCP operations
 
-use std::io;
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+};
 
 use axum::http::HeaderMap;
 use bytes::Bytes;
 use openai_protocol::{
     event_types::{
-        is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType, McpEvent,
-        OutputItemEvent, WebSearchCallEvent,
+        is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent,
+        ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent, WebSearchCallEvent,
     },
-    responses::{generate_id, ResponseInput, ResponsesRequest},
+    responses::{generate_id, ResponseInput, ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, to_value, Value};
 use smg_mcp::{McpToolSession, ResponseFormat, ResponseTransformer, ToolExecutionInput};
@@ -29,6 +32,47 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{error, header_utils::apply_request_headers, mcp_utils::DEFAULT_MAX_ITERATIONS},
 };
+
+const MAX_TOOL_OUTPUT_CONTEXT_CHARS: usize = 4096;
+
+fn compact_tool_output_for_model_context(tool_name: &str, output: &Value, is_error: bool) -> String {
+    if tool_name == "generate_image" {
+        let status = output
+            .as_object()
+            .and_then(|o| o.get("status"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(if is_error { "failed" } else { "completed" });
+        let error = output
+            .as_object()
+            .and_then(|o| o.get("error"))
+            .and_then(|v| v.as_str());
+        let has_result = output
+            .as_object()
+            .and_then(|o| o.get("result"))
+            .is_some();
+        return json!({
+            "tool": "generate_image",
+            "status": status,
+            "has_result": has_result,
+            "error": error,
+            "note": "binary image payload omitted from model context"
+        })
+        .to_string();
+    }
+
+    let raw = output.to_string();
+    if raw.chars().count() > MAX_TOOL_OUTPUT_CONTEXT_CHARS {
+        let truncated: String = raw.chars().take(MAX_TOOL_OUTPUT_CONTEXT_CHARS).collect();
+        json!({
+            "truncated": true,
+            "original_chars": raw.chars().count(),
+            "preview": truncated
+        })
+        .to_string()
+    } else {
+        raw
+    }
+}
 
 /// State for tracking multi-turn tool calling loop
 pub(crate) struct ToolLoopState {
@@ -95,6 +139,7 @@ pub(crate) async fn execute_streaming_tool_calls(
     state: &mut ToolLoopState,
     sequence_number: &mut u64,
     model_id: &str,
+    image_tool_options: Option<&HashMap<String, Value>>,
 ) -> bool {
     for call in pending_calls {
         if call.name.is_empty() {
@@ -119,7 +164,7 @@ pub(crate) async fn execute_streaming_tool_calls(
         let response_format = session.tool_response_format(&call.name);
         let server_label = session.resolve_tool_server_label(&call.name);
 
-        let arguments: Value = match serde_json::from_str(args_str) {
+        let mut arguments: Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
             Err(e) => {
                 let err_str = format!("Failed to parse tool arguments: {e}");
@@ -136,16 +181,24 @@ pub(crate) async fn execute_streaming_tool_calls(
                 if !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number) {
                     return false;
                 }
+                let model_context_output =
+                    compact_tool_output_for_model_context(&call.name, &error_output, true);
                 state.record_call(
                     call.call_id,
                     call.name,
                     call.arguments_buffer,
-                    error_output.to_string(),
+                    model_context_output,
                     mcp_call_item,
                 );
                 continue;
             }
         };
+        apply_image_tool_defaults(
+            &mut arguments,
+            &call.name,
+            session,
+            image_tool_options,
+        );
 
         if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
             return false;
@@ -171,7 +224,11 @@ pub(crate) async fn execute_streaming_tool_calls(
             },
         );
 
-        let output_str = tool_output.output.to_string();
+        let model_context_output = compact_tool_output_for_model_context(
+            &tool_output.tool_name,
+            &tool_output.output,
+            tool_output.is_error,
+        );
         let mcp_call_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
             warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
             json!({})
@@ -185,7 +242,7 @@ pub(crate) async fn execute_streaming_tool_calls(
             call.call_id,
             call.name,
             call.arguments_buffer,
-            output_str,
+            model_context_output,
             mcp_call_item,
         );
     }
@@ -201,22 +258,67 @@ pub(crate) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpT
         return;
     };
 
+    let mut requested_allowed_tools: HashSet<String> = HashSet::new();
     let mut retained_tools: Vec<Value> = Vec::new();
     if let Some(v) = obj.get_mut("tools") {
         if let Some(arr) = v.as_array_mut() {
             retained_tools = arr
                 .drain(..)
                 .filter(|item| {
-                    item.get("type")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s == ItemType::FUNCTION)
-                        .unwrap_or(false)
+                    let item_type = item.get("type").and_then(|v| v.as_str());
+                    if item_type == Some("mcp") {
+                        if let Some(allowed) = item.get("allowed_tools").and_then(|v| v.as_array()) {
+                            for name in allowed.iter().filter_map(|v| v.as_str()) {
+                                if !name.trim().is_empty() {
+                                    requested_allowed_tools.insert(name.trim().to_string());
+                                }
+                            }
+                        }
+                    }
+                    item_type == Some(ItemType::FUNCTION)
                 })
                 .collect();
         }
     }
 
-    let session_tools = session.build_function_tools_json();
+    let mut session_tools = session.build_function_tools_json();
+    if !requested_allowed_tools.is_empty() {
+        session_tools.retain(|tool| {
+            let Some(name) = tool.get("name").and_then(|v| v.as_str()) else {
+                return false;
+            };
+            if requested_allowed_tools.contains(name) {
+                return true;
+            }
+            name.rsplit_once("__")
+                .is_some_and(|(_, suffix)| requested_allowed_tools.contains(suffix))
+        });
+    }
+    for tool in &mut session_tools {
+        let is_generate_image = tool
+            .get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|name| {
+                name == "generate_image" || name.rsplit_once("__").is_some_and(|(_, s)| s == "generate_image")
+            });
+        if !is_generate_image {
+            continue;
+        }
+        if let Some(tool_obj) = tool.as_object_mut() {
+            tool_obj.insert(
+                "parameters".to_string(),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "revised_prompt": { "type": "string" }
+                    },
+                    "required": ["revised_prompt"],
+                    "additionalProperties": true
+                }),
+            );
+        }
+    }
+
     let mut tools_json = Vec::with_capacity(retained_tools.len() + session_tools.len());
     tools_json.append(&mut retained_tools);
     tools_json.extend(session_tools);
@@ -378,6 +480,7 @@ fn send_tool_call_intermediate_event(
         ResponseFormat::WebSearchCall => (WebSearchCallEvent::SEARCHING, "ws_"),
         ResponseFormat::CodeInterpreterCall => (CodeInterpreterCallEvent::INTERPRETING, "ci_"),
         ResponseFormat::FileSearchCall => (FileSearchCallEvent::SEARCHING, "fs_"),
+        ResponseFormat::ImageGenerationCall => return true, // no intermediate event
         ResponseFormat::Passthrough => return true, // mcp_call has no intermediate event
     };
 
@@ -428,6 +531,7 @@ fn send_tool_call_completion_events(
         ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::COMPLETED,
         ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::COMPLETED,
         ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::COMPLETED,
+        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::COMPLETED,
         _ => McpEvent::CALL_COMPLETED, // Default to mcp_call for mcp_call and unknown types
     };
 
@@ -503,6 +607,7 @@ pub(crate) async fn execute_tool_loop(
     session: &McpToolSession<'_>,
 ) -> Result<Value, String> {
     let mut state = ToolLoopState::new(original_body.input.clone());
+    let image_tool_options = extract_image_tool_options(original_body);
     let max_tool_calls = original_body.max_tool_calls.map(|n| n as usize);
     let base_payload = initial_payload.clone();
     let tools_json = base_payload.get("tools").cloned().unwrap_or(json!([]));
@@ -580,7 +685,7 @@ pub(crate) async fn execute_tool_loop(
                     original_body,
                 );
             }
-            let arguments: Value = match serde_json::from_str(&call.arguments) {
+            let mut arguments: Value = match serde_json::from_str(&call.arguments) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(tool = %call.name, error = %e, "Failed to parse tool arguments as JSON");
@@ -603,16 +708,24 @@ pub(crate) async fn execute_tool_loop(
                         metrics_labels::RESULT_ERROR,
                     );
 
+                    let model_context_output =
+                        compact_tool_output_for_model_context(&call.name, &error_json, true);
                     state.record_call(
                         call.call_id,
                         call.name,
                         call.arguments,
-                        error_output,
+                        model_context_output,
                         transformed_item,
                     );
                     continue;
                 }
             };
+            apply_image_tool_defaults(
+                &mut arguments,
+                &call.name,
+                session,
+                image_tool_options.as_ref(),
+            );
 
             debug!(
                 "Calling MCP tool '{}' with args: {}",
@@ -641,7 +754,11 @@ pub(crate) async fn execute_tool_loop(
                 },
             );
 
-            let output_str = tool_output.output.to_string();
+            let model_context_output = compact_tool_output_for_model_context(
+                &tool_output.tool_name,
+                &tool_output.output,
+                tool_output.is_error,
+            );
             let transformed_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
                 warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
                 json!({})
@@ -651,7 +768,7 @@ pub(crate) async fn execute_tool_loop(
                 call.call_id,
                 call.name,
                 call.arguments,
-                output_str,
+                model_context_output,
                 transformed_item,
             );
         }
@@ -664,6 +781,98 @@ pub(crate) async fn execute_tool_loop(
             false,
         )?;
     }
+}
+
+pub(crate) fn extract_image_tool_options(
+    request: &ResponsesRequest,
+) -> Option<HashMap<String, Value>> {
+    request.tools.as_ref().and_then(|tools| {
+        tools.iter().find_map(|tool| {
+            let ResponseTool::ImageGeneration(image_tool) = tool else {
+                return None;
+            };
+            Some(image_tool.options.clone())
+        })
+    })
+}
+
+fn get_non_empty_string_option(
+    options: Option<&HashMap<String, Value>>,
+    key: &str,
+) -> Option<String> {
+    options
+        .and_then(|m| m.get(key))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn apply_image_tool_defaults(
+    arguments: &mut Value,
+    call_name: &str,
+    session: &McpToolSession<'_>,
+    image_tool_options: Option<&HashMap<String, Value>>,
+) {
+    // For MCP generate_image tool calls, always use the internal default model.
+    // This keeps behavior deterministic regardless of model-generated arguments.
+    if call_name == "generate_image" {
+        if let Some(obj) = arguments.as_object_mut() {
+            obj.insert(
+                "model".to_string(),
+                Value::String("openai.gpt-image-1.5".to_string()),
+            );
+        }
+    }
+
+    if !matches!(
+        session.tool_response_format(call_name),
+        ResponseFormat::ImageGenerationCall
+    ) {
+        return;
+    }
+
+    let revised_prompt = arguments.get("revised_prompt").cloned().unwrap_or(Value::Null);
+
+    let background = get_non_empty_string_option(image_tool_options, "background")
+        .unwrap_or_else(|| "auto".to_string());
+    let size =
+        get_non_empty_string_option(image_tool_options, "size").unwrap_or_else(|| "auto".to_string());
+    let quality = get_non_empty_string_option(image_tool_options, "quality")
+        .unwrap_or_else(|| "auto".to_string());
+    let output_format = get_non_empty_string_option(image_tool_options, "output_format")
+        .unwrap_or_else(|| "png".to_string());
+    let moderation = get_non_empty_string_option(image_tool_options, "moderation")
+        .unwrap_or_else(|| "auto".to_string());
+
+    let model = if call_name == "generate_image" {
+        "openai.gpt-image-1.5".to_string()
+    } else {
+        get_non_empty_string_option(image_tool_options, "model")
+            .filter(|v| !v.eq_ignore_ascii_case("default"))
+            .unwrap_or_else(|| "openai.gpt-image-1.5".to_string())
+    };
+
+    let mut mapped = json!({
+        "revised_prompt": revised_prompt,
+        "background": background,
+        "size": size,
+        "quality": quality,
+        "output_format": output_format,
+        "moderation": moderation,
+        "model": model,
+        "stream": false
+    });
+
+    if let Some(compression) = image_tool_options
+        .and_then(|m| m.get("output_compression"))
+        .filter(|v| !v.is_null())
+        .cloned()
+    {
+        mapped["output_compression"] = compression;
+    }
+
+    *arguments = mapped;
 }
 
 /// Build an incomplete response when limits are exceeded

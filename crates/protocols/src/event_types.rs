@@ -263,6 +263,31 @@ impl fmt::Display for FileSearchCallEvent {
     }
 }
 
+/// Image generation call events for streaming
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImageGenerationCallEvent {
+    InProgress,
+    Completed,
+}
+
+impl ImageGenerationCallEvent {
+    pub const IN_PROGRESS: &'static str = "response.image_generation_call.in_progress";
+    pub const COMPLETED: &'static str = "response.image_generation_call.completed";
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InProgress => Self::IN_PROGRESS,
+            Self::Completed => Self::COMPLETED,
+        }
+    }
+}
+
+impl fmt::Display for ImageGenerationCallEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Item type discriminators used in output items
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemType {
@@ -274,6 +299,7 @@ pub enum ItemType {
     WebSearchCall,
     CodeInterpreterCall,
     FileSearchCall,
+    ImageGenerationCall,
 }
 
 impl ItemType {
@@ -286,6 +312,7 @@ impl ItemType {
     pub const WEB_SEARCH_CALL: &'static str = "web_search_call";
     pub const CODE_INTERPRETER_CALL: &'static str = "code_interpreter_call";
     pub const FILE_SEARCH_CALL: &'static str = "file_search_call";
+    pub const IMAGE_GENERATION_CALL: &'static str = "image_generation_call";
 
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -297,6 +324,7 @@ impl ItemType {
             Self::WebSearchCall => Self::WEB_SEARCH_CALL,
             Self::CodeInterpreterCall => Self::CODE_INTERPRETER_CALL,
             Self::FileSearchCall => Self::FILE_SEARCH_CALL,
+            Self::ImageGenerationCall => Self::IMAGE_GENERATION_CALL,
         }
     }
 
@@ -309,7 +337,10 @@ impl ItemType {
     pub const fn is_builtin_tool_call(self) -> bool {
         matches!(
             self,
-            Self::WebSearchCall | Self::CodeInterpreterCall | Self::FileSearchCall
+            Self::WebSearchCall
+                | Self::CodeInterpreterCall
+                | Self::FileSearchCall
+                | Self::ImageGenerationCall
         )
     }
 }

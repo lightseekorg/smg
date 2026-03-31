@@ -15,6 +15,7 @@ use openai_protocol::{
         ResponsesRequest,
     },
 };
+use serde_json::json;
 use smg_data_connector::{
     self as data_connector, ConversationId, ResponseId, ResponseStorageError,
 };
@@ -22,6 +23,36 @@ use smg_mcp::McpToolSession;
 use tracing::{debug, warn};
 
 use crate::routers::{error, grpc::common::responses::ResponsesContext};
+
+const MAX_TOOL_OUTPUT_CONTEXT_CHARS: usize = 4096;
+
+fn compact_tool_output_for_model_context(
+    tool_name: &str,
+    output_str: &str,
+    is_image_generation: bool,
+    is_error: bool,
+) -> String {
+    if is_image_generation || tool_name == "generate_image" {
+        return json!({
+            "tool": "generate_image",
+            "status": if is_error { "failed" } else { "completed" },
+            "note": "binary image payload omitted from model context"
+        })
+        .to_string();
+    }
+
+    if output_str.chars().count() > MAX_TOOL_OUTPUT_CONTEXT_CHARS {
+        let preview: String = output_str.chars().take(MAX_TOOL_OUTPUT_CONTEXT_CHARS).collect();
+        json!({
+            "truncated": true,
+            "original_chars": output_str.chars().count(),
+            "preview": preview
+        })
+        .to_string()
+    } else {
+        output_str.to_string()
+    }
+}
 
 // ============================================================================
 // Tool Loop State
@@ -62,8 +93,17 @@ impl ToolLoopState {
         args_json_str: String,
         output_str: String,
         output_item: ResponseOutputItem,
-        _success: bool,
+        success: bool,
     ) {
+        let is_image_generation =
+            matches!(&output_item, ResponseOutputItem::ImageGenerationCall { .. });
+        let model_context_output = compact_tool_output_for_model_context(
+            &tool_name,
+            &output_str,
+            is_image_generation,
+            !success,
+        );
+
         // Add function_tool_call item with both arguments and output
         let id = call_id.clone();
         self.conversation_history
@@ -72,7 +112,7 @@ impl ToolLoopState {
                 call_id,
                 name: tool_name,
                 arguments: args_json_str,
-                output: Some(output_str),
+                output: Some(model_context_output),
                 status: Some("completed".to_string()),
             });
 

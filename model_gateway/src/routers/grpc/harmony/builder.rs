@@ -60,7 +60,12 @@ pub(crate) fn convert_harmony_logprobs(proto_logprobs: &ProtoOutputLogProbs) -> 
 }
 
 /// Built-in tools that are added to the system message
-const BUILTIN_TOOLS: &[&str] = &["web_search_preview", "code_interpreter", "container"];
+const BUILTIN_TOOLS: &[&str] = &[
+    "web_search_preview",
+    "code_interpreter",
+    "image_generation",
+    "container",
+];
 
 /// Trait for tool-like objects that can be converted to Harmony ToolDescription
 trait ToolLike {
@@ -80,7 +85,10 @@ impl ToolLike for Tool {
     fn is_builtin(&self) -> bool {
         matches!(
             self.tool_type.as_str(),
-            "web_search_preview" | "code_interpreter" | "container"
+            "web_search_preview"
+                | "code_interpreter"
+                | "image_generation"
+                | "container"
         )
     }
 
@@ -102,7 +110,9 @@ impl ToolLike for ResponseTool {
     fn is_builtin(&self) -> bool {
         matches!(
             self,
-            ResponseTool::WebSearchPreview(_) | ResponseTool::CodeInterpreter(_)
+            ResponseTool::WebSearchPreview(_)
+                | ResponseTool::CodeInterpreter(_)
+                | ResponseTool::ImageGeneration(_)
         )
     }
 
@@ -316,7 +326,7 @@ impl HarmonyBuilder {
     fn build_system_message_from_responses(
         &self,
         request: &ResponsesRequest,
-        with_custom_tools: bool,
+        has_any_tools: bool,
     ) -> HarmonyMessage {
         let reasoning_effort = request
             .reasoning
@@ -329,7 +339,7 @@ impl HarmonyBuilder {
                 ResponsesReasoningEffort::Minimal => ReasoningEffort::Low,
             });
 
-        self.build_system_message(reasoning_effort, with_custom_tools)
+        self.build_system_message(reasoning_effort, has_any_tools)
     }
 
     /// Build developer message with common logic
@@ -425,16 +435,18 @@ impl HarmonyBuilder {
                             ResponseTool::Function(_) => "function",
                             ResponseTool::WebSearchPreview(_) => "web_search_preview",
                             ResponseTool::CodeInterpreter(_) => "code_interpreter",
+                            ResponseTool::ImageGeneration(_) => "image_generation",
                             ResponseTool::Mcp(_) => "mcp",
                         })
                         .collect()
                 })
                 .unwrap_or_default();
 
+            let has_any_tools = !tool_types.is_empty();
             let with_custom_tools = has_custom_tools(&tool_types);
 
             // Add system message
-            let sys_msg = self.build_system_message_from_responses(request, with_custom_tools);
+            let sys_msg = self.build_system_message_from_responses(request, has_any_tools);
             all_messages.push(sys_msg);
 
             // Add developer message if we have custom tools or instructions
