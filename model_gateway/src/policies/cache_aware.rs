@@ -540,10 +540,10 @@ impl CacheAwarePolicy {
             if let Some(tree) = tree {
                 tree.insert_text(text, worker_url);
 
-                // Populate path_hash_index so remote tenant deltas can resolve
-                // hashes back to prefix paths (same as the main routing path).
-                let path_hash = smg_mesh::hash_node_path(text);
-                self.path_hash_index.insert(path_hash, text.to_string());
+                // Don't populate path_hash_index here — we don't have a
+                // match result and storing the full prompt text (80k+ chars)
+                // would recreate the memory leak. Layer 2 snapshots handle
+                // convergence for entries from the imbalanced-load path.
 
                 self.sync_insert_operation(model_id, TreeKey::Text(text.to_string()), worker_url);
             } else {

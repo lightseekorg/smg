@@ -627,10 +627,13 @@ impl MeshSyncManager {
         // happen under the same shard lock, closing the TOCTOU gap.
         let applied = match self.stores.tree_configs.entry(key.clone()) {
             Entry::Occupied(mut entry) => {
+                // tree_configs may hold TreeState bytes (from remote) or
+                // TreeSnapshot bytes (from local checkpoint). Fall back to
+                // the authoritative atomic version counter if deserialization fails.
                 let current_version = TreeState::from_bytes(entry.get())
                     .ok()
                     .map(|ts| ts.version)
-                    .unwrap_or(0);
+                    .unwrap_or_else(|| self.stores.tree_version(&key));
                 if tree_state.version > current_version {
                     entry.insert(serialized);
                     debug!(
