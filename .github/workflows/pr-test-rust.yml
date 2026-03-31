@@ -330,7 +330,7 @@ jobs:
         env:
           ROUTER_LOCAL_MODEL_PATH: /models
         run: |
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          bash scripts/ci_killall_sglang.sh "nuke_gpus"
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 pytest e2e_test/benchmarks \
             --ignore=e2e_test/benchmarks/test_go_bindings_perf.py \
             --ignore=e2e_test/benchmarks/test_nightly_perf.py \
@@ -800,7 +800,7 @@ jobs:
 
       - name: Run Go OAI server E2E tests
         run: |
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          bash scripts/ci_killall_sglang.sh "nuke_gpus"
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
           export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/models" \
@@ -857,7 +857,7 @@ jobs:
 
       - name: Run Go bindings benchmark
         run: |
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          bash scripts/ci_killall_sglang.sh "nuke_gpus"
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
           export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/models" \

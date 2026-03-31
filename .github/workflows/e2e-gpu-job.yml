@@ -120,7 +120,7 @@ jobs:
           E2E_LOG_DIR: e2e-logs
           BRAVE_MCP_HOST: ${{ inputs.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          bash scripts/ci_killall_sglang.sh "nuke_gpus"
           pytest ${{ inputs.test_dirs }} \
             --ignore=e2e_test/benchmarks \
             --ignore=e2e_test/bindings_go \
