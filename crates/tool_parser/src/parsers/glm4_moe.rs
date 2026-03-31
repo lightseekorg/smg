@@ -547,7 +547,44 @@ impl ToolParser for Glm4MoeParser {
     }
 
     fn get_unstreamed_tool_args(&self) -> Option<Vec<ToolCallItem>> {
-        helpers::get_unstreamed_args(&self.prev_tool_call_arr, &self.streamed_args_for_tool)
+        let mut items = helpers::get_unstreamed_args(
+            &self.prev_tool_call_arr,
+            &self.streamed_args_for_tool,
+        )
+        .unwrap_or_default();
+
+        // Flush any tool calls remaining in the buffer at end of stream.
+        // This handles: (a) the last tool call missing its closing tag,
+        // (b) complete tool calls that arrived in the final chunk but were
+        //     never consumed because parse_incremental wasn't called again.
+        if !self.buffer.is_empty() && self.buffer.contains(self.bot_token) {
+            let base_id = self.current_tool_id.max(0) as usize;
+
+            let complete_tools = self.parse_tool_calls_from_text(&self.buffer, None);
+            for (i, tool_call) in complete_tools.iter().enumerate() {
+                items.push(ToolCallItem {
+                    tool_index: base_id + i,
+                    name: Some(tool_call.function.name.clone()),
+                    parameters: tool_call.function.arguments.clone(),
+                });
+            }
+
+            if let Some(tool_call) =
+                self.parse_incomplete_trailing_tool_call(&self.buffer, None)
+            {
+                items.push(ToolCallItem {
+                    tool_index: base_id + complete_tools.len(),
+                    name: Some(tool_call.function.name),
+                    parameters: tool_call.function.arguments,
+                });
+            }
+        }
+
+        if items.is_empty() {
+            None
+        } else {
+            Some(items)
+        }
     }
 
     fn reset(&mut self) {

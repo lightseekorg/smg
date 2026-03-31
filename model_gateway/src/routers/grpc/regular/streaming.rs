@@ -469,12 +469,28 @@ impl StreamingProcessor {
             let parser_guard = parser.lock().await;
             if let Some(unstreamed_items) = parser_guard.get_unstreamed_tool_args() {
                 for tool_call_item in unstreamed_items {
+                    let (id, tool_type, name) = if let Some(ref name) = tool_call_item.name {
+                        has_tool_calls.insert(*index, true);
+                        (
+                            Some(utils::generate_tool_call_id(
+                                model,
+                                name,
+                                tool_call_item.tool_index,
+                                history_tool_calls_count,
+                            )),
+                            Some("function".to_string()),
+                            Some(name.clone()),
+                        )
+                    } else {
+                        (None, None, None)
+                    };
+
                     let tool_call_delta = ToolCallDelta {
                         index: tool_call_item.tool_index as u32,
-                        id: None,
-                        tool_type: None,
+                        id,
+                        tool_type,
                         function: Some(FunctionCallDelta {
-                            name: None,
+                            name,
                             arguments: if tool_call_item.parameters.is_empty() {
                                 None
                             } else {
