@@ -14,7 +14,7 @@ on:
         required: false
         default: 'all'
   pull_request:
-    branches: [ main ]
+    branches: [main]
     paths:
       - '.github/workflows/nightly-benchmark.yml'
 
@@ -226,7 +226,8 @@ jobs:
   multi-worker:
     name: "${{ matrix.model.id }} / multi-${{ matrix.variant.id }}"
     needs: build-wheel
-    if: false #${{ !cancelled() }}
+    # TODO: re-enable multi-worker after validating single-worker nightly stability
+    if: false  # ${{ !cancelled() }}
     runs-on: 4-gpu-h100
     timeout-minutes: 1440
     strategy:

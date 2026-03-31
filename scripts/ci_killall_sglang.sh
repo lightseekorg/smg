@@ -36,11 +36,17 @@ else
     echo "Running on node: $NODE_INFO"
     # Check for remaining GPU processes only when full nuke was attempted
     if [ $# -gt 0 ]; then
-        REMAINING_PIDS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | sort -u)
+        # Give the GPU driver a moment to release compute contexts after kill -9
+        sleep 2
+        if ! REMAINING_PIDS_RAW=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); then
+            echo "::error::GPU cleanup verification failed on node '$NODE_INFO': unable to query nvidia-smi."
+            exit 1
+        fi
+        REMAINING_PIDS=$(printf '%s\n' "$REMAINING_PIDS_RAW" | awk '/^[0-9]+$/' | sort -u)
         if [ -n "$REMAINING_PIDS" ]; then
             echo "::error::GPU cleanup failed on node '$NODE_INFO'. Remaining processes:"
             for pid in $REMAINING_PIDS; do
-                echo "  PID $pid: $(ps -p "$pid" -o pid=,user=,args= 2>/dev/null || echo 'process info unavailable')"
+                echo "  PID $pid: $(ps -p "$pid" -o user=,args= 2>/dev/null || echo 'process info unavailable')"
             done
             exit 1
         fi
