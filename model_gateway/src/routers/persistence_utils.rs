@@ -34,6 +34,8 @@ pub const ITEM_TYPE_FIELDS: &[(&str, &[&str])] = &[
     ("mcp_list_tools", &["tools", "server_label"]),
     ("function_call", &["call_id", "name", "arguments", "output"]),
     ("function_call_output", &["call_id", "output"]),
+    ("custom_tool_call", &["call_id", "name", "input", "output"]),
+    ("custom_tool_call_output", &["call_id", "output"]),
 ];
 
 // ============================================================================
@@ -222,6 +224,7 @@ fn extract_input_items(input: &ResponseInput) -> Result<Vec<Value>, String> {
                                         obj.get("type").and_then(|v| v.as_str()).unwrap_or("item");
                                     let prefix = match item_type {
                                         "function_call" | "function_call_output" => "fc",
+                                        "custom_tool_call" | "custom_tool_call_output" => "ctc",
                                         "message" => "msg",
                                         _ => "item",
                                     };
@@ -256,7 +259,10 @@ fn item_to_new_conversation_item(
 
     // Determine if we should store the whole item or just the content field
     let store_whole_item = if is_input {
-        item_type == "function_call" || item_type == "function_call_output"
+        item_type == "function_call"
+            || item_type == "function_call_output"
+            || item_type == "custom_tool_call"
+            || item_type == "custom_tool_call_output"
     } else {
         item_type != "message"
     };

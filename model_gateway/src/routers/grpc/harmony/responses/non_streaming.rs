@@ -10,7 +10,7 @@ use openai_protocol::{
     common::{ToolCall, Usage},
     responses::{
         InputTokensDetails, OutputTokensDetails, ResponseContentPart, ResponseOutputItem,
-        ResponseReasoningContent, ResponseStatus, ResponseUsage, ResponsesRequest,
+        ResponseReasoningContent, ResponseStatus, ResponseTool, ResponseUsage, ResponsesRequest,
         ResponsesResponse, ResponsesUsage,
     },
 };
@@ -430,18 +430,45 @@ fn build_tool_response(
         });
     }
 
-    // Add function tool calls WITHOUT output (need caller execution)
+    // Collect custom tool names from the original request
+    let custom_tool_names: std::collections::HashSet<&str> = responses_request
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| match t {
+                    ResponseTool::Custom(ct) => Some(ct.name.as_str()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Add function/custom tool calls WITHOUT output (need caller execution)
     for tool_call in function_tool_calls {
         let call_id = tool_call.id.clone();
-        let arguments = tool_call.function.arguments.unwrap_or_default();
-        output.push(ResponseOutputItem::FunctionToolCall {
-            id: tool_call.id,
-            call_id,
-            name: tool_call.function.name,
-            arguments,
-            output: None, // No output = needs execution
-            status: "completed".to_string(),
-        });
+        let input_or_args = tool_call.function.arguments.unwrap_or_default();
+
+        if custom_tool_names.contains(tool_call.function.name.as_str()) {
+            output.push(ResponseOutputItem::CustomToolCall {
+                id: tool_call.id,
+                call_id,
+                name: tool_call.function.name,
+                input: input_or_args,
+                output: None,
+                status: "completed".to_string(),
+            });
+        } else {
+            output.push(ResponseOutputItem::FunctionToolCall {
+                id: tool_call.id,
+                call_id,
+                name: tool_call.function.name,
+                arguments: input_or_args,
+                output: None,
+                status: "completed".to_string(),
+            });
+        }
     }
 
     // Build ResponsesResponse with Completed status

@@ -293,6 +293,7 @@ pub fn make_item_id(item_type: &str) -> ConversationItemId {
         "mcp_call" => "mcp",
         "mcp_list_tools" => "mcpl",
         "function_call" => "fc",
+        "custom_tool_call" => "ctc",
         other => {
             // Fallback: first 3 letters of type or "itm"
             let fallback: String = other.chars().take(3).collect();

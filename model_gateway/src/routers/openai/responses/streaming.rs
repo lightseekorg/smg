@@ -18,8 +18,9 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use openai_protocol::{
     event_types::{
-        is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
-        FunctionCallEvent, ItemType, McpEvent, OutputItemEvent, ResponseEvent, WebSearchCallEvent,
+        is_function_call_type, is_response_event, CodeInterpreterCallEvent,
+        CustomToolCallEvent, FileSearchCallEvent, FunctionCallEvent, ItemType, McpEvent,
+        OutputItemEvent, ResponseEvent, WebSearchCallEvent,
     },
     responses::{ResponseTool, ResponsesRequest},
 };
@@ -136,10 +137,36 @@ pub(super) fn apply_event_transformations_inplace(
                             .unwrap_or("")
                             .to_string();
 
-                        // Only transform if this is an MCP tool; keep function_call unchanged
-                        if let Some(session) =
+                        // Check if this is a custom tool from the original request
+                        let is_custom_tool = ctx
+                            .original_request
+                            .tools
+                            .as_ref()
+                            .is_some_and(|tools| {
+                                tools.iter().any(|t| matches!(t, ResponseTool::Custom(ct) if ct.name == tool_name))
+                            });
+
+                        if is_custom_tool {
+                            // Transform function_call → custom_tool_call
+                            item["type"] = json!(ItemType::CUSTOM_TOOL_CALL);
+
+                            // Rename arguments → input
+                            if let Some(args) = item.as_object_mut().and_then(|o| o.remove("arguments")) {
+                                item["input"] = args;
+                            }
+
+                            // Transform ID from fc_* to ctc_*
+                            if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                                if let Some(stripped) = id.strip_prefix("fc_") {
+                                    item["id"] = json!(format!("ctc_{stripped}"));
+                                }
+                            }
+
+                            changed = true;
+                        } else if let Some(session) =
                             ctx.session.filter(|s| s.has_exposed_tool(&tool_name))
                         {
+                            // Only transform if this is an MCP tool; keep function_call unchanged
                             let response_format = session.tool_response_format(&tool_name);
 
                             // Determine item type and ID prefix based on response_format
@@ -169,13 +196,42 @@ pub(super) fn apply_event_transformations_inplace(
             }
         }
         FunctionCallEvent::ARGUMENTS_DONE => {
-            parsed_data["type"] = json!(McpEvent::CALL_ARGUMENTS_DONE);
+            // Check if this belongs to a custom tool by looking up the tool name
+            let is_custom = parsed_data
+                .get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|name| {
+                    ctx.original_request
+                        .tools
+                        .as_ref()
+                        .is_some_and(|tools| {
+                            tools.iter().any(|t| matches!(t, ResponseTool::Custom(ct) if ct.name == name))
+                        })
+                });
 
-            // Transform item_id from fc_* to mcp_*
-            if let Some(item_id) = parsed_data.get("item_id").and_then(|v| v.as_str()) {
-                if let Some(stripped) = item_id.strip_prefix("fc_") {
-                    let new_id = format!("mcp_{stripped}");
-                    parsed_data["item_id"] = json!(new_id);
+            if is_custom {
+                parsed_data["type"] = json!(CustomToolCallEvent::INPUT_DONE);
+
+                // Rename arguments → input
+                if let Some(args) = parsed_data.as_object_mut().and_then(|o| o.remove("arguments")) {
+                    parsed_data["input"] = args;
+                }
+
+                // Transform item_id from fc_* to ctc_*
+                if let Some(item_id) = parsed_data.get("item_id").and_then(|v| v.as_str()) {
+                    if let Some(stripped) = item_id.strip_prefix("fc_") {
+                        parsed_data["item_id"] = json!(format!("ctc_{stripped}"));
+                    }
+                }
+            } else {
+                parsed_data["type"] = json!(McpEvent::CALL_ARGUMENTS_DONE);
+
+                // Transform item_id from fc_* to mcp_*
+                if let Some(item_id) = parsed_data.get("item_id").and_then(|v| v.as_str()) {
+                    if let Some(stripped) = item_id.strip_prefix("fc_") {
+                        let new_id = format!("mcp_{stripped}");
+                        parsed_data["item_id"] = json!(new_id);
+                    }
                 }
             }
 

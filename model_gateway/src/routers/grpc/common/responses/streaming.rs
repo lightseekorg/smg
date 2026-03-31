@@ -7,8 +7,9 @@ use openai_protocol::{
     chat::ChatCompletionStreamResponse,
     common::{Usage, UsageInfo},
     event_types::{
-        CodeInterpreterCallEvent, ContentPartEvent, FileSearchCallEvent, FunctionCallEvent,
-        McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent, WebSearchCallEvent,
+        CodeInterpreterCallEvent, ContentPartEvent, CustomToolCallEvent, FileSearchCallEvent,
+        FunctionCallEvent, McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent,
+        WebSearchCallEvent,
     },
     responses::{
         ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
@@ -28,6 +29,7 @@ pub(crate) enum OutputItemType {
     McpListTools,
     McpCall,
     FunctionCall,
+    CustomToolCall,
     Reasoning,
     WebSearchCall,
     CodeInterpreterCall,
@@ -573,6 +575,40 @@ impl ResponseStreamEventEmitter {
     }
 
     // ========================================================================
+    // Custom Tool Call Event Emission Methods
+    // ========================================================================
+
+    pub fn emit_custom_tool_call_input_delta(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        delta: &str,
+    ) -> serde_json::Value {
+        json!({
+            "type": CustomToolCallEvent::INPUT_DELTA,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "delta": delta
+        })
+    }
+
+    pub fn emit_custom_tool_call_input_done(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        input: &str,
+    ) -> serde_json::Value {
+        json!({
+            "type": CustomToolCallEvent::INPUT_DONE,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "input": input
+        })
+    }
+
+    // ========================================================================
     // Output Item Wrapper Events
     // ========================================================================
 
@@ -621,6 +657,7 @@ impl ResponseStreamEventEmitter {
             OutputItemType::McpListTools => "mcpl",
             OutputItemType::McpCall => "mcp",
             OutputItemType::FunctionCall => "fc",
+            OutputItemType::CustomToolCall => "ctc",
             OutputItemType::Message => "msg",
             OutputItemType::Reasoning => "rs",
             OutputItemType::WebSearchCall => "ws",

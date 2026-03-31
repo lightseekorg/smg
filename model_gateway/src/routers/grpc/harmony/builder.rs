@@ -107,7 +107,7 @@ impl ToolLike for ResponseTool {
     }
 
     fn is_custom(&self) -> bool {
-        matches!(self, ResponseTool::Function(_))
+        matches!(self, ResponseTool::Function(_) | ResponseTool::Custom(_))
     }
 
     fn to_tool_description(&self) -> Option<ToolDescription> {
@@ -116,6 +116,11 @@ impl ToolLike for ResponseTool {
                 ft.function.name.clone(),
                 ft.function.description.clone().unwrap_or_default(),
                 Some(ft.function.parameters.clone()),
+            )),
+            ResponseTool::Custom(ct) => Some(ToolDescription::new(
+                ct.name.clone(),
+                ct.description.clone().unwrap_or_default(),
+                None,
             )),
             _ => None,
         }
@@ -423,6 +428,7 @@ impl HarmonyBuilder {
                         .iter()
                         .map(|tool| match tool {
                             ResponseTool::Function(_) => "function",
+                            ResponseTool::Custom(_) => "custom",
                             ResponseTool::WebSearchPreview(_) => "web_search_preview",
                             ResponseTool::CodeInterpreter(_) => "code_interpreter",
                             ResponseTool::Mcp(_) => "mcp",
@@ -477,8 +483,12 @@ impl HarmonyBuilder {
                     let msg = self.parse_response_item_to_harmony_message(item, &prev_outputs)?;
                     all_messages.push(msg);
 
-                    // Track function tool calls so that function_call_output can find the name
-                    if matches!(item, ResponseInputOutputItem::FunctionToolCall { .. }) {
+                    // Track function/custom tool calls so that output items can find the name
+                    if matches!(
+                        item,
+                        ResponseInputOutputItem::FunctionToolCall { .. }
+                            | ResponseInputOutputItem::CustomToolCall { .. }
+                    ) {
                         prev_outputs.push(item);
                     }
                 }
@@ -645,6 +655,77 @@ impl HarmonyBuilder {
                 // Create Tool message with "functions.{name}" prefix
                 // IMPORTANT: Must include recipient="assistant" for parser to recognize it.
                 // We keep channel=None to minimize what the model might copy.
+                Ok(HarmonyMessage {
+                    author: Author {
+                        role: Role::Tool,
+                        name: Some(format!("functions.{call}")),
+                    },
+                    recipient: Some("assistant".to_string()),
+                    content: vec![Content::Text(TextContent {
+                        text: output.clone(),
+                    })],
+                    channel: None,
+                    content_type: None,
+                })
+            }
+
+            // Custom tool call (with optional output) - treated like function tool call
+            ResponseInputOutputItem::CustomToolCall {
+                name,
+                input,
+                output,
+                ..
+            } => {
+                if let Some(output_str) = output {
+                    let author_name = format!("functions.{name}");
+                    Ok(HarmonyMessage {
+                        author: Author {
+                            role: Role::Tool,
+                            name: Some(author_name),
+                        },
+                        recipient: Some("assistant".to_string()),
+                        content: vec![Content::Text(TextContent {
+                            text: output_str.clone(),
+                        })],
+                        channel: None,
+                        content_type: None,
+                    })
+                } else {
+                    let recipient = format!("functions.{name}");
+                    Ok(HarmonyMessage {
+                        author: Author {
+                            role: Role::Assistant,
+                            name: None,
+                        },
+                        recipient: Some(recipient),
+                        content: vec![Content::Text(TextContent {
+                            text: input.clone(),
+                        })],
+                        channel: Some("commentary".to_string()),
+                        content_type: None,
+                    })
+                }
+            }
+
+            // Custom tool call output (separate from call)
+            ResponseInputOutputItem::CustomToolCallOutput {
+                call_id, output, ..
+            } => {
+                let call = prev_outputs
+                    .iter()
+                    .rev()
+                    .find_map(|item| match item {
+                        ResponseInputOutputItem::CustomToolCall {
+                            call_id: item_call_id,
+                            name,
+                            ..
+                        } if item_call_id == call_id => Some(name.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        format!("No custom tool call found for call_id: {call_id}")
+                    })?;
+
                 Ok(HarmonyMessage {
                     author: Author {
                         role: Role::Tool,

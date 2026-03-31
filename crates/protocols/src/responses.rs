@@ -39,6 +39,10 @@ pub enum ResponseTool {
     /// MCP server tool.
     #[serde(rename = "mcp")]
     Mcp(McpTool),
+
+    /// Custom tool (arbitrary text input with optional grammar constraints).
+    #[serde(rename = "custom")]
+    Custom(CustomTool),
 }
 
 #[serde_with::skip_serializing_none]
@@ -78,6 +82,25 @@ pub struct WebSearchPreviewTool {
 #[serde(deny_unknown_fields)]
 pub struct CodeInterpreterTool {
     pub container: Option<Value>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomTool {
+    pub name: String,
+    pub description: Option<String>,
+    pub format: Option<CustomToolFormat>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomToolFormat {
+    #[serde(rename = "type")]
+    pub format_type: String,
+    pub syntax: String,
+    pub definition: String,
 }
 
 /// `require_approval` values.
@@ -178,6 +201,25 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
+    #[serde(rename = "custom_tool_call")]
+    CustomToolCall {
+        id: String,
+        call_id: String,
+        name: String,
+        input: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
+    #[serde(rename = "custom_tool_call_output")]
+    CustomToolCallOutput {
+        id: Option<String>,
+        call_id: String,
+        output: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
     #[serde(rename = "mcp_approval_request")]
     McpApprovalRequest {
         id: String,
@@ -266,6 +308,15 @@ pub enum ResponseOutputItem {
         call_id: String,
         name: String,
         arguments: String,
+        output: Option<String>,
+        status: String,
+    },
+    #[serde(rename = "custom_tool_call")]
+    CustomToolCall {
+        id: String,
+        call_id: String,
+        name: String,
+        input: String,
         output: Option<String>,
         status: String,
     },
@@ -912,6 +963,12 @@ impl GenerationRequest for ResponsesRequest {
                     ResponseInputOutputItem::FunctionCallOutput { output, .. } => {
                         Some(output.clone())
                     }
+                    ResponseInputOutputItem::CustomToolCall { input, .. } => {
+                        Some(input.clone())
+                    }
+                    ResponseInputOutputItem::CustomToolCallOutput { output, .. } => {
+                        Some(output.clone())
+                    }
                     ResponseInputOutputItem::McpApprovalRequest { .. } => None,
                     ResponseInputOutputItem::McpApprovalResponse { .. } => None,
                 })
@@ -976,6 +1033,7 @@ fn validate_tool_choice_with_tools(request: &ResponsesRequest) -> Result<(), Val
         .iter()
         .filter_map(|t| match t {
             ResponseTool::Function(ft) => Some(ft.function.name.as_str()),
+            ResponseTool::Custom(ct) => Some(ct.name.as_str()),
             _ => None,
         })
         .collect();
@@ -1159,6 +1217,14 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
             }
         }
         ResponseInputOutputItem::FunctionToolCall { .. } => {}
+        ResponseInputOutputItem::CustomToolCall { .. } => {}
+        ResponseInputOutputItem::CustomToolCallOutput { output, .. } => {
+            if output.is_empty() {
+                let mut e = ValidationError::new("custom_tool_output_empty");
+                e.message = Some("Custom tool call output cannot be empty".into());
+                return Err(e);
+            }
+        }
         ResponseInputOutputItem::McpApprovalRequest { .. } => {}
         ResponseInputOutputItem::McpApprovalResponse { .. } => {}
     }
@@ -1171,6 +1237,15 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError
     let mut seen_mcp_labels: HashSet<String> = HashSet::new();
 
     for (idx, tool) in tools.iter().enumerate() {
+        if let ResponseTool::Custom(custom) = tool {
+            if custom.name.is_empty() {
+                let mut e = ValidationError::new("missing_required_parameter");
+                e.message = Some(
+                    format!("Missing required parameter: 'tools[{idx}].name'.").into(),
+                );
+                return Err(e);
+            }
+        }
         if let ResponseTool::Mcp(mcp) = tool {
             let raw_label = mcp.server_label.as_str();
             if raw_label.is_empty() {

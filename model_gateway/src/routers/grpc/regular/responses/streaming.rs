@@ -26,7 +26,7 @@ use openai_protocol::{
     common::{FunctionCallResponse, ToolCall, Usage, UsageInfo},
     responses::{
         ResponseContentPart, ResponseOutputItem, ResponseReasoningContent, ResponseStatus,
-        ResponsesRequest, ResponsesResponse, ResponsesUsage,
+        ResponseTool, ResponsesRequest, ResponsesResponse, ResponsesUsage,
     },
 };
 use serde_json::{json, Value};
@@ -379,8 +379,44 @@ impl StreamingResponseAccumulator {
             });
         }
 
-        // Add tool calls
-        output.extend(self.tool_calls);
+        // Add tool calls (convert custom tools from FunctionToolCall to CustomToolCall)
+        let custom_tool_names: std::collections::HashSet<&str> = self
+            .original_request
+            .tools
+            .as_ref()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|t| match t {
+                        ResponseTool::Custom(ct) => Some(ct.name.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for tc in self.tool_calls {
+            match tc {
+                ResponseOutputItem::FunctionToolCall {
+                    id,
+                    call_id,
+                    name,
+                    arguments,
+                    output: tc_output,
+                    status,
+                } if custom_tool_names.contains(name.as_str()) => {
+                    output.push(ResponseOutputItem::CustomToolCall {
+                        id,
+                        call_id,
+                        name,
+                        input: arguments,
+                        output: tc_output,
+                        status,
+                    });
+                }
+                other => output.push(other),
+            }
+        }
 
         // Determine final status
         let status = match self.finish_reason.as_deref() {
@@ -813,50 +849,93 @@ async fn execute_tool_loop_streaming_internal(
                     function_tool_calls.len()
                 );
 
-                // Emit function_tool_call events for each function tool
-                for tool_call in function_tool_calls {
-                    // Allocate output_index for this function_tool_call item
-                    let (output_index, item_id) =
-                        emitter.allocate_output_index(OutputItemType::FunctionCall);
+                // Collect custom tool names from the original request
+                let custom_tool_names: std::collections::HashSet<&str> = original_request
+                    .tools
+                    .as_ref()
+                    .map(|tools| {
+                        tools
+                            .iter()
+                            .filter_map(|t| match t {
+                                ResponseTool::Custom(ct) => Some(ct.name.as_str()),
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-                    // Build initial function_call item
+                // Emit function/custom tool call events for each tool
+                for tool_call in function_tool_calls {
+                    let is_custom = custom_tool_names.contains(tool_call.name.as_str());
+
+                    // Allocate output_index with appropriate type
+                    let item_type = if is_custom {
+                        OutputItemType::CustomToolCall
+                    } else {
+                        OutputItemType::FunctionCall
+                    };
+                    let (output_index, item_id) = emitter.allocate_output_index(item_type);
+
+                    let type_str = if is_custom {
+                        "custom_tool_call"
+                    } else {
+                        "function_call"
+                    };
+                    let data_field = if is_custom { "input" } else { "arguments" };
+
+                    // Build initial item
                     let item = json!({
                         "id": item_id,
-                        "type": "function_call",
+                        "type": type_str,
                         "call_id": tool_call.call_id,
                         "name": tool_call.name,
                         "status": "in_progress",
-                        "arguments": ""
+                        data_field: ""
                     });
 
                     // Emit output_item.added
                     let event = emitter.emit_output_item_added(output_index, &item);
                     emitter.send_event(&event, &tx)?;
 
-                    // Emit function_call_arguments.delta
-                    let event = emitter.emit_function_call_arguments_delta(
-                        output_index,
-                        &item_id,
-                        &tool_call.arguments,
-                    );
-                    emitter.send_event(&event, &tx)?;
+                    // Emit arguments/input delta and done
+                    if is_custom {
+                        let event = emitter.emit_custom_tool_call_input_delta(
+                            output_index,
+                            &item_id,
+                            &tool_call.arguments,
+                        );
+                        emitter.send_event(&event, &tx)?;
 
-                    // Emit function_call_arguments.done
-                    let event = emitter.emit_function_call_arguments_done(
-                        output_index,
-                        &item_id,
-                        &tool_call.arguments,
-                    );
-                    emitter.send_event(&event, &tx)?;
+                        let event = emitter.emit_custom_tool_call_input_done(
+                            output_index,
+                            &item_id,
+                            &tool_call.arguments,
+                        );
+                        emitter.send_event(&event, &tx)?;
+                    } else {
+                        let event = emitter.emit_function_call_arguments_delta(
+                            output_index,
+                            &item_id,
+                            &tool_call.arguments,
+                        );
+                        emitter.send_event(&event, &tx)?;
+
+                        let event = emitter.emit_function_call_arguments_done(
+                            output_index,
+                            &item_id,
+                            &tool_call.arguments,
+                        );
+                        emitter.send_event(&event, &tx)?;
+                    }
 
                     // Build complete item
                     let item_complete = json!({
                         "id": item_id,
-                        "type": "function_call",
+                        "type": type_str,
                         "call_id": tool_call.call_id,
                         "name": tool_call.name,
                         "status": "completed",
-                        "arguments": tool_call.arguments
+                        data_field: tool_call.arguments
                     });
 
                     // Emit output_item.done

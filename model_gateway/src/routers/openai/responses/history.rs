@@ -180,6 +180,18 @@ pub(crate) async fn load_input_history(
                                 }
                             }
                         }
+                        ItemType::CUSTOM_TOOL_CALL | ItemType::CUSTOM_TOOL_CALL_OUTPUT => {
+                            match serde_json::from_value::<ResponseInputOutputItem>(item.content) {
+                                Ok(custom_call) => items.push(custom_call),
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to deserialize {}: {}",
+                                        item.item_type,
+                                        e
+                                    );
+                                }
+                            }
+                        }
                         "reasoning" => {}
                         _ => {
                             warn!("Unknown item type in conversation: {}", item.item_type);

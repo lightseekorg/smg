@@ -14,7 +14,7 @@ use openai_protocol::{
     },
     responses::{
         ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
-        ResponseReasoningContent::ReasoningText, ResponseStatus, ResponsesRequest,
+        ResponseReasoningContent::ReasoningText, ResponseStatus, ResponseTool, ResponsesRequest,
         ResponsesResponse, ResponsesUsage, StringOrContentParts, TextConfig, TextFormat,
     },
     UNKNOWN_MODEL_ID,
@@ -131,6 +131,43 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                             name: None,
                             tool_calls: None,
                             reasoning_content: Some(reasoning_text),
+                        });
+                    }
+                    ResponseInputOutputItem::CustomToolCall {
+                        id,
+                        name,
+                        input,
+                        output,
+                        ..
+                    } => {
+                        // Custom tool call from history - convert to function tool call format
+                        messages.push(ChatMessage::Assistant {
+                            content: None,
+                            name: None,
+                            tool_calls: Some(vec![ToolCall {
+                                id: id.clone(),
+                                tool_type: "function".to_string(),
+                                function: FunctionCallResponse {
+                                    name: name.clone(),
+                                    arguments: Some(input.clone()),
+                                },
+                            }]),
+                            reasoning_content: None,
+                        });
+
+                        if let Some(output_text) = output {
+                            messages.push(ChatMessage::Tool {
+                                content: MessageContent::Text(output_text.clone()),
+                                tool_call_id: id.clone(),
+                            });
+                        }
+                    }
+                    ResponseInputOutputItem::CustomToolCallOutput {
+                        call_id, output, ..
+                    } => {
+                        messages.push(ChatMessage::Tool {
+                            content: MessageContent::Text(output.clone()),
+                            tool_call_id: call_id.clone(),
                         });
                     }
                     ResponseInputOutputItem::FunctionCallOutput {
@@ -322,15 +359,43 @@ pub(crate) fn chat_to_responses(
 
     // Convert tool calls if present
     if let Some(tool_calls) = &choice.message.tool_calls {
+        // Collect custom tool names from the original request
+        let custom_tool_names: std::collections::HashSet<&str> = original_req
+            .tools
+            .as_ref()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|t| match t {
+                        ResponseTool::Custom(ct) => Some(ct.name.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         for tool_call in tool_calls {
-            output.push(ResponseOutputItem::FunctionToolCall {
-                id: tool_call.id.clone(),
-                call_id: tool_call.id.clone(),
-                name: tool_call.function.name.clone(),
-                arguments: tool_call.function.arguments.clone().unwrap_or_default(),
-                output: None, // Tool hasn't been executed yet
-                status: "in_progress".to_string(),
-            });
+            let input_or_args = tool_call.function.arguments.clone().unwrap_or_default();
+
+            if custom_tool_names.contains(tool_call.function.name.as_str()) {
+                output.push(ResponseOutputItem::CustomToolCall {
+                    id: tool_call.id.clone(),
+                    call_id: tool_call.id.clone(),
+                    name: tool_call.function.name.clone(),
+                    input: input_or_args,
+                    output: None,
+                    status: "in_progress".to_string(),
+                });
+            } else {
+                output.push(ResponseOutputItem::FunctionToolCall {
+                    id: tool_call.id.clone(),
+                    call_id: tool_call.id.clone(),
+                    name: tool_call.function.name.clone(),
+                    arguments: input_or_args,
+                    output: None,
+                    status: "in_progress".to_string(),
+                });
+            }
         }
     }
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::response::Response;
 use openai_protocol::{
-    common::Tool,
+    common::{Function, Tool},
     responses::{ResponseTool, ResponsesRequest, ResponsesResponse},
 };
 use serde_json::to_value;
@@ -124,6 +124,15 @@ pub(crate) fn extract_tools_from_response_tools(
             ResponseTool::Function(ft) => Some(Tool {
                 tool_type: "function".to_string(),
                 function: ft.function.clone(),
+            }),
+            ResponseTool::Custom(ct) => Some(Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: ct.name.clone(),
+                    description: ct.description.clone(),
+                    parameters: serde_json::json!({}),
+                    strict: None,
+                },
             }),
             _ => None,
         })

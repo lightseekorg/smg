@@ -263,11 +263,37 @@ impl fmt::Display for FileSearchCallEvent {
     }
 }
 
+/// Custom tool call input streaming events
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CustomToolCallEvent {
+    InputDelta,
+    InputDone,
+}
+
+impl CustomToolCallEvent {
+    pub const INPUT_DELTA: &'static str = "response.custom_tool_call_input.delta";
+    pub const INPUT_DONE: &'static str = "response.custom_tool_call_input.done";
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InputDelta => Self::INPUT_DELTA,
+            Self::InputDone => Self::INPUT_DONE,
+        }
+    }
+}
+
+impl fmt::Display for CustomToolCallEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Item type discriminators used in output items
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemType {
     FunctionCall,
     FunctionToolCall,
+    CustomToolCall,
     McpCall,
     Function,
     McpListTools,
@@ -280,6 +306,8 @@ impl ItemType {
     pub const FUNCTION_CALL: &'static str = "function_call";
     pub const FUNCTION_CALL_OUTPUT: &'static str = "function_call_output";
     pub const FUNCTION_TOOL_CALL: &'static str = "function_tool_call";
+    pub const CUSTOM_TOOL_CALL: &'static str = "custom_tool_call";
+    pub const CUSTOM_TOOL_CALL_OUTPUT: &'static str = "custom_tool_call_output";
     pub const MCP_CALL: &'static str = "mcp_call";
     pub const FUNCTION: &'static str = "function";
     pub const MCP_LIST_TOOLS: &'static str = "mcp_list_tools";
@@ -291,6 +319,7 @@ impl ItemType {
         match self {
             Self::FunctionCall => Self::FUNCTION_CALL,
             Self::FunctionToolCall => Self::FUNCTION_TOOL_CALL,
+            Self::CustomToolCall => Self::CUSTOM_TOOL_CALL,
             Self::McpCall => Self::MCP_CALL,
             Self::Function => Self::FUNCTION,
             Self::McpListTools => Self::MCP_LIST_TOOLS,
@@ -303,6 +332,11 @@ impl ItemType {
     /// Check if this is a function call variant (FunctionCall or FunctionToolCall)
     pub const fn is_function_call(self) -> bool {
         matches!(self, Self::FunctionCall | Self::FunctionToolCall)
+    }
+
+    /// Check if this is a custom tool call variant
+    pub const fn is_custom_tool_call(self) -> bool {
+        matches!(self, Self::CustomToolCall)
     }
 
     /// Check if this is a builtin tool call variant
@@ -602,4 +636,9 @@ pub fn is_response_event(event_type: &str) -> bool {
 /// Check if an item type string is a function call variant
 pub fn is_function_call_type(item_type: &str) -> bool {
     item_type == ItemType::FUNCTION_CALL || item_type == ItemType::FUNCTION_TOOL_CALL
+}
+
+/// Check if an item type string is a custom tool call variant
+pub fn is_custom_tool_call_type(item_type: &str) -> bool {
+    item_type == ItemType::CUSTOM_TOOL_CALL
 }
