@@ -46,7 +46,12 @@ class TestChatCompletion:
                 {"role": "system", "content": "You are a helpful AI assistant"},
                 {
                     "role": "user",
-                    "content": "What is the capital of France? Answer in a few words.",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "What is the capital of France? Answer in a few words.",
+                        }
+                    ],
                 },
             ],
             temperature=temperature,
@@ -78,7 +83,10 @@ class TestChatCompletion:
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "What is the capital of France?"},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "What is the capital of France?"}],
+                },
             ],
             temperature=temperature,
             logprobs=logprobs is not None and logprobs > 0,
@@ -174,6 +182,28 @@ class TestChatCompletion:
         assert isinstance(response.choices[0].message.content, str)
         assert response.usage.completion_tokens > 0
 
+    def test_multi_content_parts(self, model, api_client):
+        """Test that multiple content parts in a single message are all processed."""
+
+        response = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is the capital of France?"},
+                        {"type": "text", "text": "What is the capital of China?"},
+                    ],
+                },
+            ],
+            temperature=0,
+            max_tokens=200,
+        )
+        content = response.choices[0].message.content
+        assert isinstance(content, str)
+        assert "paris" in content.lower(), f"Expected 'Paris' in response: {content}"
+        assert "beijing" in content.lower(), f"Expected 'Beijing' in response: {content}"
+
     def test_response_prefill(self, model, api_client):
         """Test assistant message prefill with continue_final_message."""
 
@@ -212,7 +242,10 @@ convenient hands-free control to your smart devices.
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "What is the capital of France?"},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "What is the capital of France?"}],
+                },
             ],
             temperature=0,
             max_tokens=50,
