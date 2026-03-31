@@ -2275,6 +2275,11 @@ impl StreamingProcessor {
         let suffix = completion_request.suffix.as_deref();
         // TODO: wire per-token logprob streaming when backend support is available
         let _request_logprobs = completion_request.logprobs.is_some();
+        let include_usage = completion_request
+            .stream_options
+            .as_ref()
+            .and_then(|opts| opts.include_usage)
+            .unwrap_or(false);
 
         let mut stop_decoders: HashMap<u32, StopSequenceDecoder> = HashMap::new();
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
@@ -2330,13 +2335,14 @@ impl StreamingProcessor {
                             object: "text_completion".to_string(),
                             created,
                             choices: vec![CompletionStreamChoice {
-                                text: chunk_text.clone(),
+                                text: std::mem::take(&mut chunk_text),
                                 index,
                                 logprobs: None,
                                 finish_reason: None,
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
+                            usage: None,
                         };
 
                         Self::format_completion_sse_into(&mut sse_buffer, &stream_resp);
@@ -2360,6 +2366,7 @@ impl StreamingProcessor {
                                 }],
                                 model: model.clone(),
                                 system_fingerprint: system_fingerprint.map(String::from),
+                                usage: None,
                             };
                             Self::format_completion_sse_into(&mut sse_buffer, &suffix_chunk);
                             tx.send(Ok(Bytes::from(sse_buffer.clone())))
@@ -2378,6 +2385,7 @@ impl StreamingProcessor {
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
+                            usage: None,
                         };
                         Self::format_completion_sse_into(&mut sse_buffer, &final_chunk);
                         tx.send(Ok(Bytes::from(sse_buffer.clone())))
@@ -2408,6 +2416,7 @@ impl StreamingProcessor {
                                     }],
                                     model: model.clone(),
                                     system_fingerprint: system_fingerprint.map(String::from),
+                                    usage: None,
                                 };
                                 Self::format_completion_sse_into(&mut sse_buffer, &stream_resp);
                                 tx.send(Ok(Bytes::from(sse_buffer.clone())))
@@ -2429,6 +2438,7 @@ impl StreamingProcessor {
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
+                            usage: None,
                         };
                         Self::format_completion_sse_into(&mut sse_buffer, &stream_resp);
                         tx.send(Ok(Bytes::from(sse_buffer.clone())))
@@ -2463,6 +2473,7 @@ impl StreamingProcessor {
                         }],
                         model: model.clone(),
                         system_fingerprint: system_fingerprint.map(String::from),
+                        usage: None,
                     };
                     Self::format_completion_sse_into(&mut sse_buffer, &final_chunk);
                     tx.send(Ok(Bytes::from(sse_buffer.clone())))
@@ -2473,6 +2484,21 @@ impl StreamingProcessor {
                 }
                 ProtoResponseVariant::None => continue,
             }
+        }
+
+        if include_usage {
+            let usage_chunk = CompletionStreamResponse {
+                id: request_id.clone(),
+                object: "text_completion".to_string(),
+                created,
+                choices: vec![],
+                model: model.clone(),
+                system_fingerprint: system_fingerprint.map(String::from),
+                usage: Some(Usage::from_counts(total_prompt, total_completion.total())),
+            };
+            Self::format_completion_sse_into(&mut sse_buffer, &usage_chunk);
+            tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                .map_err(|_| "Channel closed".to_string())?;
         }
 
         grpc_stream.mark_completed();
@@ -2528,6 +2554,8 @@ impl StreamingProcessor {
             )
             .await;
 
+        // Mark prefill stream as completed AFTER decode completes successfully
+        // This ensures that if client disconnects during decode, BOTH streams send abort
         if result.is_ok() {
             prefill_stream.mark_completed();
         }
