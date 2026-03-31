@@ -808,40 +808,15 @@ impl MeshSyncManager {
     /// This reads the current tree state from CacheAwarePolicy's live radix tree
     /// instead of replaying an operation log. No full prompt text is accumulated
     /// per request — the snapshot is built on-demand from the tree structure.
+    #[expect(clippy::unused_self, reason = "Public API — callers pass &self; removing would be a breaking change")]
     pub fn checkpoint_tree_states(&self) {
-        // Collect all model keys that have tree activity
-        let keys: Vec<String> = self
-            .stores
-            .tree_versions
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
-
-        let subscribers = self.tree_state_subscribers.read();
-
-        for key in keys {
-            let model_id = key.strip_prefix("tree:").unwrap_or(&key);
-
-            // Ask subscribers for the live tree state
-            let mut best_state: Option<TreeState> = None;
-            for subscriber in subscribers.iter() {
-                if let Some(ts) = subscriber.export_tree_state(model_id) {
-                    match &best_state {
-                        Some(existing) if existing.operations.len() >= ts.operations.len() => {}
-                        _ => best_state = Some(ts),
-                    }
-                }
-            }
-
-            if let Some(mut tree_state) = best_state {
-                // Set the version to the current tree version
-                tree_state.version = self.stores.tree_version(&key);
-
-                if let Ok(serialized) = tree_state.to_bytes() {
-                    self.stores.tree_configs.insert(key, serialized);
-                }
-            }
-        }
+        // No-op: tree data is synced via Layer 1 (tenant deltas) and
+        // Layer 2 (periodic compressed snapshots). The old checkpoint
+        // path called export_tree_state() which reconstructed full
+        // TreeState with all prompt text (~160 MB for 2000 entries of
+        // 80k chars), causing multi-GB memory usage every 10 seconds.
+        //
+        // tree_configs is no longer used for tree data transmission.
     }
 }
 

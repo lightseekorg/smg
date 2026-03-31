@@ -399,6 +399,7 @@ impl CacheAwarePolicy {
     /// Builds a `TreeState` from `Tree::snapshot()` — each (prefix, tenant) pair
     /// becomes a `TreeOperation::Insert`. This avoids storing full prompt text
     /// per request; the snapshot is built on-demand during periodic checkpoints.
+    #[expect(clippy::unwrap_used, reason = "pop() after last_mut().is_some() is infallible")]
     pub fn export_tree_state(&self, model_id: &str) -> Option<smg_mesh::TreeState> {
         let model_id = Self::normalize_mesh_model_id(model_id);
         let tree = self.string_trees.get(model_id)?;
