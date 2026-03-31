@@ -75,7 +75,7 @@ jobs:
             --model claude-opus-4-6
             --max-turns 30
             --allowedTools "Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(cargo clippy:*),Bash(cargo check:*)"
-          plugins: "pr-review-toolkit@claude-code-plugins"
+          plugins: "pr-review-toolkit@claude-plugins-official"
           plugin_marketplaces: "https://github.com/lightseekorg/smg-dev-guide.git"
 
   # Respond to @claude mentions in PR/issue comments
@@ -108,5 +108,5 @@ jobs:
           claude_args: |
             --model claude-opus-4-6
             --max-turns 30
-          plugins: "pr-review-toolkit@claude-code-plugins"
+          plugins: "pr-review-toolkit@claude-plugins-official"
           plugin_marketplaces: "https://github.com/lightseekorg/smg-dev-guide.git"
