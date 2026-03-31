@@ -255,7 +255,17 @@ impl SseDecoder {
     }
 
     /// Flush remaining data at end of stream.
+    ///
+    /// # Precondition
+    ///
+    /// `next_frame()` must have been called in a loop until it returned `None`
+    /// before calling this method. If complete frames remain in the buffer,
+    /// they will be silently merged into one.
     pub fn flush(&mut self) -> Option<Result<SseFrame<'_>, SseDecodeError>> {
+        debug_assert!(
+            find_frame_boundary(&self.buf[self.consumed..]).is_none(),
+            "flush() called with complete frames still in the buffer — drain next_frame() first"
+        );
         let remaining = &self.buf[self.consumed..];
         if remaining.is_empty() {
             return None;
@@ -767,6 +777,10 @@ mod tests {
     fn test_decode_flush_newlines_only() {
         let mut dec = SseDecoder::new();
         dec.push(b"\n\r\n").unwrap();
+        // \n\r\n is a frame boundary (LF + CRLF) with empty content.
+        // next_frame skips empty frames, so it returns None.
+        assert!(dec.next_frame().is_none());
+        // After draining, flush also returns None — no meaningful data.
         assert!(dec.flush().is_none());
     }
 
@@ -914,7 +928,8 @@ mod tests {
 
     #[test]
     fn test_parse_frame_basic() {
-        let frame = parse_frame("event: message_start\ndata: {\"type\":\"message_start\"}").unwrap();
+        let frame =
+            parse_frame("event: message_start\ndata: {\"type\":\"message_start\"}").unwrap();
         assert_eq!(frame.event_type, Some("message_start"));
         assert_eq!(frame.data.as_ref(), "{\"type\":\"message_start\"}");
     }
