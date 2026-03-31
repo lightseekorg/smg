@@ -278,14 +278,11 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
 
             result = await future
 
+            embedding = result["embedding"]
             return sglang_scheduler_pb2.EmbedResponse(
-                request_id=request.request_id,
-                complete=sglang_scheduler_pb2.EmbedComplete(
-                    embedding=result["embedding"],
-                    prompt_tokens=result.get("prompt_tokens", 0),
-                    cached_tokens=0,
-                    embedding_dim=len(result["embedding"]),
-                ),
+                embedding=embedding,
+                prompt_tokens=result.get("prompt_tokens", 0),
+                embedding_dim=len(embedding),
             )
 
         except grpc.aio.AbortError:

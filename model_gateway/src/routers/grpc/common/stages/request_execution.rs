@@ -197,7 +197,7 @@ impl RequestExecutionStage {
             )
         })?;
 
-        let response = client.embed(proto_request).await.map_err(|e| {
+        let complete = client.embed(proto_request).await.map_err(|e| {
             error!(function = "execute_single_embed", error = %e, "Failed to start embedding");
             e.to_http_error(
                 "start_embedding_failed",
@@ -205,19 +205,7 @@ impl RequestExecutionStage {
             )
         })?;
 
-        match response.into_complete() {
-            Some(complete) => Ok(ExecutionResult::Embedding { response: complete }),
-            None => {
-                error!(
-                    function = "execute_single_embed",
-                    "Embedding execution returned no response"
-                );
-                Err(error::internal_error(
-                    "embedding_no_response",
-                    "Embedding execution returned no response",
-                ))
-            }
-        }
+        Ok(ExecutionResult::Embedding { response: complete })
     }
 
     async fn execute_dual_dispatch(
