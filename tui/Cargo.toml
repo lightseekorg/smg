@@ -20,7 +20,7 @@ futures.workspace = true
 openai-protocol.workspace = true
 
 ratatui = "0.30"
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 clap = { version = "4", features = ["derive", "env"] }
 
 [lints]
