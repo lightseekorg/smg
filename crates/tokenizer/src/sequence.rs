@@ -123,7 +123,12 @@ impl Sequence {
         self.cached_prefix.clear();
     }
 
-    /// Append text to the sequence by encoding it
+    /// Append text to the sequence by encoding it.
+    ///
+    /// WARNING: Do not mix `append_text()` and `append_token()` on the same
+    /// instance. `append_text()` does not invalidate the incremental decode
+    /// cache (`cached_prefix`/`prefix_index`), so subsequent `append_token()`
+    /// calls would diff against stale state.
     ///
     /// Set `add_special_tokens` to `true` for embeddings, or `false` for chat completion
     /// where the chat template already handles special tokens.
