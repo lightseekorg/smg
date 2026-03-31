@@ -16,11 +16,44 @@ use super::{
         policy_key, tree_state_key, PolicyState, RateLimitConfig, StateStores, WorkerState,
         GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
     },
-    tree_ops::{TenantEvict, TenantInsert, TreeKey, TreeOperation, TreeState, TreeStateDelta},
+    tree_ops::{
+        TenantDelta, TenantEvict, TenantInsert, TreeKey, TreeOperation, TreeState, TreeStateDelta,
+    },
 };
 
 pub trait TreeStateSubscriber: Send + Sync + Debug {
     fn apply_remote_tree_state(&self, model_id: &str, tree_state: &TreeState);
+
+    /// Apply lightweight tenant delta — inserts and evictions only, no tree structure.
+    /// Default implementation converts to TreeState for backward compatibility.
+    fn apply_tenant_delta(
+        &self,
+        model_id: &str,
+        inserts: &[TenantInsert],
+        evictions: &[TenantEvict],
+    ) {
+        // Default: convert to TreeState operations for backward compat.
+        // CacheAwarePolicy overrides this with direct tree updates.
+        let mut tree_state = TreeState::new(model_id.to_string());
+        for insert in inserts {
+            tree_state.add_operation(TreeOperation::Insert(
+                crate::tree_ops::TreeInsertOp {
+                    key: TreeKey::Text(insert.node_path.clone()),
+                    tenant: insert.worker_url.clone(),
+                },
+            ));
+        }
+        for evict in evictions {
+            tree_state.add_operation(TreeOperation::Remove(
+                crate::tree_ops::TreeRemoveOp {
+                    tenant: evict.worker_url.clone(),
+                },
+            ));
+        }
+        if !tree_state.operations.is_empty() {
+            self.apply_remote_tree_state(model_id, &tree_state);
+        }
+    }
 }
 
 pub trait WorkerStateSubscriber: Send + Sync + Debug {
@@ -773,6 +806,39 @@ impl MeshSyncManager {
             self.stores.tree_generation.fetch_add(1, Ordering::Release);
             self.notify_tree_state_subscribers(&model_id, &tree_state);
         }
+    }
+
+    /// Apply a lightweight tenant delta from a remote node.
+    /// Updates the local radix tree directly via subscribers without
+    /// going through the CRDT or the full TreeState machinery.
+    pub fn apply_remote_tenant_delta(&self, delta: TenantDelta, _actor: Option<String>) {
+        let key = tree_state_key(&delta.model_id);
+
+        if delta.inserts.is_empty() && delta.evictions.is_empty() {
+            return;
+        }
+
+        debug!(
+            model_id = %delta.model_id,
+            inserts = delta.inserts.len(),
+            evictions = delta.evictions.len(),
+            version = delta.version,
+            "Applying remote tenant delta"
+        );
+
+        // Notify subscribers (CacheAwarePolicy) to apply directly to local tree
+        let subscribers = self.tree_state_subscribers.read();
+        for subscriber in subscribers.iter() {
+            subscriber.apply_tenant_delta(
+                &delta.model_id,
+                &delta.inserts,
+                &delta.evictions,
+            );
+        }
+
+        // Advance version so the collector knows we received new data
+        self.stores.advance_tree_version(&key, delta.version);
+        self.stores.tree_generation.fetch_add(1, Ordering::Release);
     }
 
     /// Checkpoint pending tree operations into the tree_configs store.

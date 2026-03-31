@@ -691,9 +691,23 @@ impl Gossip for GossipService {
                                                             Some(state_update.actor.clone());
 
                                                         if policy_state.policy_type
+                                                            == "tenant_delta"
+                                                        {
+                                                            // Lightweight tenant delta — no tree structure, no prompt text
+                                                            if let Ok(delta) =
+                                                                super::tree_ops::TenantDelta::from_bytes(
+                                                                    &policy_state.config,
+                                                                )
+                                                            {
+                                                                sync_manager
+                                                                    .apply_remote_tenant_delta(
+                                                                        delta, actor,
+                                                                    );
+                                                            }
+                                                        } else if policy_state.policy_type
                                                             == "tree_state_delta"
                                                         {
-                                                            // Delta: apply only the new operations
+                                                            // Legacy delta: apply only the new operations
                                                             if let Ok(delta) =
                                                                 super::tree_ops::TreeStateDelta::from_bytes(
                                                                     &policy_state.config,
