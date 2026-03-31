@@ -495,4 +495,149 @@ mod tests {
         let result = responses_to_chat(&req);
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_custom_tool_extracted_as_function_tool() {
+        use openai_protocol::responses::CustomTool;
+
+        let req = ResponsesRequest {
+            input: ResponseInput::Text("test".to_string()),
+            tools: Some(vec![ResponseTool::Custom(CustomTool {
+                name: "code_exec".to_string(),
+                description: Some("Executes code".to_string()),
+                format: None,
+            })]),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).unwrap();
+        // Custom tools should be converted to function tools for the backend
+        assert!(chat_req.tools.is_some());
+        let tools = chat_req.tools.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].function.name, "code_exec");
+        assert_eq!(tools[0].tool_type, "function");
+    }
+
+    #[test]
+    fn test_custom_tool_call_input_item_conversion() {
+        let req = ResponsesRequest {
+            input: ResponseInput::Items(vec![
+                ResponseInputOutputItem::Message {
+                    id: "msg_1".to_string(),
+                    role: "user".to_string(),
+                    content: vec![ResponseContentPart::InputText {
+                        text: "Use code_exec".to_string(),
+                    }],
+                    status: None,
+                },
+                ResponseInputOutputItem::CustomToolCall {
+                    id: "ctc_1".to_string(),
+                    call_id: "ctc_1".to_string(),
+                    name: "code_exec".to_string(),
+                    input: "print('hello')".to_string(),
+                    output: Some("hello".to_string()),
+                    status: Some("completed".to_string()),
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).unwrap();
+        // Should produce: user message + assistant tool_call + tool result = 3 messages
+        assert_eq!(chat_req.messages.len(), 3);
+    }
+
+    #[test]
+    fn test_custom_tool_call_output_item_conversion() {
+        let req = ResponsesRequest {
+            input: ResponseInput::Items(vec![
+                ResponseInputOutputItem::Message {
+                    id: "msg_1".to_string(),
+                    role: "user".to_string(),
+                    content: vec![ResponseContentPart::InputText {
+                        text: "test".to_string(),
+                    }],
+                    status: None,
+                },
+                ResponseInputOutputItem::CustomToolCall {
+                    id: "ctc_1".to_string(),
+                    call_id: "ctc_1".to_string(),
+                    name: "code_exec".to_string(),
+                    input: "print('hi')".to_string(),
+                    output: None,
+                    status: Some("completed".to_string()),
+                },
+                ResponseInputOutputItem::CustomToolCallOutput {
+                    id: Some("ctc_2".to_string()),
+                    call_id: "ctc_1".to_string(),
+                    output: "hi".to_string(),
+                    status: Some("completed".to_string()),
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).unwrap();
+        // user message + assistant tool_call + tool result = 3 messages
+        assert_eq!(chat_req.messages.len(), 3);
+    }
+
+    #[test]
+    fn test_chat_to_responses_custom_tool_call() {
+        use openai_protocol::chat::ChatCompletionMessage;
+        use openai_protocol::responses::CustomTool;
+
+        let original_req = ResponsesRequest {
+            input: ResponseInput::Text("test".to_string()),
+            model: "test-model".to_string(),
+            tools: Some(vec![ResponseTool::Custom(CustomTool {
+                name: "code_exec".to_string(),
+                description: None,
+                format: None,
+            })]),
+            ..Default::default()
+        };
+
+        let chat_resp = ChatCompletionResponse {
+            id: "resp_1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1234567890,
+            model: "test-model".to_string(),
+            choices: vec![openai_protocol::chat::ChatChoice {
+                index: 0,
+                message: ChatCompletionMessage {
+                    role: "assistant".to_string(),
+                    content: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_1".to_string(),
+                        tool_type: "function".to_string(),
+                        function: FunctionCallResponse {
+                            name: "code_exec".to_string(),
+                            arguments: Some("print('hello')".to_string()),
+                        },
+                    }]),
+                    reasoning_content: None,
+                },
+                finish_reason: Some("tool_calls".to_string()),
+                logprobs: None,
+                matched_stop: None,
+                hidden_states: None,
+            }],
+            usage: None,
+            system_fingerprint: None,
+        };
+
+        let resp = chat_to_responses(&chat_resp, &original_req, None).unwrap();
+        // Should contain a CustomToolCall output item (not FunctionToolCall)
+        let has_custom = resp.output.iter().any(|item| {
+            matches!(item, ResponseOutputItem::CustomToolCall { name, input, .. }
+                if name == "code_exec" && input == "print('hello')")
+        });
+        assert!(
+            has_custom,
+            "Response should contain CustomToolCall output item, got: {:?}",
+            resp.output
+        );
+    }
 }

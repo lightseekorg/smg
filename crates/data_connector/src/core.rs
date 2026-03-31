@@ -723,6 +723,21 @@ mod tests {
     }
 
     #[test]
+    fn make_item_id_custom_tool_call_prefix() {
+        let id = make_item_id("custom_tool_call");
+        assert!(
+            id.0.starts_with("ctc_"),
+            "custom_tool_call type should produce 'ctc_' prefix, got: {id}"
+        );
+        assert_eq!(
+            id.0.len(),
+            54, // "ctc_" (4) + 50 hex
+            "custom_tool_call ID should be 54 chars, got {} chars: {id}",
+            id.0.len()
+        );
+    }
+
+    #[test]
     fn make_item_id_unknown_type_uses_first_3_chars() {
         let id = make_item_id("custom_type");
         assert!(
@@ -749,6 +764,7 @@ mod tests {
             ("mcp_call", "mcp_"),
             ("mcp_list_tools", "mcpl_"),
             ("function_call", "fc_"),
+            ("custom_tool_call", "ctc_"),
         ];
 
         for (item_type, prefix) in test_cases {

@@ -642,3 +642,94 @@ pub fn is_function_call_type(item_type: &str) -> bool {
 pub fn is_custom_tool_call_type(item_type: &str) -> bool {
     item_type == ItemType::CUSTOM_TOOL_CALL
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================================================
+    // CustomToolCallEvent tests
+    // ========================================================================
+
+    #[test]
+    fn custom_tool_call_event_input_delta_str() {
+        assert_eq!(
+            CustomToolCallEvent::InputDelta.as_str(),
+            "response.custom_tool_call_input.delta"
+        );
+    }
+
+    #[test]
+    fn custom_tool_call_event_input_done_str() {
+        assert_eq!(
+            CustomToolCallEvent::InputDone.as_str(),
+            "response.custom_tool_call_input.done"
+        );
+    }
+
+    #[test]
+    fn custom_tool_call_event_display() {
+        assert_eq!(
+            CustomToolCallEvent::InputDelta.to_string(),
+            "response.custom_tool_call_input.delta"
+        );
+        assert_eq!(
+            CustomToolCallEvent::InputDone.to_string(),
+            "response.custom_tool_call_input.done"
+        );
+    }
+
+    // ========================================================================
+    // ItemType tests for CustomToolCall
+    // ========================================================================
+
+    #[test]
+    fn item_type_custom_tool_call_str() {
+        assert_eq!(ItemType::CustomToolCall.as_str(), "custom_tool_call");
+    }
+
+    #[test]
+    fn item_type_custom_tool_call_constants() {
+        assert_eq!(ItemType::CUSTOM_TOOL_CALL, "custom_tool_call");
+        assert_eq!(ItemType::CUSTOM_TOOL_CALL_OUTPUT, "custom_tool_call_output");
+    }
+
+    #[test]
+    fn item_type_custom_tool_call_is_custom() {
+        assert!(ItemType::CustomToolCall.is_custom_tool_call());
+        assert!(!ItemType::FunctionCall.is_custom_tool_call());
+        assert!(!ItemType::McpCall.is_custom_tool_call());
+    }
+
+    #[test]
+    fn item_type_custom_tool_call_not_function_call() {
+        assert!(!ItemType::CustomToolCall.is_function_call());
+    }
+
+    #[test]
+    fn item_type_custom_tool_call_not_builtin() {
+        assert!(!ItemType::CustomToolCall.is_builtin_tool_call());
+    }
+
+    // ========================================================================
+    // Helper function tests
+    // ========================================================================
+
+    #[test]
+    fn is_custom_tool_call_type_matches() {
+        assert!(is_custom_tool_call_type("custom_tool_call"));
+    }
+
+    #[test]
+    fn is_custom_tool_call_type_rejects_others() {
+        assert!(!is_custom_tool_call_type("function_call"));
+        assert!(!is_custom_tool_call_type("mcp_call"));
+        assert!(!is_custom_tool_call_type("custom_tool_call_output"));
+        assert!(!is_custom_tool_call_type(""));
+    }
+
+    #[test]
+    fn is_function_call_type_rejects_custom() {
+        assert!(!is_function_call_type("custom_tool_call"));
+    }
+}

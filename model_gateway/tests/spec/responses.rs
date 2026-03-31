@@ -1,7 +1,8 @@
 use openai_protocol::{
     common::{Function, StringOrArray, ToolChoice, ToolChoiceValue},
     responses::{
-        FunctionTool, IncludeField, McpTool, ResponseInput, ResponseInputOutputItem, ResponseTool,
+        CustomTool, CustomToolFormat, FunctionTool, IncludeField, McpTool, ResponseInput,
+        ResponseInputOutputItem, ResponseOutputItem, ResponseTool,
         ResponsesRequest, StringOrContentParts, TextConfig, TextFormat,
     },
 };
@@ -1223,4 +1224,366 @@ fn test_normalize_store_no_override() {
         Some(false),
         "store should not be overridden if already set to false"
     );
+}
+
+// ============================================================================
+// Custom Tool Tests
+// ============================================================================
+
+/// Test that a valid custom tool passes validation
+#[test]
+fn test_validate_custom_tool_valid() {
+    let request = ResponsesRequest {
+        input: ResponseInput::Text("test".to_string()),
+        tools: Some(vec![ResponseTool::Custom(CustomTool {
+            name: "code_exec".to_string(),
+            description: Some("Executes arbitrary Python code.".to_string()),
+            format: None,
+        })]),
+        ..Default::default()
+    };
+    assert!(
+        request.validate().is_ok(),
+        "Valid custom tool should be accepted"
+    );
+}
+
+/// Test that a custom tool with grammar format passes validation
+#[test]
+fn test_validate_custom_tool_with_grammar() {
+    let request = ResponsesRequest {
+        input: ResponseInput::Text("test".to_string()),
+        tools: Some(vec![ResponseTool::Custom(CustomTool {
+            name: "math_exp".to_string(),
+            description: Some("Creates valid mathematical expressions".to_string()),
+            format: Some(CustomToolFormat {
+                format_type: "grammar".to_string(),
+                syntax: "lark".to_string(),
+                definition: "start: expr\nexpr: INT\n%import common.INT".to_string(),
+            }),
+        })]),
+        ..Default::default()
+    };
+    assert!(
+        request.validate().is_ok(),
+        "Custom tool with grammar format should be accepted"
+    );
+}
+
+/// Test that a custom tool with empty name fails validation
+#[test]
+fn test_validate_custom_tool_empty_name() {
+    let request = ResponsesRequest {
+        input: ResponseInput::Text("test".to_string()),
+        tools: Some(vec![ResponseTool::Custom(CustomTool {
+            name: String::new(),
+            description: None,
+            format: None,
+        })]),
+        ..Default::default()
+    };
+    let result = request.validate();
+    assert!(
+        result.is_err(),
+        "Custom tool with empty name should be invalid"
+    );
+}
+
+/// Test that custom tool serialization produces correct JSON
+#[test]
+fn test_custom_tool_serialization() {
+    let tool = ResponseTool::Custom(CustomTool {
+        name: "code_exec".to_string(),
+        description: Some("Executes Python code.".to_string()),
+        format: None,
+    });
+    let json_val = serde_json::to_value(&tool).unwrap();
+    assert_eq!(json_val["type"], "custom");
+    assert_eq!(json_val["name"], "code_exec");
+    assert_eq!(json_val["description"], "Executes Python code.");
+}
+
+/// Test that custom tool deserialization works from JSON
+#[test]
+fn test_custom_tool_deserialization() {
+    let v = json!({
+        "type": "custom",
+        "name": "code_exec",
+        "description": "Executes arbitrary Python code."
+    });
+    let tool: ResponseTool = serde_json::from_value(v).unwrap();
+    assert!(
+        matches!(tool, ResponseTool::Custom(ref ct) if ct.name == "code_exec"),
+        "Should deserialize as Custom tool"
+    );
+}
+
+/// Test that custom tool with grammar deserializes correctly
+#[test]
+fn test_custom_tool_grammar_deserialization() {
+    let v = json!({
+        "type": "custom",
+        "name": "math_exp",
+        "description": "Creates valid mathematical expressions",
+        "format": {
+            "type": "grammar",
+            "syntax": "lark",
+            "definition": "start: INT\n%import common.INT"
+        }
+    });
+    let tool: ResponseTool = serde_json::from_value(v).unwrap();
+    match tool {
+        ResponseTool::Custom(ct) => {
+            assert_eq!(ct.name, "math_exp");
+            let fmt = ct.format.unwrap();
+            assert_eq!(fmt.format_type, "grammar");
+            assert_eq!(fmt.syntax, "lark");
+        }
+        _ => panic!("Expected Custom tool"),
+    }
+}
+
+/// Test that custom tool with regex grammar deserializes correctly
+#[test]
+fn test_custom_tool_regex_grammar_deserialization() {
+    let v = json!({
+        "type": "custom",
+        "name": "timestamp",
+        "description": "Saves a timestamp",
+        "format": {
+            "type": "grammar",
+            "syntax": "regex",
+            "definition": r"^(?P<month>January|February)\s+(?P<day>\d{1,2})$"
+        }
+    });
+    let tool: ResponseTool = serde_json::from_value(v).unwrap();
+    match tool {
+        ResponseTool::Custom(ct) => {
+            let fmt = ct.format.unwrap();
+            assert_eq!(fmt.syntax, "regex");
+        }
+        _ => panic!("Expected Custom tool"),
+    }
+}
+
+/// Test CustomToolCall output item serialization
+#[test]
+fn test_custom_tool_call_output_item_serialization() {
+    let item = ResponseOutputItem::CustomToolCall {
+        id: "ctc_abc123".to_string(),
+        call_id: "call_xyz".to_string(),
+        name: "code_exec".to_string(),
+        input: "print(\"hello world\")".to_string(),
+        output: None,
+        status: "completed".to_string(),
+    };
+    let json_val = serde_json::to_value(&item).unwrap();
+    assert_eq!(json_val["type"], "custom_tool_call");
+    assert_eq!(json_val["id"], "ctc_abc123");
+    assert_eq!(json_val["input"], "print(\"hello world\")");
+    assert_eq!(json_val["name"], "code_exec");
+    // Should NOT have "arguments" field
+    assert!(json_val.get("arguments").is_none());
+}
+
+/// Test CustomToolCall input item serialization
+#[test]
+fn test_custom_tool_call_input_item_serialization() {
+    let item = ResponseInputOutputItem::CustomToolCall {
+        id: "ctc_abc123".to_string(),
+        call_id: "call_xyz".to_string(),
+        name: "code_exec".to_string(),
+        input: "print(\"hello\")".to_string(),
+        output: Some("hello".to_string()),
+        status: Some("completed".to_string()),
+    };
+    let json_val = serde_json::to_value(&item).unwrap();
+    assert_eq!(json_val["type"], "custom_tool_call");
+    assert_eq!(json_val["input"], "print(\"hello\")");
+    assert_eq!(json_val["output"], "hello");
+}
+
+/// Test CustomToolCallOutput input item serialization
+#[test]
+fn test_custom_tool_call_output_input_item_serialization() {
+    let item = ResponseInputOutputItem::CustomToolCallOutput {
+        id: Some("ctc_abc123".to_string()),
+        call_id: "call_xyz".to_string(),
+        output: "result text".to_string(),
+        status: Some("completed".to_string()),
+    };
+    let json_val = serde_json::to_value(&item).unwrap();
+    assert_eq!(json_val["type"], "custom_tool_call_output");
+    assert_eq!(json_val["output"], "result text");
+}
+
+/// Test CustomToolCall deserialization from JSON
+#[test]
+fn test_custom_tool_call_deserialization() {
+    let v = json!({
+        "type": "custom_tool_call",
+        "id": "ctc_abc123",
+        "call_id": "call_xyz",
+        "name": "code_exec",
+        "input": "4 + 4",
+        "status": "completed"
+    });
+    let item: ResponseOutputItem = serde_json::from_value(v).unwrap();
+    match item {
+        ResponseOutputItem::CustomToolCall {
+            id, name, input, ..
+        } => {
+            assert_eq!(id, "ctc_abc123");
+            assert_eq!(name, "code_exec");
+            assert_eq!(input, "4 + 4");
+        }
+        _ => panic!("Expected CustomToolCall"),
+    }
+}
+
+/// Test tool_choice validation includes custom tools
+#[test]
+fn test_validate_tool_choice_with_custom_tool() {
+    let request = ResponsesRequest {
+        input: ResponseInput::Text("test".to_string()),
+        tools: Some(vec![ResponseTool::Custom(CustomTool {
+            name: "code_exec".to_string(),
+            description: None,
+            format: None,
+        })]),
+        tool_choice: Some(ToolChoice::Function {
+            tool_type: "function".to_string(),
+            function: openai_protocol::common::FunctionChoice {
+                name: "code_exec".to_string(),
+            },
+        }),
+        ..Default::default()
+    };
+    assert!(
+        request.validate().is_ok(),
+        "tool_choice referencing a custom tool by name should be valid"
+    );
+}
+
+/// Test tool_choice fails for non-existent custom tool
+#[test]
+fn test_validate_tool_choice_custom_tool_not_found() {
+    let request = ResponsesRequest {
+        input: ResponseInput::Text("test".to_string()),
+        tools: Some(vec![ResponseTool::Custom(CustomTool {
+            name: "code_exec".to_string(),
+            description: None,
+            format: None,
+        })]),
+        tool_choice: Some(ToolChoice::Function {
+            tool_type: "function".to_string(),
+            function: openai_protocol::common::FunctionChoice {
+                name: "nonexistent".to_string(),
+            },
+        }),
+        ..Default::default()
+    };
+    let result = request.validate();
+    assert!(
+        result.is_err(),
+        "tool_choice referencing non-existent tool should be invalid"
+    );
+}
+
+/// Test custom tool alongside function tool
+#[test]
+fn test_validate_mixed_custom_and_function_tools() {
+    let request = ResponsesRequest {
+        input: ResponseInput::Text("test".to_string()),
+        tools: Some(vec![
+            ResponseTool::Function(FunctionTool {
+                function: Function {
+                    name: "get_weather".to_string(),
+                    description: None,
+                    parameters: json!({}),
+                    strict: None,
+                },
+            }),
+            ResponseTool::Custom(CustomTool {
+                name: "code_exec".to_string(),
+                description: Some("Executes code.".to_string()),
+                format: None,
+            }),
+        ]),
+        ..Default::default()
+    };
+    assert!(
+        request.validate().is_ok(),
+        "Mixed function and custom tools should be valid"
+    );
+}
+
+/// Test custom tool input item validation - empty output rejected
+#[test]
+fn test_validate_custom_tool_call_output_empty() {
+    let request = ResponsesRequest {
+        input: ResponseInput::Items(vec![
+            ResponseInputOutputItem::CustomToolCallOutput {
+                id: Some("ctc_123".to_string()),
+                call_id: "call_1".to_string(),
+                output: String::new(),
+                status: None,
+            },
+        ]),
+        ..Default::default()
+    };
+    let result = request.validate();
+    assert!(
+        result.is_err(),
+        "CustomToolCallOutput with empty output should be invalid"
+    );
+}
+
+/// Test normalization sets tool_choice=auto for custom tools
+#[test]
+fn test_normalize_tool_choice_with_custom_tool() {
+    use openai_protocol::validated::Normalizable;
+
+    let mut request = ResponsesRequest {
+        input: ResponseInput::Text("test".to_string()),
+        tools: Some(vec![ResponseTool::Custom(CustomTool {
+            name: "code_exec".to_string(),
+            description: None,
+            format: None,
+        })]),
+        tool_choice: None,
+        ..Default::default()
+    };
+
+    request.normalize();
+
+    assert!(
+        matches!(
+            request.tool_choice,
+            Some(ToolChoice::Value(ToolChoiceValue::Auto))
+        ),
+        "tool_choice should default to auto when custom tools are present"
+    );
+}
+
+/// Test full request deserialization with custom tool (matching OpenAI format)
+#[test]
+fn test_full_request_deserialization_with_custom_tool() {
+    let v = json!({
+        "model": "gpt-5",
+        "input": "Use the code_exec tool to print hello world.",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "code_exec",
+                "description": "Executes arbitrary Python code."
+            }
+        ]
+    });
+    let request: ResponsesRequest = serde_json::from_value(v).unwrap();
+    assert_eq!(request.tools.as_ref().unwrap().len(), 1);
+    assert!(matches!(
+        &request.tools.as_ref().unwrap()[0],
+        ResponseTool::Custom(ct) if ct.name == "code_exec"
+    ));
 }
