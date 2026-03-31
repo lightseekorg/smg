@@ -156,11 +156,16 @@ impl SseDecoder {
     }
 
     /// Append bytes. Returns error if buffer exceeds max_size.
-    /// Check BEFORE extending (DoS protection).
+    ///
+    /// Auto-compacts when the total allocation would exceed `max_size` but
+    /// the unconsumed data alone would fit. This prevents unbounded growth
+    /// when callers drain frames but forget to call `compact()`.
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), SseDecodeError> {
-        let unconsumed = self.buf.len() - self.consumed;
-        if unconsumed + chunk.len() > self.max_size {
-            return Err(SseDecodeError::BufferOverflow);
+        if self.buf.len() + chunk.len() > self.max_size {
+            self.compact();
+            if self.buf.len() + chunk.len() > self.max_size {
+                return Err(SseDecodeError::BufferOverflow);
+            }
         }
         self.buf.extend_from_slice(chunk);
         Ok(())
@@ -172,19 +177,19 @@ impl SseDecoder {
     /// Call in a loop until `None`, then call `compact()`.
     pub fn next_frame(&mut self) -> Option<Result<SseFrame<'_>, SseDecodeError>> {
         let remaining = &self.buf[self.consumed..];
-        let pos = find_double_newline(remaining)?;
+        let (pos, delim_len) = find_frame_boundary(remaining)?;
         let frame_bytes = &remaining[..pos];
 
         let frame_str = match std::str::from_utf8(frame_bytes) {
             Ok(s) => s,
             Err(e) => {
-                self.consumed += pos + 2; // skip past \n\n
+                self.consumed += pos + delim_len;
                 return Some(Err(SseDecodeError::InvalidUtf8(e)));
             }
         };
 
         let result = parse_frame(frame_str);
-        self.consumed += pos + 2;
+        self.consumed += pos + delim_len;
         Some(Ok(result))
     }
 
@@ -207,12 +212,12 @@ impl SseDecoder {
             Ok(s) => s,
             Err(e) => return Some(Err(SseDecodeError::InvalidUtf8(e))),
         };
-        let trimmed = frame_str.trim();
-        if trimmed.is_empty() {
+        // Only trim trailing newlines/CR to detect empty frames, not payload whitespace
+        if frame_str.trim_end_matches(['\r', '\n']).is_empty() {
             return None;
         }
         self.consumed = self.buf.len();
-        Some(Ok(parse_frame(trimmed)))
+        Some(Ok(parse_frame(frame_str.trim_end_matches(['\r', '\n']))))
     }
 
     /// Unconsumed byte count (for DoS monitoring).
@@ -236,56 +241,67 @@ impl Default for SseDecoder {
 /// Use this when you already have a complete SSE block as a string (e.g. from
 /// an accumulator or rewrite path) and don't need the full [`SseDecoder`] machinery.
 pub fn parse_block(block: &str) -> SseFrame<'_> {
-    parse_frame(block.trim())
+    parse_frame(block.trim_end_matches(['\r', '\n']))
 }
 
 // ============================================================================
 // Shared helpers
 // ============================================================================
 
-/// Find `\n\n` boundary. Returns byte offset of first `\n` in the pair.
+/// Find a frame boundary (empty line) in the buffer.
+///
+/// Supports `\n\n`, `\r\n\r\n`, and `\r\r` per the SSE spec.
+/// Returns `(position, delimiter_length)` of the earliest match.
 #[inline]
-fn find_double_newline(buf: &[u8]) -> Option<usize> {
-    // memchr::memmem is ~10x faster than windows(2) for large buffers.
+fn find_frame_boundary(buf: &[u8]) -> Option<(usize, usize)> {
+    // Check all spec-compliant delimiters and return the earliest match.
+    // memchr::memmem is ~10x faster than windows() for large buffers.
     // memchr is already a direct dependency of model_gateway.
-    memchr::memmem::find(buf, b"\n\n")
+    [
+        (&b"\n\n"[..], 2usize),
+        (&b"\r\n\r\n"[..], 4),
+        (&b"\r\r"[..], 2),
+    ]
+    .into_iter()
+    .filter_map(|(needle, len)| memchr::memmem::find(buf, needle).map(|pos| (pos, len)))
+    .min_by_key(|(pos, _)| *pos)
 }
 
 /// Parse a complete SSE frame into event type and data.
 ///
 /// Returns borrowed references for zero-allocation in the common case
 /// (single `data:` line, `event:` present or absent).
+///
+/// Per the SSE spec, each line is split at the first colon to determine
+/// the field name and value. A single leading space after the colon is stripped.
 fn parse_frame(frame: &str) -> SseFrame<'_> {
     let mut event_type: Option<&str> = None;
     let mut first_data: Option<&str> = None;
     let mut extra_data: Option<Vec<&str>> = None;
 
     for line in frame.lines() {
-        // CRLF normalization: strip trailing \r if present (spec requires this)
-        let line = line.strip_suffix('\r').unwrap_or(line);
-
-        if line.is_empty() {
+        if line.is_empty() || line.starts_with(':') {
             continue;
         }
 
-        // Comments (lines starting with :) — ignore per spec
-        if line.starts_with(':') {
-            continue;
-        }
+        // Per spec: split at first colon to get field name and value
+        let (field, value) = match line.split_once(':') {
+            Some((f, v)) => (f, v.strip_prefix(' ').unwrap_or(v)),
+            None => (line, ""), // field with no colon = field name, empty value
+        };
 
-        if let Some(value) = line.strip_prefix("data:") {
-            let value = value.strip_prefix(' ').unwrap_or(value); // spec: strip ONE leading space
-            match first_data {
+        match field {
+            "data" => match first_data {
                 None => first_data = Some(value),
                 Some(_) => {
-                    // Multi-line data: rare in practice, but spec-compliant
                     extra_data.get_or_insert_with(Vec::new).push(value);
                 }
+            },
+            "event" => {
+                event_type = Some(value);
             }
-        } else if let Some(value) = line.strip_prefix("event:") {
-            event_type = Some(value.strip_prefix(' ').unwrap_or(value));
+            _ => {} // id, retry, etc. — silently ignored
         }
-        // id:, retry: — silently ignored (not used by LLM APIs)
     }
 
     let data = match (first_data, extra_data) {
@@ -467,13 +483,32 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_crlf_frame_boundary() {
+        // Full CRLF-delimited frame: \r\n\r\n
+        let mut dec = SseDecoder::new();
+        dec.push(b"event: ping\r\ndata: {}\r\n\r\n").unwrap();
+        let frame = dec.next_frame().unwrap().unwrap();
+        assert_eq!(frame.event_type, Some("ping"));
+        assert_eq!(frame.data.as_ref(), "{}");
+    }
+
+    #[test]
     fn test_decode_crlf_within_frame() {
-        // If the frame *is* delimited by \n\n but lines have trailing \r
+        // Mixed: CRLF lines but LF-only frame boundary
         let mut dec = SseDecoder::new();
         dec.push(b"event: ping\r\ndata: {}\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
         assert_eq!(frame.event_type, Some("ping"));
         assert_eq!(frame.data.as_ref(), "{}");
+    }
+
+    #[test]
+    fn test_decode_cr_cr_frame_boundary() {
+        // Standalone CR delimiters: \r\r
+        let mut dec = SseDecoder::new();
+        dec.push(b"data: hello\r\r").unwrap();
+        let frame = dec.next_frame().unwrap().unwrap();
+        assert_eq!(frame.data.as_ref(), "hello");
     }
 
     #[test]
@@ -519,6 +554,24 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_buffer_overflow_auto_compacts() {
+        // Buffer with max_size=32. Push data, drain frames, push more.
+        // Without auto-compact, the second push would overflow because
+        // consumed bytes still occupy the Vec.
+        let mut dec = SseDecoder::with_max_size(32);
+        dec.push(b"data: first\n\n").unwrap(); // 13 bytes
+        let f = dec.next_frame().unwrap().unwrap();
+        assert_eq!(f.data.as_ref(), "first");
+        drop(f);
+        // Without auto-compact: buf.len()=13, consumed=13, unconsumed=0
+        // New push of 14 bytes: buf.len()+chunk.len() = 27 <= 32, OK
+        // But if we pushed 20 bytes: 13+20 = 33 > 32, auto-compact needed
+        dec.push(b"data: second-longer\n\n").unwrap(); // 21 bytes, 13+21=34>32, auto-compacts
+        let f = dec.next_frame().unwrap().unwrap();
+        assert_eq!(f.data.as_ref(), "second-longer");
+    }
+
+    #[test]
     fn test_decode_compact() {
         let mut dec = SseDecoder::new();
         dec.push(b"data: first\n\ndata: second\n\npartial").unwrap();
@@ -558,6 +611,17 @@ mod tests {
     fn test_decode_flush_whitespace_only() {
         let mut dec = SseDecoder::new();
         dec.push(b"  \n  ").unwrap();
+        // flush trims trailing newlines but not spaces — this still has content
+        // after trim_end_matches for \r\n, so parse_frame sees "  \n  " trimmed to "  \n  "
+        // parse_frame will see empty lines and return empty data
+        let frame = dec.flush().unwrap().unwrap();
+        assert_eq!(frame.data.as_ref(), "");
+    }
+
+    #[test]
+    fn test_decode_flush_newlines_only() {
+        let mut dec = SseDecoder::new();
+        dec.push(b"\n\r\n").unwrap();
         assert!(dec.flush().is_none());
     }
 
@@ -576,7 +640,7 @@ mod tests {
         // Per spec: strip exactly one leading space after the colon
         dec.push(b"data:  two spaces\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        // Strip one space, leaving " two spaces" -> " two spaces"
+        // Strip one space, leaving " two spaces"
         assert_eq!(frame.data.as_ref(), " two spaces");
     }
 
@@ -586,6 +650,15 @@ mod tests {
         dec.push(b"data:nospace\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
         assert_eq!(frame.data.as_ref(), "nospace");
+    }
+
+    #[test]
+    fn test_decode_field_without_colon() {
+        // Per spec: a line with no colon is treated as field name with empty value
+        let mut dec = SseDecoder::new();
+        dec.push(b"data\n\n").unwrap();
+        let frame = dec.next_frame().unwrap().unwrap();
+        assert_eq!(frame.data.as_ref(), "");
     }
 
     #[test]
@@ -729,5 +802,39 @@ mod tests {
         let frame = parse_frame(": heartbeat");
         assert_eq!(frame.event_type, None);
         assert_eq!(frame.data.as_ref(), "");
+    }
+
+    #[test]
+    fn test_parse_frame_field_without_colon() {
+        let frame = parse_frame("data");
+        assert_eq!(frame.data.as_ref(), "");
+    }
+
+    // --- find_frame_boundary tests ---
+
+    #[test]
+    fn test_find_frame_boundary_lf() {
+        assert_eq!(find_frame_boundary(b"data: x\n\n"), Some((7, 2)));
+    }
+
+    #[test]
+    fn test_find_frame_boundary_crlf() {
+        assert_eq!(find_frame_boundary(b"data: x\r\n\r\n"), Some((7, 4)));
+    }
+
+    #[test]
+    fn test_find_frame_boundary_cr() {
+        assert_eq!(find_frame_boundary(b"data: x\r\r"), Some((7, 2)));
+    }
+
+    #[test]
+    fn test_find_frame_boundary_none() {
+        assert_eq!(find_frame_boundary(b"data: x\n"), None);
+    }
+
+    #[test]
+    fn test_find_frame_boundary_earliest_wins() {
+        // \n\n at pos 7, \r\r at pos 10 — \n\n should win
+        assert_eq!(find_frame_boundary(b"data: x\n\ndata: y\r\r"), Some((7, 2)));
     }
 }
