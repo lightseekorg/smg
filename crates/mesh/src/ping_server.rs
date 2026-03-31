@@ -114,7 +114,7 @@ impl GossipService {
                 })
                 .collect(),
             LocalStoreType::Policy => {
-                let mut entries: Vec<(String, Vec<u8>)> = stores
+                let entries: Vec<(String, Vec<u8>)> = stores
                     .policy
                     .all()
                     .into_iter()
@@ -133,31 +133,10 @@ impl GossipService {
                     })
                     .collect();
 
-                // Also include tree_configs entries (stored outside CRDT
-                // to avoid operation log memory accumulation).
-                for entry in &stores.tree_configs {
-                    let key = entry.key().clone();
-                    let config_bytes = entry.value().clone();
-                    let model_id = key.strip_prefix("tree:").unwrap_or(&key).to_string();
-
-                    // Wrap in PolicyState so the receiver can process it
-                    // the same way as any other tree_state entry.
-                    let version = super::tree_ops::TreeState::from_bytes(&config_bytes)
-                        .ok()
-                        .map(|ts| ts.version)
-                        .unwrap_or(1);
-                    let policy_state = super::stores::PolicyState {
-                        model_id,
-                        policy_type: "tree_state".to_string(),
-                        config: config_bytes,
-                        version,
-                    };
-                    let serialized = bincode::serialize(&policy_state).unwrap_or_else(|e| {
-                        log::error!("Failed to serialize tree config as policy state: {}", e);
-                        vec![]
-                    });
-                    entries.push((key, serialized));
-                }
+                // Tree data is synced via Layer 1 (tenant deltas) and Layer 2
+                // (periodic compressed snapshots). No longer include tree_configs
+                // in the snapshot exchange — cloning large TreeState bytes on
+                // every ping round caused multi-GB memory growth.
                 entries
             }
             LocalStoreType::RateLimit => {
