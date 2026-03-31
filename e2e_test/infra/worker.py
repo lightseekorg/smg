@@ -415,6 +415,9 @@ def start_workers(
     Returns:
         List of started Worker instances.
     """
+    if log_dir is None:
+        log_dir = os.environ.get("E2E_LOG_DIR")
+
     if engine is None:
         engine = get_runtime()
 
