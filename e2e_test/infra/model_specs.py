@@ -98,7 +98,7 @@ MODEL_SPECS: dict[str, dict] = {
     },
     "openai/gpt-oss-120b": {
         "model": _resolve_model_path("openai/gpt-oss-120b"),
-        "tp": 2,
+        "tp": 4,
         "features": ["chat", "streaming", "reasoning", "harmony"],
         "vllm_args": [
             "--structured-outputs-config",
