@@ -2346,6 +2346,25 @@ impl StreamingProcessor {
                     if stopped {
                         stopped_indices.insert(index, true);
 
+                        if let Some(sfx) = suffix {
+                            let suffix_chunk = CompletionStreamResponse {
+                                id: request_id.clone(),
+                                object: "text_completion".to_string(),
+                                created,
+                                choices: vec![CompletionStreamChoice {
+                                    text: sfx.to_string(),
+                                    index,
+                                    logprobs: None,
+                                    finish_reason: None,
+                                }],
+                                model: model.clone(),
+                                system_fingerprint: system_fingerprint.map(String::from),
+                            };
+                            Self::format_completion_sse_into(&mut sse_buffer, &suffix_chunk);
+                            tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                                .map_err(|_| "Channel closed".to_string())?;
+                        }
+
                         let final_chunk = CompletionStreamResponse {
                             id: request_id.clone(),
                             object: "text_completion".to_string(),
@@ -2360,7 +2379,8 @@ impl StreamingProcessor {
                             system_fingerprint: system_fingerprint.map(String::from),
                         };
                         Self::format_completion_sse_into(&mut sse_buffer, &final_chunk);
-                        let _ = tx.send(Ok(Bytes::from(sse_buffer.clone())));
+                        tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                            .map_err(|_| "Channel closed".to_string())?;
                     }
                 }
                 ProtoResponseVariant::Complete(complete) => {
