@@ -4,6 +4,55 @@ use anyhow::Result;
 
 use crate::traits::{TokenIdType, Tokenizer as TokenizerTrait};
 
+const INCREMENTAL_DETOKENIZATION_OVERLAP: usize = 32;
+
+#[inline]
+fn incremental_text(
+    prefix_text: &str,
+    new_text: &str,
+    allow_incomplete_suffix: bool,
+) -> Option<String> {
+    if !allow_incomplete_suffix && new_text.ends_with('\u{FFFD}') {
+        return None;
+    }
+
+    let mut split_at = prefix_text.len();
+    while split_at > 0
+        && (split_at > new_text.len()
+            || !new_text.is_char_boundary(split_at)
+            || !prefix_text.is_char_boundary(split_at))
+    {
+        split_at -= 1;
+    }
+
+    if new_text.len() > split_at && new_text.starts_with(&prefix_text[..split_at]) {
+        let incremental = new_text[split_at..].to_string();
+        if !incremental.is_empty() {
+            return Some(incremental);
+        }
+    }
+
+    let stable_prefix = prefix_text.trim_end_matches('\u{FFFD}');
+    let mut matched_len = 0;
+    let mut right_chars = new_text.char_indices();
+
+    for left_ch in stable_prefix.chars() {
+        match right_chars.next() {
+            Some((idx, right_ch)) if left_ch == right_ch => {
+                matched_len = idx + right_ch.len_utf8();
+            }
+            _ => break,
+        }
+    }
+
+    let incremental = new_text[matched_len..].to_string();
+    if incremental.is_empty() {
+        None
+    } else {
+        Some(incremental)
+    }
+}
+
 /// Maintains state for an ongoing sequence of tokens and their decoded text
 /// This provides a cleaner abstraction for managing token sequences
 pub struct Sequence {
@@ -79,7 +128,7 @@ impl Sequence {
         Self {
             tokenizer,
             token_ids,
-            prefix_offset: 0,
+            prefix_offset: len.saturating_sub(INCREMENTAL_DETOKENIZATION_OVERLAP),
             read_offset: len,
             skip_special_tokens,
         }
@@ -114,60 +163,64 @@ impl Sequence {
         Ok(())
     }
 
-    /// Append a single token to the sequence and return newly decoded text
-    /// Based on HuggingFace TGI incremental decoding
+    /// Append a single token to the sequence and return newly decoded text.
+    /// Based on HuggingFace TGI incremental decoding, but with a bounded
+    /// sliding window so each call is O(1) in tokenizer work regardless of
+    /// total sequence length.
     #[inline]
     pub fn append_token(&mut self, token_id: TokenIdType) -> Result<String> {
-        // Store the old read offset before adding the new token
-        let old_read_offset = self.read_offset;
-
         self.token_ids.push(token_id);
-        self.read_offset = self.token_ids.len();
 
-        // If this is the first token or we're at the beginning, decode everything
-        if self.prefix_offset == 0 && old_read_offset == 0 {
-            let text = self
-                .tokenizer
-                .decode(&self.token_ids, self.skip_special_tokens)?;
-            if text.ends_with("�") {
-                // Incomplete UTF-8 sequence, wait for more tokens
-                return Ok(String::new());
-            }
-            self.prefix_offset = 0;
-            return Ok(text);
-        }
-
-        // Decode the text up to the previous position
+        let len = self.token_ids.len();
         let prefix_text = self.tokenizer.decode(
-            &self.token_ids[self.prefix_offset..old_read_offset],
+            &self.token_ids[self.prefix_offset..self.read_offset],
             self.skip_special_tokens,
         )?;
-
-        // Decode the text including the new token
         let new_text = self.tokenizer.decode(
             &self.token_ids[self.prefix_offset..],
             self.skip_special_tokens,
         )?;
 
-        // Handle multi-byte character boundaries
-        let mut prefix_text_len = prefix_text.len();
-        while !new_text.is_char_boundary(prefix_text_len) && prefix_text_len > 0 {
-            prefix_text_len -= 1;
+        if let Some(text) = incremental_text(&prefix_text, &new_text, false) {
+            self.prefix_offset = self.read_offset;
+            self.read_offset = len;
+            return Ok(text);
         }
 
-        if new_text.len() > prefix_text.len() {
-            if new_text.ends_with("�") {
-                // Incomplete UTF-8 sequence, wait for more tokens
-                return Ok(String::new());
-            } else {
-                // Return the new text portion
-                let incremental_text = new_text[prefix_text_len..].to_string().replace("�", "");
-                self.prefix_offset = old_read_offset;
-                return Ok(incremental_text);
-            }
+        let decode_window_len = len.saturating_sub(self.prefix_offset);
+        if !new_text.ends_with('\u{FFFD}') {
+            self.prefix_offset = len.saturating_sub(INCREMENTAL_DETOKENIZATION_OVERLAP);
+            self.read_offset = len;
+        } else if decode_window_len > INCREMENTAL_DETOKENIZATION_OVERLAP + 2 {
+            self.prefix_offset = len.saturating_sub(INCREMENTAL_DETOKENIZATION_OVERLAP);
+            self.read_offset = self.prefix_offset;
         }
 
         Ok(String::new())
+    }
+
+    pub(crate) fn flush_pending(&mut self) -> Result<Option<String>> {
+        if self.read_offset < self.token_ids.len() {
+            let prefix_start = self
+                .read_offset
+                .saturating_sub(INCREMENTAL_DETOKENIZATION_OVERLAP);
+            let prefix_text = self.tokenizer.decode(
+                &self.token_ids[prefix_start..self.read_offset],
+                self.skip_special_tokens,
+            )?;
+            let remaining = self
+                .tokenizer
+                .decode(&self.token_ids[prefix_start..], self.skip_special_tokens)?;
+
+            self.prefix_offset = self.read_offset;
+            self.read_offset = self.token_ids.len();
+
+            if let Some(remaining) = incremental_text(&prefix_text, &remaining, true) {
+                return Ok(Some(remaining));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Get a reference to the tokenizer
