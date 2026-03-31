@@ -168,7 +168,11 @@ impl Sequence {
         &self.token_ids
     }
 
-    /// Decode the current buffer to text
+    /// Decode the current buffer to text.
+    ///
+    /// WARNING: after `append_token()` calls, this only decodes the sliding
+    /// window (retained tokens), not the full sequence history. Use the
+    /// incremental return values from `append_token()` to build the full text.
     pub fn text(&self) -> Result<String> {
         self.tokenizer
             .decode(&self.token_ids, self.skip_special_tokens)
@@ -251,10 +255,14 @@ mod tests {
         let tokenizer = Arc::new(MockTokenizer::new());
         let mut seq = Sequence::new(tokenizer);
 
-        // Append many tokens
+        // Append many tokens and accumulate decoded output
+        let mut output = String::new();
+        let mut all_token_ids = Vec::new();
         for i in 0..100 {
             let token_id = (i % 5) + 1; // cycle through mock tokens
-            let _ = seq.append_token(token_id);
+            all_token_ids.push(token_id);
+            let text = seq.append_token(token_id).unwrap();
+            output.push_str(&text);
         }
 
         // Logical length should reflect all tokens
@@ -265,6 +273,13 @@ mod tests {
             seq.token_ids().len() < 100,
             "Token buffer should be drained, but has {} entries",
             seq.token_ids().len()
+        );
+
+        // Accumulated output must match a full decode of all tokens
+        let expected = seq.tokenizer().decode(&all_token_ids, false).unwrap();
+        assert_eq!(
+            output, expected,
+            "Drained incremental output must match full decode"
         );
     }
 }
