@@ -68,6 +68,12 @@ struct LastScannedGenerations {
     tree: u64,
 }
 
+/// How often to send a full tree structure snapshot for convergence
+/// (in gossip rounds). Tenant deltas are sent every round; full snapshots
+/// every STRUCTURE_SNAPSHOT_INTERVAL rounds to handle missed deltas,
+/// new nodes joining, or network partitions.
+const STRUCTURE_SNAPSHOT_INTERVAL: u64 = 30;
+
 /// Incremental update collector
 pub struct IncrementalUpdateCollector {
     stores: Arc<StateStores>,
@@ -78,6 +84,8 @@ pub struct IncrementalUpdateCollector {
     /// Used in `mark_sent` instead of re-reading the atomic to avoid
     /// advancing `last_scanned.tree` past the batch boundary.
     collected_tree_gen: Arc<RwLock<u64>>,
+    /// Counter for gossip rounds since last full structure snapshot per model.
+    rounds_since_snapshot: Arc<RwLock<HashMap<String, u64>>>,
 }
 
 impl IncrementalUpdateCollector {
@@ -88,6 +96,7 @@ impl IncrementalUpdateCollector {
             last_sent: Arc::new(RwLock::new(LastSentVersions::default())),
             last_scanned: Arc::new(RwLock::new(LastScannedGenerations::default())),
             collected_tree_gen: Arc::new(RwLock::new(0)),
+            rounds_since_snapshot: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -228,6 +237,9 @@ impl IncrementalUpdateCollector {
                     // Phase 0: Drain tenant delta buffers — lightweight per-gossip-round sync.
                     // Each TenantDelta is ~100 bytes per insert vs ~200KB for full TreeOperation.
                     // Models emitted here are skipped in Phase 1 (no need for heavy ops).
+                    //
+                    // Every STRUCTURE_SNAPSHOT_INTERVAL rounds, skip Phase 0 for a model
+                    // and let Phase 1/2 emit a full TreeState for convergence.
                     {
                         let models_with_inserts: Vec<String> = self
                             .stores
@@ -249,8 +261,28 @@ impl IncrementalUpdateCollector {
                             .chain(models_with_evictions)
                             .collect();
 
+                        let mut rounds = self.rounds_since_snapshot.write();
+
                         for model_id in all_models {
                             let key = format!("tree:{model_id}");
+
+                            // Check if it's time for a full structure snapshot
+                            let round_count = rounds.entry(model_id.clone()).or_insert(0);
+                            *round_count += 1;
+                            if *round_count >= STRUCTURE_SNAPSHOT_INTERVAL {
+                                *round_count = 0;
+                                // Don't emit tenant delta — let Phase 1/2 emit
+                                // full TreeState for convergence. But still drain
+                                // the buffer so it doesn't accumulate.
+                                self.stores.tenant_delta_inserts.remove(&model_id);
+                                self.stores.tenant_delta_evictions.remove(&model_id);
+                                debug!(
+                                    "Skipping tenant delta for {} — emitting full structure snapshot",
+                                    model_id
+                                );
+                                continue;
+                            }
+
                             let current_version = self.stores.tree_version(&key);
 
                             let inserts = self
