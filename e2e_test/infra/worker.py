@@ -251,8 +251,6 @@ class Worker:
             str(self.port),
             "--tensor-parallel-size",
             str(tp_size),
-            "--max-model-len",
-            "16384",
             "--gpu-memory-utilization",
             "0.9",
         ]
