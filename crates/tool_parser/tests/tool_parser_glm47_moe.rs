@@ -2,6 +2,8 @@
 mod common;
 
 use common::create_test_tools;
+use openai_protocol::common::{Function, Tool};
+use serde_json::json;
 use tool_parser::{Glm4MoeParser, ToolParser};
 
 #[tokio::test]
@@ -33,6 +35,25 @@ async fn test_glm47_multiple_tools() {
     assert_eq!(normal_text, "");
     assert_eq!(tools[0].function.name, "search");
     assert_eq!(tools[1].function.name, "translate");
+}
+
+#[tokio::test]
+async fn test_glm47_complete_parsing_salvages_incomplete_trailing_tool() {
+    let parser = Glm4MoeParser::glm47();
+
+    let input = concat!(
+        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>New York, NY</arg_value></tool_call>",
+        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>San Francisco, CA</arg_value></tool_call>",
+        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Chicago, IL</arg_value>"
+    );
+
+    let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
+    assert_eq!(normal_text, "");
+    assert_eq!(tools.len(), 3);
+    assert_eq!(tools[2].function.name, "get_weather");
+
+    let args: serde_json::Value = serde_json::from_str(&tools[2].function.arguments).unwrap();
+    assert_eq!(args["city"], "Chicago, IL");
 }
 
 #[tokio::test]
@@ -84,6 +105,90 @@ async fn test_glm47_streaming() {
     }
 
     assert!(found_name, "Should have found tool name during streaming");
+}
+
+#[tokio::test]
+async fn test_glm47_streaming_multiple_complete_tools_in_one_chunk() {
+    let mut parser = Glm4MoeParser::glm47();
+    let tools = create_test_tools();
+
+    let chunk = concat!(
+        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Shanghai</arg_value></tool_call>",
+        "<tool_call>translate<arg_key>text</arg_key><arg_value>Hello</arg_value><arg_key>target_lang</arg_key><arg_value>zh</arg_value></tool_call>"
+    );
+
+    let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+
+    assert_eq!(result.calls.len(), 2);
+    assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
+    assert_eq!(result.calls[1].name.as_deref(), Some("translate"));
+}
+
+#[tokio::test]
+async fn test_glm47_streaming_preserves_partial_next_tool_prefix_between_chunks() {
+    let mut parser = Glm4MoeParser::glm47();
+    let tools = create_test_tools();
+
+    let first_chunk = concat!(
+        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>New York, NY</arg_value></tool_call>",
+        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>San Francisco, CA</arg_value></tool_call>",
+        "<tool_ca"
+    );
+
+    let second_chunk =
+        "ll>get_weather<arg_key>city</arg_key><arg_value>Chicago, IL</arg_value></tool_call>";
+
+    let first_result = parser.parse_incremental(first_chunk, &tools).await.unwrap();
+    assert_eq!(first_result.calls.len(), 2);
+    assert_eq!(first_result.calls[0].name.as_deref(), Some("get_weather"));
+    assert_eq!(first_result.calls[1].name.as_deref(), Some("get_weather"));
+
+    let second_result = parser
+        .parse_incremental(second_chunk, &tools)
+        .await
+        .unwrap();
+    assert_eq!(second_result.calls.len(), 1);
+    assert_eq!(second_result.calls[0].name.as_deref(), Some("get_weather"));
+    assert_eq!(
+        second_result.calls[0].parameters,
+        r#"{"city":"Chicago, IL"}"#
+    );
+}
+
+#[tokio::test]
+async fn test_glm47_streaming_uses_schema_for_string_arguments() {
+    let mut parser = Glm4MoeParser::glm47();
+    let tools = vec![Tool {
+        tool_type: "function".to_string(),
+        function: Function {
+            name: "invokeCallback".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "callback": {"type": "string"},
+                    "error": {"type": "string"},
+                    "value": {"type": "string"}
+                }
+            }),
+            strict: None,
+        },
+    }];
+
+    let result = parser
+        .parse_incremental(
+            "<tool_call>invokeCallback<arg_key>callback</arg_key><arg_value>processResult</arg_value><arg_key>error</arg_key><arg_value>null</arg_value><arg_key>value</arg_key><arg_value>Operation successful</arg_value></tool_call>",
+            &tools,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.calls.len(), 1);
+    assert_eq!(result.calls[0].name.as_deref(), Some("invokeCallback"));
+    assert_eq!(
+        result.calls[0].parameters,
+        r#"{"callback":"processResult","error":"null","value":"Operation successful"}"#
+    );
 }
 
 #[test]

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use openai_protocol::common::Tool;
 use regex::Regex;
@@ -46,6 +48,207 @@ pub struct Glm4MoeParser {
 }
 
 impl Glm4MoeParser {
+    fn parse_incomplete_trailing_tool_call(
+        &self,
+        text: &str,
+        tools: Option<&[Tool]>,
+    ) -> Option<ToolCall> {
+        let start = text.rfind(self.bot_token)?;
+        let trailing = &text[start..];
+
+        if trailing.contains(self.eot_token) {
+            return None;
+        }
+
+        let repaired_block = format!("{trailing}{}", self.eot_token);
+        match self.parse_tool_call(&repaired_block, tools) {
+            Ok(Some(tool_call)) => Some(tool_call),
+            Ok(None) | Err(_) => None,
+        }
+    }
+
+    fn normalize_schema_type(type_name: &str) -> Option<&'static str> {
+        match type_name {
+            "integer" => Some("integer"),
+            "number" => Some("number"),
+            "string" => Some("string"),
+            "boolean" => Some("boolean"),
+            "object" => Some("object"),
+            "array" => Some("array"),
+            "null" => Some("string"),
+            _ => None,
+        }
+    }
+
+    fn infer_type_from_json_schema(schema: &Value) -> Option<&'static str> {
+        let Value::Object(schema_obj) = schema else {
+            return None;
+        };
+
+        if let Some(type_value) = schema_obj.get("type") {
+            match type_value {
+                Value::String(type_name) => {
+                    return Self::normalize_schema_type(type_name);
+                }
+                Value::Array(type_names) => {
+                    for type_name in type_names {
+                        if let Some(type_name) = type_name.as_str() {
+                            if type_name != "null" {
+                                return Self::normalize_schema_type(type_name);
+                            }
+                        }
+                    }
+                    return Some("string");
+                }
+                _ => {}
+            }
+        }
+
+        for union_key in ["anyOf", "oneOf"] {
+            if let Some(Value::Array(schemas)) = schema_obj.get(union_key) {
+                let mut inferred_types = Vec::new();
+                for sub_schema in schemas {
+                    if let Some(inferred_type) = Self::infer_type_from_json_schema(sub_schema) {
+                        inferred_types.push(inferred_type);
+                    }
+                }
+                if let Some(first_type) = inferred_types.first().copied() {
+                    if inferred_types.iter().all(|ty| *ty == first_type) {
+                        return Some(first_type);
+                    }
+                    if inferred_types.contains(&"string") {
+                        return Some("string");
+                    }
+                    return Some(first_type);
+                }
+            }
+        }
+
+        if let Some(Value::Array(enum_values)) = schema_obj.get("enum") {
+            if enum_values.is_empty() {
+                return Some("string");
+            }
+
+            let inferred: HashSet<&str> = enum_values
+                .iter()
+                .map(|value| match value {
+                    Value::Null => "null",
+                    Value::Bool(_) => "boolean",
+                    Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+                    Value::Number(_) => "number",
+                    Value::String(_) => "string",
+                    Value::Array(_) => "array",
+                    Value::Object(_) => "object",
+                })
+                .collect();
+
+            if inferred.len() == 1 {
+                return inferred.iter().next().copied();
+            }
+            return Some("string");
+        }
+
+        if let Some(Value::Array(schemas)) = schema_obj.get("allOf") {
+            for sub_schema in schemas {
+                if let Some(inferred_type) = Self::infer_type_from_json_schema(sub_schema) {
+                    if inferred_type != "string" {
+                        return Some(inferred_type);
+                    }
+                }
+            }
+            return Some("string");
+        }
+
+        if schema_obj.contains_key("properties") {
+            return Some("object");
+        }
+        if schema_obj.contains_key("items") {
+            return Some("array");
+        }
+
+        None
+    }
+
+    fn get_argument_type(func_name: &str, arg_key: &str, tools: &[Tool]) -> Option<&'static str> {
+        let tool = tools.iter().find(|tool| tool.function.name == func_name)?;
+        let params = tool.function.parameters.as_object()?;
+        let properties = params.get("properties")?.as_object()?;
+        let arg_schema = properties.get(arg_key)?;
+        Self::infer_type_from_json_schema(arg_schema)
+    }
+
+    fn parse_argument_value(value_str: &str, arg_type: Option<&str>) -> Value {
+        let value_str = value_str.trim();
+
+        if let Ok(json_val) = serde_json::from_str::<Value>(value_str) {
+            return match arg_type {
+                Some("string") => match json_val {
+                    Value::String(_) => json_val,
+                    Value::Array(array) => Value::String(Value::Array(array).to_string()),
+                    Value::Object(object) => Value::String(Value::Object(object).to_string()),
+                    Value::Null => Value::String(value_str.to_string()),
+                    other => Value::String(match other {
+                        Value::Bool(v) => v.to_string(),
+                        Value::Number(v) => v.to_string(),
+                        _ => value_str.to_string(),
+                    }),
+                },
+                Some("number") | Some("integer") => match json_val {
+                    Value::String(number_like) => {
+                        if let Ok(int_val) = number_like.parse::<i64>() {
+                            Value::Number(int_val.into())
+                        } else if let Ok(float_val) = number_like.parse::<f64>() {
+                            serde_json::Number::from_f64(float_val)
+                                .map(Value::Number)
+                                .unwrap_or(Value::String(number_like))
+                        } else {
+                            Value::String(number_like)
+                        }
+                    }
+                    other => other,
+                },
+                _ => json_val,
+            };
+        }
+
+        match arg_type {
+            Some("string") => Value::String(value_str.to_string()),
+            Some("boolean") => match value_str {
+                "true" | "True" => Value::Bool(true),
+                "false" | "False" => Value::Bool(false),
+                _ => Value::String(value_str.to_string()),
+            },
+            Some("number") | Some("integer") => {
+                if let Ok(int_val) = value_str.parse::<i64>() {
+                    Value::Number(int_val.into())
+                } else if let Ok(float_val) = value_str.parse::<f64>() {
+                    serde_json::Number::from_f64(float_val)
+                        .map(Value::Number)
+                        .unwrap_or(Value::String(value_str.to_string()))
+                } else {
+                    Value::String(value_str.to_string())
+                }
+            }
+            _ => {
+                if value_str == "true" || value_str == "True" {
+                    Value::Bool(true)
+                } else if value_str == "false" || value_str == "False" {
+                    Value::Bool(false)
+                } else if value_str == "null" || value_str == "None" {
+                    Value::Null
+                } else if let Ok(int_val) = value_str.parse::<i64>() {
+                    Value::Number(int_val.into())
+                } else if let Ok(float_val) = value_str.parse::<f64>() {
+                    serde_json::Number::from_f64(float_val)
+                        .map(Value::Number)
+                        .unwrap_or(Value::String(value_str.to_string()))
+                } else {
+                    Value::String(value_str.to_string())
+                }
+            }
+        }
+    }
+
     /// Create a new generic GLM MoE parser with a custom func_detail_extractor pattern
     ///
     /// # Arguments
@@ -89,37 +292,21 @@ impl Glm4MoeParser {
         Self::new(r"(?s)<tool_call>\s*([^<\s]+)\s*(.*?)</tool_call>")
     }
 
-    /// Parse arguments from key-value pairs
-    fn parse_arguments(&self, args_text: &str) -> serde_json::Map<String, Value> {
+    /// Parse arguments from key-value pairs, using tool schema for type inference
+    fn parse_arguments(
+        &self,
+        args_text: &str,
+        func_name: &str,
+        tools: Option<&[Tool]>,
+    ) -> serde_json::Map<String, Value> {
         let mut arguments = serde_json::Map::new();
 
         for capture in self.arg_extractor.captures_iter(args_text) {
             let key = capture.get(1).map_or("", |m| m.as_str()).trim();
             let value_str = capture.get(2).map_or("", |m| m.as_str()).trim();
-
-            // Try to parse the value as JSON first, fallback to string
-            let value = if let Ok(json_val) = serde_json::from_str::<Value>(value_str) {
-                json_val
-            } else {
-                // Try parsing as Python literal (similar to Python's ast.literal_eval)
-                if value_str == "true" || value_str == "True" {
-                    Value::Bool(true)
-                } else if value_str == "false" || value_str == "False" {
-                    Value::Bool(false)
-                } else if value_str == "null" || value_str == "None" {
-                    Value::Null
-                } else if let Ok(num) = value_str.parse::<i64>() {
-                    Value::Number(num.into())
-                } else if let Ok(num) = value_str.parse::<f64>() {
-                    if let Some(n) = serde_json::Number::from_f64(num) {
-                        Value::Number(n)
-                    } else {
-                        Value::String(value_str.to_string())
-                    }
-                } else {
-                    Value::String(value_str.to_string())
-                }
-            };
+            let arg_type =
+                tools.and_then(|tool_defs| Self::get_argument_type(func_name, key, tool_defs));
+            let value = Self::parse_argument_value(value_str, arg_type);
 
             arguments.insert(key.to_string(), value);
         }
@@ -128,16 +315,15 @@ impl Glm4MoeParser {
     }
 
     /// Parse a single tool call block
-    fn parse_tool_call(&self, block: &str) -> ParserResult<Option<ToolCall>> {
+    fn parse_tool_call(
+        &self,
+        block: &str,
+        tools: Option<&[Tool]>,
+    ) -> ParserResult<Option<ToolCall>> {
         if let Some(captures) = self.func_detail_extractor.captures(block) {
-            // Get function name
             let func_name = captures.get(1).map_or("", |m| m.as_str()).trim();
-
-            // Get arguments text
             let args_text = captures.get(2).map_or("", |m| m.as_str());
-
-            // Parse arguments
-            let arguments = self.parse_arguments(args_text);
+            let arguments = self.parse_arguments(args_text, func_name, tools);
 
             let arguments_str = serde_json::to_string(&arguments)
                 .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
@@ -154,12 +340,12 @@ impl Glm4MoeParser {
     }
 
     /// Parse all tool calls from text (shared logic for complete and incremental parsing)
-    fn parse_tool_calls_from_text(&self, text: &str) -> Vec<ToolCall> {
-        let mut tools = Vec::new();
+    fn parse_tool_calls_from_text(&self, text: &str, tools: Option<&[Tool]>) -> Vec<ToolCall> {
+        let mut parsed_tools = Vec::new();
 
         for mat in self.tool_call_extractor.find_iter(text) {
-            match self.parse_tool_call(mat.as_str()) {
-                Ok(Some(tool)) => tools.push(tool),
+            match self.parse_tool_call(mat.as_str(), tools) {
+                Ok(Some(tool)) => parsed_tools.push(tool),
                 Ok(None) => continue,
                 Err(e) => {
                     tracing::debug!("Failed to parse tool call: {}", e);
@@ -168,7 +354,7 @@ impl Glm4MoeParser {
             }
         }
 
-        tools
+        parsed_tools
     }
 }
 
@@ -193,10 +379,12 @@ impl ToolParser for Glm4MoeParser {
             .ok_or_else(|| ParserError::ParsingFailed("tool call marker not found".to_string()))?;
         let normal_text = text[..idx].to_string();
 
-        // Parse all tool calls using shared helper
-        let tools = self.parse_tool_calls_from_text(text);
+        // Parse all tool calls, including incomplete trailing ones
+        let mut tools = self.parse_tool_calls_from_text(text, None);
+        if let Some(trailing_tool_call) = self.parse_incomplete_trailing_tool_call(text, None) {
+            tools.push(trailing_tool_call);
+        }
 
-        // If no tools were successfully parsed despite having markers, return entire text as fallback
         if tools.is_empty() {
             return Ok((text.to_string(), vec![]));
         }
@@ -216,9 +404,25 @@ impl ToolParser for Glm4MoeParser {
         // Check if we have bot_token
         let start = current_text.find(self.bot_token);
         if start.is_none() {
+            // Preserve partial bot_token at the end of the buffer
+            if let Some(partial_len) =
+                helpers::ends_with_partial_token(current_text, self.bot_token)
+            {
+                let split_at = current_text.len() - partial_len;
+                let normal_text = if self.current_tool_id >= 0 {
+                    String::new()
+                } else {
+                    current_text[..split_at].to_string()
+                };
+                self.buffer = current_text[split_at..].to_string();
+                return Ok(StreamingParseResult {
+                    normal_text,
+                    calls: vec![],
+                });
+            }
+
             self.buffer.clear();
-            // If we're in the middle of streaming (current_tool_id > 0), don't return text
-            let normal_text = if self.current_tool_id > 0 {
+            let normal_text = if self.current_tool_id >= 0 {
                 String::new()
             } else {
                 current_text.clone()
@@ -231,9 +435,7 @@ impl ToolParser for Glm4MoeParser {
 
         // Check if we have eot_token (end of tool call)
         let end = current_text.find(self.eot_token);
-        if let Some(end_pos) = end {
-            // We have a complete tool call!
-
+        if end.is_some() {
             // Initialize state if this is the first tool call
             if self.current_tool_id == -1 {
                 self.current_tool_id = 0;
@@ -241,18 +443,9 @@ impl ToolParser for Glm4MoeParser {
                 self.streamed_args_for_tool = vec![String::new()];
             }
 
-            // Ensure we have enough entries in our tracking arrays
-            helpers::ensure_capacity(
-                self.current_tool_id,
-                &mut self.prev_tool_call_arr,
-                &mut self.streamed_args_for_tool,
-            );
+            let tool_indices = helpers::get_tool_indices(tools);
 
-            // Parse the complete block using shared helper
-            let block_end = end_pos + self.eot_token.len();
-            let parsed_tools = self.parse_tool_calls_from_text(&current_text[..block_end]);
-
-            // Extract normal text before tool calls
+            // Extract normal text before the first tool call
             let idx = current_text.find(self.bot_token);
             let normal_text = if let Some(pos) = idx {
                 current_text[..pos].trim().to_string()
@@ -260,60 +453,78 @@ impl ToolParser for Glm4MoeParser {
                 String::new()
             };
 
-            // Build tool indices for validation
-            let tool_indices = helpers::get_tool_indices(tools);
+            let Some(start_pos) = idx else {
+                return Ok(StreamingParseResult::default());
+            };
 
             let mut calls = Vec::new();
+            let mut parse_cursor = start_pos;
 
-            if !parsed_tools.is_empty() {
-                // Take the first tool and convert to ToolCallItem
-                let tool_call = &parsed_tools[0];
-                let tool_id = self.current_tool_id as usize;
+            loop {
+                let remaining = &current_text[parse_cursor..];
+                let Some(end_rel) = remaining.find(self.eot_token) else {
+                    break;
+                };
 
-                // Validate tool name
-                if !tool_indices.contains_key(&tool_call.function.name) {
-                    // Invalid tool name - skip this tool, preserve indexing for next tool
-                    tracing::debug!("Invalid tool name '{}' - skipping", tool_call.function.name);
-                    helpers::reset_current_tool_state(
-                        &mut self.buffer,
-                        &mut false, // glm45_moe/glm47_moe doesn't track name_sent per tool
-                        &mut self.streamed_args_for_tool,
-                        &self.prev_tool_call_arr,
-                    );
-                    return Ok(StreamingParseResult::default());
-                }
+                let block_end = end_rel + self.eot_token.len();
+                let block = &remaining[..block_end];
 
-                calls.push(ToolCallItem {
-                    tool_index: tool_id,
-                    name: Some(tool_call.function.name.clone()),
-                    parameters: tool_call.function.arguments.clone(),
-                });
+                helpers::ensure_capacity(
+                    self.current_tool_id,
+                    &mut self.prev_tool_call_arr,
+                    &mut self.streamed_args_for_tool,
+                );
 
-                // Store in tracking arrays
-                if self.prev_tool_call_arr.len() <= tool_id {
-                    self.prev_tool_call_arr
-                        .resize_with(tool_id + 1, || Value::Null);
-                }
+                let parsed_tools = self.parse_tool_calls_from_text(block, Some(tools));
+                if !parsed_tools.is_empty() {
+                    let tool_call = &parsed_tools[0];
+                    let tool_id = self.current_tool_id as usize;
 
-                // Parse parameters as JSON and store
-                if let Ok(args) = serde_json::from_str::<Value>(&tool_call.function.arguments) {
-                    self.prev_tool_call_arr[tool_id] = serde_json::json!({
-                        "name": tool_call.function.name,
-                        "arguments": args,
+                    if !tool_indices.contains_key(&tool_call.function.name) {
+                        tracing::debug!(
+                            "Invalid tool name '{}' - skipping",
+                            tool_call.function.name
+                        );
+                        helpers::reset_current_tool_state(
+                            &mut self.buffer,
+                            &mut false,
+                            &mut self.streamed_args_for_tool,
+                            &self.prev_tool_call_arr,
+                        );
+                        return Ok(StreamingParseResult::default());
+                    }
+
+                    calls.push(ToolCallItem {
+                        tool_index: tool_id,
+                        name: Some(tool_call.function.name.clone()),
+                        parameters: tool_call.function.arguments.clone(),
                     });
+
+                    if self.prev_tool_call_arr.len() <= tool_id {
+                        self.prev_tool_call_arr
+                            .resize_with(tool_id + 1, || Value::Null);
+                    }
+
+                    if let Ok(args) = serde_json::from_str::<Value>(&tool_call.function.arguments) {
+                        self.prev_tool_call_arr[tool_id] = serde_json::json!({
+                            "name": tool_call.function.name,
+                            "arguments": args,
+                        });
+                    }
+
+                    if self.streamed_args_for_tool.len() <= tool_id {
+                        self.streamed_args_for_tool
+                            .resize_with(tool_id + 1, String::new);
+                    }
+                    self.streamed_args_for_tool[tool_id].clone_from(&tool_call.function.arguments);
+
+                    self.current_tool_id += 1;
                 }
 
-                if self.streamed_args_for_tool.len() <= tool_id {
-                    self.streamed_args_for_tool
-                        .resize_with(tool_id + 1, String::new);
-                }
-                self.streamed_args_for_tool[tool_id].clone_from(&tool_call.function.arguments);
-
-                self.current_tool_id += 1;
+                parse_cursor += block_end;
             }
 
-            // Remove processed portion from buffer
-            self.buffer = current_text[block_end..].to_string();
+            self.buffer = current_text[parse_cursor..].to_string();
             return Ok(StreamingParseResult { normal_text, calls });
         }
 
