@@ -107,11 +107,17 @@ jobs:
           bash scripts/ci_agentic_svc_deps.sh create-oracle-user oracle-db
           bash scripts/ci_agentic_svc_deps.sh create-oracle-flyway-user oracle-db
 
+      # Pre-download models with flock to prevent races between pods on same node
+      - name: Download models
+        run: bash scripts/ci_download_model.sh --gpu-tier ${{ inputs.gpu_tier }}
+
       # Run tests
       - name: Run E2E tests
+        timeout-minutes: 20
         env:
           SHOW_WORKER_LOGS: "0"
           SHOW_ROUTER_LOGS: "1"
+          E2E_LOG_DIR: e2e-logs
           BRAVE_MCP_HOST: ${{ inputs.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
@@ -121,6 +127,20 @@ jobs:
             ${{ inputs.test_filter }} \
             --reruns 2 --reruns-delay 5 \
             -s -vv
+
+      - name: Compute log artifact label
+        if: failure() || cancelled()
+        id: log-label
+        run: echo "label=$(echo '${{ inputs.test_dirs }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload worker logs
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${{ steps.log-label.outputs.label }}
+          path: e2e-logs/
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Cleanup Oracle test users
         if: always() && inputs.setup_agentic_deps

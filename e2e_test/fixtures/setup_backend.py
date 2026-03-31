@@ -43,6 +43,20 @@ _GW_DEFAULTS = {
 
 _WORKER_DEFAULTS = {"count": 1, "prefill": None, "decode": None}
 
+# Track worker startup failures — fail fast after repeated failures
+_worker_start_failures: dict[str, int] = {}  # engine -> count
+_MAX_WORKER_START_FAILURES = 3  # fail fast after this many failures (matches --reruns 2)
+
+
+def _start_workers_tracked(**kwargs) -> list:
+    """Start workers and track failures by engine for fail-fast."""
+    engine = kwargs.get("engine") or get_runtime()
+    try:
+        return start_workers(**kwargs)
+    except (TimeoutError, RuntimeError):
+        _worker_start_failures[engine] = _worker_start_failures.get(engine, 0) + 1
+        raise
+
 
 def _start_gateway(gateway: Gateway, gateway_config: dict, **mode_kwargs) -> None:
     """Start gateway with mode-specific kwargs and shared config."""
@@ -106,7 +120,14 @@ def setup_backend(request: pytest.FixtureRequest):
     engine = get_runtime()
     model_path = get_model_spec(model_id)["model"]
     workers_config = get_marker_kwargs(request, "workers", defaults=_WORKER_DEFAULTS)
-    log_dir = gateway_config.get("log_dir")
+    log_dir = os.environ.get("E2E_LOG_DIR") or gateway_config.get("log_dir")
+
+    fail_count = _worker_start_failures.get(engine, 0)
+    if fail_count >= _MAX_WORKER_START_FAILURES:
+        pytest.exit(
+            f"Engine {engine} failed to start workers {fail_count} times — aborting test session",
+            returncode=1,
+        )
 
     gateway = Gateway()
     try:
@@ -158,8 +179,8 @@ def _setup_local(
     num_workers = workers_config.get("count") or 1
     logger.info("Starting %s backend: model=%s, workers=%d", backend_name, model_id, num_workers)
 
-    workers = start_workers(
-        model_id,
+    workers = _start_workers_tracked(
+        model_id=model_id,
         engine=engine,
         mode=connection_mode,
         count=num_workers,
@@ -212,8 +233,8 @@ def _setup_pd(
 
     all_workers: list = []
     try:
-        prefill_workers = start_workers(
-            model_id,
+        prefill_workers = _start_workers_tracked(
+            model_id=model_id,
             engine=engine,
             mode=connection_mode,
             count=num_prefill,
@@ -224,8 +245,8 @@ def _setup_pd(
 
         # Decode workers start on GPUs after prefill workers
         decode_gpu_offset = num_prefill * spec.get("tp", 1)
-        decode_workers = start_workers(
-            model_id,
+        decode_workers = _start_workers_tracked(
+            model_id=model_id,
             engine=engine,
             mode=connection_mode,
             count=num_decode,

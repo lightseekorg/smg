@@ -348,3 +348,49 @@ fn test_llama31_template_should_be_string_format() {
         ChatTemplateContentFormat::String
     );
 }
+
+#[test]
+fn test_qwen3_template_should_be_string_format() {
+    // Qwen3 template uses `set content = message.content` to extract content
+    // into a local variable, then checks `content is string`.
+    // The `set` assignment alone does NOT indicate OpenAI format - the template
+    // explicitly rejects non-string content by setting content = ''.
+    let template = r#"{%- for message in messages %}
+    {%- if message.content is string %}
+        {%- set content = message.content %}
+    {%- else %}
+        {%- set content = '' %}
+    {%- endif %}
+    {%- if (message.role == "user") or (message.role == "system" and not loop.first) %}
+        {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>' + '\n' }}
+    {%- elif message.role == "assistant" %}
+        {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>\n' }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+{%- endif %}"#;
+
+    assert_eq!(
+        detect_chat_template_content_format(template),
+        ChatTemplateContentFormat::String
+    );
+}
+
+#[test]
+fn test_assignment_with_iteration_is_openai() {
+    // Template that assigns content AND iterates over it should still be OpenAI
+    let template = r"
+        {%- for message in messages %}
+        {%- set content = message.content %}
+        {%- for item in content %}
+        {{ item.text }}
+        {%- endfor %}
+        {%- endfor %}
+        ";
+
+    assert_eq!(
+        detect_chat_template_content_format(template),
+        ChatTemplateContentFormat::OpenAI
+    );
+}

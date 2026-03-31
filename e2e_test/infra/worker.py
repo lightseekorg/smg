@@ -315,18 +315,17 @@ class Worker:
         stderr_target: int | IO[Any] | None = None
 
         if not show_output:
+            safe_name = f"{self.model_id}_{self.engine}_{self.mode.value}_{self.port}".replace(
+                "/", "__"
+            ).replace(":", "_")
             if self.log_dir:
                 os.makedirs(self.log_dir, exist_ok=True)
-                safe_name = f"{self.model_id}_{self.engine}_{self.mode.value}_{self.port}".replace(
-                    "/", "__"
-                ).replace(":", "_")
                 log_path = os.path.join(self.log_dir, f"worker-{safe_name}.log")
-                self._log_file = open(log_path, "w", encoding="utf-8")
-                stdout_target = self._log_file
-                stderr_target = subprocess.STDOUT
             else:
-                stdout_target = subprocess.DEVNULL
-                stderr_target = subprocess.DEVNULL
+                log_path = os.path.join(tempfile.gettempdir(), f"smg-worker-{safe_name}.log")
+            self._log_file = open(log_path, "w", encoding="utf-8")
+            stdout_target = self._log_file
+            stderr_target = subprocess.STDOUT
 
         try:
             return subprocess.Popen(

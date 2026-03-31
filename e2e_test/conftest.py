@@ -27,6 +27,7 @@ model: Convenience fixture that returns just the model_path from setup_backend.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from importlib.util import find_spec
 from pathlib import Path
@@ -112,6 +113,42 @@ from fixtures import (
 )
 from smg_client import SmgClient
 
+# ---------------------------------------------------------------------------
+# Failure diagnostics
+# ---------------------------------------------------------------------------
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Print worker log summary on test failure."""
+    from infra import LOG_SEPARATOR_WIDTH
+
+    outcome = yield
+    report = outcome.get_result()
+
+    if not report.failed:
+        return
+
+    log_dir = os.environ.get("E2E_LOG_DIR")
+    if not log_dir or not Path(log_dir).is_dir():
+        return
+
+    logs = sorted(p.name for p in Path(log_dir).glob("*.log") if p.is_file())
+    if logs:
+        print(f"\n{'!' * LOG_SEPARATOR_WIDTH}")
+        print(f"Worker logs available in CI artifacts ({len(logs)} files)")
+        # Show only the most recent logs to avoid flooding the console
+        for f in logs[-5:]:
+            print(f"  {f}")
+        if len(logs) > 5:
+            print(f"  ... and {len(logs) - 5} more")
+        print(f"{'!' * LOG_SEPARATOR_WIDTH}")
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def model(setup_backend):
@@ -144,6 +181,7 @@ def api_client(request, setup_backend):
 __all__ = [
     # Hooks
     "pytest_runtest_logstart",
+    "pytest_runtest_makereport",
     "pytest_runtest_setup",
     "pytest_collection_modifyitems",
     "pytest_configure",

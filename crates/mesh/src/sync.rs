@@ -2,7 +2,10 @@
 //!
 //! Handles synchronization of worker and policy states across mesh cluster nodes
 
-use std::{fmt::Debug, sync::Arc};
+use std::{
+    fmt::Debug,
+    sync::{atomic::Ordering, Arc},
+};
 
 use parking_lot::RwLock;
 use tracing::{debug, warn};
@@ -471,16 +474,24 @@ impl MeshSyncManager {
     }
 
     /// Materialize a TreeState for the given tree key by combining the
-    /// policy store's config blob (may be stale) with any pending operations.
-    fn materialize_tree_state(&self, key: &str, model_id: &str) -> Option<TreeState> {
-        let policy_state = self.stores.policy.get(key);
-        let mut tree_state = match policy_state {
-            Some(ps) if !ps.config.is_empty() => TreeState::from_bytes(&ps.config).ok()?,
+    /// tree_configs blob (may be stale) with any pending operations.
+    ///
+    /// Returns `(TreeState, pending_count)` where `pending_count` is the
+    /// number of operations read from the pending buffer under the same
+    /// DashMap `Ref`.  Callers that need to drain the pending buffer after
+    /// checkpoint should use this count (not `tree_state.operations.len()`,
+    /// which also includes operations baked into the config blob).
+    fn materialize_tree_state(&self, key: &str, model_id: &str) -> Option<(TreeState, usize)> {
+        // Clone bytes out of the DashMap ref so no guard is held while
+        // accessing tree_ops_pending.
+        let config_bytes = self.stores.tree_configs.get(key).map(|r| r.clone());
+        let mut tree_state = match config_bytes.as_deref() {
+            Some(bytes) if !bytes.is_empty() => TreeState::from_bytes(bytes).ok()?,
             Some(_) => TreeState::new(model_id.to_string()),
             None => {
-                // No policy store entry yet — tree may only exist in the
+                // No tree_configs entry yet — tree may only exist in the
                 // pending buffer (sync_tree_operation no longer creates
-                // policy entries on the hot path).
+                // config entries on the hot path).
                 if self.stores.tree_ops_pending.contains_key(key) {
                     TreeState::new(model_id.to_string())
                 } else {
@@ -488,44 +499,46 @@ impl MeshSyncManager {
                 }
             }
         };
+        let mut pending_count = 0;
         if let Some(pending) = self.stores.tree_ops_pending.get(key) {
+            pending_count = pending.len();
             for op in pending.iter() {
                 tree_state.add_operation(op.clone());
             }
         }
-        Some(tree_state)
+        Some((tree_state, pending_count))
     }
 
     /// Get tree state for a model from mesh stores
     pub fn get_tree_state(&self, model_id: &str) -> Option<TreeState> {
         let key = tree_state_key(model_id);
         self.materialize_tree_state(&key, model_id)
+            .map(|(tree_state, _)| tree_state)
     }
 
     pub fn get_all_tree_states(&self) -> Vec<TreeState> {
         let mut seen = std::collections::HashSet::new();
         let mut results = Vec::new();
 
-        // Collect from policy store (checkpointed trees)
-        for (key, state) in self.stores.policy.all() {
-            if state.policy_type != "tree_state" {
-                continue;
-            }
+        // Collect from tree_configs (checkpointed trees, bypasses CRDT).
+        for entry in &self.stores.tree_configs {
+            let key = entry.key().clone();
+            let model_id = key.strip_prefix("tree:").unwrap_or(&key).to_string();
             seen.insert(key.clone());
-            if let Some(ts) = self.materialize_tree_state(&key, &state.model_id) {
+            if let Some((ts, _)) = self.materialize_tree_state(&key, &model_id) {
                 results.push(ts);
             }
         }
 
         // Also collect trees that only exist in the pending buffer
-        // (not yet checkpointed into policy store)
+        // (not yet checkpointed into tree_configs)
         for entry in &self.stores.tree_ops_pending {
             let key = entry.key();
             if seen.contains(key.as_str()) {
                 continue;
             }
             let model_id = key.strip_prefix("tree:").unwrap_or(key);
-            if let Some(ts) = self.materialize_tree_state(key, model_id) {
+            if let Some((ts, _)) = self.materialize_tree_state(key, model_id) {
                 results.push(ts);
             }
         }
@@ -533,16 +546,24 @@ impl MeshSyncManager {
         results
     }
 
-    /// Apply remote tree operation to local policy
-    /// This is called when receiving tree state updates from other nodes
+    /// Apply remote tree operation to local stores.
+    /// This is called when receiving full tree state updates from other nodes.
+    ///
+    /// Writes to `tree_configs` (plain DashMap) instead of the CRDT policy
+    /// store to avoid operation log memory accumulation.
+    ///
+    /// Uses `DashMap::entry()` for atomic read-modify-write on `tree_configs`
+    /// to avoid the TOCTOU gap between `get()` and `insert()`.
     pub fn apply_remote_tree_operation(
         &self,
         model_id: String,
         tree_state: TreeState,
         actor: Option<String>,
     ) {
+        use dashmap::mapref::entry::Entry;
+
         let key = tree_state_key(&model_id);
-        let actor = actor.unwrap_or_else(|| "remote".to_string());
+        let _actor = actor.unwrap_or_else(|| "remote".to_string());
 
         let serialized = match tree_state.to_bytes() {
             Ok(bytes) => bytes,
@@ -552,94 +573,104 @@ impl MeshSyncManager {
             }
         };
 
-        let mut current_version = 0;
-        let update_result = self.stores.policy.update_if(key.clone(), |current| {
-            current_version = current
-                .as_ref()
-                .map(|existing| existing.version)
-                .unwrap_or(0);
-            if tree_state.version > current_version {
-                Some(PolicyState {
-                    model_id: model_id.clone(),
-                    policy_type: "tree_state".to_string(),
-                    config: serialized.clone(),
-                    version: tree_state.version,
-                })
-            } else {
-                None
+        // Atomic read-modify-write via entry() — version check and insert
+        // happen under the same shard lock, closing the TOCTOU gap.
+        let applied = match self.stores.tree_configs.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                let current_version = TreeState::from_bytes(entry.get())
+                    .ok()
+                    .map(|ts| ts.version)
+                    .unwrap_or(0);
+                if tree_state.version > current_version {
+                    entry.insert(serialized);
+                    debug!(
+                        "Applied remote tree state update: model={} (version: {} -> {})",
+                        model_id, current_version, tree_state.version
+                    );
+                    true
+                } else {
+                    debug!(
+                        "Skipped remote tree state update: model={} (version {} <= current {})",
+                        model_id, tree_state.version, current_version
+                    );
+                    false
+                }
             }
-        });
+            Entry::Vacant(entry) => {
+                entry.insert(serialized);
+                debug!(
+                    "Applied remote tree state update (new): model={} (version: {})",
+                    model_id, tree_state.version
+                );
+                true
+            }
+        };
 
-        match update_result {
-            Ok((_, true)) => {
-                // Note: we do NOT clear tree_ops_pending here — concurrent
-                // local ops may have been appended since update_if ran.
-                // The periodic checkpoint (every ~60s) handles cleanup.
-                debug!(
-                    "Applied remote tree state update: model={} (version: {} -> {})",
-                    model_id, current_version, tree_state.version
-                );
-                // Advance atomic tree version so subsequent local ops
-                // start above the remote baseline.
-                self.stores.advance_tree_version(&key, tree_state.version);
-                self.notify_tree_state_subscribers(&model_id, &tree_state);
-            }
-            Ok((_, false)) => {
-                debug!(
-                    "Skipped remote tree state update: model={} (version {} <= current {})",
-                    model_id, tree_state.version, current_version
-                );
-            }
-            Err(err) => {
-                debug!(error = %err, model_id = %model_id, actor = %actor, "Failed to apply remote tree state update");
-            }
+        // Subscriber notification and version advancement happen after
+        // dropping the entry (shard lock released).
+        if applied {
+            // Note: we do NOT clear tree_ops_pending here — concurrent
+            // local ops may have been appended since we read the config.
+            // The periodic checkpoint (every ~60s) handles cleanup.
+            self.stores.advance_tree_version(&key, tree_state.version);
+            self.stores.tree_generation.fetch_add(1, Ordering::Release);
+            self.notify_tree_state_subscribers(&model_id, &tree_state);
         }
     }
 
     /// Apply a delta (incremental operations) from a remote node.
     /// Merges the delta operations into the existing local tree state,
     /// avoiding the cost of replacing the entire tree state on every sync.
-    /// Uses atomic compare-and-swap via `update_if` to prevent concurrent
-    /// read/modify/write races.
+    ///
+    /// Uses `DashMap::entry()` for atomic read-modify-write on `tree_configs`
+    /// to avoid the TOCTOU gap between `get()` and `insert()`.
     pub fn apply_remote_tree_delta(&self, delta: TreeStateDelta, actor: Option<String>) {
+        use dashmap::mapref::entry::Entry;
+
         let key = tree_state_key(&delta.model_id);
-        let actor = actor.unwrap_or_else(|| "remote".to_string());
+        let _actor = actor.unwrap_or_else(|| "remote".to_string());
         let model_id = delta.model_id.clone();
         let ops_count = delta.operations.len();
 
-        let mut old_version = 0u64;
+        // Perform the atomic read-modify-write inside the entry block.
+        // Tree construction and serialization happen while holding the
+        // shard write lock; subscriber notification happens after.
+        let result: Option<(TreeState, u64)> = match self.stores.tree_configs.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                let bytes = entry.get();
+                let current_version = if bytes.is_empty() {
+                    0
+                } else {
+                    match TreeState::from_bytes(bytes) {
+                        Ok(ts) => ts.version,
+                        Err(_) => 0,
+                    }
+                };
 
-        let update_result = self.stores.policy.update_if(key.clone(), |current| {
-            let mut tree_state = if let Some(existing) = current {
-                old_version = existing.version;
-
-                // If the delta's base_version is ahead of our current version,
-                // there is a gap — we are missing operations.  Skip the delta;
-                // the next full-state sync will catch us up.
-                if delta.base_version > existing.version {
-                    return None;
-                }
-
-                // Skip if we already have a version >= the delta's new_version
-                if existing.version >= delta.new_version {
-                    return None;
+                // Version checks
+                if delta.base_version > current_version || current_version >= delta.new_version {
+                    debug!(
+                        "Skipped remote tree delta: model={} (base_version={}, new_version={}, current={})",
+                        model_id, delta.base_version, delta.new_version, current_version
+                    );
+                    return;
                 }
 
                 // Build base tree from config only — do NOT replay
                 // tree_ops_pending here. Pending ops are local and will be
                 // included by materialize_tree_state() when the tree is
                 // read for routing or sync.
-                if existing.config.is_empty() {
-                    if existing.version > 0 {
-                        // Config not materialized but we have a version —
-                        // local ops exist only in pending buffer. Reject the
-                        // delta; the periodic checkpoint will materialize the
-                        // config, then the next delta will apply cleanly.
-                        return None;
+                let mut tree_state = if bytes.is_empty() {
+                    if current_version > 0 {
+                        debug!(
+                            "Skipped remote tree delta: model={} (base_version={}, new_version={}, current={})",
+                            model_id, delta.base_version, delta.new_version, current_version
+                        );
+                        return;
                     }
                     TreeState::new(delta.model_id.clone())
                 } else {
-                    match TreeState::from_bytes(&existing.config) {
+                    match TreeState::from_bytes(bytes) {
                         Ok(state) => state,
                         Err(err) => {
                             warn!(
@@ -647,69 +678,81 @@ impl MeshSyncManager {
                                 error = %err,
                                 "Corrupted tree state — rejecting delta to avoid data loss"
                             );
-                            return None;
+                            return;
                         }
                     }
+                };
+
+                let old_version = current_version;
+                for op in &delta.operations {
+                    tree_state.add_operation(op.clone());
                 }
-            } else {
-                TreeState::new(delta.model_id.clone())
-            };
+                let new_version = tree_state.version;
 
-            for op in &delta.operations {
-                tree_state.add_operation(op.clone());
-            }
-
-            let serialized = tree_state.to_bytes().ok()?;
-            Some(PolicyState {
-                model_id: delta.model_id.clone(),
-                policy_type: "tree_state".to_string(),
-                config: serialized,
-                version: tree_state.version,
-            })
-        });
-
-        match update_result {
-            Ok((_, true)) => {
-                // Note: we do NOT clear tree_ops_pending here — concurrent
-                // local ops may have been appended since update_if ran.
-                // The periodic checkpoint (every ~60s) handles cleanup.
-                debug!(
-                    "Applied remote tree delta: model={} (version: {} -> +{} ops)",
-                    model_id, old_version, ops_count
-                );
-
-                // Advance atomic tree version so subsequent local ops
-                // start above the remote baseline.
-                if let Some(ps) = self.stores.policy.get(&key) {
-                    self.stores.advance_tree_version(&key, ps.version);
-                }
-
-                // Re-read the committed state for subscriber notification
-                if let Some(policy_state) = self.stores.policy.get(&key) {
-                    if let Ok(tree_state) = TreeState::from_bytes(&policy_state.config) {
-                        self.notify_tree_state_subscribers(&model_id, &tree_state);
+                match tree_state.to_bytes() {
+                    Ok(serialized) => {
+                        entry.insert(serialized);
+                        debug!(
+                            "Applied remote tree delta: model={} (version: {} -> +{} ops)",
+                            model_id, old_version, ops_count
+                        );
+                        Some((tree_state, new_version))
+                    }
+                    Err(err) => {
+                        debug!(error = %err, model_id = %model_id, "Failed to serialize tree state after delta apply");
+                        None
                     }
                 }
             }
-            Ok((_, false)) => {
-                debug!(
-                    "Skipped remote tree delta: model={} (base_version={}, new_version={}, current={})",
-                    model_id, delta.base_version, delta.new_version, old_version
-                );
+            Entry::Vacant(entry) => {
+                // No existing config — new tree from delta.
+                if delta.base_version > 0 {
+                    debug!(
+                        "Skipped remote tree delta: model={} (base_version={}, new_version={}, no local state)",
+                        model_id, delta.base_version, delta.new_version
+                    );
+                    return;
+                }
+                let mut tree_state = TreeState::new(delta.model_id.clone());
+                for op in &delta.operations {
+                    tree_state.add_operation(op.clone());
+                }
+                let new_version = tree_state.version;
+
+                match tree_state.to_bytes() {
+                    Ok(serialized) => {
+                        entry.insert(serialized);
+                        debug!(
+                            "Applied remote tree delta (new tree): model={} (+{} ops)",
+                            model_id, ops_count
+                        );
+                        Some((tree_state, new_version))
+                    }
+                    Err(err) => {
+                        debug!(error = %err, model_id = %model_id, "Failed to serialize new tree state from delta");
+                        None
+                    }
+                }
             }
-            Err(err) => {
-                debug!(error = %err, model_id = %model_id, actor = %actor, "Failed to apply remote tree delta");
-            }
+        };
+
+        // Notification happens outside the entry block (shard lock released).
+        if let Some((tree_state, new_version)) = result {
+            self.stores.advance_tree_version(&key, new_version);
+            self.stores.tree_generation.fetch_add(1, Ordering::Release);
+            self.notify_tree_state_subscribers(&model_id, &tree_state);
         }
     }
 
-    /// Checkpoint pending tree operations into the policy store config blob.
+    /// Checkpoint pending tree operations into the tree_configs store.
     /// Called periodically (e.g., from the GC cycle) to keep the config blob
     /// reasonably fresh and limit how much the pending buffer can drift.
-    /// Materialize pending tree ops into policy store config blobs.
-    /// Called periodically (every ~60 gossip rounds) to keep the config
-    /// blob fresh and bound pending buffer growth.
+    ///
+    /// Writes to `tree_configs` (plain DashMap) instead of the CRDT policy
+    /// store to avoid operation log memory accumulation.
     pub fn checkpoint_tree_states(&self) {
+        use dashmap::mapref::entry::Entry;
+
         let keys: Vec<String> = self
             .stores
             .tree_ops_pending
@@ -719,32 +762,47 @@ impl MeshSyncManager {
 
         for key in keys {
             let model_id = key.strip_prefix("tree:").unwrap_or(&key);
-            if let Some(tree_state) = self.materialize_tree_state(&key, model_id) {
+            if let Some((tree_state, pending_count)) = self.materialize_tree_state(&key, model_id) {
                 if let Ok(serialized) = tree_state.to_bytes() {
-                    // Preserve version monotonicity: use max of current policy
-                    // version and tree version to avoid regressing.
-                    let _ = self.stores.policy.update(key.clone(), |current| {
-                        let current_version = current.map(|c| c.version).unwrap_or(0);
-                        PolicyState {
-                            model_id: tree_state.model_id.clone(),
-                            policy_type: "tree_state".to_string(),
-                            config: serialized,
-                            version: current_version.max(tree_state.version),
+                    // Write to tree_configs only if our materialized version
+                    // >= the current config version. A concurrent remote
+                    // update may have written a newer entry between
+                    // materialize_tree_state and now.
+                    let inserted = match self.stores.tree_configs.entry(key.clone()) {
+                        Entry::Occupied(mut entry) => {
+                            let current = TreeState::from_bytes(entry.get())
+                                .ok()
+                                .map(|ts| ts.version)
+                                .unwrap_or(0);
+                            if tree_state.version >= current {
+                                entry.insert(serialized);
+                                true
+                            } else {
+                                // A concurrent remote update wrote a newer
+                                // version — skip our stale checkpoint.
+                                false
+                            }
                         }
-                    });
-                    // Drain materialized ops from the pending buffer.
-                    // Use `alter` to atomically keep only ops appended AFTER
-                    // materialize_tree_state() read the buffer. The number of
-                    // ops materialized is `tree_state.operations.len()`.
-                    let materialized_count = tree_state.operations.len();
-                    self.stores.tree_ops_pending.alter(&key, |_, mut ops| {
-                        if ops.len() <= materialized_count {
-                            ops.clear();
-                        } else {
-                            ops.drain(..materialized_count);
+                        Entry::Vacant(entry) => {
+                            entry.insert(serialized);
+                            true
                         }
-                        ops
-                    });
+                    };
+
+                    // Only drain pending ops if the checkpoint was actually
+                    // written. If a concurrent remote update won the version
+                    // race, our materialized data is stale — draining would
+                    // lose ops that haven't been persisted anywhere.
+                    if inserted {
+                        self.stores.tree_ops_pending.alter(&key, |_, mut ops| {
+                            if ops.len() <= pending_count {
+                                ops = Vec::new();
+                            } else {
+                                ops.drain(..pending_count);
+                            }
+                            ops
+                        });
+                    }
                 }
             }
         }
@@ -1752,20 +1810,19 @@ mod tests {
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
 
-        // Directly insert a tree state into the policy store WITHOUT going through
-        // sync_tree_operation (so tree_ops_pending is empty).
+        // Directly insert a tree state into tree_configs WITHOUT going through
+        // sync_tree_operation (so tree_ops_pending is empty).  This simulates
+        // a remote tree state received via apply_remote_tree_operation.
         let mut tree = TreeState::new("model1".to_string());
         tree.add_operation(make_insert_op("direct", "http://w:8000"));
         let serialized = tree.to_bytes().unwrap();
-        let _ = stores.policy.insert(
-            "tree:model1".to_string(),
-            PolicyState {
-                model_id: "model1".to_string(),
-                policy_type: "tree_state".to_string(),
-                config: serialized,
-                version: tree.version,
-            },
-        );
+        stores
+            .tree_configs
+            .insert("tree:model1".to_string(), serialized);
+        // Advance tree version so the collector sees it as changed.
+        stores.advance_tree_version("tree:model1", tree.version);
+        // Bump tree_generation so the collector's tree_changed check fires.
+        stores.bump_tree_version("tree:model1");
 
         let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
         let updates = collector.collect_updates_for_store(StoreType::Policy);
@@ -1972,13 +2029,18 @@ mod tests {
             total_ops as u64 + 1,
         );
 
-        // The local version is total_ops (the policy store version), and the
+        // The local version is total_ops (the tree_configs version), and the
         // delta's new_version must exceed it for acceptance.
-        // sync_tree_operation bumps the PolicyState.version each call, so
-        // the policy version equals total_ops.
+        // sync_tree_operation bumps the tree version each call, so
+        // the tree config version equals total_ops after checkpoint.
         let pre_apply_version = {
             let key = tree_state_key("model1");
-            manager.stores.policy.get(&key).unwrap().version
+            manager
+                .stores
+                .tree_configs
+                .get(&key)
+                .and_then(|bytes| TreeState::from_bytes(&bytes).ok().map(|ts| ts.version))
+                .unwrap_or(0)
         };
         assert_eq!(pre_apply_version, total_ops as u64);
 
@@ -2179,9 +2241,9 @@ mod tests {
 
     #[test]
     fn test_delta_empty_pending_vec() {
-        // Add an op, checkpoint (materializes config in policy store), then
+        // Add an op, checkpoint (materializes config in tree_configs), then
         // replace pending with empty vec.  The collector should NOT produce
-        // a delta — it should fall back to full state from the policy store.
+        // a delta — it should fall back to full state from tree_configs.
         use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
@@ -2387,9 +2449,14 @@ mod tests {
         // Checkpoint to materialize config before applying delta
         manager.checkpoint_tree_states();
 
-        // Apply delta with base_version=2999 (one less than current policy version)
+        // Apply delta with base_version=2999 (one less than current tree config version)
         let key = tree_state_key("model1");
-        let policy_version = manager.stores.policy.get(&key).unwrap().version;
+        let policy_version = manager
+            .stores
+            .tree_configs
+            .get(&key)
+            .and_then(|bytes| TreeState::from_bytes(&bytes).ok().map(|ts| ts.version))
+            .unwrap_or(0);
 
         let delta = make_delta(
             "model1",
