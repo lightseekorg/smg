@@ -1,0 +1,88 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - '*.lock'
+      - 'mkdocs.yml'
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  # Auto-review on PR open/push
+  review:
+    name: Claude PR Review
+    if: >-
+      github.event_name == 'pull_request'
+      && github.repository == 'lightseekorg/smg'
+      && github.actor != 'dependabot[bot]'
+    runs-on: k8s-runner-cpu
+    timeout-minutes: 30
+    concurrency:
+      group: claude-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Export API key from pod env
+        run: echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$GITHUB_ENV"
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Use the /smg:review-pr skill to review this pull request.
+            Follow the skill's full process: fetch diff, map files to checklist sections,
+            check each applicable section, then summarize findings with severity and file:line citations.
+
+            Also read REVIEW.md at the repo root for additional domain-specific review guidance.
+          claude_args: |
+            --model claude-opus-4-6
+            --max-turns 30
+            --allowedTools "Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(cargo clippy:*),Bash(cargo check:*)"
+          plugin_marketplaces: "https://github.com/lightseekorg/smg-dev-guide.git"
+
+  # Respond to @claude mentions in PR/issue comments
+  respond:
+    name: Claude Respond
+    if: >-
+      (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment')
+      && contains(github.event.comment.body, '@claude')
+      && github.repository == 'lightseekorg/smg'
+    runs-on: k8s-runner-cpu
+    timeout-minutes: 30
+    concurrency:
+      group: claude-respond-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Export API key from pod env
+        run: echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$GITHUB_ENV"
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
+          claude_args: |
+            --model claude-opus-4-6
+            --max-turns 30
+          plugin_marketplaces: "https://github.com/lightseekorg/smg-dev-guide.git"
