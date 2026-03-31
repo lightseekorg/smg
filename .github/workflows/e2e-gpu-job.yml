@@ -135,7 +135,7 @@ jobs:
 
       - name: Upload worker logs
         if: failure() || cancelled()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${{ steps.log-label.outputs.label }}
           path: e2e-logs/
