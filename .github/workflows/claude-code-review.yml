@@ -60,22 +60,18 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            You are reviewing a pull request. Your job is to find bugs and post inline comments.
+            Review this pull request. Read REVIEW.md first for severity format,
+            focus areas, and domain knowledge.
 
-            IMPORTANT: For EVERY issue you find, you MUST call the
-            mcp__github_inline_comment__create_inline_comment tool to post an inline
-            comment on the specific file and line. Do NOT just write text output.
-            Each call needs: path, line, body. The body should explain the issue.
+            For every issue found, call mcp__github_inline_comment__create_inline_comment
+            with path, line, and a severity-prefixed body per REVIEW.md format.
 
             Steps:
-            1. Run `git diff origin/main...HEAD` to see what changed.
-            2. Read each changed file to understand the full context.
-            3. Read REVIEW.md at the repo root for project-specific review guidance.
-            4. For every issue found, call mcp__github_inline_comment__create_inline_comment
-               with the file path, line number, and a description of the issue.
-            5. Focus on: logic errors, security issues, missing error handling,
-               broken cross-references, incorrect defaults, silent failures.
-            6. Do NOT comment on: formatting, naming style, missing docs, or test coverage.
+            1. Read REVIEW.md for review guidelines.
+            2. Run `git diff origin/main...HEAD` to see what changed.
+            3. Read each changed file for full context.
+            4. Post inline comments for every issue found.
+            5. Write a brief summary with count per severity level.
           claude_args: |
             --model claude-opus-4-6
             --max-turns 30
