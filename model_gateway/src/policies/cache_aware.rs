@@ -249,18 +249,16 @@ impl CacheAwarePolicy {
     }
 
     fn restore_tree_state_from_mesh(&self) {
-        let tree_states = {
+        let snapshots = {
             let guard = self.mesh_sync.read();
             guard
                 .as_ref()
-                .map(|mesh_sync| mesh_sync.get_all_tree_states())
+                .map(|mesh_sync| mesh_sync.get_all_tree_snapshots())
         };
 
-        if let Some(tree_states) = tree_states {
-            for tree_state in &tree_states {
-                // Use the merge path (not replace) so concurrent live updates
-                // arriving via subscriber callbacks are not overwritten.
-                self.apply_remote_tree_state(&tree_state.model_id, tree_state);
+        if let Some(snapshots) = snapshots {
+            for (model_id, snapshot) in &snapshots {
+                self.apply_remote_tree_snapshot(model_id, snapshot);
             }
         }
     }
@@ -331,15 +329,16 @@ impl CacheAwarePolicy {
         }
     }
 
-    /// Merge remote tree state into local trees incrementally.
-    /// Uses entry-based insertion to preserve existing local routing state.
-    pub fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
+    /// Merge remote tree snapshot into local trees.
+    /// Uses the three-case merge algorithm (exact match, prefix match, edge split)
+    /// to efficiently combine remote state without losing local routing state.
+    pub fn apply_remote_tree_snapshot(&self, model_id: &str, snapshot: &smg_mesh::TreeSnapshot) {
         let model_id = Self::normalize_mesh_model_id(model_id);
-        for operation in &tree_state.operations {
-            if let TreeOperation::Insert(insert_op) = operation {
-                self.apply_insert_operation(model_id, insert_op);
-            }
-        }
+        let tree = self
+            .string_trees
+            .entry(model_id.to_string())
+            .or_insert_with(|| Arc::new(Tree::new()));
+        tree.merge_snapshot(snapshot);
     }
 
     /// Run cache eviction to prevent unbounded growth
@@ -980,8 +979,10 @@ mod tests {
         let tree = policy.string_trees.get("model1");
         assert!(tree.is_some());
 
-        let tree_state = mesh_sync.get_tree_state("model1").unwrap();
-        assert_eq!(tree_state.operations.len(), 2);
+        let snapshot = mesh_sync.get_tree_snapshot("model1").unwrap();
+        // 2 inserts with shared prefix "test_text_" → at least 3 snapshot nodes
+        // (root, shared prefix, and 2 leaf suffixes)
+        assert!(snapshot.node_count() >= 3);
     }
 
     #[test]

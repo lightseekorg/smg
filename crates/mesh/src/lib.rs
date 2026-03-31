@@ -29,6 +29,8 @@ mod tests;
 
 // Re-export commonly used types
 pub use crdt_kv::{CrdtOrMap, OperationLog};
+// Re-export snapshot types from kv-index for use by subscribers (e.g., cache_aware routing).
+pub use kv_index::snapshot::TreeSnapshot;
 pub use metrics::init_mesh_metrics;
 pub use mtls::{MTLSConfig, MTLSManager, OptionalMTLSManager};
 pub use partition::PartitionDetector;

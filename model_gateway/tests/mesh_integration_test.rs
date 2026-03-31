@@ -252,17 +252,17 @@ async fn test_cache_aware_tree_synchronization() {
 
     // Node2 receives tree state (simulated)
     let tree_state = manager1.get_tree_state("model1").unwrap();
-    manager2.apply_remote_tree_operation(
+    manager2.apply_remote_tree_state_compat(
         "model1".to_string(),
         tree_state,
         Some("node1".to_string()),
     );
 
     // Verify Node2 has the tree state
-    let tree_state2 = manager2.get_tree_state("model1");
-    assert!(tree_state2.is_some());
-    let tree = tree_state2.unwrap();
-    assert_eq!(tree.operations.len(), 2);
+    let snapshot = manager2.get_tree_snapshot("model1");
+    assert!(snapshot.is_some());
+    // 2 inserts sharing prefix "request" → at least 3 snapshot nodes
+    assert!(snapshot.unwrap().node_count() >= 3);
 }
 
 #[tokio::test]

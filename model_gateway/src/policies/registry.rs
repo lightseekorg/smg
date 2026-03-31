@@ -524,13 +524,13 @@ impl PolicyRegistry {
         }
     }
 
-    pub fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
+    pub fn apply_remote_tree_snapshot(&self, model_id: &str, snapshot: &smg_mesh::TreeSnapshot) {
         let model_policy = self.get_policy(model_id);
 
         if let Some(ref policy) = model_policy {
             if policy.name() == "cache_aware" {
                 if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
-                    cache_aware.apply_remote_tree_state(model_id, tree_state);
+                    cache_aware.apply_remote_tree_snapshot(model_id, snapshot);
                 }
             }
         }
@@ -546,7 +546,7 @@ impl PolicyRegistry {
                 .as_any()
                 .downcast_ref::<CacheAwarePolicy>()
             {
-                cache_aware.apply_remote_tree_state(model_id, tree_state);
+                cache_aware.apply_remote_tree_snapshot(model_id, snapshot);
             }
         }
 
@@ -555,7 +555,7 @@ impl PolicyRegistry {
                 if let Some(cache_aware) =
                     prefill_policy.as_any().downcast_ref::<CacheAwarePolicy>()
                 {
-                    cache_aware.apply_remote_tree_state(model_id, tree_state);
+                    cache_aware.apply_remote_tree_snapshot(model_id, snapshot);
                 }
             }
         }
@@ -564,7 +564,7 @@ impl PolicyRegistry {
             if decode_policy.name() == "cache_aware" {
                 if let Some(cache_aware) = decode_policy.as_any().downcast_ref::<CacheAwarePolicy>()
                 {
-                    cache_aware.apply_remote_tree_state(model_id, tree_state);
+                    cache_aware.apply_remote_tree_snapshot(model_id, snapshot);
                 }
             }
         }
@@ -572,8 +572,8 @@ impl PolicyRegistry {
 }
 
 impl smg_mesh::TreeStateSubscriber for PolicyRegistry {
-    fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
-        PolicyRegistry::apply_remote_tree_state(self, model_id, tree_state);
+    fn apply_remote_tree_snapshot(&self, model_id: &str, snapshot: &smg_mesh::TreeSnapshot) {
+        PolicyRegistry::apply_remote_tree_snapshot(self, model_id, snapshot);
     }
 }
 
@@ -745,7 +745,7 @@ mod tests {
             tenant: "http://w2:8000".to_string(),
         }));
 
-        mesh_sync.apply_remote_tree_operation(UNKNOWN_MODEL_ID.to_string(), tree_state, None);
+        mesh_sync.apply_remote_tree_state_compat(UNKNOWN_MODEL_ID.to_string(), tree_state, None);
 
         let selected = cache_aware.select_worker(
             &workers,

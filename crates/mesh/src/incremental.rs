@@ -8,13 +8,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use kv_index::RadixTree;
 use parking_lot::RwLock;
 use tracing::{debug, trace};
 
 use super::{
     service::gossip::StateUpdate,
     stores::{AppState, MembershipState, PolicyState, StateStores, StoreType, WorkerState},
-    tree_ops::{TreeState, TreeStateDelta},
+    tree_ops::TreeStateDelta,
 };
 
 /// Trait for extracting version from state types
@@ -288,37 +289,40 @@ impl IncrementalUpdateCollector {
                         }
 
                         if !sent_delta {
-                            // Full-state fallback: build TreeState from
-                            // tree_configs (if checkpointed) + pending ops.
+                            // Full-state fallback: build Tree from stored
+                            // snapshot + pending ops, then snapshot for compact wire format.
                             let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
-                            // Clone bytes out of the DashMap ref so no guard
-                            // is held while iterating tree_ops_pending.
                             let config_bytes = self
                                 .stores
                                 .tree_configs
                                 .get(key.as_str())
                                 .map(|r| r.clone());
-                            let mut tree_state = match config_bytes.as_deref() {
+                            let tree = match config_bytes.as_deref() {
                                 Some(bytes) if !bytes.is_empty() => {
-                                    match TreeState::from_bytes(bytes) {
-                                        Ok(ts) => ts,
+                                    match kv_index::snapshot::TreeSnapshot::from_bytes(bytes) {
+                                        Ok(snap) => kv_index::Tree::from_snapshot(&snap),
                                         Err(_) => {
                                             debug!("Skipping full-state fallback for {} — config corrupted", key);
                                             continue;
                                         }
                                     }
                                 }
-                                _ => TreeState::new(model_id.clone()),
+                                _ => kv_index::Tree::new(),
                             };
                             for op in &**pending {
-                                tree_state.add_operation(op.clone());
+                                if let super::tree_ops::TreeOperation::Insert(ref insert_op) = op {
+                                    if let super::tree_ops::TreeKey::Text(ref text) = insert_op.key
+                                    {
+                                        tree.insert(text, &insert_op.tenant);
+                                    }
+                                }
                             }
-                            let tree_version = tree_state.version;
+                            let snapshot = tree.snapshot();
                             let full_state = PolicyState {
                                 model_id,
-                                policy_type: "tree_state".to_string(),
-                                config: tree_state.to_bytes().unwrap_or_default(),
-                                version: tree_version,
+                                policy_type: "tree_snapshot".to_string(),
+                                config: snapshot.to_bytes().unwrap_or_default(),
+                                version: current_version,
                             };
                             if let Ok(serialized) = bincode::serialize(&full_state) {
                                 updates.push(StateUpdate {
@@ -329,7 +333,7 @@ impl IncrementalUpdateCollector {
                                     timestamp,
                                 });
                                 debug!(
-                                    "Collected full tree state fallback: {} (version: {})",
+                                    "Collected full tree snapshot fallback: {} (version: {})",
                                     key, current_version
                                 );
                                 emitted_tree_keys.insert(key.clone());
@@ -339,9 +343,8 @@ impl IncrementalUpdateCollector {
 
                     // Phase 2: Scan tree_configs for keys not yet emitted
                     // (e.g., after checkpoint + buffer drain, or remote-only entries).
-                    // tree_configs already stores serialized TreeState bytes, so
-                    // we use them directly as the PolicyState config instead of
-                    // round-tripping through deserialize + re-serialize.
+                    // tree_configs stores serialized TreeSnapshot bytes — use
+                    // them directly as the PolicyState config.
                     for entry in &self.stores.tree_configs {
                         let key = entry.key();
                         if emitted_tree_keys.contains(key.as_str()) {
@@ -358,24 +361,19 @@ impl IncrementalUpdateCollector {
                         if config_bytes.is_empty() {
                             continue;
                         }
-                        // Validate the bytes are a valid TreeState and extract
-                        // the version, but use the raw bytes directly as the
-                        // config payload to avoid redundant re-serialization.
-                        let tree_version = match TreeState::from_bytes(&config_bytes) {
-                            Ok(ts) => ts.version,
-                            Err(_) => {
-                                debug!(
-                                    "Skipping tree_configs full-state for {} — config corrupted",
-                                    key
-                                );
-                                continue;
-                            }
-                        };
+                        // Validate bytes are a valid TreeSnapshot.
+                        if kv_index::snapshot::TreeSnapshot::from_bytes(&config_bytes).is_err() {
+                            debug!(
+                                "Skipping tree_configs full-state for {} — config corrupted",
+                                key
+                            );
+                            continue;
+                        }
                         let full_state = PolicyState {
                             model_id,
-                            policy_type: "tree_state".to_string(),
+                            policy_type: "tree_snapshot".to_string(),
                             config: config_bytes,
-                            version: tree_version,
+                            version: current_version,
                         };
                         if let Ok(serialized) = bincode::serialize(&full_state) {
                             updates.push(StateUpdate {
@@ -386,7 +384,7 @@ impl IncrementalUpdateCollector {
                                 timestamp,
                             });
                             debug!(
-                                "Collected tree_configs full state: {} (version: {})",
+                                "Collected tree_configs full snapshot: {} (version: {})",
                                 key, current_version
                             );
                         }

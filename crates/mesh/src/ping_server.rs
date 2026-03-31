@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Result;
 use futures::Stream;
+use kv_index::RadixTree;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tonic::{
@@ -135,20 +136,18 @@ impl GossipService {
 
                 // Also include tree_configs entries (stored outside CRDT
                 // to avoid operation log memory accumulation).
+                // tree_configs now stores TreeSnapshot bytes (compact format).
                 for entry in &stores.tree_configs {
                     let key = entry.key().clone();
                     let config_bytes = entry.value().clone();
                     let model_id = key.strip_prefix("tree:").unwrap_or(&key).to_string();
 
-                    // Wrap in PolicyState so the receiver can process it
-                    // the same way as any other tree_state entry.
-                    let version = super::tree_ops::TreeState::from_bytes(&config_bytes)
-                        .ok()
-                        .map(|ts| ts.version)
-                        .unwrap_or(1);
+                    // Wrap in PolicyState with "tree_snapshot" policy_type.
+                    // Version comes from the atomic tree_versions map.
+                    let version = stores.tree_version(&key);
                     let policy_state = super::stores::PolicyState {
                         model_id,
-                        policy_type: "tree_state".to_string(),
+                        policy_type: "tree_snapshot".to_string(),
                         config: config_bytes,
                         version,
                     };
@@ -705,16 +704,35 @@ impl Gossip for GossipService {
                                                                     );
                                                             }
                                                         } else if policy_state.policy_type
+                                                            == "tree_snapshot"
+                                                        {
+                                                            // New compact format
+                                                            if let Ok(snapshot) =
+                                                                kv_index::snapshot::TreeSnapshot::from_bytes(
+                                                                    &policy_state.config,
+                                                                )
+                                                            {
+                                                                sync_manager
+                                                                    .apply_remote_tree_snapshot(
+                                                                        policy_state
+                                                                            .model_id
+                                                                            .clone(),
+                                                                        snapshot,
+                                                                        policy_state.version,
+                                                                        actor,
+                                                                    );
+                                                            }
+                                                        } else if policy_state.policy_type
                                                             == "tree_state"
                                                         {
-                                                            // Full state: replace (backward compatible)
+                                                            // Old format: backward compatible
                                                             if let Ok(tree_state) =
                                                                 super::tree_ops::TreeState::from_bytes(
                                                                     &policy_state.config,
                                                                 )
                                                             {
                                                                 sync_manager
-                                                                    .apply_remote_tree_operation(
+                                                                    .apply_remote_tree_state_compat(
                                                                         policy_state
                                                                             .model_id
                                                                             .clone(),
@@ -1050,22 +1068,47 @@ impl Gossip for GossipService {
                                                             }
                                                             LocalStoreType::Policy => {
                                                                 if let Ok(policy_state) = bincode::deserialize::<super::stores::PolicyState>(&entry.value) {
-                                                                    if policy_state.policy_type == "tree_state" {
-                                                                        // Tree state entries go to tree_configs
-                                                                        // (plain DashMap, no CRDT operation log).
+                                                                    if policy_state.policy_type == "tree_snapshot" {
+                                                                        // New compact snapshot format
+                                                                        if let Some(ref sync_manager) = sync_manager {
+                                                                            if let Ok(snapshot) = kv_index::snapshot::TreeSnapshot::from_bytes(
+                                                                                &policy_state.config
+                                                                            ) {
+                                                                                sync_manager.apply_remote_tree_snapshot(
+                                                                                    policy_state.model_id.clone(),
+                                                                                    snapshot,
+                                                                                    policy_state.version,
+                                                                                    Some(entry.actor.clone()),
+                                                                                );
+                                                                            }
+                                                                        } else {
+                                                                            stores.tree_configs.insert(key, policy_state.config.clone());
+                                                                        }
+                                                                    } else if policy_state.policy_type == "tree_state" {
+                                                                        // Old format: backward compatible — convert to snapshot before storing
                                                                         if let Some(ref sync_manager) = sync_manager {
                                                                             if let Ok(tree_state) = super::tree_ops::TreeState::from_bytes(
                                                                                 &policy_state.config
                                                                             ) {
-                                                                                sync_manager.apply_remote_tree_operation(
+                                                                                sync_manager.apply_remote_tree_state_compat(
                                                                                     policy_state.model_id.clone(),
                                                                                     tree_state,
                                                                                     Some(entry.actor.clone()),
                                                                                 );
                                                                             }
-                                                                        } else {
-                                                                            // No sync manager — write directly to tree_configs.
-                                                                            stores.tree_configs.insert(key, policy_state.config.clone());
+                                                                        } else if let Ok(tree_state) = super::tree_ops::TreeState::from_bytes(&policy_state.config) {
+                                                                            // No sync manager — convert old TreeState to TreeSnapshot bytes.
+                                                                            let tree = kv_index::Tree::new();
+                                                                            for op in &tree_state.operations {
+                                                                                if let super::tree_ops::TreeOperation::Insert(ref ins) = op {
+                                                                                    if let super::tree_ops::TreeKey::Text(ref text) = ins.key {
+                                                                                        tree.insert(text, &ins.tenant);
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                            if let Ok(snap_bytes) = tree.snapshot().to_bytes() {
+                                                                                stores.tree_configs.insert(key, snap_bytes);
+                                                                            }
                                                                         }
                                                                     } else {
                                                                         let _ = stores.policy.insert(key, policy_state.clone());

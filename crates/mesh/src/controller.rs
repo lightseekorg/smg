@@ -652,16 +652,42 @@ impl MeshController {
                                                                 }
                                                             }
                                                         } else if policy_state.policy_type
+                                                            == "tree_snapshot"
+                                                        {
+                                                            // New compact snapshot format
+                                                            match kv_index::snapshot::TreeSnapshot::from_bytes(
+                                                                    &policy_state.config,
+                                                                )
+                                                            {
+                                                                Ok(snapshot) => {
+                                                                    sync_manager
+                                                                        .apply_remote_tree_snapshot(
+                                                                            policy_state
+                                                                                .model_id
+                                                                                .clone(),
+                                                                            snapshot,
+                                                                            policy_state.version,
+                                                                            actor,
+                                                                        );
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to deserialize tree snapshot for model {}: {e}",
+                                                                        policy_state.model_id
+                                                                    );
+                                                                }
+                                                            }
+                                                        } else if policy_state.policy_type
                                                             == "tree_state"
                                                         {
-                                                            // Full state: replace (backward compatible)
+                                                            // Old format: backward compatible
                                                             match super::tree_ops::TreeState::from_bytes(
                                                                     &policy_state.config,
                                                                 )
                                                             {
                                                                 Ok(tree_state) => {
                                                                     sync_manager
-                                                                        .apply_remote_tree_operation(
+                                                                        .apply_remote_tree_state_compat(
                                                                             policy_state
                                                                                 .model_id
                                                                                 .clone(),
