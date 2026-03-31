@@ -30,10 +30,10 @@ else
     fi
 
     # Show GPU status after clean up
-    NODE_INFO="${NODE_NAME:-$(hostname)}"
-    echo "Running on node: $NODE_INFO"
     nvidia-smi
 
+    NODE_INFO="${NODE_IP:-$(hostname)}"
+    echo "Running on node: $NODE_INFO"
     # Check for remaining GPU processes only when full nuke was attempted
     if [ $# -gt 0 ]; then
         REMAINING_PIDS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | sort -u)
