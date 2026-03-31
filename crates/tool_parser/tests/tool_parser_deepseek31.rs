@@ -221,3 +221,23 @@ async fn test_deepseek31_streaming_end_tokens_stripped() {
         .unwrap();
     assert!(result.normal_text.is_empty() || !result.normal_text.contains("<｜tool▁calls▁end｜>"));
 }
+
+use tool_parser::ParserFactory;
+
+#[test]
+fn test_deepseek31_factory_registration() {
+    let factory = ParserFactory::new();
+
+    // Verify parser is registered
+    assert!(factory.has_parser("deepseek31"));
+
+    // Verify model mappings resolve to the right parser
+    assert!(factory.registry().has_parser_for_model("deepseek-v3.1"));
+    assert!(factory.registry().has_parser_for_model("deepseek-v3.1-terminus"));
+    assert!(factory.registry().has_parser_for_model("deepseek-ai/DeepSeek-V3.1"));
+    assert!(factory.registry().has_parser_for_model("deepseek-ai/DeepSeek-V3.1-Terminus"));
+
+    // Verify existing V3 mappings still work
+    assert!(factory.registry().has_parser_for_model("deepseek-v3"));
+    assert!(factory.registry().has_parser_for_model("deepseek-ai/DeepSeek-V3-0324"));
+}

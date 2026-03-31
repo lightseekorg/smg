@@ -7,9 +7,9 @@ use tokio::sync::Mutex;
 
 use crate::{
     parsers::{
-        CohereParser, DeepSeekParser, Glm4MoeParser, JsonParser, KimiK2Parser, LlamaParser,
-        MinimaxM2Parser, MistralParser, PassthroughParser, PythonicParser, QwenCoderParser,
-        QwenParser, Step3Parser,
+        CohereParser, DeepSeek31Parser, DeepSeekParser, Glm4MoeParser, JsonParser, KimiK2Parser,
+        LlamaParser, MinimaxM2Parser, MistralParser, PassthroughParser, PythonicParser,
+        QwenCoderParser, QwenParser, Step3Parser,
     },
     traits::ToolParser,
 };
@@ -239,6 +239,7 @@ impl ParserFactory {
         registry.register_parser("pythonic", || Box::new(PythonicParser::new()));
         registry.register_parser("llama", || Box::new(LlamaParser::new()));
         registry.register_parser("deepseek", || Box::new(DeepSeekParser::new()));
+        registry.register_parser("deepseek31", || Box::new(DeepSeek31Parser::new()));
         registry.register_parser("glm45_moe", || Box::new(Glm4MoeParser::glm45()));
         registry.register_parser("glm47_moe", || Box::new(Glm4MoeParser::glm47()));
         registry.register_parser("step3", || Box::new(Step3Parser::new()));
@@ -288,6 +289,8 @@ impl ParserFactory {
         // DeepSeek models
         registry.map_model("deepseek-v3*", "deepseek");
         registry.map_model("deepseek-ai/DeepSeek-V3*", "deepseek");
+        registry.map_model("deepseek-v3.1*", "deepseek31");
+        registry.map_model("deepseek-ai/DeepSeek-V3.1*", "deepseek31");
         registry.map_model("deepseek-*", "pythonic");
 
         // GLM models
