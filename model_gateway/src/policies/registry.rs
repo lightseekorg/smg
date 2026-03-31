@@ -524,6 +524,44 @@ impl PolicyRegistry {
         }
     }
 
+    /// Apply lightweight tenant delta directly to CacheAwarePolicy trees.
+    /// No TreeState deserialization — inserts/evictions go straight to the radix tree.
+    pub fn apply_tenant_delta(
+        &self,
+        model_id: &str,
+        inserts: &[smg_mesh::TenantInsert],
+        evictions: &[smg_mesh::TenantEvict],
+    ) {
+        let apply_to = |policy: &dyn LoadBalancingPolicy| {
+            if policy.name() == "cache_aware" {
+                if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
+                    cache_aware.apply_tenant_delta(model_id, inserts, evictions);
+                }
+            }
+        };
+
+        if let Some(ref policy) = self.get_policy(model_id) {
+            apply_to(policy.as_ref());
+        }
+
+        // Apply to default if different from model policy
+        if !self
+            .get_policy(model_id)
+            .as_ref()
+            .is_some_and(|p| Arc::ptr_eq(p, &self.default_policy))
+        {
+            apply_to(self.default_policy.as_ref());
+        }
+
+        if let Some(prefill_policy) = self.prefill_policy.get() {
+            apply_to(prefill_policy.as_ref());
+        }
+
+        if let Some(decode_policy) = self.decode_policy.get() {
+            apply_to(decode_policy.as_ref());
+        }
+    }
+
     pub fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
         let model_policy = self.get_policy(model_id);
 
@@ -574,6 +612,15 @@ impl PolicyRegistry {
 impl smg_mesh::TreeStateSubscriber for PolicyRegistry {
     fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
         PolicyRegistry::apply_remote_tree_state(self, model_id, tree_state);
+    }
+
+    fn apply_tenant_delta(
+        &self,
+        model_id: &str,
+        inserts: &[smg_mesh::TenantInsert],
+        evictions: &[smg_mesh::TenantEvict],
+    ) {
+        PolicyRegistry::apply_tenant_delta(self, model_id, inserts, evictions);
     }
 }
 

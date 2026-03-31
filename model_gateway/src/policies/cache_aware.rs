@@ -342,6 +342,38 @@ impl CacheAwarePolicy {
         }
     }
 
+    /// Apply lightweight tenant delta directly to local radix trees.
+    /// No TreeState deserialization — each insert/eviction is applied
+    /// individually to the string tree via the node_path.
+    pub fn apply_tenant_delta(
+        &self,
+        model_id: &str,
+        inserts: &[smg_mesh::TenantInsert],
+        evictions: &[smg_mesh::TenantEvict],
+    ) {
+        let model_id = Self::normalize_mesh_model_id(model_id);
+
+        let string_tree = self
+            .string_trees
+            .entry(model_id.to_string())
+            .or_insert_with(|| Arc::new(Tree::new()))
+            .clone();
+
+        // Apply inserts — insert the prefix path into the tree with the worker tenant
+        for insert in inserts {
+            // Skip token-encoded paths (those need TokenTree, handled separately)
+            if insert.node_path.starts_with("tok:") {
+                continue;
+            }
+            string_tree.insert_text(&insert.node_path, &insert.worker_url);
+        }
+
+        // Evictions: for now, rely on local eviction logic (evict_cache).
+        // Full eviction propagation is Step 6 of the efficient sync design.
+        // TODO: walk tree and remove worker tenant from all nodes
+        let _ = evictions;
+    }
+
     /// Run cache eviction to prevent unbounded growth
     pub fn evict_cache(&self, max_size: usize) {
         // Evict string trees (HTTP)
