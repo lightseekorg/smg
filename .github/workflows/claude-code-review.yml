@@ -46,9 +46,10 @@ jobs:
       - name: Install gh CLI
         run: |
           if ! command -v gh &>/dev/null; then
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-            apt-get update && apt-get install -y gh
+            GH_VERSION="2.74.0"
+            curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+              | tar xz --strip-components=1 -C "$HOME/.local" "gh_${GH_VERSION}_linux_amd64/bin/gh"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           fi
 
       - uses: anthropics/claude-code-action@v1
@@ -117,9 +118,10 @@ jobs:
       - name: Install gh CLI
         run: |
           if ! command -v gh &>/dev/null; then
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-            apt-get update && apt-get install -y gh
+            GH_VERSION="2.74.0"
+            curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+              | tar xz --strip-components=1 -C "$HOME/.local" "gh_${GH_VERSION}_linux_amd64/bin/gh"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           fi
 
       - uses: anthropics/claude-code-action@v1
