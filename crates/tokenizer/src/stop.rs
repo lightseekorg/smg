@@ -75,10 +75,6 @@ pub struct StopSequenceDecoder {
     /// Maximum bytes to retain in jail_buffer — equal to the longest stop sequence.
     /// Text beyond this window cannot participate in a future match and is safe to drain.
     jail_max_bytes: usize,
-    /// Byte offset in jail_buffer up to which Aho-Corasick has already scanned.
-    /// On the next call we start the search from `max(0, ac_scanned - jail_max_bytes + 1)`
-    /// to catch matches that straddle the boundary, but skip the bulk of old text.
-    ac_scanned: usize,
     /// Whether we've stopped
     stopped: bool,
     /// True when there are no string stop sequences (only token-level stops).
@@ -142,7 +138,6 @@ impl StopSequenceDecoder {
             visible_boundary_idx,
             jail_buffer: String::new(),
             jail_max_bytes,
-            ac_scanned: 0,
             stopped: false,
             token_only,
         }
@@ -233,8 +228,6 @@ impl StopSequenceDecoder {
                     });
                 }
             }
-
-            self.ac_scanned = self.jail_buffer.len();
         }
 
         // Drain the jail buffer down to at most jail_max_bytes, emitting safe text.
@@ -243,17 +236,14 @@ impl StopSequenceDecoder {
             // Find a char-safe drain point: we want to keep the last jail_max_bytes,
             // but must not split a multi-byte UTF-8 character.
             let mut drain_to = self.jail_buffer.len() - self.jail_max_bytes;
-            while drain_to < self.jail_buffer.len() && !self.jail_buffer.is_char_boundary(drain_to)
-            {
-                // Move forward to the next char boundary (retaining slightly more is safe)
-                drain_to += 1;
+            while drain_to > 0 && !self.jail_buffer.is_char_boundary(drain_to) {
+                // Move backward to retain at least jail_max_bytes (safe: retains more, not less)
+                drain_to -= 1;
             }
 
             if drain_to > 0 {
                 let suffix = self.jail_buffer.split_off(drain_to);
                 let to_output = std::mem::replace(&mut self.jail_buffer, suffix);
-                // After draining, ac_scanned resets relative to the new buffer
-                self.ac_scanned = self.jail_buffer.len();
                 return Ok(SequenceDecoderOutput::Text(to_output));
             }
         }
@@ -303,7 +293,6 @@ impl StopSequenceDecoder {
     pub fn reset(&mut self) {
         self.jail_buffer.clear();
         self.sequence.clear();
-        self.ac_scanned = 0;
         self.stopped = false;
     }
 }
