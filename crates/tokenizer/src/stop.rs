@@ -1,6 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
-use aho_corasick::AhoCorasick;
+use aho_corasick::{AhoCorasick, Input};
 use anyhow::Result;
 
 use crate::{
@@ -75,8 +75,15 @@ pub struct StopSequenceDecoder {
     /// Maximum bytes to retain in jail_buffer — equal to the longest stop sequence.
     /// Text beyond this window cannot participate in a future match and is safe to drain.
     jail_max_bytes: usize,
+    /// Byte offset in jail_buffer up to which Aho-Corasick has already scanned.
+    /// On the next call we start the search from `max(0, ac_scanned - jail_max_bytes + 1)`
+    /// to catch matches that straddle the boundary, but skip the bulk of old text.
+    ac_scanned: usize,
     /// Whether we've stopped
     stopped: bool,
+    /// True when there are no string stop sequences (only token-level stops).
+    /// In this mode the jail buffer is bypassed entirely for lower overhead.
+    token_only: bool,
 }
 
 impl StopSequenceDecoder {
@@ -126,6 +133,8 @@ impl StopSequenceDecoder {
             Some(AhoCorasick::new(patterns).expect("Failed to build Aho-Corasick automaton"))
         };
 
+        let token_only = aho_corasick.is_none();
+
         StopSequenceDecoder {
             sequence: Sequence::new_with_options(tokenizer, skip_special_tokens),
             config,
@@ -133,7 +142,9 @@ impl StopSequenceDecoder {
             visible_boundary_idx,
             jail_buffer: String::new(),
             jail_max_bytes,
+            ac_scanned: 0,
             stopped: false,
+            token_only,
         }
     }
 
@@ -172,11 +183,37 @@ impl StopSequenceDecoder {
         // Use Sequence for incremental decoding
         let new_text = self.sequence.append_token(token_id)?;
 
+        // Optimization #6: fast path when only token-level stops are configured.
+        // No string stop sequences means no jail needed — emit text immediately.
+        if self.token_only {
+            if new_text.is_empty() {
+                return Ok(SequenceDecoderOutput::Held);
+            }
+            return Ok(SequenceDecoderOutput::Text(new_text));
+        }
+
+        let old_len = self.jail_buffer.len();
         self.jail_buffer.push_str(&new_text);
 
-        // Check for stop sequences using Aho-Corasick (O(N) single-pass)
+        // Check for stop sequences using Aho-Corasick.
+        // Optimization #3: scope the search to avoid rescanning old text.
+        // A match can start at earliest at `old_len - jail_max_bytes + 1` because
+        // any match starting earlier would have been found on a previous call.
         if let Some(ac) = &self.aho_corasick {
-            if let Some(mat) = ac.find(&self.jail_buffer) {
+            let search_start = if old_len >= self.jail_max_bytes {
+                // Walk forward to a char boundary (we must not start mid-codepoint)
+                let raw = old_len + 1 - self.jail_max_bytes;
+                let mut start = raw;
+                while start < self.jail_buffer.len() && !self.jail_buffer.is_char_boundary(start) {
+                    start += 1;
+                }
+                start
+            } else {
+                0
+            };
+
+            let input = Input::new(&self.jail_buffer).span(search_start..self.jail_buffer.len());
+            if let Some(mat) = ac.find(input) {
                 self.stopped = true;
                 let is_visible = mat.pattern().as_usize() >= self.visible_boundary_idx;
 
@@ -196,11 +233,13 @@ impl StopSequenceDecoder {
                     });
                 }
             }
+
+            self.ac_scanned = self.jail_buffer.len();
         }
 
         // Drain the jail buffer down to at most jail_max_bytes, emitting safe text.
         // Any text older than the window cannot be part of a future stop sequence match.
-        if self.jail_max_bytes > 0 && self.jail_buffer.len() > self.jail_max_bytes {
+        if self.jail_buffer.len() > self.jail_max_bytes {
             // Find a char-safe drain point: we want to keep the last jail_max_bytes,
             // but must not split a multi-byte UTF-8 character.
             let mut drain_to = self.jail_buffer.len() - self.jail_max_bytes;
@@ -213,40 +252,42 @@ impl StopSequenceDecoder {
             if drain_to > 0 {
                 let suffix = self.jail_buffer.split_off(drain_to);
                 let to_output = std::mem::replace(&mut self.jail_buffer, suffix);
+                // After draining, ac_scanned resets relative to the new buffer
+                self.ac_scanned = self.jail_buffer.len();
                 return Ok(SequenceDecoderOutput::Text(to_output));
             }
         }
 
         // Buffer is within the window — hold everything for potential partial match
-        if self.jail_buffer.is_empty() {
-            Ok(SequenceDecoderOutput::Held)
-        } else if self.jail_max_bytes == 0 {
-            // No stop sequences configured — flush immediately
-            Ok(SequenceDecoderOutput::Text(std::mem::take(
-                &mut self.jail_buffer,
-            )))
-        } else {
-            Ok(SequenceDecoderOutput::Held)
-        }
+        Ok(SequenceDecoderOutput::Held)
     }
 
-    /// Process multiple tokens
+    /// Process multiple tokens.
+    ///
+    /// Early-exits after a `Stopped` result — remaining tokens are not processed.
     pub fn process_tokens(
         &mut self,
         token_ids: &[TokenIdType],
     ) -> Result<Vec<SequenceDecoderOutput>> {
-        // Pre-allocate with exact capacity to avoid reallocations
         let mut outputs = Vec::with_capacity(token_ids.len());
         for &token_id in token_ids {
-            outputs.push(self.process_token(token_id)?);
+            let output = self.process_token(token_id)?;
+            let done = matches!(
+                output,
+                SequenceDecoderOutput::Stopped | SequenceDecoderOutput::StoppedWithText(_)
+            );
+            outputs.push(output);
+            if done {
+                break;
+            }
         }
         Ok(outputs)
     }
 
-    /// Flush any held text
+    /// Flush any held text. Returns `Held` if the buffer is empty.
     pub fn flush(&mut self) -> SequenceDecoderOutput {
         if self.jail_buffer.is_empty() {
-            SequenceDecoderOutput::Text(String::new())
+            SequenceDecoderOutput::Held
         } else {
             // Use mem::take to avoid clone - transfers ownership and leaves empty string
             SequenceDecoderOutput::Text(std::mem::take(&mut self.jail_buffer))
@@ -262,6 +303,7 @@ impl StopSequenceDecoder {
     pub fn reset(&mut self) {
         self.jail_buffer.clear();
         self.sequence.clear();
+        self.ac_scanned = 0;
         self.stopped = false;
     }
 }
