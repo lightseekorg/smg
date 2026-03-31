@@ -13,10 +13,7 @@ use crate::{
             context::{
                 ClientSelection, ExecutionResult, LoadGuards, RequestContext, WorkerSelection,
             },
-            proto_wrapper::{
-                ProtoEmbedRequest, ProtoEmbedResponseVariant, ProtoGenerateRequest, ProtoRequest,
-                ProtoStream,
-            },
+            proto_wrapper::{ProtoEmbedRequest, ProtoGenerateRequest, ProtoRequest, ProtoStream},
             utils::tonic_ext::{TonicResultExt, TonicStatusExt},
         },
     },
@@ -208,22 +205,9 @@ impl RequestExecutionStage {
             )
         })?;
 
-        match response.into_response() {
-            ProtoEmbedResponseVariant::Complete(complete) => {
-                Ok(ExecutionResult::Embedding { response: complete })
-            }
-            ProtoEmbedResponseVariant::Error(e) => {
-                error!(
-                    function = "execute_single_embed",
-                    error = %e.message(),
-                    "Embedding execution failed"
-                );
-                Err(error::internal_error(
-                    "embedding_execution_failed",
-                    e.message().to_string(),
-                ))
-            }
-            ProtoEmbedResponseVariant::None => {
+        match response.into_complete() {
+            Some(complete) => Ok(ExecutionResult::Embedding { response: complete }),
+            None => {
                 error!(
                     function = "execute_single_embed",
                     "Embedding execution returned no response"

@@ -915,30 +915,46 @@ impl ProtoStream {
     }
 }
 
-/// Unified EmbedRequest that works with both backends
+/// Unified EmbedRequest that works with all backends
 #[derive(Clone)]
 pub enum ProtoEmbedRequest {
     Sglang(Box<sglang::EmbedRequest>),
+    Vllm(Box<vllm::EmbedRequest>),
 }
 
 impl ProtoEmbedRequest {
     /// Get SGLang variant
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &sglang::EmbedRequest {
         match self {
             Self::Sglang(req) => req,
+            Self::Vllm(_) => panic!("Expected SGLang embed request"),
         }
     }
 
     /// Get mutable SGLang variant
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang_mut(&mut self) -> &mut sglang::EmbedRequest {
         match self {
             Self::Sglang(req) => req,
+            Self::Vllm(_) => panic!("Expected SGLang embed request"),
         }
     }
 
     /// Check if this is SGLang
     pub fn is_sglang(&self) -> bool {
         matches!(self, Self::Sglang(_))
+    }
+
+    /// Check if this is vLLM
+    pub fn is_vllm(&self) -> bool {
+        matches!(self, Self::Vllm(_))
     }
 
     /// Clone the inner request (for passing to embed())
@@ -950,6 +966,7 @@ impl ProtoEmbedRequest {
     pub fn request_id(&self) -> &str {
         match self {
             Self::Sglang(req) => &req.request_id,
+            Self::Vllm(req) => &req.request_id,
         }
     }
 }
@@ -957,36 +974,35 @@ impl ProtoEmbedRequest {
 /// Unified EmbedResponse
 pub enum ProtoEmbedResponse {
     Sglang(sglang::EmbedResponse),
+    Vllm(vllm::EmbedResponse),
 }
 
 impl ProtoEmbedResponse {
-    /// Get the response variant (complete or error)
-    pub fn into_response(self) -> ProtoEmbedResponseVariant {
+    /// Extract the completed embedding from the response.
+    ///
+    /// Errors are reported via tonic::Status (gRPC status codes), not proto error types.
+    /// The servicer uses `context.abort()` for all error paths, so by the time we have
+    /// a ProtoEmbedResponse, it's always a successful completion.
+    pub fn into_complete(self) -> Option<ProtoEmbedComplete> {
         match self {
             Self::Sglang(resp) => match resp.response {
                 Some(sglang::embed_response::Response::Complete(complete)) => {
-                    ProtoEmbedResponseVariant::Complete(ProtoEmbedComplete::Sglang(complete))
+                    Some(ProtoEmbedComplete::Sglang(complete))
                 }
-                Some(sglang::embed_response::Response::Error(error)) => {
-                    ProtoEmbedResponseVariant::Error(ProtoEmbedError::Sglang(error))
-                }
-                None => ProtoEmbedResponseVariant::None,
+                // Error/None should not happen — servicer uses gRPC status for errors
+                _ => None,
             },
+            Self::Vllm(resp) => Some(ProtoEmbedComplete::Vllm(resp)),
         }
     }
-}
-
-/// Response variant extracted from EmbedResponse
-pub enum ProtoEmbedResponseVariant {
-    Complete(ProtoEmbedComplete),
-    Error(ProtoEmbedError),
-    None,
 }
 
 /// Unified EmbedComplete response
 #[derive(Clone)]
 pub enum ProtoEmbedComplete {
     Sglang(sglang::EmbedComplete),
+    /// vLLM has a flat EmbedResponse (no separate Complete/Error types)
+    Vllm(vllm::EmbedResponse),
 }
 
 impl ProtoEmbedComplete {
@@ -994,6 +1010,7 @@ impl ProtoEmbedComplete {
     pub fn embedding(&self) -> &[f32] {
         match self {
             Self::Sglang(c) => &c.embedding,
+            Self::Vllm(c) => &c.embedding,
         }
     }
 
@@ -1001,6 +1018,7 @@ impl ProtoEmbedComplete {
     pub fn prompt_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.prompt_tokens,
+            Self::Vllm(c) => c.prompt_tokens,
         }
     }
 
@@ -1008,6 +1026,7 @@ impl ProtoEmbedComplete {
     pub fn cached_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.cached_tokens,
+            Self::Vllm(_) => 0, // TODO: add cached_tokens to vllm EmbedResponse proto
         }
     }
 
@@ -1015,28 +1034,7 @@ impl ProtoEmbedComplete {
     pub fn embedding_dim(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.embedding_dim,
-        }
-    }
-}
-
-/// Unified EmbedError
-#[derive(Clone)]
-pub enum ProtoEmbedError {
-    Sglang(sglang::EmbedError),
-}
-
-impl ProtoEmbedError {
-    /// Get error message
-    pub fn message(&self) -> &str {
-        match self {
-            Self::Sglang(e) => &e.message,
-        }
-    }
-
-    /// Get error code
-    pub fn code(&self) -> &str {
-        match self {
-            Self::Sglang(e) => &e.code,
+            Self::Vllm(c) => c.embedding_dim,
         }
     }
 }

@@ -252,6 +252,10 @@ impl GrpcClient {
                 let resp = client.embed(*boxed_req).await?;
                 Ok(ProtoEmbedResponse::Sglang(resp))
             }
+            (Self::Vllm(client), ProtoEmbedRequest::Vllm(boxed_req)) => {
+                let resp = client.embed(*boxed_req).await?;
+                Ok(ProtoEmbedResponse::Vllm(resp))
+            }
             #[expect(
                 clippy::panic,
                 reason = "client and request types are always matched by construction in the pipeline"
