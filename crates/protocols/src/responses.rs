@@ -963,9 +963,7 @@ impl GenerationRequest for ResponsesRequest {
                     ResponseInputOutputItem::FunctionCallOutput { output, .. } => {
                         Some(output.clone())
                     }
-                    ResponseInputOutputItem::CustomToolCall { input, .. } => {
-                        Some(input.clone())
-                    }
+                    ResponseInputOutputItem::CustomToolCall { input, .. } => Some(input.clone()),
                     ResponseInputOutputItem::CustomToolCallOutput { output, .. } => {
                         Some(output.clone())
                     }
@@ -1240,9 +1238,8 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError
         if let ResponseTool::Custom(custom) = tool {
             if custom.name.is_empty() {
                 let mut e = ValidationError::new("missing_required_parameter");
-                e.message = Some(
-                    format!("Missing required parameter: 'tools[{idx}].name'.").into(),
-                );
+                e.message =
+                    Some(format!("Missing required parameter: 'tools[{idx}].name'.").into());
                 return Err(e);
             }
         }

@@ -585,8 +585,7 @@ mod tests {
 
     #[test]
     fn test_chat_to_responses_custom_tool_call() {
-        use openai_protocol::chat::ChatCompletionMessage;
-        use openai_protocol::responses::CustomTool;
+        use openai_protocol::{chat::ChatCompletionMessage, responses::CustomTool};
 
         let original_req = ResponsesRequest {
             input: ResponseInput::Text("test".to_string()),

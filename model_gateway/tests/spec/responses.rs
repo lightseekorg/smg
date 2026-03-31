@@ -2,8 +2,8 @@ use openai_protocol::{
     common::{Function, StringOrArray, ToolChoice, ToolChoiceValue},
     responses::{
         CustomTool, CustomToolFormat, FunctionTool, IncludeField, McpTool, ResponseInput,
-        ResponseInputOutputItem, ResponseOutputItem, ResponseTool,
-        ResponsesRequest, StringOrContentParts, TextConfig, TextFormat,
+        ResponseInputOutputItem, ResponseOutputItem, ResponseTool, ResponsesRequest,
+        StringOrContentParts, TextConfig, TextFormat,
     },
 };
 use serde_json::json;
@@ -1522,14 +1522,12 @@ fn test_validate_mixed_custom_and_function_tools() {
 #[test]
 fn test_validate_custom_tool_call_output_empty() {
     let request = ResponsesRequest {
-        input: ResponseInput::Items(vec![
-            ResponseInputOutputItem::CustomToolCallOutput {
-                id: Some("ctc_123".to_string()),
-                call_id: "call_1".to_string(),
-                output: String::new(),
-                status: None,
-            },
-        ]),
+        input: ResponseInput::Items(vec![ResponseInputOutputItem::CustomToolCallOutput {
+            id: Some("ctc_123".to_string()),
+            call_id: "call_1".to_string(),
+            output: String::new(),
+            status: None,
+        }]),
         ..Default::default()
     };
     let result = request.validate();

@@ -18,9 +18,9 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use openai_protocol::{
     event_types::{
-        is_function_call_type, is_response_event, CodeInterpreterCallEvent,
-        CustomToolCallEvent, FileSearchCallEvent, FunctionCallEvent, ItemType, McpEvent,
-        OutputItemEvent, ResponseEvent, WebSearchCallEvent,
+        is_function_call_type, is_response_event, CodeInterpreterCallEvent, CustomToolCallEvent,
+        FileSearchCallEvent, FunctionCallEvent, ItemType, McpEvent, OutputItemEvent, ResponseEvent,
+        WebSearchCallEvent,
     },
     responses::{ResponseTool, ResponsesRequest},
 };
@@ -151,7 +151,9 @@ pub(super) fn apply_event_transformations_inplace(
                             item["type"] = json!(ItemType::CUSTOM_TOOL_CALL);
 
                             // Rename arguments → input
-                            if let Some(args) = item.as_object_mut().and_then(|o| o.remove("arguments")) {
+                            if let Some(args) =
+                                item.as_object_mut().and_then(|o| o.remove("arguments"))
+                            {
                                 item["input"] = args;
                             }
 
@@ -201,19 +203,21 @@ pub(super) fn apply_event_transformations_inplace(
                 .get("name")
                 .and_then(|v| v.as_str())
                 .is_some_and(|name| {
-                    ctx.original_request
-                        .tools
-                        .as_ref()
-                        .is_some_and(|tools| {
-                            tools.iter().any(|t| matches!(t, ResponseTool::Custom(ct) if ct.name == name))
-                        })
+                    ctx.original_request.tools.as_ref().is_some_and(|tools| {
+                        tools
+                            .iter()
+                            .any(|t| matches!(t, ResponseTool::Custom(ct) if ct.name == name))
+                    })
                 });
 
             if is_custom {
                 parsed_data["type"] = json!(CustomToolCallEvent::INPUT_DONE);
 
                 // Rename arguments → input
-                if let Some(args) = parsed_data.as_object_mut().and_then(|o| o.remove("arguments")) {
+                if let Some(args) = parsed_data
+                    .as_object_mut()
+                    .and_then(|o| o.remove("arguments"))
+                {
                     parsed_data["input"] = args;
                 }
 

@@ -722,9 +722,7 @@ impl HarmonyBuilder {
                         } if item_call_id == call_id => Some(name.clone()),
                         _ => None,
                     })
-                    .ok_or_else(|| {
-                        format!("No custom tool call found for call_id: {call_id}")
-                    })?;
+                    .ok_or_else(|| format!("No custom tool call found for call_id: {call_id}"))?;
 
                 Ok(HarmonyMessage {
                     author: Author {
