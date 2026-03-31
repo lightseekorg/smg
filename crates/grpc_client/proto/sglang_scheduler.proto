@@ -191,10 +191,11 @@ message GenerateResponse {
   string request_id = 1;
 
   // Response type
+  reserved 4;  // was GenerateError — removed, errors use gRPC status
+
   oneof response {
     GenerateStreamChunk chunk = 2;
     GenerateComplete complete = 3;
-    GenerateError error = 4;
   }
 }
 
@@ -249,12 +250,6 @@ message GenerateComplete {
 
   // Index for ordering when n>1 (for parallel request multiplexing)
   uint32 index = 11;
-}
-
-message GenerateError {
-  string message = 1;
-  string http_status_code = 2;
-  string details = 3;
 }
 
 // Output logprobs - all values are present (no None)

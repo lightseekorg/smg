@@ -448,9 +448,6 @@ impl ProtoGenerateResponse {
                 Some(sglang::generate_response::Response::Complete(complete)) => {
                     ProtoResponseVariant::Complete(ProtoGenerateComplete::Sglang(complete))
                 }
-                Some(sglang::generate_response::Response::Error(error)) => {
-                    ProtoResponseVariant::Error(ProtoGenerateError::Sglang(error))
-                }
                 None => ProtoResponseVariant::None,
             },
             Self::Vllm(resp) => match resp.response {
@@ -460,7 +457,6 @@ impl ProtoGenerateResponse {
                 Some(vllm::generate_response::Response::Complete(complete)) => {
                     ProtoResponseVariant::Complete(ProtoGenerateComplete::Vllm(complete))
                 }
-                // Note: vLLM proto no longer has Error variant in GenerateResponse
                 None => ProtoResponseVariant::None,
             },
             Self::Trtllm(resp) => match resp.response {
@@ -469,9 +465,6 @@ impl ProtoGenerateResponse {
                 }
                 Some(trtllm::generate_response::Response::Complete(complete)) => {
                     ProtoResponseVariant::Complete(ProtoGenerateComplete::Trtllm(complete))
-                }
-                Some(trtllm::generate_response::Response::Error(error)) => {
-                    ProtoResponseVariant::Error(ProtoGenerateError::Trtllm(error))
                 }
                 None => ProtoResponseVariant::None,
             },
@@ -483,7 +476,6 @@ impl ProtoGenerateResponse {
 pub enum ProtoResponseVariant {
     Chunk(ProtoGenerateStreamChunk),
     Complete(ProtoGenerateComplete),
-    Error(ProtoGenerateError),
     None,
 }
 
@@ -857,24 +849,6 @@ impl ProtoGenerateComplete {
                 .as_ref()
                 .map(|params| (params.remote_host.clone(), params.remote_port)),
             Self::Sglang(_) | Self::Trtllm(_) => None,
-        }
-    }
-}
-
-/// Unified GenerateError
-/// Note: vLLM proto no longer has GenerateError - errors are returned via gRPC status
-#[derive(Clone)]
-pub enum ProtoGenerateError {
-    Sglang(sglang::GenerateError),
-    Trtllm(trtllm::GenerateError),
-}
-
-impl ProtoGenerateError {
-    /// Get error message
-    pub fn message(&self) -> &str {
-        match self {
-            Self::Sglang(e) => &e.message,
-            Self::Trtllm(e) => &e.message,
         }
     }
 }
