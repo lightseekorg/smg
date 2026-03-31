@@ -137,54 +137,22 @@ impl Sequence {
 
     /// Append a single token to the sequence and return newly decoded text.
     ///
-    /// Uses the same algorithm as the native `DecodeStream` in the HuggingFace
-    /// `tokenizers` crate: cache the decoded prefix string between calls and
-    /// drain consumed tokens to keep memory bounded.
+    /// Delegates to `Decoder::decode_step` on the tokenizer trait. For HuggingFace
+    /// tokenizers this uses the native `step_decode_stream`; other backends use the
+    /// default double-decode fallback. Both paths handle token draining and prefix
+    /// caching internally.
     #[inline]
     pub fn append_token(&mut self, token_id: TokenIdType) -> Result<String> {
-        self.token_ids.push(token_id);
         self.total_tokens += 1;
-
-        // If the cached prefix is empty but we have buffered tokens, compute it.
-        // This handles the first call and recovery after incomplete UTF-8.
-        if self.cached_prefix.is_empty() && self.token_ids.len() > 1 {
-            let new_prefix = self.tokenizer.decode(
-                &self.token_ids[..self.token_ids.len() - 1],
-                self.skip_special_tokens,
-            )?;
-            if !new_prefix.ends_with("�") {
-                self.prefix_index = self.token_ids.len() - 1;
-                self.cached_prefix = new_prefix;
-            }
-        }
-
-        // Decode the full buffer (prefix context + new token)
-        let string = self
-            .tokenizer
-            .decode(&self.token_ids, self.skip_special_tokens)?;
-
-        if string.len() > self.cached_prefix.len() && !string.ends_with("�") {
-            // Find the char-safe split point
-            let mut split_at = self.cached_prefix.len();
-            while !string.is_char_boundary(split_at) && split_at > 0 {
-                split_at -= 1;
-            }
-
-            let incremental_text = string[split_at..].to_string().replace("�", "");
-
-            // Drain consumed tokens and recompute the cached prefix for next call.
-            // This mirrors native DecodeStream: keeps buffer small, avoids unbounded growth.
-            let new_prefix_len = self.token_ids.len() - self.prefix_index;
-            self.token_ids.drain(..self.prefix_index);
-            self.prefix_index = new_prefix_len;
-            self.cached_prefix = self
-                .tokenizer
-                .decode(&self.token_ids, self.skip_special_tokens)?;
-
-            Ok(incremental_text)
-        } else {
-            // Incomplete UTF-8 or no new text — wait for more tokens
-            Ok(String::new())
+        match self.tokenizer.decode_step(
+            token_id,
+            &mut self.token_ids,
+            &mut self.cached_prefix,
+            &mut self.prefix_index,
+            self.skip_special_tokens,
+        )? {
+            Some(text) => Ok(text),
+            None => Ok(String::new()),
         }
     }
 
