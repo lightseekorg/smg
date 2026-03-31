@@ -634,6 +634,7 @@ class TestToolChoiceGptOss:
             ),
             tools=tools,
             tool_choice="auto",
+            max_tool_calls=5,
             stream=False,
         )
 
@@ -654,6 +655,7 @@ class TestToolChoiceGptOss:
             input="Search for information about Python",
             tools=tools,
             tool_choice={"type": "function", "function": {"name": "local_search"}},
+            max_tool_calls=5,
             stream=False,
         )
 
@@ -1008,6 +1010,7 @@ class TestToolChoiceLocal:
             ),
             tools=tools,
             tool_choice="auto",
+            max_tool_calls=5,
             stream=False,
         )
 
@@ -1028,6 +1031,7 @@ class TestToolChoiceLocal:
             input="Search for information about Python",
             tools=tools,
             tool_choice={"type": "function", "function": {"name": "local_search"}},
+            max_tool_calls=5,
             stream=False,
         )
 

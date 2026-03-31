@@ -377,4 +377,4 @@ class TestChatCompletionGptOss(TestChatCompletion):
 @pytest.mark.model("openai/gpt-oss-120b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 class TestChatCompletionGptOss120B(TestChatCompletionGptOss):
-    """Tests for chat completions API with Harmony model (GPT-OSS 120B, 2 GPU)."""
+    """Tests for chat completions API with Harmony model (GPT-OSS 120B, 4 GPU)."""

@@ -156,4 +156,4 @@ class TestStructuredOutputGptOss(_TestStructuredOutputBase):
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestStructuredOutputGptOss120B(_TestStructuredOutputBase):
-    """Structured output tests for Harmony models (GPT-OSS 120B, 2 GPU)."""
+    """Structured output tests for Harmony models (GPT-OSS 120B, 4 GPU)."""
