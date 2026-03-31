@@ -66,12 +66,24 @@ jobs:
             For every issue found, call mcp__github_inline_comment__create_inline_comment
             with path, line, and a severity-prefixed body per REVIEW.md format.
 
+            IMPORTANT — Deduplication:
+            Before posting any comment, first fetch all existing review comments
+            on this PR by running:
+              gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate
+            Build a set of (path, line, first_sentence) from existing comments by
+            any bot (claude[bot], coderabbitai[bot], gemini-code-assist[bot],
+            chatgpt-codex-connector[bot], github-actions[bot]).
+            Do NOT post a new comment if an existing comment already covers the
+            same file, same line (±3 lines), and same issue.
+            Only comment on NEW issues or issues on NEWLY changed lines.
+
             Steps:
             1. Read REVIEW.md for review guidelines.
-            2. Run `git diff origin/main...HEAD` to see what changed.
-            3. Read each changed file for full context.
-            4. Post inline comments for every issue found.
-            5. Write a brief summary with count per severity level.
+            2. Fetch existing review comments on this PR (for dedup).
+            3. Run `git diff origin/main...HEAD` to see what changed.
+            4. Read each changed file for full context.
+            5. Post inline comments only for NEW issues not already flagged.
+            6. Write a brief summary with count per severity level.
           claude_args: |
             --model claude-opus-4-6
             --max-turns 30
