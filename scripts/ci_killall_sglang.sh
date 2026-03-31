@@ -30,5 +30,17 @@ else
     fi
 
     # Show GPU status after clean up
+    NODE_INFO="${NODE_NAME:-$(hostname)}"
+    echo "Running on node: $NODE_INFO"
     nvidia-smi
+
+    # Check for remaining GPU processes and warn if cleanup was incomplete
+    REMAINING_PIDS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | sort -u)
+    if [ -n "$REMAINING_PIDS" ]; then
+        echo "::error::GPU cleanup failed on node '$NODE_INFO'. Remaining processes:"
+        for pid in $REMAINING_PIDS; do
+            echo "  PID $pid: $(ps -p "$pid" -o pid=,user=,args= 2>/dev/null || echo 'process info unavailable')"
+        done
+        exit 1
+    fi
 fi

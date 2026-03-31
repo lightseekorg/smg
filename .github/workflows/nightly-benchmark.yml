@@ -13,6 +13,10 @@ on:
         description: 'Runtime: sglang, vllm, or all (default: all)'
         required: false
         default: 'all'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/nightly-benchmark.yml'
 
 concurrency:
   group: nightly-benchmark-${{ github.event_name }}
@@ -222,7 +226,7 @@ jobs:
   multi-worker:
     name: "${{ matrix.model.id }} / multi-${{ matrix.variant.id }}"
     needs: build-wheel
-    if: ${{ !cancelled() }}
+    if: false #${{ !cancelled() }}
     runs-on: 4-gpu-h100
     timeout-minutes: 1440
     strategy:
