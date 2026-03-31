@@ -13,7 +13,6 @@
 
 mod common;
 mod event_tree;
-pub mod snapshot;
 mod string_tree;
 mod token_tree;
 
