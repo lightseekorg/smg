@@ -739,6 +739,12 @@ pub struct StateStores {
     /// store to avoid operation log memory accumulation (~50 MB/min leak).
     /// Key: tree key (e.g., "tree:model-name"), Value: bincode-serialized TreeState.
     pub tree_configs: DashMap<String, Vec<u8>>,
+    /// Tenant delta buffer for efficient two-layer sync.
+    /// Key: model_id, Value: pending tenant inserts since last gossip round.
+    /// Drained by the collector each round and sent as TenantDelta messages.
+    pub tenant_delta_inserts: DashMap<String, Vec<crate::tree_ops::TenantInsert>>,
+    /// Tenant eviction buffer — same pattern as inserts.
+    pub tenant_delta_evictions: DashMap<String, Vec<crate::tree_ops::TenantEvict>>,
 }
 
 impl StateStores {
@@ -753,6 +759,8 @@ impl StateStores {
             tree_versions: DashMap::new(),
             tree_generation: Arc::new(AtomicU64::new(0)),
             tree_configs: DashMap::new(),
+            tenant_delta_inserts: DashMap::new(),
+            tenant_delta_evictions: DashMap::new(),
         }
     }
 
@@ -767,6 +775,8 @@ impl StateStores {
             tree_versions: DashMap::new(),
             tree_generation: Arc::new(AtomicU64::new(0)),
             tree_configs: DashMap::new(),
+            tenant_delta_inserts: DashMap::new(),
+            tenant_delta_evictions: DashMap::new(),
         }
     }
 

@@ -16,7 +16,7 @@ use super::{
         policy_key, tree_state_key, PolicyState, RateLimitConfig, StateStores, WorkerState,
         GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
     },
-    tree_ops::{TreeOperation, TreeState, TreeStateDelta},
+    tree_ops::{TenantEvict, TenantInsert, TreeKey, TreeOperation, TreeState, TreeStateDelta},
 };
 
 pub trait TreeStateSubscriber: Send + Sync + Debug {
@@ -450,7 +450,48 @@ impl MeshSyncManager {
     ) -> Result<(), String> {
         let key = tree_state_key(&model_id);
 
-        // Append to pending buffer for delta sync (O(1)).
+        // Buffer a lightweight tenant delta for the two-layer sync protocol.
+        // This is what gets sent over the wire — just (node_path, worker_url, epoch),
+        // NOT the full prompt text. ~100 bytes vs ~200KB.
+        match &operation {
+            TreeOperation::Insert(insert) => {
+                let node_path = match &insert.key {
+                    TreeKey::Text(text) => text.clone(),
+                    TreeKey::Tokens(tokens) => {
+                        // For token keys, encode as a compact string representation
+                        format!(
+                            "tok:{}",
+                            tokens
+                                .iter()
+                                .map(|t| t.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )
+                    }
+                };
+                self.stores
+                    .tenant_delta_inserts
+                    .entry(model_id.clone())
+                    .or_default()
+                    .push(TenantInsert {
+                        node_path,
+                        worker_url: insert.tenant.clone(),
+                        epoch: self.stores.tree_version(&key),
+                    });
+            }
+            TreeOperation::Remove(remove) => {
+                self.stores
+                    .tenant_delta_evictions
+                    .entry(model_id.clone())
+                    .or_default()
+                    .push(TenantEvict {
+                        node_path: String::new(), // evictions apply globally to the worker
+                        worker_url: remove.tenant.clone(),
+                    });
+            }
+        }
+
+        // Append to pending buffer for periodic structure sync (O(1)).
         self.stores
             .tree_ops_pending
             .entry(key.clone())
@@ -458,16 +499,6 @@ impl MeshSyncManager {
             .push(operation);
 
         // Bump the lightweight atomic version counter (O(1), no serialization).
-        //
-        // Previously this called `stores.policy.update()` which goes through
-        // the full CRDT machinery: deserialize PolicyState (including the
-        // potentially large config blob), re-serialize, clone for operation
-        // log — costing ~5× the config size per request.  After checkpoint
-        // materializes the TreeState (~1 MB), this was ~1 GB/s of allocation
-        // churn at 200 rps.
-        //
-        // The collector now detects tree changes via `tree_generation` and
-        // reads version from `tree_versions` instead of PolicyState.version.
         self.stores.bump_tree_version(&key);
 
         Ok(())
