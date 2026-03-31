@@ -2266,8 +2266,12 @@ impl StreamingProcessor {
         let prompt_text: &str = if echo {
             match &completion_request.prompt {
                 StringOrArray::String(s) => s.as_str(),
-                // Array prompts are rejected by CompletionPreparationStage (Stage 1)
-                StringOrArray::Array(_) => "",
+                // Array prompts are rejected by CompletionPreparationStage (Stage 1).
+                // If this arm is ever reached, it means a new code path bypassed Stage 1.
+                StringOrArray::Array(_) => {
+                    debug_assert!(false, "Array prompt reached streaming — CompletionPreparationStage should have rejected it");
+                    ""
+                }
             }
         } else {
             ""
@@ -2324,7 +2328,7 @@ impl StreamingProcessor {
 
                     if *is_first {
                         if echo {
-                            chunk_text = format!("{prompt_text}{chunk_text}");
+                            chunk_text.insert_str(0, prompt_text);
                         }
                         *is_first = false;
                     }
@@ -2351,6 +2355,9 @@ impl StreamingProcessor {
                     }
 
                     if stopped {
+                        // Stop-decoder match takes precedence: emit "stop" even if
+                        // the backend's eventual Complete carries "length". This is
+                        // intentional — the local stop sequence fired first.
                         stopped_indices.insert(index, true);
 
                         if let Some(sfx) = suffix {
@@ -2447,17 +2454,27 @@ impl StreamingProcessor {
 
                     let finish_reason = {
                         let reason = complete.finish_reason();
-                        if reason.is_empty() {
+                        if reason.is_empty() || reason == "stop" {
                             Some("stop".to_string())
-                        } else if reason == "stop" || reason == "length" {
+                        } else if reason == "length" || reason == "content_filter" {
                             Some(reason.to_string())
                         } else if let Ok(json) = serde_json::from_str::<Value>(reason) {
                             json.get("type")
                                 .and_then(|v| v.as_str())
-                                .map(str::to_string)
+                                .map(|t| match t {
+                                    "stop" | "length" | "content_filter" => t.to_string(),
+                                    other => {
+                                        warn!(unexpected_finish_reason = other, "Unmapped finish_reason type from backend, defaulting to stop");
+                                        "stop".to_string()
+                                    }
+                                })
                                 .or_else(|| Some("stop".to_string()))
                         } else {
-                            Some(reason.to_string())
+                            warn!(
+                                unexpected_finish_reason = reason,
+                                "Unrecognized finish_reason from backend, defaulting to stop"
+                            );
+                            Some("stop".to_string())
                         }
                     };
 
@@ -2486,6 +2503,11 @@ impl StreamingProcessor {
             }
         }
 
+        // Mark stream as completed before usage emission — the backend stream
+        // is fully consumed at this point, so an abort would be a no-op.
+        // This ensures mark_completed runs even if the usage send fails.
+        grpc_stream.mark_completed();
+
         if include_usage {
             let usage_chunk = CompletionStreamResponse {
                 id: request_id.clone(),
@@ -2497,11 +2519,8 @@ impl StreamingProcessor {
                 usage: Some(Usage::from_counts(total_prompt, total_completion.total())),
             };
             Self::format_completion_sse_into(&mut sse_buffer, &usage_chunk);
-            tx.send(Ok(Bytes::from(sse_buffer.clone())))
-                .map_err(|_| "Channel closed".to_string())?;
+            let _ = tx.send(Ok(Bytes::from(sse_buffer.clone())));
         }
-
-        grpc_stream.mark_completed();
         Metrics::record_streaming_metrics(StreamingMetricsParams {
             router_type: metrics_labels::ROUTER_GRPC,
             backend_type: self.backend_type,
@@ -2572,7 +2591,13 @@ impl StreamingProcessor {
             error!("Failed to serialize completion SSE chunk: {}", e);
             buffer.clear();
             buffer.extend_from_slice(b"data: ");
-            let error_msg = json!({"error": "serialization_failed"}).to_string();
+            let error_msg = json!({
+                "error": {
+                    "message": format!("Failed to serialize completion chunk: {e}"),
+                    "type": "internal_error"
+                }
+            })
+            .to_string();
             buffer.extend_from_slice(error_msg.as_bytes());
         }
         buffer.extend_from_slice(b"\n\n");
