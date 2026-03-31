@@ -2270,6 +2270,7 @@ impl StreamingProcessor {
         let mut sse_buffer = Vec::with_capacity(512);
         let mut chunk_text = String::new();
         let mut total_prompt = 0u32;
+        let mut total_cached = 0u32;
         let mut total_completion = CompletionTokenTracker::new();
 
         while let Some(response) = grpc_stream.next().await {
@@ -2381,6 +2382,7 @@ impl StreamingProcessor {
                 ProtoResponseVariant::Complete(complete) => {
                     let index = complete.index();
                     total_prompt = total_prompt.max(complete.prompt_tokens());
+                    total_cached = total_cached.max(complete.cached_tokens());
                     total_completion.record_complete(&complete);
 
                     if stopped_indices.contains_key(&index) {
@@ -2495,7 +2497,10 @@ impl StreamingProcessor {
                 choices: vec![],
                 model: model.clone(),
                 system_fingerprint: system_fingerprint.map(String::from),
-                usage: Some(Usage::from_counts(total_prompt, total_completion.total())),
+                usage: Some(
+                    Usage::from_counts(total_prompt, total_completion.total())
+                        .with_cached_tokens(total_cached),
+                ),
             };
             Self::format_completion_sse_into(&mut sse_buffer, &usage_chunk);
             let _ = tx.send(Ok(Bytes::from(sse_buffer.clone())));
