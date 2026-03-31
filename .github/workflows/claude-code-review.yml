@@ -51,15 +51,31 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            Use the /smg:review-pr skill to review this pull request.
-            Follow the skill's full process: fetch diff, map files to checklist sections,
-            check each applicable section, then summarize findings with severity and file:line citations.
+            Review this PR in three phases:
 
-            Also read REVIEW.md at the repo root for additional domain-specific review guidance.
+            Phase 1 — SMG subsystem review:
+            Use the /smg:review-pr skill. Follow its full process: fetch diff, map files
+            to checklist sections, check each applicable section.
+
+            Phase 2 — Silent failure hunting:
+            Spawn a pr-review-toolkit:silent-failure-hunter agent on the changed files.
+            Look for swallowed errors, inappropriate fallbacks, and missing error propagation.
+
+            Phase 3 — Test coverage analysis:
+            Spawn a pr-review-toolkit:pr-test-analyzer agent to check if tests adequately
+            cover the new/changed functionality.
+
+            If new types are introduced, also spawn a pr-review-toolkit:type-design-analyzer
+            agent to review their invariants and encapsulation.
+
+            Also read REVIEW.md at the repo root for additional domain-specific guidance.
+
+            Summarize all findings with severity (blocker/nit) and file:line citations.
           claude_args: |
             --model claude-opus-4-6
             --max-turns 30
             --allowedTools "Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(cargo clippy:*),Bash(cargo check:*)"
+          plugins: "pr-review-toolkit@claude-code-plugins"
           plugin_marketplaces: "https://github.com/lightseekorg/smg-dev-guide.git"
 
   # Respond to @claude mentions in PR/issue comments
@@ -92,4 +108,5 @@ jobs:
           claude_args: |
             --model claude-opus-4-6
             --max-turns 30
+          plugins: "pr-review-toolkit@claude-code-plugins"
           plugin_marketplaces: "https://github.com/lightseekorg/smg-dev-guide.git"
