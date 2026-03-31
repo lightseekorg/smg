@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
+use kv_index::RadixTree;
 use smg_mesh::{
     gossip::NodeStatus, AppState, MembershipState, MeshSyncManager, RateLimitConfig, StateStores,
-    TreeInsertOp, TreeKey, TreeOperation, WorkerState, GLOBAL_RATE_LIMIT_COUNTER_KEY,
-    GLOBAL_RATE_LIMIT_KEY,
+    WorkerState, GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
 };
 
 /// Create test stores for a node
@@ -230,25 +230,21 @@ async fn test_rate_limit_node_failure() {
 
 #[tokio::test]
 async fn test_cache_aware_tree_synchronization() {
-    let manager1 = create_test_sync_manager("node1".to_string());
+    let stores1 = create_test_stores("node1".to_string());
+    let manager1 = Arc::new(MeshSyncManager::new(stores1.clone(), "node1".to_string()));
     let manager2 = create_test_sync_manager("node2".to_string());
 
-    // Node1 syncs tree operations
-    let op1 = TreeOperation::Insert(TreeInsertOp {
-        key: TreeKey::Text("request1".to_string()),
-        tenant: "http://worker1:8000".to_string(),
-    });
-    manager1
-        .sync_tree_operation("model1".to_string(), op1)
-        .unwrap();
-
-    let op2 = TreeOperation::Insert(TreeInsertOp {
-        key: TreeKey::Text("request2".to_string()),
-        tenant: "http://worker2:8000".to_string(),
-    });
-    manager1
-        .sync_tree_operation("model1".to_string(), op2)
-        .unwrap();
+    // Build a tree snapshot and write it directly to tree_configs
+    // (sync_tree_operation only bumps the version counter now).
+    let tree = <kv_index::Tree>::new();
+    tree.insert("request1", "http://worker1:8000");
+    tree.insert("request2", "http://worker2:8000");
+    let snapshot = tree.snapshot();
+    let key = "tree:model1".to_string();
+    stores1
+        .tree_configs
+        .insert(key.clone(), snapshot.to_bytes().unwrap());
+    stores1.bump_tree_version(&key);
 
     // Node2 receives tree state (simulated)
     let tree_state = manager1.get_tree_state("model1").unwrap();
@@ -261,7 +257,7 @@ async fn test_cache_aware_tree_synchronization() {
     // Verify Node2 has the tree state
     let snapshot = manager2.get_tree_snapshot("model1");
     assert!(snapshot.is_some());
-    // 2 inserts sharing prefix "request" → at least 3 snapshot nodes
+    // 2 inserts sharing prefix "request" -> at least 3 snapshot nodes
     assert!(snapshot.unwrap().node_count() >= 3);
 }
 

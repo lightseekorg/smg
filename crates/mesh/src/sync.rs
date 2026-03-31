@@ -24,6 +24,14 @@ pub trait TreeStateSubscriber: Send + Sync + Debug {
     fn apply_remote_tree_snapshot(&self, model_id: &str, snapshot: &TreeSnapshot);
 }
 
+/// Provider of tree snapshots for mesh sync.
+/// Implemented by cache_aware policy to provide snapshots directly
+/// from its radix trees instead of buffering raw operations.
+pub trait TreeSnapshotProvider: Send + Sync + Debug {
+    /// Return snapshots for all models, keyed by model_id.
+    fn snapshot_all_trees(&self) -> Vec<(String, TreeSnapshot)>;
+}
+
 pub trait WorkerStateSubscriber: Send + Sync + Debug {
     fn on_remote_worker_state(&self, state: &WorkerState);
 }
@@ -35,6 +43,7 @@ pub struct MeshSyncManager {
     self_name: String,
     tree_state_subscribers: Arc<RwLock<Vec<Arc<dyn TreeStateSubscriber>>>>,
     worker_state_subscribers: Arc<RwLock<Vec<Arc<dyn WorkerStateSubscriber>>>>,
+    tree_snapshot_provider: Arc<RwLock<Option<Arc<dyn TreeSnapshotProvider>>>>,
 }
 
 impl MeshSyncManager {
@@ -44,7 +53,12 @@ impl MeshSyncManager {
             self_name,
             tree_state_subscribers: Arc::new(RwLock::new(Vec::new())),
             worker_state_subscribers: Arc::new(RwLock::new(Vec::new())),
+            tree_snapshot_provider: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub fn register_tree_snapshot_provider(&self, provider: Arc<dyn TreeSnapshotProvider>) {
+        *self.tree_snapshot_provider.write() = Some(provider);
     }
 
     pub fn register_tree_state_subscriber(&self, subscriber: Arc<dyn TreeStateSubscriber>) {
@@ -431,15 +445,12 @@ impl MeshSyncManager {
 
     /// Sync tree operation to mesh stores.
     ///
-    /// This is called on every request (hot path). The operation is appended to
-    /// the pending buffer for delta sync — the collector serializes and sends it
-    /// to peers. We do NOT read/deserialize/serialize the full TreeState here,
-    /// because that is O(tree_size) per request and caused multi-GB memory usage
-    /// at 200+ rps.
+    /// Notify mesh that a tree was modified.
     ///
-    /// The policy store version is bumped so the generation-based collector
-    /// detects the change, but the `config` blob is NOT updated on every call.
-    /// It is rebuilt lazily by the collector when a full-state fallback is needed.
+    /// Called on every request (hot path). Just bumps the version counter
+    /// so the checkpoint cycle knows to re-snapshot. The actual tree data
+    /// comes from the registered TreeSnapshotProvider during checkpoint —
+    /// no raw operations are buffered. O(1), no allocation.
     #[expect(
         clippy::unnecessary_wraps,
         reason = "Public API — callers handle Result; changing return type is a cross-crate break"
@@ -447,30 +458,10 @@ impl MeshSyncManager {
     pub fn sync_tree_operation(
         &self,
         model_id: String,
-        operation: TreeOperation,
+        _operation: TreeOperation,
     ) -> Result<(), String> {
         let key = tree_state_key(&model_id);
-
-        // Append to pending buffer for delta sync (O(1)).
-        self.stores
-            .tree_ops_pending
-            .entry(key.clone())
-            .or_default()
-            .push(operation);
-
-        // Bump the lightweight atomic version counter (O(1), no serialization).
-        //
-        // Previously this called `stores.policy.update()` which goes through
-        // the full CRDT machinery: deserialize PolicyState (including the
-        // potentially large config blob), re-serialize, clone for operation
-        // log — costing ~5× the config size per request.  After checkpoint
-        // materializes the TreeState (~1 MB), this was ~1 GB/s of allocation
-        // churn at 200 rps.
-        //
-        // The collector now detects tree changes via `tree_generation` and
-        // reads version from `tree_versions` instead of PolicyState.version.
         self.stores.bump_tree_version(&key);
-
         Ok(())
     }
 
@@ -884,60 +875,26 @@ impl MeshSyncManager {
         }
     }
 
-    /// Checkpoint pending tree operations into the tree_configs store.
-    /// Called periodically (e.g., from the GC cycle) to keep the config blob
-    /// reasonably fresh and limit how much the pending buffer can drift.
+    /// Checkpoint tree snapshots from the snapshot provider into tree_configs.
     ///
-    /// Builds a Tree from stored snapshot + pending ops, re-snapshots, and
-    /// stores the compact TreeSnapshot bytes in tree_configs.
+    /// Called periodically (every ~10 gossip rounds). Gets fresh snapshots
+    /// directly from the radix trees (via the registered provider) and
+    /// writes them to tree_configs for the collector to send.
+    ///
+    /// No raw operations are buffered or replayed — the snapshot IS the
+    /// authoritative state from the routing policy's radix trees.
     pub fn checkpoint_tree_states(&self) {
-        use dashmap::mapref::entry::Entry;
+        let provider = self.tree_snapshot_provider.read().clone();
+        let Some(provider) = provider else {
+            return;
+        };
 
-        let keys: Vec<String> = self
-            .stores
-            .tree_ops_pending
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
-
-        for key in keys {
-            if let Some((snapshot, our_version, pending_count)) =
-                self.materialize_tree_snapshot(&key)
-            {
-                if let Ok(serialized) = snapshot.to_bytes() {
-                    // Write to tree_configs only if our version >= the current.
-                    // A concurrent remote update may have written a newer entry.
-                    let inserted = match self.stores.tree_configs.entry(key.clone()) {
-                        Entry::Occupied(mut entry) => {
-                            let current = self.stores.tree_version(&key);
-                            if our_version >= current {
-                                entry.insert(serialized);
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        Entry::Vacant(entry) => {
-                            entry.insert(serialized);
-                            true
-                        }
-                    };
-
-                    // Only drain pending ops if the checkpoint was actually
-                    // written. If a concurrent remote update won the version
-                    // race, our materialized data is stale — draining would
-                    // lose ops that haven't been persisted anywhere.
-                    if inserted {
-                        self.stores.tree_ops_pending.alter(&key, |_, mut ops| {
-                            if ops.len() <= pending_count {
-                                ops = Vec::new();
-                            } else {
-                                ops.drain(..pending_count);
-                            }
-                            ops
-                        });
-                    }
-                }
+        for (model_id, snapshot) in provider.snapshot_all_trees() {
+            let key = tree_state_key(&model_id);
+            if let Ok(serialized) = snapshot.to_bytes() {
+                self.stores.tree_configs.insert(key.clone(), serialized);
+                // Ensure version is current so the collector picks it up.
+                self.stores.bump_tree_version(&key);
             }
         }
     }
@@ -1619,12 +1576,24 @@ mod tests {
         let result = manager.sync_tree_operation("model1".to_string(), op);
         assert!(result.is_ok());
 
-        // Verify tree state was stored
+        // sync_tree_operation now only bumps the version counter;
+        // actual tree data comes from checkpoint_tree_states via a
+        // TreeSnapshotProvider. Verify the version was bumped.
+        let key = tree_state_key("model1");
+        assert_eq!(manager.stores.tree_version(&key), 1);
+
+        // Write a snapshot directly to tree_configs so get_tree_state works.
+        let tree = kv_index::Tree::new();
+        tree.insert("test_text", "http://localhost:8000");
+        let snapshot = tree.snapshot();
+        let serialized = snapshot.to_bytes().unwrap();
+        manager.stores.tree_configs.insert(key, serialized);
+
         let tree_state = manager.get_tree_state("model1");
         assert!(tree_state.is_some());
-        let tree = tree_state.unwrap();
-        assert_eq!(tree.model_id, "model1");
-        assert_eq!(tree.operations.len(), 1);
+        let ts = tree_state.unwrap();
+        assert_eq!(ts.model_id, "model1");
+        assert_eq!(ts.operations.len(), 1);
     }
 
     #[test]
@@ -1634,15 +1603,14 @@ mod tests {
         // Initially should be None
         assert!(manager.get_tree_state("model1").is_none());
 
-        // Sync an operation
-        use crate::tree_ops::{TreeInsertOp, TreeKey, TreeOperation};
-        let op = TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Text("test_text".to_string()),
-            tenant: "http://localhost:8000".to_string(),
-        });
-        manager
-            .sync_tree_operation("model1".to_string(), op)
-            .unwrap();
+        // Write a snapshot directly to tree_configs (simulates checkpoint)
+        let key = tree_state_key("model1");
+        let tree = kv_index::Tree::new();
+        tree.insert("test_text", "http://localhost:8000");
+        let snapshot = tree.snapshot();
+        let serialized = snapshot.to_bytes().unwrap();
+        manager.stores.tree_configs.insert(key.clone(), serialized);
+        manager.stores.bump_tree_version(&key);
 
         let tree_state = manager.get_tree_state("model1");
         assert!(tree_state.is_some());
@@ -1692,26 +1660,29 @@ mod tests {
     fn test_get_all_tree_states() {
         let manager = create_test_manager("node1".to_string());
 
-        use crate::tree_ops::{TreeInsertOp, TreeKey, TreeOperation};
+        // Write snapshots directly to tree_configs (simulates checkpoint).
+        // Model1: text key
+        let key1 = tree_state_key("model1");
+        let tree1 = kv_index::Tree::new();
+        tree1.insert("alpha", "http://localhost:8000");
+        let snap1 = tree1.snapshot();
+        manager
+            .stores
+            .tree_configs
+            .insert(key1.clone(), snap1.to_bytes().unwrap());
+        manager.stores.bump_tree_version(&key1);
 
+        // Model2: empty snapshot (token keys are not representable in
+        // snapshot format, but an entry in tree_configs is enough for
+        // get_all_tree_states to discover the model).
+        let key2 = tree_state_key("model2");
+        let tree2 = kv_index::Tree::new();
+        let snap2 = tree2.snapshot();
         manager
-            .sync_tree_operation(
-                "model1".to_string(),
-                TreeOperation::Insert(TreeInsertOp {
-                    key: TreeKey::Text("alpha".to_string()),
-                    tenant: "http://localhost:8000".to_string(),
-                }),
-            )
-            .unwrap();
-        manager
-            .sync_tree_operation(
-                "model2".to_string(),
-                TreeOperation::Insert(TreeInsertOp {
-                    key: TreeKey::Tokens(vec![1, 2, 3, 4]),
-                    tenant: "http://localhost:8001".to_string(),
-                }),
-            )
-            .unwrap();
+            .stores
+            .tree_configs
+            .insert(key2.clone(), snap2.to_bytes().unwrap());
+        manager.stores.bump_tree_version(&key2);
 
         let mut states = manager.get_all_tree_states();
         states.sort_by(|left, right| left.model_id.cmp(&right.model_id));
@@ -1910,43 +1881,6 @@ mod tests {
     }
 
     #[test]
-    fn test_collector_sends_delta_not_full_state() {
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
-
-        // Sync a tree operation (this populates both the policy store and tree_ops_pending)
-        manager
-            .sync_tree_operation("model1".to_string(), make_insert_op("a", "http://w:8000"))
-            .unwrap();
-
-        let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates = collector.collect_updates_for_store(StoreType::Policy);
-
-        assert!(!updates.is_empty(), "expected at least one policy update");
-
-        // The update should be a delta (policy_type = "tree_state_delta")
-        let tree_update = updates
-            .iter()
-            .find(|u| u.key.starts_with("tree:"))
-            .expect("expected a tree key update");
-
-        let policy_state: PolicyState =
-            bincode::deserialize(&tree_update.value).expect("deserialize PolicyState");
-        assert_eq!(
-            policy_state.policy_type, "tree_state_delta",
-            "expected delta, got full state"
-        );
-
-        // Verify the delta deserializes correctly
-        let delta =
-            TreeStateDelta::from_bytes(&policy_state.config).expect("deserialize TreeStateDelta");
-        assert_eq!(delta.model_id, "model1");
-        assert_eq!(delta.operations.len(), 1);
-    }
-
-    #[test]
     fn test_collector_falls_back_to_full_state() {
         use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
 
@@ -1984,49 +1918,6 @@ mod tests {
             policy_state.policy_type, "tree_snapshot",
             "expected full snapshot fallback, got {}",
             policy_state.policy_type
-        );
-    }
-
-    #[test]
-    fn test_collector_buffer_survives_mark_sent() {
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
-
-        // Sync an operation (populates tree_ops_pending)
-        manager
-            .sync_tree_operation("model1".to_string(), make_insert_op("a", "http://w:8000"))
-            .unwrap();
-
-        // Collector A collects and marks sent
-        let collector_a = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates_a = collector_a.collect_updates_for_store(StoreType::Policy);
-        assert!(!updates_a.is_empty());
-        collector_a.mark_sent(StoreType::Policy, &updates_a);
-
-        // Collector B (simulating a second peer's collector) should still be
-        // able to collect, because the buffer was NOT cleared by A's mark_sent.
-        let collector_b = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates_b = collector_b.collect_updates_for_store(StoreType::Policy);
-        assert!(
-            !updates_b.is_empty(),
-            "collector B lost updates after collector A marked sent — buffer was prematurely cleared"
-        );
-
-        // Verify the buffer still has the pending ops
-        let tree_update_b = updates_b
-            .iter()
-            .find(|u| u.key.starts_with("tree:"))
-            .expect("expected tree update for collector B");
-
-        let policy_b: PolicyState = bincode::deserialize(&tree_update_b.value).unwrap();
-        // It may be a delta (if pending buffer survived) or full state (fallback).
-        // Either way, it must be present.
-        assert!(
-            policy_b.policy_type == "tree_state_delta" || policy_b.policy_type == "tree_state",
-            "unexpected policy_type: {}",
-            policy_b.policy_type
         );
     }
 
@@ -2089,114 +1980,6 @@ mod tests {
         // Verify the snapshot has content
         let snap = manager.get_tree_snapshot("legacy_model").unwrap();
         assert!(snap.node_count() > 0);
-    }
-
-    // ── Edge-case delta encoding tests ─────────────────────────────────
-
-    #[test]
-    fn test_delta_reconnect_falls_back_to_full_state() {
-        // Simulate: add ops via sync_tree_operation, checkpoint (materializes
-        // config in policy store), then clear tree_ops_pending (simulating
-        // buffer trim), then create a new collector (simulating reconnected
-        // peer).  The collector should produce a full PolicyState, not a delta.
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
-
-        for i in 0..10 {
-            manager
-                .sync_tree_operation(
-                    "model1".to_string(),
-                    make_insert_op(&format!("op_{i}"), "http://w:8000"),
-                )
-                .unwrap();
-        }
-
-        // Checkpoint to materialize into policy store (like production)
-        manager.checkpoint_tree_states();
-
-        // Clear tree_ops_pending to simulate buffer drain
-        stores.tree_ops_pending.remove("tree:model1");
-
-        // New collector (simulating reconnected peer)
-        let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates = collector.collect_updates_for_store(StoreType::Policy);
-
-        assert!(!updates.is_empty(), "expected at least one update");
-
-        let tree_update = updates
-            .iter()
-            .find(|u| u.key.starts_with("tree:"))
-            .expect("expected a tree key update");
-
-        let policy_state: PolicyState =
-            bincode::deserialize(&tree_update.value).expect("deserialize PolicyState");
-        assert_eq!(
-            policy_state.policy_type, "tree_snapshot",
-            "expected full snapshot fallback when pending buffer is empty, got: {}",
-            policy_state.policy_type
-        );
-    }
-
-    #[test]
-    fn test_delta_compaction_divergence() {
-        // Add 2048 + 100 operations to trigger compaction.  Version must
-        // remain monotonically increasing regardless of compaction.
-        let manager = create_test_manager("node1".to_string());
-        let total_ops = 2048 + 100;
-
-        for i in 0..total_ops {
-            manager
-                .sync_tree_operation(
-                    "model1".to_string(),
-                    make_insert_op(&format!("op_{i}"), "http://w:8000"),
-                )
-                .unwrap();
-        }
-
-        let tree = manager.get_tree_state("model1").unwrap();
-        // Version must equal total operations added (monotonic, not reset)
-        assert_eq!(tree.version, total_ops as u64);
-        // After snapshot round-trip, operations are reconstructed from the
-        // radix tree which merges common prefixes, so the count will differ
-        // from total_ops. Just verify the snapshot has content.
-        let snap = manager.get_tree_snapshot("model1").unwrap();
-        assert!(snap.node_count() > 0);
-
-        // Checkpoint to materialize config before applying delta
-        // (delta is rejected when config is empty but version > 0).
-        manager.checkpoint_tree_states();
-
-        // Apply a delta referencing a post-compaction version.
-        // Even though many old operations were compacted away, the version
-        // is still valid because it monotonically increases.
-        let delta = make_delta(
-            "model1",
-            vec![make_insert_op("post_compaction", "http://w2:8000")],
-            total_ops as u64 - 1,
-            total_ops as u64 + 1,
-        );
-
-        // The local version is total_ops (from the atomic version map), and the
-        // delta's new_version must exceed it for acceptance.
-        // sync_tree_operation bumps the tree version each call, so
-        // the tree version equals total_ops after checkpoint.
-        let pre_apply_version = {
-            let key = tree_state_key("model1");
-            manager.stores.tree_version(&key)
-        };
-        assert_eq!(pre_apply_version, total_ops as u64);
-
-        manager.apply_remote_tree_delta(delta, Some("remote".to_string()));
-
-        let tree_after = manager.get_tree_state("model1").unwrap();
-        // The delta should have been applied — version increased
-        assert!(
-            tree_after.version > total_ops as u64,
-            "delta after compaction should have been accepted, version={}",
-            tree_after.version
-        );
     }
 
     #[test]
@@ -2321,299 +2104,6 @@ mod tests {
         // Verify the snapshot has content from both B and A
         let snap = manager.get_tree_snapshot("model1").unwrap();
         assert!(snap.node_count() > 0);
-    }
-
-    #[test]
-    fn test_delta_buffer_trim_multi_peer() {
-        // Create a pending buffer with >4096 ops.  Collector A sends and
-        // marks_sent (which trims at the PENDING_TRIM_THRESHOLD of 4096).
-        // Collector B should still get data — either delta from remaining
-        // buffer or full state fallback.
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
-
-        let op_count = 5000;
-        for i in 0..op_count {
-            manager
-                .sync_tree_operation(
-                    "model1".to_string(),
-                    make_insert_op(&format!("op_{i}"), "http://w:8000"),
-                )
-                .unwrap();
-        }
-
-        // Verify pending buffer has all ops
-        let pending_before = stores
-            .tree_ops_pending
-            .get("tree:model1")
-            .map(|v| v.len())
-            .unwrap_or(0);
-        assert_eq!(pending_before, op_count);
-
-        // Collector A collects and marks sent (triggers trim)
-        let collector_a = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates_a = collector_a.collect_updates_for_store(StoreType::Policy);
-        assert!(!updates_a.is_empty());
-        collector_a.mark_sent(StoreType::Policy, &updates_a);
-
-        // Pending buffer should have been trimmed (oldest half removed)
-        let pending_after = stores
-            .tree_ops_pending
-            .get("tree:model1")
-            .map(|v| v.len())
-            .unwrap_or(0);
-        assert!(
-            pending_after < pending_before,
-            "mark_sent should have trimmed the buffer: before={pending_before}, after={pending_after}",
-        );
-
-        // Collector B (new peer) — after trim, the buffer starts at a
-        // higher offset. B has last_sent=0 which is below the buffer's
-        // base_version, so no delta can be constructed. Without full-state
-        // fallback, B gets no tree updates from the collector. B would
-        // receive the tree via the initial snapshot exchange (ping_server).
-        let collector_b = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates_b = collector_b.collect_updates_for_store(StoreType::Policy);
-        let tree_update_b = updates_b.iter().find(|u| u.key.starts_with("tree:"));
-        // No tree update expected — B's version gap can't be covered by delta
-        assert!(
-            tree_update_b.is_none(),
-            "new peer should not get tree delta after trim (version gap)"
-        );
-    }
-
-    #[test]
-    fn test_delta_empty_pending_vec() {
-        // Add an op, checkpoint (materializes config in tree_configs), then
-        // replace pending with empty vec.  The collector should NOT produce
-        // a delta — it should fall back to full snapshot from tree_configs.
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
-
-        // Add one op via normal path
-        manager
-            .sync_tree_operation(
-                "model1".to_string(),
-                make_insert_op("real_op", "http://w:8000"),
-            )
-            .unwrap();
-
-        // Checkpoint to materialize into policy store
-        manager.checkpoint_tree_states();
-
-        // Overwrite pending buffer with empty vec
-        stores
-            .tree_ops_pending
-            .insert("tree:model1".to_string(), Vec::new());
-
-        let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates = collector.collect_updates_for_store(StoreType::Policy);
-
-        assert!(!updates.is_empty(), "expected at least one update");
-
-        let tree_update = updates
-            .iter()
-            .find(|u| u.key.starts_with("tree:"))
-            .expect("expected a tree key update");
-
-        let policy_state: PolicyState =
-            bincode::deserialize(&tree_update.value).expect("deserialize PolicyState");
-        // Empty pending vec should cause fallback to full snapshot
-        assert_eq!(
-            policy_state.policy_type, "tree_snapshot",
-            "empty pending vec should fall back to full snapshot, got: {}",
-            policy_state.policy_type
-        );
-    }
-
-    #[test]
-    fn test_delta_concurrent_write_and_collect() {
-        // Spawn a thread that adds 100 ops via sync_tree_operation.
-        // Simultaneously run the collector.  The collector should get a
-        // consistent snapshot — either some ops or all ops, but never
-        // corrupted data.
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let manager = Arc::new(MeshSyncManager::new(stores.clone(), "node1".to_string()));
-
-        let manager_clone = manager.clone();
-        let writer = std::thread::spawn(move || {
-            for i in 0..100 {
-                manager_clone
-                    .sync_tree_operation(
-                        "model1".to_string(),
-                        make_insert_op(&format!("concurrent_op_{i}"), "http://w:8000"),
-                    )
-                    .unwrap();
-            }
-        });
-
-        // Collect multiple times while writer is active
-        let mut collected_any = false;
-        for _ in 0..10 {
-            let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-            let updates = collector.collect_updates_for_store(StoreType::Policy);
-            for update in &updates {
-                if update.key.starts_with("tree:") {
-                    // Verify the data deserializes without corruption
-                    let policy_state: PolicyState =
-                        bincode::deserialize(&update.value).expect("data should not be corrupted");
-                    assert!(
-                        policy_state.policy_type == "tree_state_delta"
-                            || policy_state.policy_type == "tree_state"
-                    );
-
-                    if policy_state.policy_type == "tree_state_delta" {
-                        let delta = TreeStateDelta::from_bytes(&policy_state.config)
-                            .expect("delta should deserialize cleanly");
-                        assert!(!delta.operations.is_empty());
-                    } else {
-                        let tree = TreeState::from_bytes(&policy_state.config)
-                            .expect("tree state should deserialize cleanly");
-                        assert!(!tree.operations.is_empty());
-                    }
-                    collected_any = true;
-                }
-            }
-        }
-
-        writer.join().unwrap();
-
-        // After writer finishes, one final collect should succeed
-        let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let final_updates = collector.collect_updates_for_store(StoreType::Policy);
-        if !collected_any {
-            // Writer may have been too fast; at least final collection must succeed
-            assert!(
-                !final_updates.is_empty(),
-                "final collection after writer finished should have updates"
-            );
-        }
-    }
-
-    #[test]
-    fn test_delta_oversized_mark_sent_trims_buffer() {
-        // Verify that when the pending buffer exceeds PENDING_TRIM_THRESHOLD
-        // (4096) and mark_sent is called, the buffer gets trimmed so that
-        // subsequent collections can produce smaller batches.
-        use crate::{
-            incremental::IncrementalUpdateCollector, service::gossip::StateUpdate,
-            stores::StoreType,
-        };
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
-
-        // Add more ops than PENDING_TRIM_THRESHOLD (4096)
-        let op_count = 4200;
-        for i in 0..op_count {
-            manager
-                .sync_tree_operation(
-                    "model1".to_string(),
-                    make_insert_op(&format!("op_{i}"), "http://w:8000"),
-                )
-                .unwrap();
-        }
-
-        let pending_before = stores
-            .tree_ops_pending
-            .get("tree:model1")
-            .map(|v| v.len())
-            .unwrap_or(0);
-        assert_eq!(pending_before, op_count);
-
-        // Simulate mark_sent with a fake update for the tree key
-        let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let fake_update = StateUpdate {
-            key: "tree:model1".to_string(),
-            value: vec![],
-            version: op_count as u64,
-            actor: "node1".to_string(),
-            timestamp: 0,
-        };
-        collector.mark_sent(StoreType::Policy, &[fake_update]);
-
-        let pending_after = stores
-            .tree_ops_pending
-            .get("tree:model1")
-            .map(|v| v.len())
-            .unwrap_or(0);
-
-        // Buffer should have been trimmed: oldest half removed
-        assert!(
-            pending_after < pending_before,
-            "buffer should be trimmed after mark_sent: before={pending_before}, after={pending_after}",
-        );
-        assert_eq!(
-            pending_after,
-            pending_before - pending_before / 2,
-            "expected oldest half to be drained"
-        );
-
-        // A new collector (fresh peer) can't construct a delta after trim
-        // because its last_sent=0 is below the buffer's base_version.
-        // It would receive the tree via snapshot exchange instead.
-        let collector2 = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates = collector2.collect_updates_for_store(StoreType::Policy);
-        let tree_updates: Vec<_> = updates.iter().filter(|u| u.key.starts_with("tree:")).collect();
-        assert!(
-            tree_updates.is_empty(),
-            "new peer should not get tree delta after trim (version gap)"
-        );
-    }
-
-    #[test]
-    fn test_delta_version_monotonic_after_compaction() {
-        // Add 3000 operations (triggers compaction at MAX_TREE_OPERATIONS=2048).
-        // Verify version is 3000 (not reset by compaction).  Then apply a
-        // delta with base_version=2999 — should succeed.
-        let manager = create_test_manager("node1".to_string());
-
-        for i in 0..3000 {
-            manager
-                .sync_tree_operation(
-                    "model1".to_string(),
-                    make_insert_op(&format!("op_{i}"), "http://w:8000"),
-                )
-                .unwrap();
-        }
-
-        let tree = manager.get_tree_state("model1").unwrap();
-        // TreeState.version should be 3000 — monotonic despite compaction
-        assert_eq!(tree.version, 3000);
-        // After snapshot round-trip, the radix tree merges common prefixes
-        // so the operations count will differ. Verify via snapshot.
-        let snap = manager.get_tree_snapshot("model1").unwrap();
-        assert!(snap.node_count() > 0);
-
-        // Checkpoint to materialize config before applying delta
-        manager.checkpoint_tree_states();
-
-        // Apply delta with base_version=2999 (one less than current version)
-        let key = tree_state_key("model1");
-        let current_version = manager.stores.tree_version(&key);
-        assert_eq!(current_version, 3000);
-
-        let delta = make_delta(
-            "model1",
-            vec![make_insert_op("post_compact_op", "http://w2:8000")],
-            current_version - 1,
-            current_version + 1,
-        );
-        manager.apply_remote_tree_delta(delta, Some("remote".to_string()));
-
-        let tree_after = manager.get_tree_state("model1").unwrap();
-        // Version may be higher than 3001 due to pending buffer replay
-        assert!(
-            tree_after.version >= 3001,
-            "version should be at least 3001, got {}",
-            tree_after.version
-        );
     }
 
     #[test]

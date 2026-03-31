@@ -577,6 +577,20 @@ impl smg_mesh::TreeStateSubscriber for PolicyRegistry {
     }
 }
 
+impl smg_mesh::TreeSnapshotProvider for PolicyRegistry {
+    fn snapshot_all_trees(&self) -> Vec<(String, smg_mesh::TreeSnapshot)> {
+        // Collect snapshots from the default policy's cache_aware trees.
+        if let Some(cache_aware) = self
+            .default_policy
+            .as_any()
+            .downcast_ref::<CacheAwarePolicy>()
+        {
+            return cache_aware.snapshot_all_trees();
+        }
+        Vec::new()
+    }
+}
+
 impl std::fmt::Debug for PolicyRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PolicyRegistry")
@@ -661,18 +675,21 @@ mod tests {
 
     #[test]
     fn test_set_mesh_sync_propagates_to_default_cache_aware_policy() {
-        let registry = PolicyRegistry::new(PolicyConfig::CacheAware {
+        let registry = Arc::new(PolicyRegistry::new(PolicyConfig::CacheAware {
             cache_threshold: 0.5,
             balance_abs_threshold: 32,
             balance_rel_threshold: 1.1,
             eviction_interval_secs: 0,
             max_tree_size: 10_000,
             block_size: 16,
-        });
+        }));
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
         registry.set_mesh_sync(Some(mesh_sync.clone()));
+
+        // Register snapshot provider so checkpoint_tree_states works
+        mesh_sync.register_tree_snapshot_provider(registry.clone());
 
         let policy = registry.get_default_policy();
         let cache_aware = policy
@@ -697,6 +714,11 @@ mod tests {
         );
 
         assert_eq!(selected, Some(0));
+
+        // sync_tree_operation only bumps the version counter now;
+        // checkpoint materializes tree data from the snapshot provider.
+        mesh_sync.checkpoint_tree_states();
+
         assert!(mesh_sync.get_tree_state(UNKNOWN_MODEL_ID).is_some());
     }
 

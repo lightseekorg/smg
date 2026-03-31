@@ -41,6 +41,7 @@ pub use stores::{
     GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
 };
 pub use sync::{
-    MeshSyncManager, OptionalMeshSyncManager, TreeStateSubscriber, WorkerStateSubscriber,
+    MeshSyncManager, OptionalMeshSyncManager, TreeSnapshotProvider, TreeStateSubscriber,
+    WorkerStateSubscriber,
 };
 pub use tree_ops::{TreeInsertOp, TreeKey, TreeOperation, TreeRemoveOp, TreeState};

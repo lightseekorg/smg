@@ -47,7 +47,7 @@ use dashmap::DashMap;
 use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
 use parking_lot::RwLock;
 use rand::Rng;
-use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeKey, TreeOperation};
+use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeKey, TreeOperation, TreeSnapshot};
 use tracing::{debug, warn};
 
 use super::{
@@ -332,7 +332,7 @@ impl CacheAwarePolicy {
     /// Merge remote tree snapshot into local trees.
     /// Uses the three-case merge algorithm (exact match, prefix match, edge split)
     /// to efficiently combine remote state without losing local routing state.
-    pub fn apply_remote_tree_snapshot(&self, model_id: &str, snapshot: &smg_mesh::TreeSnapshot) {
+    pub fn apply_remote_tree_snapshot(&self, model_id: &str, snapshot: &TreeSnapshot) {
         let model_id = Self::normalize_mesh_model_id(model_id);
         // Clone the Arc to release the DashMap shard guard before merging.
         // merge_snapshot walks the entire tree and can be expensive — holding
@@ -427,6 +427,19 @@ impl CacheAwarePolicy {
         workers[min_load_idx].increment_processed();
 
         Some(min_load_idx)
+    }
+}
+
+impl smg_mesh::TreeSnapshotProvider for CacheAwarePolicy {
+    fn snapshot_all_trees(&self) -> Vec<(String, TreeSnapshot)> {
+        self.string_trees
+            .iter()
+            .map(|entry| {
+                let model_id = entry.key().clone();
+                let snapshot = entry.value().snapshot();
+                (model_id, snapshot)
+            })
+            .collect()
     }
 }
 
@@ -744,7 +757,7 @@ impl Default for CacheAwarePolicy {
 
 #[cfg(test)]
 mod tests {
-    use kv_index::{compute_content_hash, SequenceHash, StoredBlock, WorkerBlockMap};
+    use kv_index::{compute_content_hash, RadixTree, SequenceHash, StoredBlock, WorkerBlockMap};
 
     use super::*;
     use crate::core::{BasicWorkerBuilder, WorkerType};
@@ -917,8 +930,11 @@ mod tests {
             eviction_interval_secs: 0,
             ..Default::default()
         };
-        let policy = CacheAwarePolicy::with_config(config);
+        let policy = Arc::new(CacheAwarePolicy::with_config(config));
         policy.set_mesh_sync(Some(mesh_sync.clone()));
+
+        // Register policy as snapshot provider so checkpoint_tree_states works
+        mesh_sync.register_tree_snapshot_provider(policy.clone());
 
         let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
             BasicWorkerBuilder::new("http://w1:8000")
@@ -940,7 +956,11 @@ mod tests {
             )
             .unwrap();
 
-        // Verify tree operation was synced to mesh (under UNKNOWN_MODEL_ID since no model was specified)
+        // sync_tree_operation only bumps the version counter now;
+        // checkpoint materializes tree data from the snapshot provider.
+        mesh_sync.checkpoint_tree_states();
+
+        // Verify tree state was materialized under UNKNOWN_MODEL_ID
         let tree_state = mesh_sync.get_tree_state(UNKNOWN_MODEL_ID);
         assert!(tree_state.is_some());
         let tree = tree_state.unwrap();
@@ -951,42 +971,38 @@ mod tests {
     fn test_cache_aware_restore_tree_state_from_mesh() {
         use std::sync::Arc;
 
-        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
+        use smg_mesh::{MeshSyncManager, StateStores};
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
+        let mesh_sync = Arc::new(MeshSyncManager::new(stores.clone(), "node1".to_string()));
 
-        // Pre-populate mesh with tree state
-        let op1 = TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Text("test_text_1".to_string()),
-            tenant: "http://w1:8000".to_string(),
-        });
-        mesh_sync
-            .sync_tree_operation("model1".to_string(), op1)
-            .unwrap();
-
-        let op2 = TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Text("test_text_2".to_string()),
-            tenant: "http://w2:8000".to_string(),
-        });
-        mesh_sync
-            .sync_tree_operation("model1".to_string(), op2)
-            .unwrap();
+        // Pre-populate mesh with tree data by writing a snapshot directly
+        // to tree_configs (sync_tree_operation only bumps version now).
+        let tree = Tree::new();
+        tree.insert("test_text_1", "http://w1:8000");
+        tree.insert("test_text_2", "http://w2:8000");
+        let snapshot = tree.snapshot();
+        let key = "tree:model1".to_string();
+        stores
+            .tree_configs
+            .insert(key.clone(), snapshot.to_bytes().unwrap());
+        stores.bump_tree_version(&key);
 
         let config = CacheAwareConfig {
             eviction_interval_secs: 0,
             ..Default::default()
         };
         let policy = CacheAwarePolicy::with_config(config);
+        // set_mesh_sync triggers restore_tree_state_from_mesh which reads
+        // from tree_configs via get_all_tree_snapshots.
         policy.set_mesh_sync(Some(mesh_sync.clone()));
 
-        let tree = policy.string_trees.get("model1");
-        assert!(tree.is_some());
+        let policy_tree = policy.string_trees.get("model1");
+        assert!(policy_tree.is_some());
 
-        let snapshot = mesh_sync.get_tree_snapshot("model1").unwrap();
-        // 2 inserts with shared prefix "test_text_" → at least 3 snapshot nodes
-        // (root, shared prefix, and 2 leaf suffixes)
-        assert!(snapshot.node_count() >= 3);
+        let mesh_snapshot = mesh_sync.get_tree_snapshot("model1").unwrap();
+        // 2 inserts with shared prefix "test_text_" -> at least 3 snapshot nodes
+        assert!(mesh_snapshot.node_count() >= 3);
     }
 
     #[test]

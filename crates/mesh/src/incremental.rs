@@ -14,7 +14,6 @@ use tracing::{debug, trace};
 use super::{
     service::gossip::StateUpdate,
     stores::{AppState, MembershipState, PolicyState, StateStores, StoreType, WorkerState},
-    tree_ops::TreeStateDelta,
 };
 
 /// Trait for extracting version from state types
@@ -222,120 +221,12 @@ impl IncrementalUpdateCollector {
                 }
 
                 // --- Tree keys (driven by atomic tree_versions, not CRDT) ---
+                // Snapshot-based sync: tree_configs stores compact TreeSnapshot
+                // bytes written by the checkpoint cycle. No raw operations are
+                // buffered or sent — only the tree structure (with prefix sharing).
                 if tree_changed {
-                    let mut emitted_tree_keys = std::collections::HashSet::new();
-
-                    // Phase 1: Scan tree_ops_pending for keys with pending ops.
-                    for entry in &self.stores.tree_ops_pending {
-                        let key = entry.key();
-                        let pending = entry.value();
-                        if pending.is_empty() {
-                            continue;
-                        }
-
-                        let current_version = self.stores.tree_version(key);
-                        let last_sent_version =
-                            last_sent.policy.get(key.as_str()).copied().unwrap_or(0);
-
-                        if current_version <= last_sent_version {
-                            continue;
-                        }
-
-                        // Try to send a delta with only the unsent pending ops
-                        let mut sent_delta = false;
-                        let total_pending = pending.len() as u64;
-                        let base_version = current_version.saturating_sub(total_pending);
-
-                        if last_sent_version >= base_version {
-                            let already_sent =
-                                last_sent_version.saturating_sub(base_version) as usize;
-                            let unsent_start = already_sent.min(pending.len());
-                            let unsent_ops = &pending[unsent_start..];
-                            if !unsent_ops.is_empty() {
-                                // Cap ops per delta to keep serialized size
-                                // under the gRPC message limit. Each op can
-                                // be up to ~20 KB (long prompt text), so 200
-                                // ops ≈ 4 MB which fits in 10 MB with overhead.
-                                const MAX_OPS_PER_DELTA: usize = 200;
-                                let capped_ops = if unsent_ops.len() > MAX_OPS_PER_DELTA {
-                                    &unsent_ops[..MAX_OPS_PER_DELTA]
-                                } else {
-                                    unsent_ops
-                                };
-                                let capped_version = last_sent_version + capped_ops.len() as u64;
-
-                                let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
-                                let delta = TreeStateDelta {
-                                    model_id: model_id.clone(),
-                                    operations: capped_ops.to_vec(),
-                                    base_version: last_sent_version,
-                                    new_version: capped_version,
-                                };
-                                if let Ok(delta_bytes) = delta.to_bytes() {
-                                    let delta_policy = PolicyState {
-                                        model_id,
-                                        policy_type: "tree_state_delta".to_string(),
-                                        config: delta_bytes,
-                                        version: capped_version,
-                                    };
-                                    if let Ok(serialized) = bincode::serialize(&delta_policy) {
-                                        updates.push(StateUpdate {
-                                            key: key.clone(),
-                                            value: serialized,
-                                            version: capped_version,
-                                            actor: self.self_name.clone(),
-                                            timestamp,
-                                        });
-                                        debug!(
-                                            "Collected tree delta: {} ({}/{} ops, version: {}->{})",
-                                            key,
-                                            capped_ops.len(),
-                                            unsent_ops.len(),
-                                            last_sent_version,
-                                            capped_version,
-                                        );
-                                        sent_delta = true;
-                                        emitted_tree_keys.insert(key.clone());
-                                    }
-                                }
-                            }
-                        }
-
-                        if !sent_delta {
-                            // No delta available (version gap). Don't send
-                            // full-state — it can be tens of MB with long
-                            // prompts and will exceed the gRPC message limit.
-                            // The next checkpoint cycle will fold pending ops
-                            // into tree_configs, resetting the delta window.
-                            // The peer will receive the snapshot via the
-                            // initial snapshot exchange (ping_server) or
-                            // Phase 2 (tree_configs-only entries) instead.
-                            debug!(
-                                "Skipping full-state fallback for {} (version gap: last_sent={}, current={})",
-                                key, last_sent_version, current_version
-                            );
-                        }
-                    }
-
-                    // Phase 2: Scan tree_configs for keys not yet emitted.
-                    // Only emit keys that have NO pending ops — those are
-                    // remote-only entries that can't be covered by deltas.
-                    // Keys with pending ops are already covered by Phase 1
-                    // (delta or full-state fallback).
                     for entry in &self.stores.tree_configs {
                         let key = entry.key();
-                        if emitted_tree_keys.contains(key.as_str()) {
-                            continue;
-                        }
-                        // Skip keys that have pending ops — Phase 1 handles them.
-                        if self
-                            .stores
-                            .tree_ops_pending
-                            .get(key.as_str())
-                            .is_some_and(|p| !p.is_empty())
-                        {
-                            continue;
-                        }
                         let current_version = self.stores.tree_version(key);
                         let last_sent_version =
                             last_sent.policy.get(key.as_str()).copied().unwrap_or(0);
@@ -345,13 +236,6 @@ impl IncrementalUpdateCollector {
                         let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
                         let config_bytes = entry.value().clone();
                         if config_bytes.is_empty() {
-                            continue;
-                        }
-                        if kv_index::snapshot::TreeSnapshot::from_bytes(&config_bytes).is_err() {
-                            debug!(
-                                "Skipping tree_configs full-state for {} — config corrupted",
-                                key
-                            );
                             continue;
                         }
                         let full_state = PolicyState {
@@ -369,7 +253,7 @@ impl IncrementalUpdateCollector {
                                 timestamp,
                             });
                             debug!(
-                                "Collected tree_configs full snapshot: {} (version: {})",
+                                "Collected tree snapshot: {} (version: {})",
                                 key, current_version
                             );
                         }
