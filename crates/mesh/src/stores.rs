@@ -735,6 +735,9 @@ pub struct StateStores {
     /// checks this (in addition to `policy.generation()`) to decide whether
     /// the policy store needs scanning.
     pub tree_generation: Arc<AtomicU64>,
+    /// Last tree_generation value seen by checkpoint_tree_states.
+    /// Used to skip re-export when nothing changed.
+    pub last_checkpoint_gen: Arc<AtomicU64>,
     /// Materialized tree state config blobs, stored outside the CRDT policy
     /// store to avoid operation log memory accumulation (~50 MB/min leak).
     /// Key: tree key (e.g., "tree:model-name"), Value: bincode-serialized TreeState.
@@ -758,6 +761,7 @@ impl StateStores {
             tree_ops_pending: DashMap::new(),
             tree_versions: DashMap::new(),
             tree_generation: Arc::new(AtomicU64::new(0)),
+            last_checkpoint_gen: Arc::new(AtomicU64::new(0)),
             tree_configs: DashMap::new(),
             tenant_delta_inserts: DashMap::new(),
             tenant_delta_evictions: DashMap::new(),
@@ -774,6 +778,7 @@ impl StateStores {
             tree_ops_pending: DashMap::new(),
             tree_versions: DashMap::new(),
             tree_generation: Arc::new(AtomicU64::new(0)),
+            last_checkpoint_gen: Arc::new(AtomicU64::new(0)),
             tree_configs: DashMap::new(),
             tenant_delta_inserts: DashMap::new(),
             tenant_delta_evictions: DashMap::new(),

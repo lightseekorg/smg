@@ -844,12 +844,22 @@ impl MeshSyncManager {
     /// by `export_tree_state` (~2-4 MB vs ~40 MB for 2048 entries sharing
     /// 80% prefixes) and avoids accumulating full prompt text in memory.
     pub fn checkpoint_tree_states(&self) {
+        // Only re-export if tree_generation changed since last checkpoint.
+        // Prevents allocating large TreeSnapshot bytes every 10s when idle.
+        let current_gen = self.stores.tree_generation.load(Ordering::Acquire);
+        let last_gen = self
+            .stores
+            .last_checkpoint_gen
+            .swap(current_gen, Ordering::AcqRel);
+        if current_gen == last_gen {
+            return;
+        }
+
         let subscribers = self.tree_state_subscribers.read().clone();
         if subscribers.is_empty() {
             return;
         }
 
-        // Iterate models with activity (those that have a tree_versions entry).
         let model_keys: Vec<String> = self
             .stores
             .tree_versions
@@ -860,7 +870,6 @@ impl MeshSyncManager {
         for key in model_keys {
             let model_id = key.strip_prefix("tree:").unwrap_or(&key);
 
-            // Ask subscribers for a compact snapshot of this model's tree.
             let mut snapshot_bytes: Option<Vec<u8>> = None;
             for subscriber in &subscribers {
                 if let Some(snap) = subscriber.export_tree_snapshot(model_id) {
