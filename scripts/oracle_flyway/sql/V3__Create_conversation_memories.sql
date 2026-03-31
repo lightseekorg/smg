@@ -1,6 +1,6 @@
 -- Sample downstream Flyway DDL for conversation memories.
 -- Upstream runtime initialization is handled by the Oracle writer's init_schema path.
--- UPDATED_AT only gets an INSERT default here; downstream update paths should
+-- UPDATED_AT only gets an INSERT default here and downstream update paths should
 -- set it explicitly (or add a trigger) when status/content fields change.
 
 CREATE TABLE CONVERSATION_MEMORIES (
