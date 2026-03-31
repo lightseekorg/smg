@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use axum::body::Body;
 use bytes::Bytes;
 use http::{
-    header::{HeaderValue, CONTENT_TYPE},
+    header::{HeaderValue, CACHE_CONTROL, CONTENT_TYPE},
     StatusCode,
 };
 use serde::Serialize;
@@ -483,7 +483,7 @@ pub fn build_sse_response(
             CONTENT_TYPE,
             HeaderValue::from_static("text/event-stream; charset=utf-8"),
         )
-        .header("Cache-Control", HeaderValue::from_static("no-cache"))
+        .header(CACHE_CONTROL, HeaderValue::from_static("no-cache"))
         .body(Body::from_stream(stream))
         .expect("infallible: static headers and valid status code")
 }
