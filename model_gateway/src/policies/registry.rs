@@ -640,6 +640,24 @@ impl smg_mesh::TreeStateSubscriber for PolicyRegistry {
         }
         None
     }
+
+    fn export_tree_snapshot(&self, model_id: &str) -> Option<kv_index::snapshot::TreeSnapshot> {
+        // Try model-specific policy first, then default
+        let policy = self.get_policy(model_id);
+        if let Some(ref p) = policy {
+            if let Some(cache_aware) = p.as_any().downcast_ref::<CacheAwarePolicy>() {
+                return cache_aware.export_tree_snapshot(model_id);
+            }
+        }
+        if let Some(cache_aware) = self
+            .default_policy
+            .as_any()
+            .downcast_ref::<CacheAwarePolicy>()
+        {
+            return cache_aware.export_tree_snapshot(model_id);
+        }
+        None
+    }
 }
 
 impl std::fmt::Debug for PolicyRegistry {

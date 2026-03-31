@@ -399,7 +399,10 @@ impl CacheAwarePolicy {
     /// Builds a `TreeState` from `Tree::snapshot()` — each (prefix, tenant) pair
     /// becomes a `TreeOperation::Insert`. This avoids storing full prompt text
     /// per request; the snapshot is built on-demand during periodic checkpoints.
-    #[expect(clippy::unwrap_used, reason = "pop() after last_mut().is_some() is infallible")]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "pop() after last_mut().is_some() is infallible"
+    )]
     pub fn export_tree_state(&self, model_id: &str) -> Option<smg_mesh::TreeState> {
         let model_id = Self::normalize_mesh_model_id(model_id);
         let tree = self.string_trees.get(model_id)?;
@@ -446,6 +449,20 @@ impl CacheAwarePolicy {
         }
 
         Some(tree_state)
+    }
+
+    /// Export a compact tree snapshot for a model from the live radix tree.
+    /// Returns the compact [`kv_index::snapshot::TreeSnapshot`] directly,
+    /// which preserves shared prefixes and is much smaller than the flat
+    /// `TreeState` returned by [`export_tree_state`].
+    pub fn export_tree_snapshot(&self, model_id: &str) -> Option<kv_index::snapshot::TreeSnapshot> {
+        let model_id = Self::normalize_mesh_model_id(model_id);
+        let tree = self.string_trees.get(model_id)?;
+        let snapshot = tree.snapshot();
+        if snapshot.nodes.is_empty() {
+            return None;
+        }
+        Some(snapshot)
     }
 
     /// Run cache eviction to prevent unbounded growth
@@ -522,6 +539,12 @@ impl CacheAwarePolicy {
 
             if let Some(tree) = tree {
                 tree.insert_text(text, worker_url);
+
+                // Populate path_hash_index so remote tenant deltas can resolve
+                // hashes back to prefix paths (same as the main routing path).
+                let path_hash = smg_mesh::hash_node_path(text);
+                self.path_hash_index.insert(path_hash, text.to_string());
+
                 self.sync_insert_operation(model_id, TreeKey::Text(text.to_string()), worker_url);
             } else {
                 debug!(

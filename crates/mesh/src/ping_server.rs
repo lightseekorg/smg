@@ -700,17 +700,40 @@ impl Gossip for GossipService {
                                                         } else if policy_state.policy_type
                                                             == "tree_state_lz4"
                                                         {
-                                                            // LZ4-compressed full state
+                                                            // LZ4-compressed snapshot (TreeState or TreeSnapshot bytes)
                                                             if let Ok(decompressed) =
                                                                 super::tree_ops::lz4_decompress(
                                                                     &policy_state.config,
                                                                 )
                                                             {
+                                                                // Try TreeState first (backward compat)
                                                                 if let Ok(tree_state) =
                                                                     super::tree_ops::TreeState::from_bytes(
                                                                         &decompressed,
                                                                     )
                                                                 {
+                                                                    sync_manager
+                                                                        .apply_remote_tree_operation(
+                                                                            policy_state
+                                                                                .model_id
+                                                                                .clone(),
+                                                                            tree_state,
+                                                                            actor.clone(),
+                                                                        );
+                                                                } else if let Ok(snap) =
+                                                                    kv_index::snapshot::TreeSnapshot::from_bytes(
+                                                                        &decompressed,
+                                                                    )
+                                                                {
+                                                                    // Compact TreeSnapshot — convert to TreeState
+                                                                    let tree_state =
+                                                                        super::tree_ops::TreeState::from_snapshot(
+                                                                            policy_state
+                                                                                .model_id
+                                                                                .clone(),
+                                                                            &snap,
+                                                                            policy_state.version,
+                                                                        );
                                                                     sync_manager
                                                                         .apply_remote_tree_operation(
                                                                             policy_state

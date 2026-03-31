@@ -62,6 +62,17 @@ pub trait TreeStateSubscriber: Send + Sync + Debug {
     fn export_tree_state(&self, _model_id: &str) -> Option<TreeState> {
         None
     }
+
+    /// Export a compact tree snapshot for a model from the live radix tree.
+    /// Returns a [`kv_index::snapshot::TreeSnapshot`] that encodes the tree
+    /// structure with shared prefixes — much smaller than the flat
+    /// `TreeState` returned by [`export_tree_state`].
+    ///
+    /// Used by `checkpoint_tree_states` to populate `tree_configs` for
+    /// Layer 2 periodic snapshots.
+    fn export_tree_snapshot(&self, _model_id: &str) -> Option<kv_index::snapshot::TreeSnapshot> {
+        None
+    }
 }
 
 pub trait WorkerStateSubscriber: Send + Sync + Debug {
@@ -538,13 +549,30 @@ impl MeshSyncManager {
 
     /// Load the materialized TreeState from `tree_configs`.
     /// Returns None if no checkpoint exists for this key.
+    ///
+    /// Handles two storage formats:
+    /// - `TreeState` bytes (from remote full-state updates)
+    /// - `TreeSnapshot` bytes (from local `checkpoint_tree_states`)
     fn materialize_tree_state(&self, key: &str, model_id: &str) -> Option<TreeState> {
         let config_bytes = self.stores.tree_configs.get(key)?;
         let bytes = config_bytes.value();
         if bytes.is_empty() {
             return Some(TreeState::new(model_id.to_string()));
         }
-        TreeState::from_bytes(bytes).ok()
+        // Try TreeState first (remote full-state updates store this format).
+        if let Ok(ts) = TreeState::from_bytes(bytes) {
+            return Some(ts);
+        }
+        // Fall back to TreeSnapshot (local checkpoint format).
+        if let Ok(snap) = kv_index::snapshot::TreeSnapshot::from_bytes(bytes) {
+            let version = self.stores.tree_version(key);
+            return Some(TreeState::from_snapshot(
+                model_id.to_string(),
+                &snap,
+                version,
+            ));
+        }
+        None
     }
 
     /// Get tree state for a model from mesh stores.
@@ -801,22 +829,51 @@ impl MeshSyncManager {
         self.stores.tree_generation.fetch_add(1, Ordering::Release);
     }
 
-    /// Checkpoint tree state by exporting from the live radix tree via subscribers.
-    /// Called periodically (~every 10s) to keep `tree_configs` fresh for the
-    /// periodic structure snapshot (every 30 gossip rounds).
+    /// Checkpoint tree state by exporting compact snapshots from the live
+    /// radix tree via subscribers.
     ///
-    /// This reads the current tree state from CacheAwarePolicy's live radix tree
-    /// instead of replaying an operation log. No full prompt text is accumulated
-    /// per request — the snapshot is built on-demand from the tree structure.
-    #[expect(clippy::unused_self, reason = "Public API — callers pass &self; removing would be a breaking change")]
+    /// Called periodically (~every 10s) to keep `tree_configs` fresh for
+    /// the periodic structure snapshot (every 30 gossip rounds).
+    ///
+    /// Uses [`TreeStateSubscriber::export_tree_snapshot`] to obtain a
+    /// compact [`kv_index::snapshot::TreeSnapshot`] that preserves shared
+    /// prefixes.  This is much smaller than the flat `TreeState` produced
+    /// by `export_tree_state` (~2-4 MB vs ~40 MB for 2048 entries sharing
+    /// 80% prefixes) and avoids accumulating full prompt text in memory.
     pub fn checkpoint_tree_states(&self) {
-        // No-op: tree data is synced via Layer 1 (tenant deltas) and
-        // Layer 2 (periodic compressed snapshots). The old checkpoint
-        // path called export_tree_state() which reconstructed full
-        // TreeState with all prompt text (~160 MB for 2000 entries of
-        // 80k chars), causing multi-GB memory usage every 10 seconds.
-        //
-        // tree_configs is no longer used for tree data transmission.
+        let subscribers = self.tree_state_subscribers.read().clone();
+        if subscribers.is_empty() {
+            return;
+        }
+
+        // Iterate models with activity (those that have a tree_versions entry).
+        let model_keys: Vec<String> = self
+            .stores
+            .tree_versions
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in model_keys {
+            let model_id = key.strip_prefix("tree:").unwrap_or(&key);
+
+            // Ask subscribers for a compact snapshot of this model's tree.
+            let mut snapshot_bytes: Option<Vec<u8>> = None;
+            for subscriber in &subscribers {
+                if let Some(snap) = subscriber.export_tree_snapshot(model_id) {
+                    if let Ok(bytes) = snap.to_bytes() {
+                        snapshot_bytes = Some(bytes);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(bytes) = snapshot_bytes {
+                if !bytes.is_empty() {
+                    self.stores.tree_configs.insert(key, bytes);
+                }
+            }
+        }
     }
 }
 

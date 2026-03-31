@@ -96,16 +96,23 @@ pub struct TenantEvict {
 }
 
 /// Compute a compact 8-byte hash of a prefix path for node identification.
+/// Returns a non-zero hash; 0 is reserved for [`GLOBAL_EVICTION_HASH`].
 #[expect(
     clippy::unwrap_used,
     reason = "blake3 always returns 32 bytes; [..8] into [u8; 8] cannot fail"
 )]
 pub fn hash_node_path(path: &str) -> u64 {
     let hash = blake3::hash(path.as_bytes());
-    u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap())
+    let h = u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap());
+    if h == GLOBAL_EVICTION_HASH {
+        1
+    } else {
+        h
+    }
 }
 
 /// Compute a compact 8-byte hash from token IDs.
+/// Returns a non-zero hash; 0 is reserved for [`GLOBAL_EVICTION_HASH`].
 #[expect(
     clippy::unwrap_used,
     reason = "blake3 always returns 32 bytes; [..8] into [u8; 8] cannot fail"
@@ -113,7 +120,12 @@ pub fn hash_node_path(path: &str) -> u64 {
 pub fn hash_token_path(tokens: &[u32]) -> u64 {
     let bytes: Vec<u8> = tokens.iter().flat_map(|t| t.to_le_bytes()).collect();
     let hash = blake3::hash(&bytes);
-    u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap())
+    let h = u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap());
+    if h == GLOBAL_EVICTION_HASH {
+        1
+    } else {
+        h
+    }
 }
 
 impl TenantDelta {
@@ -195,6 +207,62 @@ impl TreeState {
     /// Deserialize from bincode bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         bincode::deserialize(bytes).map_err(|e| format!("Failed to deserialize TreeState: {e}"))
+    }
+
+    /// Reconstruct a `TreeState` from a compact [`kv_index::snapshot::TreeSnapshot`].
+    ///
+    /// Walks the pre-order node list, rebuilding full prefix paths and emitting
+    /// an `Insert` operation for each `(tenant, prefix)` pair. This is the
+    /// inverse of [`CacheAwarePolicy::export_tree_state`] and is used on the
+    /// receiver side to convert compact snapshots back into the `TreeState`
+    /// format that `apply_remote_tree_operation` expects.
+    #[expect(
+        clippy::unwrap_used,
+        reason = "pop() after last_mut().is_some() is infallible"
+    )]
+    pub fn from_snapshot(
+        model_id: String,
+        snapshot: &kv_index::snapshot::TreeSnapshot,
+        version: u64,
+    ) -> Self {
+        let mut tree_state = Self::new(model_id);
+        let mut path_stack: Vec<(String, u32)> = Vec::new();
+        let mut current_prefix = String::new();
+
+        for node in &snapshot.nodes {
+            // Pop completed parents from the stack
+            while let Some((_, remaining)) = path_stack.last_mut() {
+                if *remaining == 0 {
+                    let (parent_prefix, _) = path_stack.pop().unwrap();
+                    current_prefix = parent_prefix;
+                } else {
+                    *remaining -= 1;
+                    break;
+                }
+            }
+
+            // Build this node's full prefix
+            let node_prefix = format!("{}{}", current_prefix, node.edge);
+
+            // Emit an Insert operation for each tenant at this node
+            for (tenant_url, _epoch) in &node.tenants {
+                if !node_prefix.is_empty() {
+                    tree_state.add_operation(TreeOperation::Insert(TreeInsertOp {
+                        key: TreeKey::Text(node_prefix.clone()),
+                        tenant: tenant_url.clone(),
+                    }));
+                }
+            }
+
+            // Push this node onto the stack for its children
+            if node.child_count > 0 {
+                path_stack.push((current_prefix.clone(), node.child_count));
+                current_prefix = node_prefix;
+            }
+        }
+
+        tree_state.version = version;
+        tree_state
     }
 }
 

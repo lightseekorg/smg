@@ -617,6 +617,83 @@ impl MeshController {
                                                         let actor = Some(state_update.actor.clone());
 
                                                         if policy_state.policy_type
+                                                            == "tenant_delta"
+                                                        {
+                                                            // Lightweight tenant delta — no tree structure, no prompt text
+                                                            match super::tree_ops::TenantDelta::from_bytes(
+                                                                &policy_state.config,
+                                                            ) {
+                                                                Ok(delta) => {
+                                                                    sync_manager
+                                                                        .apply_remote_tenant_delta(
+                                                                            delta, actor,
+                                                                        );
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to deserialize tenant delta for model {}: {e}",
+                                                                        policy_state.model_id
+                                                                    );
+                                                                }
+                                                            }
+                                                        } else if policy_state.policy_type
+                                                            == "tree_state_lz4"
+                                                        {
+                                                            // LZ4-compressed snapshot (TreeState or TreeSnapshot bytes)
+                                                            match super::tree_ops::lz4_decompress(
+                                                                &policy_state.config,
+                                                            ) {
+                                                                Ok(decompressed) => {
+                                                                    // Try TreeState first (backward compat)
+                                                                    if let Ok(tree_state) =
+                                                                        super::tree_ops::TreeState::from_bytes(
+                                                                            &decompressed,
+                                                                        )
+                                                                    {
+                                                                        sync_manager
+                                                                            .apply_remote_tree_operation(
+                                                                                policy_state
+                                                                                    .model_id
+                                                                                    .clone(),
+                                                                                tree_state,
+                                                                                actor,
+                                                                            );
+                                                                    } else if let Ok(snap) =
+                                                                        kv_index::snapshot::TreeSnapshot::from_bytes(
+                                                                            &decompressed,
+                                                                        )
+                                                                    {
+                                                                        let tree_state =
+                                                                            super::tree_ops::TreeState::from_snapshot(
+                                                                                policy_state
+                                                                                    .model_id
+                                                                                    .clone(),
+                                                                                &snap,
+                                                                                policy_state.version,
+                                                                            );
+                                                                        sync_manager
+                                                                            .apply_remote_tree_operation(
+                                                                                policy_state
+                                                                                    .model_id
+                                                                                    .clone(),
+                                                                                tree_state,
+                                                                                actor,
+                                                                            );
+                                                                    } else {
+                                                                        log::warn!(
+                                                                            "Failed to deserialize tree_state_lz4 payload for model {}",
+                                                                            policy_state.model_id
+                                                                        );
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to LZ4-decompress tree state for model {}: {e}",
+                                                                        policy_state.model_id
+                                                                    );
+                                                                }
+                                                            }
+                                                        } else if policy_state.policy_type
                                                             == "tree_state_delta"
                                                         {
                                                             // Delta: apply only the new operations
