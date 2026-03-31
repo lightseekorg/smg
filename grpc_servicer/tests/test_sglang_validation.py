@@ -10,15 +10,18 @@ from smg_grpc_servicer.sglang.validation import validate_tokenized_input
 
 class _Tokenized:
     def __init__(self, original_text: str, input_ids: list[int]):
+        """Store tokenized payload fields used by validation tests."""
         self.original_text = original_text
         self.input_ids = input_ids
 
 
 class _GrpcReqStub:
     def __init__(self, tokenized: _Tokenized | None):
+        """Mimic a protobuf request object with an optional `tokenized` field."""
         self.tokenized = tokenized
 
     def HasField(self, field_name: str) -> bool:  # noqa: N802
+        """Match protobuf HasField behavior for the `tokenized` presence check."""
         return field_name == "tokenized" and self.tokenized is not None
 
 
