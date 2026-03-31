@@ -188,9 +188,9 @@ async fn test_non_streaming_mcp_minimal_e2e_with_persistence() {
         assert_eq!(text, "Tool result consumed; here is the final answer.");
     } else {
         let call_entry = output.iter().find(|entry| {
-            entry.get("type") == Some(&serde_json::Value::String("function_tool_call".into()))
+            entry.get("type") == Some(&serde_json::Value::String("function_call".into()))
         });
-        assert!(call_entry.is_some(), "missing function tool call entry");
+        assert!(call_entry.is_some(), "missing function call entry");
         if let Some(entry) = call_entry {
             assert_eq!(
                 entry.get("status").and_then(|v| v.as_str()),
