@@ -56,12 +56,34 @@ class WorkerLauncher(ABC):
         return 1
 
     def gpu_env(self, args: argparse.Namespace, dp_rank: int, env: dict | None = None) -> dict:
-        """Build env dict with CUDA_VISIBLE_DEVICES for this worker's dp_rank."""
+        """Build env dict with CUDA_VISIBLE_DEVICES for this worker's dp_rank.
+
+        If CUDA_VISIBLE_DEVICES is already set in the environment, it is treated
+        as the available GPU pool and indexed into by dp_rank/tp_size.  This
+        allows users to control GPU assignment externally while still supporting
+        multi-worker partitioning.
+        """
         env = dict(env) if env is not None else os.environ.copy()
         tp_size = self._get_tp_size(args)
-        base_gpu = dp_rank * tp_size
-        gpu_ids = range(base_gpu, base_gpu + tp_size)
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
+        if tp_size <= 0:
+            raise ValueError(f"tp_size must be positive, got {tp_size}")
+        base_idx = dp_rank * tp_size
+
+        visible = env.get("CUDA_VISIBLE_DEVICES", "")
+        available_gpus = [g.strip() for g in visible.split(",") if g.strip()]
+
+        if available_gpus:
+            if base_idx + tp_size > len(available_gpus):
+                raise ValueError(
+                    f"CUDA_VISIBLE_DEVICES has {len(available_gpus)} GPU(s) but "
+                    f"dp_rank={dp_rank} with tp_size={tp_size} requires "
+                    f"index {base_idx}..{base_idx + tp_size - 1}"
+                )
+            gpu_ids = available_gpus[base_idx : base_idx + tp_size]
+        else:
+            gpu_ids = [str(g) for g in range(base_idx, base_idx + tp_size)]
+
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
         env["PYTHONUNBUFFERED"] = "1"
         return env
 
