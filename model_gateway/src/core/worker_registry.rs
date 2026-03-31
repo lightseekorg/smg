@@ -26,7 +26,7 @@ use crate::{
     core::{
         circuit_breaker::CircuitState,
         worker::{HealthChecker, RuntimeType, WorkerType},
-        ConnectionMode, Worker,
+        ConnectionMode, Job, JobQueue, Worker,
     },
     observability::metrics::Metrics,
 };
@@ -234,22 +234,6 @@ impl WorkerRegistry {
             worker_mutation_locks: Arc::new(DashMap::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
             model_retry_configs: Arc::new(DashMap::new()),
-        }
-    }
-
-    /// Create a cheap handle that shares all internal Arc state.
-    /// Unlike `Clone`, this is private so the singleton semantics are preserved.
-    fn shallow_clone(&self) -> Self {
-        Self {
-            workers: self.workers.clone(),
-            model_index: self.model_index.clone(),
-            hash_rings: self.hash_rings.clone(),
-            type_workers: self.type_workers.clone(),
-            connection_workers: self.connection_workers.clone(),
-            url_to_id: self.url_to_id.clone(),
-            worker_mutation_locks: self.worker_mutation_locks.clone(),
-            mesh_sync: self.mesh_sync.clone(),
-            model_retry_configs: self.model_retry_configs.clone(),
         }
     }
 
@@ -931,15 +915,12 @@ impl WorkerRegistry {
         &self,
         default_interval_secs: u64,
         remove_unhealthy: bool,
+        job_queue: Option<Arc<JobQueue>>,
     ) -> HealthChecker {
         let shutdown_notify = Arc::new(tokio::sync::Notify::new());
         let shutdown_clone = shutdown_notify.clone();
         let workers_ref = self.workers.clone();
-        let registry = if remove_unhealthy {
-            Some(self.shallow_clone())
-        } else {
-            None
-        };
+        let job_queue = if remove_unhealthy { job_queue } else { None };
 
         #[expect(
             clippy::disallowed_methods,
@@ -1005,8 +986,10 @@ impl WorkerRegistry {
                         .collect();
                     let checked_workers = futures::future::join_all(futs).await;
 
-                    // Remove workers that transitioned to unhealthy
-                    if let Some(ref registry) = registry {
+                    // Submit removal jobs for workers that transitioned to unhealthy.
+                    // Goes through the full removal workflow (policy registry,
+                    // worker registry, metrics, load monitor).
+                    if let Some(ref job_queue) = job_queue {
                         for worker in &checked_workers {
                             if !worker.is_healthy() {
                                 let url = worker.url().to_string();
@@ -1015,7 +998,16 @@ impl WorkerRegistry {
                                     "Removing unhealthy worker from registry"
                                 );
                                 next_check.remove(&url);
-                                registry.remove_by_url(&url);
+                                if let Err(e) = job_queue
+                                    .submit(Job::RemoveWorker { url: url.clone() })
+                                    .await
+                                {
+                                    tracing::error!(
+                                        worker_url = %url,
+                                        error = %e,
+                                        "Failed to submit worker removal job"
+                                    );
+                                }
                             }
                         }
                     }
@@ -1258,16 +1250,18 @@ mod tests {
         registry.register(Arc::from(worker)).unwrap();
         assert_eq!(registry.stats().total_workers, 1);
 
-        // Start health checker with remove_unhealthy=true and 1s interval
-        let _hc = registry.start_health_checker(1, true);
+        // Start health checker with remove_unhealthy=true but no job queue.
+        // Without a job queue the removal job can't be submitted, but the worker
+        // should still be marked unhealthy by the health check.
+        let _hc = registry.start_health_checker(1, true, None);
 
-        // Wait for the health check to run and remove the worker
+        // Wait for the health check to run and mark the worker unhealthy
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
         assert_eq!(
-            registry.stats().total_workers,
+            registry.stats().healthy_workers,
             0,
-            "Unhealthy worker should have been removed from the registry"
+            "Worker should be marked unhealthy after failed health checks"
         );
     }
 
@@ -1298,7 +1292,7 @@ mod tests {
         assert_eq!(registry.stats().total_workers, 1);
 
         // Start health checker with remove_unhealthy=false (default behavior)
-        let _hc = registry.start_health_checker(1, false);
+        let _hc = registry.start_health_checker(1, false, None);
 
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
