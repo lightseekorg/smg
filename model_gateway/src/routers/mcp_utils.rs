@@ -10,7 +10,7 @@ use smg_mcp::{
 use tracing::{debug, warn};
 
 /// Default maximum tool loop iterations (safety limit).
-pub const DEFAULT_MAX_ITERATIONS: usize = 5;
+pub const DEFAULT_MAX_ITERATIONS: usize = 10;
 
 /// Protocol-agnostic MCP server descriptor for connection setup.
 ///
