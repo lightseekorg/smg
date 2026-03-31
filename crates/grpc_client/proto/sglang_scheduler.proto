@@ -322,10 +322,13 @@ message EmbedRequest {
 }
 
 message EmbedResponse {
-  repeated float embedding = 1;
-  uint32 prompt_tokens = 2;
-  reserved 3;  // was cached_tokens — never populated
+  // Fields 1-3 reserved: old layout was request_id(1), oneof{EmbedComplete(2), EmbedError(3)}
+  reserved 1, 2, 3;
+
+  // Flat response — no oneof, errors via gRPC status
   uint32 embedding_dim = 4;
+  repeated float embedding = 5;
+  uint32 prompt_tokens = 6;
 }
 
 // =====================
