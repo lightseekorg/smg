@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use axum::body::Body;
 use bytes::Bytes;
 use http::{
-    header::{HeaderValue, CACHE_CONTROL, CONTENT_TYPE},
+    header::{HeaderValue, CACHE_CONTROL, CONNECTION, CONTENT_TYPE},
     StatusCode,
 };
 use serde::Serialize;
@@ -43,7 +43,7 @@ impl SseEncoder {
     ///
     /// Serializes directly into the reusable buffer via `serde_json::to_writer`
     /// (no intermediate `String`), then copies into `Bytes` for the channel.
-    pub fn encode_data<T: Serialize>(&mut self, value: &T) -> Result<Bytes, serde_json::Error> {
+    pub fn encode_data<T: Serialize>(&mut self, value: &T) -> Result<Bytes, SseEncodeError> {
         self.buf.clear();
         self.buf.extend_from_slice(b"data: ");
         serde_json::to_writer(&mut self.buf, value)?;
@@ -170,6 +170,9 @@ pub enum SseDecodeError {
     BufferOverflow,
     /// A complete frame contained invalid UTF-8.
     InvalidUtf8(std::str::Utf8Error),
+    /// `flush()` called while complete frames remain in the buffer.
+    /// Drain `next_frame()` to `None` before calling `flush()`.
+    IncompleteFlush,
 }
 
 impl std::fmt::Display for SseDecodeError {
@@ -177,6 +180,9 @@ impl std::fmt::Display for SseDecodeError {
         match self {
             SseDecodeError::BufferOverflow => write!(f, "SSE buffer overflow"),
             SseDecodeError::InvalidUtf8(e) => write!(f, "invalid UTF-8 in SSE frame: {e}"),
+            SseDecodeError::IncompleteFlush => {
+                write!(f, "flush() called with complete frames still in the buffer")
+            }
         }
     }
 }
@@ -185,7 +191,7 @@ impl std::error::Error for SseDecodeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             SseDecodeError::InvalidUtf8(e) => Some(e),
-            SseDecodeError::BufferOverflow => None,
+            SseDecodeError::BufferOverflow | SseDecodeError::IncompleteFlush => None,
         }
     }
 }
@@ -256,16 +262,14 @@ impl SseDecoder {
 
     /// Flush remaining data at end of stream.
     ///
-    /// # Precondition
-    ///
-    /// `next_frame()` must have been called in a loop until it returned `None`
-    /// before calling this method. If complete frames remain in the buffer,
-    /// they will be silently merged into one.
+    /// Returns `Err(SseDecodeError::IncompleteFlush)` if complete frames remain
+    /// in the buffer. Callers must drain `next_frame()` to `None` before calling
+    /// this method.
     pub fn flush(&mut self) -> Option<Result<SseFrame<'_>, SseDecodeError>> {
-        debug_assert!(
-            find_frame_boundary(&self.buf[self.consumed..]).is_none(),
-            "flush() called with complete frames still in the buffer — drain next_frame() first"
-        );
+        if find_frame_boundary(&self.buf[self.consumed..]).is_some() {
+            return Some(Err(SseDecodeError::IncompleteFlush));
+        }
+
         let remaining = &self.buf[self.consumed..];
         if remaining.is_empty() {
             return None;
@@ -484,6 +488,7 @@ pub fn build_sse_response(
             HeaderValue::from_static("text/event-stream; charset=utf-8"),
         )
         .header(CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+        .header(CONNECTION, HeaderValue::from_static("keep-alive"))
         .body(Body::from_stream(stream))
         .expect("infallible: static headers and valid status code")
 }
