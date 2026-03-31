@@ -55,9 +55,8 @@ impl DeepSeek31Parser {
         reason = "regex patterns are compile-time string literals"
     )]
     pub fn new() -> Self {
-        let tool_call_extractor =
-            Regex::new(r"(?s)<｜tool▁call▁begin｜>.*?<｜tool▁call▁end｜>")
-                .expect("Valid regex pattern");
+        let tool_call_extractor = Regex::new(r"(?s)<｜tool▁call▁begin｜>.*?<｜tool▁call▁end｜>")
+            .expect("Valid regex pattern");
 
         let func_detail_extractor =
             Regex::new(r"(?s)<｜tool▁call▁begin｜>(.*?)<｜tool▁sep｜>(.*?)<｜tool▁call▁end｜>")
@@ -67,9 +66,8 @@ impl DeepSeek31Parser {
             Regex::new(r"(?s)<｜tool▁call▁begin｜>(.*)<｜tool▁sep｜>(.*)")
                 .expect("Valid regex pattern");
 
-        let tool_call_end_pattern =
-            Regex::new(r"(?s)<｜tool▁call▁begin｜>.*?<｜tool▁call▁end｜>")
-                .expect("Valid regex pattern");
+        let tool_call_end_pattern = Regex::new(r"(?s)<｜tool▁call▁begin｜>.*?<｜tool▁call▁end｜>")
+            .expect("Valid regex pattern");
 
         Self {
             tool_call_extractor,
