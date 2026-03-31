@@ -8,7 +8,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use kv_index::RadixTree;
 use parking_lot::RwLock;
 use tracing::{debug, trace};
 
