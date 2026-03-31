@@ -898,6 +898,18 @@ impl Tree {
     }
 
     /// Helper to evict a specific number of chars for a tenant
+    /// Remove a tenant from all nodes in the tree.
+    /// Used for mesh eviction propagation — when a remote node reports
+    /// that a worker evicted all its cached prefixes.
+    pub fn remove_tenant_all(&self, tenant_id: &TenantId) {
+        let mut nodes: Vec<(NodeRef, u64)> = Vec::new();
+        self.collect_tenant_nodes(&self.root, tenant_id, &mut nodes);
+        for (node, _) in &nodes {
+            self.remove_tenant_from_node(node, tenant_id);
+        }
+        self.tenant_char_count.remove(tenant_id);
+    }
+
     fn evict_tenant_entries(&self, tenant_id: &TenantId, chars_to_evict: usize) {
         if chars_to_evict == 0 {
             return;

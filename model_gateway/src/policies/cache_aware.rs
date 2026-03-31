@@ -368,10 +368,11 @@ impl CacheAwarePolicy {
             string_tree.insert_text(&insert.node_path, &insert.worker_url);
         }
 
-        // Evictions: for now, rely on local eviction logic (evict_cache).
-        // Full eviction propagation is Step 6 of the efficient sync design.
-        // TODO: walk tree and remove worker tenant from all nodes
-        let _ = evictions;
+        // Apply evictions — remove the worker tenant from all nodes in the tree
+        for evict in evictions {
+            let tenant_id: Arc<str> = Arc::from(evict.worker_url.as_str());
+            string_tree.remove_tenant_all(&tenant_id);
+        }
     }
 
     /// Run cache eviction to prevent unbounded growth
