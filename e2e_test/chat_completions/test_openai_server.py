@@ -351,6 +351,9 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
+    @pytest.mark.skip_for_runtime(
+        "trtllm", reason="trtllm may return more top_logprobs than requested in streaming"
+    )
     def test_chat_completion_stream(self, model, api_client, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
         super().test_chat_completion_stream(model, api_client, logprobs, parallel_sample_num)
