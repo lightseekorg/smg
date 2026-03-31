@@ -17,6 +17,7 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  id-token: write
 
 jobs:
   # Auto-review on PR open/push
@@ -38,11 +39,14 @@ jobs:
           fetch-depth: 1
 
       - name: Export API key from pod env
-        run: echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$GITHUB_ENV"
+        run: |
+          echo "::add-mask::${ANTHROPIC_API_KEY}"
+          echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$GITHUB_ENV"
 
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -77,11 +81,14 @@ jobs:
           fetch-depth: 0
 
       - name: Export API key from pod env
-        run: echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$GITHUB_ENV"
+        run: |
+          echo "::add-mask::${ANTHROPIC_API_KEY}"
+          echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$GITHUB_ENV"
 
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
           claude_args: |
             --model claude-opus-4-6
             --max-turns 30
