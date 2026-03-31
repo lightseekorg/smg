@@ -126,9 +126,9 @@ class TestChatCompletion:
 
             if logprobs and not is_finished.get(index, False):
                 assert response.choices[0].logprobs is not None, "logprobs was not returned"
-                assert (
-                    len(response.choices[0].logprobs.content[0].top_logprobs) == logprobs
-                ), "top_logprobs count mismatch"
+                assert len(response.choices[0].logprobs.content[0].top_logprobs) == logprobs, (
+                    "top_logprobs count mismatch"
+                )
 
         for index in range(parallel_sample_num):
             assert index in finish_reason_counts, f"No finish_reason found for index {index}"
@@ -295,9 +295,9 @@ convenient hands-free control to your smart devices.
         if self.STOP_SEQUENCE_TRIMMED:
             assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
         else:
-            assert content.endswith(
-                ","
-            ), f"Stop sequence ',' should be the suffix of output: {content}"
+            assert content.endswith(","), (
+                f"Stop sequence ',' should be the suffix of output: {content}"
+            )
 
     def test_stop_sequences_stream(self, model, api_client):
         """Test that stop sequences work in streaming mode."""
@@ -333,9 +333,9 @@ convenient hands-free control to your smart devices.
         if self.STOP_SEQUENCE_TRIMMED:
             assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
         else:
-            assert content.endswith(
-                ","
-            ), f"Stop sequence ',' should be the suffix of output: {content}"
+            assert content.endswith(","), (
+                f"Stop sequence ',' should be the suffix of output: {content}"
+            )
 
     # -------------------------------------------------------------------------
     # Helper methods
