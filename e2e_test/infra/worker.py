@@ -268,6 +268,8 @@ class Worker:
             mode="w", suffix=".yaml", delete=False, prefix="trtllm_"
         )
         config_path.write("guided_decoding_backend: xgrammar\n")
+        for line in spec.get("trtllm_extra_config", []):
+            config_path.write(line + "\n")
         config_path.close()
 
         cmd = [

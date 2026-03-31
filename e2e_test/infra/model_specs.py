@@ -64,6 +64,10 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["chat", "streaming", "thinking", "reasoning"],
         "vllm_args": [] if _is_nightly else ["--enforce-eager"],
+        "trtllm_extra_config": [
+            "kv_cache_config:",
+            "  free_gpu_memory_fraction: 0.8",
+        ],
     },
     # Mistral for function calling
     "mistralai/Mistral-7B-Instruct-v0.3": {
