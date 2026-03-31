@@ -2,7 +2,12 @@
 //!
 //! This module contains shared streaming logic for both Regular and PD router.
 
-use std::{collections::HashMap, io, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    sync::Arc,
+    time::Instant,
+};
 
 use axum::response::Response;
 use bytes::Bytes;
@@ -2175,8 +2180,6 @@ impl StreamingProcessor {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 let processor = self.clone();
-                let dispatch_clone = dispatch.clone();
-                let tokenizer_clone = tokenizer.clone();
                 #[expect(
                     clippy::disallowed_methods,
                     reason = "streaming task is fire-and-forget; client disconnect terminates it"
@@ -2185,8 +2188,8 @@ impl StreamingProcessor {
                     let result = processor
                         .process_completion_streaming_chunks(
                             stream,
-                            dispatch_clone,
-                            tokenizer_clone,
+                            dispatch,
+                            tokenizer,
                             stop_params,
                             completion_request,
                             &tx,
@@ -2202,7 +2205,6 @@ impl StreamingProcessor {
             }
             context::ExecutionResult::Dual { prefill, decode } => {
                 let processor = self.clone();
-                let tokenizer_clone = tokenizer.clone();
                 #[expect(
                     clippy::disallowed_methods,
                     reason = "streaming task is fire-and-forget; client disconnect terminates it"
@@ -2213,7 +2215,7 @@ impl StreamingProcessor {
                             prefill,
                             *decode,
                             dispatch,
-                            tokenizer_clone,
+                            tokenizer,
                             stop_params,
                             completion_request,
                             &tx,
@@ -2245,7 +2247,7 @@ impl StreamingProcessor {
     /// Decodes tokens through stop decoder, handles `echo` (first chunk) and
     /// `suffix` (after final chunk), and emits `CompletionStreamResponse` SSE
     /// events. Supports n>1 via per-index tracking.
-    pub async fn process_completion_streaming_chunks(
+    async fn process_completion_streaming_chunks(
         &self,
         mut grpc_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
@@ -2270,6 +2272,7 @@ impl StreamingProcessor {
                 // If this arm is ever reached, it means a new code path bypassed Stage 1.
                 StringOrArray::Array(_) => {
                     debug_assert!(false, "Array prompt reached streaming — CompletionPreparationStage should have rejected it");
+                    warn!("Array prompt reached completion streaming — CompletionPreparationStage should have rejected it");
                     ""
                 }
             }
@@ -2287,9 +2290,11 @@ impl StreamingProcessor {
 
         let mut stop_decoders: HashMap<u32, StopSequenceDecoder> = HashMap::new();
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
-        let mut stopped_indices: HashMap<u32, bool> = HashMap::new();
+        let mut stopped_indices: HashSet<u32> = HashSet::new();
         let mut sse_buffer = Vec::with_capacity(512);
         let mut chunk_text = String::new();
+        // For n>1, each index shares the same prompt — use max across Complete
+        // messages rather than summing (same prompt tokenized once, not per-choice).
         let mut total_prompt = 0u32;
         let mut total_cached = 0u32;
         let mut total_completion = CompletionTokenTracker::new();
@@ -2305,7 +2310,7 @@ impl StreamingProcessor {
 
                     let index = chunk.index();
 
-                    if stopped_indices.contains_key(&index) {
+                    if stopped_indices.contains(&index) {
                         continue;
                     }
 
@@ -2359,7 +2364,7 @@ impl StreamingProcessor {
                         // Stop-decoder match takes precedence: emit "stop" even if
                         // the backend's eventual Complete carries "length". This is
                         // intentional — the local stop sequence fired first.
-                        stopped_indices.insert(index, true);
+                        stopped_indices.insert(index);
 
                         if let Some(sfx) = suffix {
                             let suffix_chunk = CompletionStreamResponse {
@@ -2406,7 +2411,7 @@ impl StreamingProcessor {
                     total_cached = total_cached.max(complete.cached_tokens());
                     total_completion.record_complete(&complete);
 
-                    if stopped_indices.contains_key(&index) {
+                    if stopped_indices.contains(&index) {
                         continue;
                     }
 
@@ -2543,7 +2548,7 @@ impl StreamingProcessor {
     /// PD dual-dispatch variant: consume prefill stream, then delegate decode
     /// stream to [`Self::process_completion_streaming_chunks`].
     #[expect(clippy::too_many_arguments)]
-    pub async fn process_dual_completion_streaming_chunks(
+    async fn process_dual_completion_streaming_chunks(
         &self,
         mut prefill_stream: ProtoStream,
         decode_stream: ProtoStream,
