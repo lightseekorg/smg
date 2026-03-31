@@ -707,7 +707,7 @@ impl Gossip for GossipService {
                                                         } else if policy_state.policy_type
                                                             == "tree_state_delta"
                                                         {
-                                                            // Legacy delta: apply only the new operations
+                                                            // Operation-level delta: apply only the new operations
                                                             if let Ok(delta) =
                                                                 super::tree_ops::TreeStateDelta::from_bytes(
                                                                     &policy_state.config,
@@ -719,9 +719,33 @@ impl Gossip for GossipService {
                                                                     );
                                                             }
                                                         } else if policy_state.policy_type
+                                                            == "tree_state_lz4"
+                                                        {
+                                                            // LZ4-compressed full state
+                                                            if let Ok(decompressed) =
+                                                                super::tree_ops::lz4_decompress(
+                                                                    &policy_state.config,
+                                                                )
+                                                            {
+                                                                if let Ok(tree_state) =
+                                                                    super::tree_ops::TreeState::from_bytes(
+                                                                        &decompressed,
+                                                                    )
+                                                                {
+                                                                    sync_manager
+                                                                        .apply_remote_tree_operation(
+                                                                            policy_state
+                                                                                .model_id
+                                                                                .clone(),
+                                                                            tree_state,
+                                                                            actor.clone(),
+                                                                        );
+                                                                }
+                                                            }
+                                                        } else if policy_state.policy_type
                                                             == "tree_state"
                                                         {
-                                                            // Full state: replace (backward compatible)
+                                                            // Uncompressed full state (backward compatible)
                                                             if let Ok(tree_state) =
                                                                 super::tree_ops::TreeState::from_bytes(
                                                                     &policy_state.config,

@@ -71,21 +71,49 @@ pub struct TenantDelta {
 /// A tenant was added or refreshed at a tree node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TenantInsert {
-    /// Full prefix path from tree root to this node (for node identification).
-    pub node_path: String,
+    /// Blake3 hash of the full prefix path from tree root to this node.
+    /// 8 bytes instead of 80k+ chars. Receiver looks up node by hash;
+    /// if unknown, buffers until next structure snapshot.
+    pub node_path_hash: u64,
     /// Worker URL that cached this prefix.
     pub worker_url: String,
     /// Epoch (timestamp) of the cache event. Max-epoch-wins on merge.
     pub epoch: u64,
 }
 
+/// Sentinel value for `TenantEvict.node_path_hash` meaning
+/// "evict this tenant from ALL nodes" (global eviction).
+pub const GLOBAL_EVICTION_HASH: u64 = 0;
+
 /// A tenant was evicted from a tree node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TenantEvict {
-    /// Full prefix path from tree root to this node.
-    pub node_path: String,
+    /// Blake3 hash of the prefix path where the tenant was evicted.
+    /// Use [`GLOBAL_EVICTION_HASH`] (0) to evict from all nodes.
+    pub node_path_hash: u64,
     /// Worker URL that evicted this prefix.
     pub worker_url: String,
+}
+
+/// Compute a compact 8-byte hash of a prefix path for node identification.
+#[expect(
+    clippy::unwrap_used,
+    reason = "blake3 always returns 32 bytes; [..8] into [u8; 8] cannot fail"
+)]
+pub fn hash_node_path(path: &str) -> u64 {
+    let hash = blake3::hash(path.as_bytes());
+    u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap())
+}
+
+/// Compute a compact 8-byte hash from token IDs.
+#[expect(
+    clippy::unwrap_used,
+    reason = "blake3 always returns 32 bytes; [..8] into [u8; 8] cannot fail"
+)]
+pub fn hash_token_path(tokens: &[u32]) -> u64 {
+    let bytes: Vec<u8> = tokens.iter().flat_map(|t| t.to_le_bytes()).collect();
+    let hash = blake3::hash(&bytes);
+    u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap())
 }
 
 impl TenantDelta {
@@ -107,9 +135,21 @@ impl TenantDelta {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        bincode::deserialize(bytes)
-            .map_err(|e| format!("Failed to deserialize TenantDelta: {e}"))
+        bincode::deserialize(bytes).map_err(|e| format!("Failed to deserialize TenantDelta: {e}"))
     }
+}
+
+// ── Compression helpers for structure snapshots ─────────────────────
+
+/// Compress bytes with LZ4 for wire efficiency.
+/// Radix tree data compresses well (repetitive edge labels, worker URLs).
+pub fn lz4_compress(data: &[u8]) -> Vec<u8> {
+    lz4_flex::compress_prepend_size(data)
+}
+
+/// Decompress LZ4-compressed bytes.
+pub fn lz4_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
+    lz4_flex::decompress_size_prepended(data).map_err(|e| format!("LZ4 decompression failed: {e}"))
 }
 
 // ── Legacy types (still used for periodic structure snapshots) ───────
@@ -491,14 +531,15 @@ mod tests {
 
     #[test]
     fn test_tenant_delta_round_trip() {
+        let path_hash = hash_node_path("Hello world, how are");
         let mut delta = TenantDelta::new("model1".to_string(), 42);
         delta.inserts.push(TenantInsert {
-            node_path: "Hello world, how are".to_string(),
+            node_path_hash: path_hash,
             worker_url: "grpc://w1:8000".to_string(),
             epoch: 1000,
         });
         delta.evictions.push(TenantEvict {
-            node_path: "Hello world, how are".to_string(),
+            node_path_hash: path_hash,
             worker_url: "grpc://w2:8000".to_string(),
         });
 
@@ -511,6 +552,7 @@ mod tests {
         assert_eq!(restored.version, 42);
         assert_eq!(restored.inserts.len(), 1);
         assert_eq!(restored.inserts[0].worker_url, "grpc://w1:8000");
+        assert_eq!(restored.inserts[0].node_path_hash, path_hash);
         assert_eq!(restored.inserts[0].epoch, 1000);
         assert_eq!(restored.evictions.len(), 1);
         assert_eq!(restored.evictions[0].worker_url, "grpc://w2:8000");
@@ -524,9 +566,9 @@ mod tests {
 
     #[test]
     fn test_tenant_delta_size_vs_tree_operation() {
-        // A TenantInsert with a 100-char prefix is ~150 bytes
+        // A TenantInsert with a hash is ~30 bytes (8 + ~20 URL + 8 epoch)
         let insert = TenantInsert {
-            node_path: "a".repeat(100),
+            node_path_hash: hash_node_path(&"a".repeat(100)),
             worker_url: "grpc://worker1:8000".to_string(),
             epoch: 12345,
         };

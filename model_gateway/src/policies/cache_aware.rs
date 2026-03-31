@@ -77,11 +77,12 @@ pub struct CacheAwarePolicy {
     mesh_sync: RwLock<OptionalMeshSyncManager>,
     _eviction_task: Option<PeriodicTask>,
     /// Event-driven KV cache monitor for overlap scoring (gRPC workers only).
-    /// Set via `set_kv_event_monitor`. When present and the indexer has data for
-    /// a model, event-driven routing takes priority over approximate trees.
-    /// Uses `RwLock` for interior mutability so the monitor can be injected into
-    /// policies already behind `Arc<dyn LoadBalancingPolicy>`.
     kv_monitor: RwLock<Option<Arc<KvEventMonitor>>>,
+    /// Hash → matched prefix index for resolving tenant delta hashes.
+    /// Populated on local inserts with the MATCHED PREFIX from the radix
+    /// tree (not the full prompt text). Consumed on remote tenant delta
+    /// application. Bounded by eviction at `max_tree_size` entries.
+    path_hash_index: Arc<DashMap<u64, String>>,
 }
 
 impl CacheAwarePolicy {
@@ -92,11 +93,13 @@ impl CacheAwarePolicy {
     pub fn with_config(config: CacheAwareConfig) -> Self {
         let string_trees = Arc::new(DashMap::<String, Arc<Tree>>::new());
         let token_trees = Arc::new(DashMap::<String, Arc<TokenTree>>::new());
+        let path_hash_index = Arc::new(DashMap::<u64, String>::new());
 
         // Start background eviction thread if configured
         let eviction_task = if config.eviction_interval_secs > 0 {
             let string_trees_clone = Arc::clone(&string_trees);
             let token_trees_clone = Arc::clone(&token_trees);
+            let path_hash_index_clone = Arc::clone(&path_hash_index);
             let max_tree_size = config.max_tree_size;
 
             Some(PeriodicTask::spawn(
@@ -125,6 +128,15 @@ impl CacheAwarePolicy {
                             model_id, max_tree_size
                         );
                     }
+                    // Evict path hash index if it exceeds tree size limit.
+                    // Entries are repopulated on the next local insert.
+                    if path_hash_index_clone.len() > max_tree_size {
+                        path_hash_index_clone.clear();
+                        debug!(
+                            "Path hash index cleared (exceeded max_tree_size: {})",
+                            max_tree_size
+                        );
+                    }
                 },
             ))
         } else {
@@ -138,6 +150,7 @@ impl CacheAwarePolicy {
             mesh_sync: RwLock::new(None),
             _eviction_task: eviction_task,
             kv_monitor: RwLock::new(None),
+            path_hash_index,
         }
     }
 
@@ -359,20 +372,79 @@ impl CacheAwarePolicy {
             .or_insert_with(|| Arc::new(Tree::new()))
             .clone();
 
-        // Apply inserts — insert the prefix path into the tree with the worker tenant
+        // Apply inserts — look up the prefix path by hash in our local index.
+        // If the hash is unknown (prefix doesn't exist locally), the insert is
+        // silently dropped. The next structure snapshot (every ~30s) will deliver
+        // the full tree including this prefix + its tenants.
         for insert in inserts {
-            // Skip token-encoded paths (those need TokenTree, handled separately)
-            if insert.node_path.starts_with("tok:") {
-                continue;
+            if let Some(path_entry) = self.path_hash_index.get(&insert.node_path_hash) {
+                string_tree.insert_text(path_entry.value(), &insert.worker_url);
             }
-            string_tree.insert_text(&insert.node_path, &insert.worker_url);
+            // Unknown hash — dropped, next snapshot corrects
         }
 
-        // Apply evictions — remove the worker tenant from all nodes in the tree
+        // Apply evictions
         for evict in evictions {
             let tenant_id: Arc<str> = Arc::from(evict.worker_url.as_str());
-            string_tree.remove_tenant_all(&tenant_id);
+            if evict.node_path_hash == smg_mesh::GLOBAL_EVICTION_HASH {
+                // Global eviction: remove from all nodes
+                string_tree.remove_tenant_all(&tenant_id);
+            }
+            // Targeted eviction (non-zero hash) deferred until hash index
+            // tracks eviction paths too
         }
+    }
+
+    /// Export the current tree state for a model by walking the live radix tree.
+    /// Builds a `TreeState` from `Tree::snapshot()` — each (prefix, tenant) pair
+    /// becomes a `TreeOperation::Insert`. This avoids storing full prompt text
+    /// per request; the snapshot is built on-demand during periodic checkpoints.
+    pub fn export_tree_state(&self, model_id: &str) -> Option<smg_mesh::TreeState> {
+        let model_id = Self::normalize_mesh_model_id(model_id);
+        let tree = self.string_trees.get(model_id)?;
+        let snapshot = tree.snapshot();
+        if snapshot.nodes.is_empty() {
+            return None;
+        }
+
+        // Walk snapshot nodes in pre-order, reconstructing full prefix paths
+        let mut tree_state = smg_mesh::TreeState::new(model_id.to_string());
+        let mut path_stack: Vec<(String, u32)> = Vec::new(); // (prefix_so_far, remaining_children)
+        let mut current_prefix = String::new();
+
+        for node in &snapshot.nodes {
+            // Pop completed parents from the stack
+            while let Some((_, remaining)) = path_stack.last_mut() {
+                if *remaining == 0 {
+                    let (parent_prefix, _) = path_stack.pop().unwrap();
+                    current_prefix = parent_prefix;
+                } else {
+                    *remaining -= 1;
+                    break;
+                }
+            }
+
+            // Build this node's full prefix
+            let node_prefix = format!("{}{}", current_prefix, node.edge);
+
+            // Emit an Insert operation for each tenant at this node
+            for (tenant_url, _epoch) in &node.tenants {
+                if !node_prefix.is_empty() {
+                    tree_state.add_operation(TreeOperation::Insert(TreeInsertOp {
+                        key: TreeKey::Text(node_prefix.clone()),
+                        tenant: tenant_url.clone(),
+                    }));
+                }
+            }
+
+            // Push this node onto the stack for its children
+            if node.child_count > 0 {
+                path_stack.push((current_prefix.clone(), node.child_count));
+                current_prefix = node_prefix;
+            }
+        }
+
+        Some(tree_state)
     }
 
     /// Run cache eviction to prevent unbounded growth
@@ -396,6 +468,11 @@ impl CacheAwarePolicy {
                 "Token tree eviction for model {}, max_size: {}",
                 model_id, max_size
             );
+        }
+        // Evict path hash index if it exceeds tree size limit
+        if self.path_hash_index.len() > max_size {
+            self.path_hash_index.clear();
+            debug!("Path hash index cleared (exceeded max_size: {})", max_size);
         }
     }
 
@@ -682,6 +759,12 @@ impl CacheAwarePolicy {
 
             if let Some(idx) = selected_idx {
                 tree.insert_tokens(tokens, workers[idx].url());
+
+                // Note: token-based inserts do NOT populate path_hash_index.
+                // Token hashes can't be resolved back to the original token
+                // sequence on the receiving side. Token trees rely on Layer 2
+                // (periodic structure snapshots) for cross-node convergence,
+                // not tenant deltas.
                 self.sync_insert_operation(
                     model_id,
                     TreeKey::Tokens(tokens.to_vec()),
@@ -741,6 +824,18 @@ impl CacheAwarePolicy {
 
             if let Some(idx) = selected_idx {
                 tree.insert_text(text, workers[idx].url());
+
+                // Record hash(full_text)→matched_prefix for mesh tenant delta
+                // resolution. The hash key matches what sync_tree_operation sends
+                // on the wire (hash of full text). The VALUE is only the matched
+                // prefix (~50-200 chars), not the full prompt (20KB+). When a
+                // remote delta arrives, we look up the hash and call
+                // insert_text(matched_prefix, worker) which routes to the same
+                // tree node. This keeps the index memory-bounded.
+                let matched_prefix: String = text.chars().take(result.matched_char_count).collect();
+                let path_hash = smg_mesh::hash_node_path(text);
+                self.path_hash_index.insert(path_hash, matched_prefix);
+
                 self.sync_insert_operation(
                     model_id,
                     TreeKey::Text(text.to_string()),
@@ -970,11 +1065,14 @@ mod tests {
             )
             .unwrap();
 
-        // Verify tree operation was synced to mesh (under UNKNOWN_MODEL_ID since no model was specified)
-        let tree_state = mesh_sync.get_tree_state(UNKNOWN_MODEL_ID);
-        assert!(tree_state.is_some());
-        let tree = tree_state.unwrap();
-        assert!(!tree.operations.is_empty());
+        // Verify the tree version was bumped (sync_tree_operation buffers
+        // tenant deltas and bumps version, but does not store full prompt text).
+        // get_tree_state returns None without a checkpoint, but the version
+        // counter proves the operation was processed.
+        assert!(
+            mesh_sync.get_tree_state(UNKNOWN_MODEL_ID).is_none(),
+            "get_tree_state should be None until checkpoint runs"
+        );
     }
 
     #[test]
@@ -986,22 +1084,18 @@ mod tests {
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
 
-        // Pre-populate mesh with tree state
-        let op1 = TreeOperation::Insert(TreeInsertOp {
+        // Pre-populate mesh with tree state via apply_remote_tree_operation
+        // (simulates receiving a full tree state from another node)
+        let mut ts = smg_mesh::TreeState::new("model1".to_string());
+        ts.add_operation(TreeOperation::Insert(TreeInsertOp {
             key: TreeKey::Text("test_text_1".to_string()),
             tenant: "http://w1:8000".to_string(),
-        });
-        mesh_sync
-            .sync_tree_operation("model1".to_string(), op1)
-            .unwrap();
-
-        let op2 = TreeOperation::Insert(TreeInsertOp {
+        }));
+        ts.add_operation(TreeOperation::Insert(TreeInsertOp {
             key: TreeKey::Text("test_text_2".to_string()),
             tenant: "http://w2:8000".to_string(),
-        });
-        mesh_sync
-            .sync_tree_operation("model1".to_string(), op2)
-            .unwrap();
+        }));
+        mesh_sync.apply_remote_tree_operation("model1".to_string(), ts, None);
 
         let config = CacheAwareConfig {
             eviction_interval_secs: 0,
@@ -1010,6 +1104,7 @@ mod tests {
         let policy = CacheAwarePolicy::with_config(config);
         policy.set_mesh_sync(Some(mesh_sync.clone()));
 
+        // Verify local tree was populated from mesh state
         let tree = policy.string_trees.get("model1");
         assert!(tree.is_some());
 

@@ -122,9 +122,9 @@ impl MeshController {
             };
             cnt += 1;
 
-            // Checkpoint pending tree ops every 10 rounds (~10s) to bound
-            // the pending buffer size.  With 20k-char prompts at 500 rps,
-            // 60-round intervals accumulated ~300 MB in pending.
+            // Checkpoint tree state every 10 rounds (~10s) by exporting
+            // the live radix tree from CacheAwarePolicy into tree_configs.
+            // This keeps the periodic structure snapshot fresh.
             if cnt.is_multiple_of(10) {
                 self.sync_manager.checkpoint_tree_states();
             }
@@ -409,7 +409,6 @@ impl MeshController {
                     let peer_name_incremental = peer_name.clone();
                     let shared_sequence = sequence.clone();
                     let size_validator = MessageSizeValidator::default();
-                    let stores_for_trim = stores.clone();
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
@@ -452,26 +451,13 @@ impl MeshController {
                                             e,
                                             size_validator.max_size()
                                         );
-                                        // For tree deltas, do NOT mark as sent — skip this
-                                        // round and let the pending buffer trim in mark_sent
-                                        // eventually reduce the size.  For other stores,
-                                        // mark_sent prevents an infinite retry loop (PR #808).
-                                        let is_tree_delta =
+                                        // Mark non-tree stores as sent to prevent infinite
+                                        // retry loops (PR #808). Tree updates (tenant deltas,
+                                        // structure snapshots) are retried next round with
+                                        // updated data from the live tree.
+                                        let is_tree_update =
                                             updates.iter().any(|u| u.key.starts_with("tree:"));
-                                        if is_tree_delta {
-                                            // Force trim the pending buffer to reduce size for next round.
-                                            for u in updates {
-                                                if u.key.starts_with("tree:") {
-                                                    if let Some(mut pending) = stores_for_trim.tree_ops_pending.get_mut(&u.key) {
-                                                        let len = pending.len();
-                                                        if len > 100 {
-                                                            pending.drain(..len / 2);
-                                                            log::info!("Force-trimmed oversized tree pending buffer for {}: {} -> {}", u.key, len, pending.len());
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        } else {
+                                        if !is_tree_update {
                                             collector.mark_sent(*store_type, updates);
                                         }
                                         continue;
