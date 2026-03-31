@@ -345,13 +345,23 @@ impl IncrementalUpdateCollector {
                         }
                     }
 
-                    // Phase 2: Scan tree_configs for keys not yet emitted
-                    // (e.g., after checkpoint + buffer drain, or remote-only entries).
-                    // tree_configs stores serialized TreeSnapshot bytes — use
-                    // them directly as the PolicyState config.
+                    // Phase 2: Scan tree_configs for keys not yet emitted.
+                    // Only emit keys that have NO pending ops — those are
+                    // remote-only entries that can't be covered by deltas.
+                    // Keys with pending ops are already covered by Phase 1
+                    // (delta or full-state fallback).
                     for entry in &self.stores.tree_configs {
                         let key = entry.key();
                         if emitted_tree_keys.contains(key.as_str()) {
+                            continue;
+                        }
+                        // Skip keys that have pending ops — Phase 1 handles them.
+                        if self
+                            .stores
+                            .tree_ops_pending
+                            .get(key.as_str())
+                            .is_some_and(|p| !p.is_empty())
+                        {
                             continue;
                         }
                         let current_version = self.stores.tree_version(key);
@@ -365,7 +375,6 @@ impl IncrementalUpdateCollector {
                         if config_bytes.is_empty() {
                             continue;
                         }
-                        // Validate bytes are a valid TreeSnapshot.
                         if kv_index::snapshot::TreeSnapshot::from_bytes(&config_bytes).is_err() {
                             debug!(
                                 "Skipping tree_configs full-state for {} — config corrupted",
@@ -465,7 +474,10 @@ impl IncrementalUpdateCollector {
         updates
     }
 
-    /// Collect all incremental updates across all stores
+    /// Collect all incremental updates across all stores.
+    ///
+    /// Tree updates are split into per-key batches so a single oversized
+    /// snapshot doesn't block delivery of small deltas or policy updates.
     pub fn collect_all_updates(&self) -> Vec<(StoreType, Vec<StateUpdate>)> {
         let mut all_updates = Vec::new();
 
@@ -477,7 +489,33 @@ impl IncrementalUpdateCollector {
             StoreType::RateLimit,
         ] {
             let updates = self.collect_updates_for_store(store_type);
-            if !updates.is_empty() {
+            if updates.is_empty() {
+                continue;
+            }
+
+            if store_type == StoreType::Policy {
+                // Split tree entries from policy entries so each gets
+                // its own batch with independent size checking.
+                // A 28 MB tree snapshot must not block 1 KB deltas.
+                let mut policy_updates = Vec::new();
+                let mut tree_batches: Vec<Vec<StateUpdate>> = Vec::new();
+
+                for update in updates {
+                    if update.key.starts_with("tree:") {
+                        // Each tree key gets its own batch
+                        tree_batches.push(vec![update]);
+                    } else {
+                        policy_updates.push(update);
+                    }
+                }
+
+                if !policy_updates.is_empty() {
+                    all_updates.push((StoreType::Policy, policy_updates));
+                }
+                for batch in tree_batches {
+                    all_updates.push((StoreType::Policy, batch));
+                }
+            } else {
                 all_updates.push((store_type, updates));
             }
         }
