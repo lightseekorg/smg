@@ -7,20 +7,23 @@ use openai_protocol::responses::{
 
 use super::ResponseFormat;
 
-/// Normalize an internal tool call identifier into an external `mcp_call.id`.
-pub fn mcp_response_item_id(tool_call_id: &str) -> String {
-    if tool_call_id.starts_with("mcp_") {
-        return tool_call_id.to_string();
+/// Normalize an MCP response item id source into an external `mcp_call.id`.
+///
+/// The input may be an upstream output item id (`fc_*`), an internal call id
+/// (`call_*`), or an already-normalized MCP id (`mcp_*`).
+pub fn mcp_response_item_id(source_id: &str) -> String {
+    if source_id.starts_with("mcp_") {
+        return source_id.to_string();
     }
 
-    if let Some(stripped) = tool_call_id
+    if let Some(stripped) = source_id
         .strip_prefix("call_")
-        .or_else(|| tool_call_id.strip_prefix("fc_"))
+        .or_else(|| source_id.strip_prefix("fc_"))
     {
         return format!("mcp_{stripped}");
     }
 
-    format!("mcp_{tool_call_id}")
+    format!("mcp_{source_id}")
 }
 
 /// Transforms MCP CallToolResult to OpenAI Responses API output items.
