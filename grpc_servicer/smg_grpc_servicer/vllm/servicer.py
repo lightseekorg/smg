@@ -206,6 +206,12 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         logger.info("Embed request %s", request_id)
 
         try:
+            if not request.HasField("tokenized"):
+                await context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    "EmbedRequest requires tokenized input",
+                )
+
             prompt: TokensPrompt = {"prompt_token_ids": list(request.tokenized.input_ids)}
             if request.tokenized.original_text:
                 prompt["prompt"] = request.tokenized.original_text

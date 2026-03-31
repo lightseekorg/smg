@@ -89,7 +89,7 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
                     function = "EmbeddingRequestBuildingStage::execute",
                     "TensorRT-LLM embedding not yet supported"
                 );
-                return Err(error::internal_error(
+                return Err(error::not_implemented(
                     "unsupported_backend",
                     "TensorRT-LLM embedding is not yet supported via gRPC",
                 ));
