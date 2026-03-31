@@ -36,14 +36,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Export API key from pod env
         run: |
           echo "::add-mask::${ANTHROPIC_API_KEY}"
           echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$GITHUB_ENV"
 
+      - name: Install gh CLI
+        run: |
+          if ! command -v gh &>/dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            apt-get update && apt-get install -y gh
+          fi
+
       - uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
@@ -54,8 +64,8 @@ jobs:
             Review this PR in three phases:
 
             Phase 1 — SMG subsystem review:
-            Use the /smg:review-pr skill. Follow its full process: fetch diff, map files
-            to checklist sections, check each applicable section.
+            Use the /smg:review-pr skill. Use `git diff origin/main...HEAD` to get the diff,
+            map files to checklist sections, check each applicable section.
 
             Phase 2 — Silent failure hunting:
             Spawn a pr-review-toolkit:silent-failure-hunter agent on the changed files.
@@ -104,6 +114,14 @@ jobs:
           echo "::add-mask::${ANTHROPIC_API_KEY}"
           echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$GITHUB_ENV"
 
+      - name: Install gh CLI
+        run: |
+          if ! command -v gh &>/dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            apt-get update && apt-get install -y gh
+          fi
+
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
@@ -111,6 +129,7 @@ jobs:
           claude_args: |
             --model claude-opus-4-6
             --max-turns 30
+            --allowedTools "Read,Glob,Grep,Bash,Agent,Skill,ToolSearch,TaskCreate,TaskUpdate,TaskGet"
           plugins: "pr-review-toolkit@claude-plugins-official"
           plugin_marketplaces: |
             https://github.com/anthropics/claude-plugins-official.git
