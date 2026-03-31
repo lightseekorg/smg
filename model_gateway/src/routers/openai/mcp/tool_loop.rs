@@ -524,6 +524,19 @@ fn stable_streaming_tool_item_id(
     }
 }
 
+fn non_streaming_tool_item_id_source(item_id: &str, response_format: &ResponseFormat) -> String {
+    match response_format {
+        ResponseFormat::Passthrough => item_id.to_string(),
+        ResponseFormat::WebSearchCall
+        | ResponseFormat::CodeInterpreterCall
+        | ResponseFormat::FileSearchCall => item_id
+            .strip_prefix("fc_")
+            .or_else(|| item_id.strip_prefix("call_"))
+            .unwrap_or(item_id)
+            .to_string(),
+    }
+}
+
 /// Inject MCP metadata into a streaming response
 pub(crate) fn inject_mcp_metadata_streaming(
     response: &mut Value,
@@ -648,11 +661,13 @@ pub(crate) async fn execute_tool_loop(
                     let error_output = format!("Invalid tool arguments: {e}");
                     let response_format = session.tool_response_format(&call.name);
                     let server_label = session.resolve_tool_server_label(&call.name);
+                    let tool_item_id =
+                        non_streaming_tool_item_id_source(&call.item_id, &response_format);
                     let error_json = json!({ "error": &error_output });
                     let transformed_item = build_transformed_mcp_call_item(
                         &error_json,
                         &response_format,
-                        &call.item_id,
+                        &tool_item_id,
                         &server_label,
                         &call.name,
                         &call.arguments,
@@ -705,10 +720,11 @@ pub(crate) async fn execute_tool_loop(
             let output_str = tool_output.output.to_string();
             let response_format = session.tool_response_format(&call.name);
             let server_label = session.resolve_tool_server_label(&call.name);
+            let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, &response_format);
             let transformed_item = build_transformed_mcp_call_item(
                 &tool_output.output,
                 &response_format,
-                &call.item_id,
+                &tool_item_id,
                 &server_label,
                 &call.name,
                 &call.arguments,
