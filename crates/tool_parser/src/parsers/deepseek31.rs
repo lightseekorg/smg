@@ -27,11 +27,9 @@ pub struct DeepSeek31Parser {
     tool_call_extractor: Regex,
     /// Regex for extracting function name and arguments from a complete block
     func_detail_extractor: Regex,
-    /// Regex for matching partial tool calls during streaming (used in Task 3)
-    #[expect(dead_code, reason = "used by parse_incremental, implemented in Task 3")]
+    /// Regex for matching partial tool calls during streaming
     partial_tool_call_regex: Regex,
-    /// Regex for removing completed tool calls from buffer (used in Task 3)
-    #[expect(dead_code, reason = "used by parse_incremental, implemented in Task 3")]
+    /// Regex for removing completed tool calls from buffer
     tool_call_end_pattern: Regex,
 
     /// Buffer for accumulating incomplete patterns across chunks
@@ -160,11 +158,132 @@ impl ToolParser for DeepSeek31Parser {
 
     async fn parse_incremental(
         &mut self,
-        _chunk: &str,
-        _tools: &[Tool],
+        chunk: &str,
+        tools: &[Tool],
     ) -> ParserResult<StreamingParseResult> {
-        // Placeholder — implemented in Task 3
-        Ok(StreamingParseResult::default())
+        self.buffer.push_str(chunk);
+        let current_text = self.buffer.clone();
+
+        let has_tool_call =
+            self.has_tool_markers(&current_text) || current_text.contains("<｜tool▁call▁begin｜>");
+
+        if !has_tool_call {
+            let mut normal_text = std::mem::take(&mut self.buffer);
+            for end_token in [
+                "<｜tool▁calls▁end｜>",
+                "<｜tool▁call▁end｜>",
+                "<｜end▁of▁sentence｜>",
+            ] {
+                normal_text = normal_text.replace(end_token, "");
+            }
+            return Ok(StreamingParseResult {
+                normal_text,
+                calls: vec![],
+            });
+        }
+
+        let tool_indices = helpers::get_tool_indices(tools);
+        let mut calls: Vec<ToolCallItem> = Vec::new();
+
+        if let Some(captures) = self.partial_tool_call_regex.captures(&current_text) {
+            let func_name = captures.get(1).map_or("", |m| m.as_str()).trim();
+            let func_args_raw = captures.get(2).map_or("", |m| m.as_str()).trim();
+
+            if !tool_indices.contains_key(func_name) {
+                tracing::debug!("Invalid tool name '{}' - skipping", func_name);
+                helpers::reset_current_tool_state(
+                    &mut self.buffer,
+                    &mut self.current_tool_name_sent,
+                    &mut self.streamed_args_for_tool,
+                    &self.prev_tool_call_arr,
+                );
+                return Ok(StreamingParseResult::default());
+            }
+
+            if self.current_tool_id == -1 {
+                self.current_tool_id = 0;
+                self.prev_tool_call_arr = Vec::new();
+                self.streamed_args_for_tool = vec![String::new()];
+            }
+
+            helpers::ensure_capacity(
+                self.current_tool_id,
+                &mut self.prev_tool_call_arr,
+                &mut self.streamed_args_for_tool,
+            );
+
+            if self.current_tool_name_sent {
+                let tool_id = self.current_tool_id as usize;
+                let last_sent = self
+                    .streamed_args_for_tool
+                    .get(tool_id)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+
+                let argument_diff = func_args_raw
+                    .strip_prefix(last_sent)
+                    .unwrap_or(func_args_raw);
+
+                if !argument_diff.is_empty() {
+                    calls.push(ToolCallItem {
+                        tool_index: tool_id,
+                        name: None,
+                        parameters: argument_diff.to_string(),
+                    });
+                    if tool_id < self.streamed_args_for_tool.len() {
+                        self.streamed_args_for_tool[tool_id].push_str(argument_diff);
+                    }
+                }
+
+                if helpers::is_complete_json(func_args_raw) {
+                    if let Ok(parsed_args) = serde_json::from_str::<Value>(func_args_raw) {
+                        let tool_id = self.current_tool_id as usize;
+                        if tool_id < self.prev_tool_call_arr.len() {
+                            if let Some(obj) = self.prev_tool_call_arr[tool_id].as_object_mut() {
+                                obj.insert("arguments".to_string(), parsed_args);
+                            }
+                        }
+                    }
+
+                    if let Some(mat) = self.tool_call_end_pattern.find(&current_text) {
+                        self.buffer = current_text[mat.end()..].to_string();
+                    } else {
+                        self.buffer.clear();
+                    }
+
+                    let result = StreamingParseResult {
+                        normal_text: String::new(),
+                        calls,
+                    };
+
+                    self.current_tool_id += 1;
+                    self.current_tool_name_sent = false;
+                    return Ok(result);
+                }
+            } else {
+                calls.push(ToolCallItem {
+                    tool_index: self.current_tool_id as usize,
+                    name: Some(func_name.to_string()),
+                    parameters: String::new(),
+                });
+                self.current_tool_name_sent = true;
+
+                let tool_id = self.current_tool_id as usize;
+                if self.prev_tool_call_arr.len() <= tool_id {
+                    self.prev_tool_call_arr
+                        .resize_with(tool_id + 1, || Value::Null);
+                }
+                self.prev_tool_call_arr[tool_id] = serde_json::json!({
+                    "name": func_name,
+                    "arguments": {},
+                });
+            }
+        }
+
+        Ok(StreamingParseResult {
+            normal_text: String::new(),
+            calls,
+        })
     }
 
     fn has_tool_markers(&self, text: &str) -> bool {

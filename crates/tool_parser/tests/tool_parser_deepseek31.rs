@@ -108,3 +108,116 @@ async fn test_deepseek31_no_tool_calls() {
     assert_eq!(normal_text, input);
     assert!(tools.is_empty());
 }
+
+use common::create_test_tools;
+
+#[tokio::test]
+async fn test_deepseek31_streaming_single_tool() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeek31Parser::new();
+
+    let chunks = vec![
+        "<｜tool▁calls▁begin｜>",
+        "<｜tool▁call▁begin｜>",
+        "get_weather",
+        "<｜tool▁sep｜>",
+        r#"{"location"#,
+        r#": "Beijing"#,
+        r#", "units": "#,
+        r#""metric"}"#,
+        "<｜tool▁call▁end｜>",
+        "<｜tool▁calls▁end｜>",
+    ];
+
+    let mut found_name = false;
+    let mut collected_args = String::new();
+
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if let Some(name) = call.name {
+                assert_eq!(name, "get_weather");
+                found_name = true;
+            }
+            if !call.parameters.is_empty() {
+                collected_args.push_str(&call.parameters);
+            }
+        }
+    }
+
+    assert!(found_name, "Should have found tool name during streaming");
+    assert!(!collected_args.is_empty(), "Should have streamed arguments");
+}
+
+#[tokio::test]
+async fn test_deepseek31_streaming_multiple_tools() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeek31Parser::new();
+
+    let chunks = vec![
+        "<｜tool▁calls▁begin｜>",
+        "<｜tool▁call▁begin｜>search<｜tool▁sep｜>",
+        r#"{"query": "rust"}"#,
+        "<｜tool▁call▁end｜>",
+        "<｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>",
+        r#"{"location": "Tokyo"}"#,
+        "<｜tool▁call▁end｜>",
+        "<｜tool▁calls▁end｜>",
+    ];
+
+    let mut tool_names: Vec<String> = Vec::new();
+
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if let Some(name) = call.name {
+                tool_names.push(name);
+            }
+        }
+    }
+
+    assert_eq!(tool_names, vec!["search", "get_weather"]);
+}
+
+#[tokio::test]
+async fn test_deepseek31_streaming_text_before_tools() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeek31Parser::new();
+
+    let chunks = vec![
+        "Here is ",
+        "the result",
+        "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>search<｜tool▁sep｜>",
+        r#"{"query": "test"}"#,
+        "<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+    ];
+
+    let mut normal_text = String::new();
+    let mut found_tool = false;
+
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        normal_text.push_str(&result.normal_text);
+        for call in result.calls {
+            if call.name.is_some() {
+                found_tool = true;
+            }
+        }
+    }
+
+    assert_eq!(normal_text, "Here is the result");
+    assert!(found_tool);
+}
+
+#[tokio::test]
+async fn test_deepseek31_streaming_end_tokens_stripped() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeek31Parser::new();
+
+    // After tool calls complete, end tokens may arrive as separate chunks
+    let result = parser
+        .parse_incremental("<｜tool▁calls▁end｜>", &tools)
+        .await
+        .unwrap();
+    assert!(result.normal_text.is_empty() || !result.normal_text.contains("<｜tool▁calls▁end｜>"));
+}
