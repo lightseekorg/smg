@@ -70,12 +70,15 @@ jobs:
             Before posting any comment, first fetch all existing review comments
             on this PR by running:
               gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate
-            Build a set of (path, line, first_sentence) from existing comments by
-            any bot (claude[bot], coderabbitai[bot], gemini-code-assist[bot],
-            chatgpt-codex-connector[bot], github-actions[bot]).
-            Do NOT post a new comment if an existing comment already covers the
-            same file, same line (±3 lines), and same issue.
-            Only comment on NEW issues or issues on NEWLY changed lines.
+
+            Self-dedup (strict): If claude[bot] already commented on the same
+            file and line (±3 lines), SKIP — do not post regardless of wording.
+
+            Cross-bot awareness (soft): If another bot (coderabbitai[bot],
+            gemini-code-assist[bot], chatgpt-codex-connector[bot]) already
+            commented on the same file and line (±3 lines), READ their comment.
+            Only post if you have a genuinely different concern not covered by
+            the existing comment. Do not rephrase the same issue.
 
             Steps:
             1. Read REVIEW.md for review guidelines.
