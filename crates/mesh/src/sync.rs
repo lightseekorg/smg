@@ -1799,15 +1799,19 @@ mod tests {
     }
 
     #[test]
-    fn test_collector_sends_delta_not_full_state() {
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
+    fn test_collector_sends_tenant_delta() {
+        use crate::{
+            incremental::IncrementalUpdateCollector,
+            stores::StoreType,
+            tree_ops::TenantDelta,
+        };
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
 
-        // Sync a tree operation (this populates both the policy store and tree_ops_pending)
+        // Sync a tree operation — buffers a tenant insert
         manager
-            .sync_tree_operation("model1".to_string(), make_insert_op("a", "http://w:8000"))
+            .sync_tree_operation("model1".to_string(), make_insert_op("hello world", "http://w:8000"))
             .unwrap();
 
         let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
@@ -1815,7 +1819,7 @@ mod tests {
 
         assert!(!updates.is_empty(), "expected at least one policy update");
 
-        // The update should be a delta (policy_type = "tree_state_delta")
+        // The update should be a tenant delta (not full tree state)
         let tree_update = updates
             .iter()
             .find(|u| u.key.starts_with("tree:"))
@@ -1824,15 +1828,19 @@ mod tests {
         let policy_state: PolicyState =
             bincode::deserialize(&tree_update.value).expect("deserialize PolicyState");
         assert_eq!(
-            policy_state.policy_type, "tree_state_delta",
-            "expected delta, got full state"
+            policy_state.policy_type, "tenant_delta",
+            "expected tenant_delta, got {}",
+            policy_state.policy_type
         );
 
-        // Verify the delta deserializes correctly
+        // Verify the tenant delta deserializes and contains the insert
         let delta =
-            TreeStateDelta::from_bytes(&policy_state.config).expect("deserialize TreeStateDelta");
+            TenantDelta::from_bytes(&policy_state.config).expect("deserialize TenantDelta");
         assert_eq!(delta.model_id, "model1");
-        assert_eq!(delta.operations.len(), 1);
+        assert_eq!(delta.inserts.len(), 1);
+        assert_eq!(delta.inserts[0].worker_url, "http://w:8000");
+        assert_eq!(delta.inserts[0].node_path, "hello world");
+        assert!(delta.evictions.is_empty());
     }
 
     #[test]
@@ -1997,8 +2005,10 @@ mod tests {
         // Checkpoint to materialize into policy store (like production)
         manager.checkpoint_tree_states();
 
-        // Clear tree_ops_pending to simulate buffer drain
+        // Clear tree_ops_pending and tenant delta buffers to simulate buffer drain
         stores.tree_ops_pending.remove("tree:model1");
+        stores.tenant_delta_inserts.remove("model1");
+        stores.tenant_delta_evictions.remove("model1");
 
         // New collector (simulating reconnected peer)
         let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
@@ -2291,10 +2301,12 @@ mod tests {
         // Checkpoint to materialize into policy store
         manager.checkpoint_tree_states();
 
-        // Overwrite pending buffer with empty vec
+        // Overwrite pending buffer with empty vec and clear tenant delta buffers
         stores
             .tree_ops_pending
             .insert("tree:model1".to_string(), Vec::new());
+        stores.tenant_delta_inserts.remove("model1");
+        stores.tenant_delta_evictions.remove("model1");
 
         let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
         let updates = collector.collect_updates_for_store(StoreType::Policy);
@@ -2308,7 +2320,7 @@ mod tests {
 
         let policy_state: PolicyState =
             bincode::deserialize(&tree_update.value).expect("deserialize PolicyState");
-        // Empty pending vec should cause fallback to full state
+        // Empty pending vec + empty tenant deltas should cause fallback to full state
         assert_eq!(
             policy_state.policy_type, "tree_state",
             "empty pending vec should fall back to full state, got: {}",
@@ -2350,7 +2362,8 @@ mod tests {
                     let policy_state: PolicyState =
                         bincode::deserialize(&update.value).expect("data should not be corrupted");
                     assert!(
-                        policy_state.policy_type == "tree_state_delta"
+                        policy_state.policy_type == "tenant_delta"
+                            || policy_state.policy_type == "tree_state_delta"
                             || policy_state.policy_type == "tree_state"
                     );
 

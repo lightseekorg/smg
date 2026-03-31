@@ -14,7 +14,7 @@ use tracing::{debug, trace};
 use super::{
     service::gossip::StateUpdate,
     stores::{AppState, MembershipState, PolicyState, StateStores, StoreType, WorkerState},
-    tree_ops::{TreeState, TreeStateDelta},
+    tree_ops::{TenantDelta, TreeState, TreeStateDelta},
 };
 
 /// Trait for extracting version from state types
@@ -224,6 +224,86 @@ impl IncrementalUpdateCollector {
                 // --- Tree keys (driven by atomic tree_versions, not CRDT) ---
                 if tree_changed {
                     let mut emitted_tree_keys = std::collections::HashSet::new();
+
+                    // Phase 0: Drain tenant delta buffers — lightweight per-gossip-round sync.
+                    // Each TenantDelta is ~100 bytes per insert vs ~200KB for full TreeOperation.
+                    // Models emitted here are skipped in Phase 1 (no need for heavy ops).
+                    {
+                        let models_with_inserts: Vec<String> = self
+                            .stores
+                            .tenant_delta_inserts
+                            .iter()
+                            .filter(|entry| !entry.value().is_empty())
+                            .map(|entry| entry.key().clone())
+                            .collect();
+                        let models_with_evictions: Vec<String> = self
+                            .stores
+                            .tenant_delta_evictions
+                            .iter()
+                            .filter(|entry| !entry.value().is_empty())
+                            .map(|entry| entry.key().clone())
+                            .collect();
+
+                        let all_models: std::collections::HashSet<String> = models_with_inserts
+                            .into_iter()
+                            .chain(models_with_evictions)
+                            .collect();
+
+                        for model_id in all_models {
+                            let key = format!("tree:{model_id}");
+                            let current_version = self.stores.tree_version(&key);
+
+                            let inserts = self
+                                .stores
+                                .tenant_delta_inserts
+                                .remove(&model_id)
+                                .map(|(_, v)| v)
+                                .unwrap_or_default();
+                            let evictions = self
+                                .stores
+                                .tenant_delta_evictions
+                                .remove(&model_id)
+                                .map(|(_, v)| v)
+                                .unwrap_or_default();
+
+                            if inserts.is_empty() && evictions.is_empty() {
+                                continue;
+                            }
+
+                            let delta = TenantDelta {
+                                model_id: model_id.clone(),
+                                version: current_version,
+                                inserts,
+                                evictions,
+                            };
+
+                            if let Ok(delta_bytes) = delta.to_bytes() {
+                                let delta_policy = PolicyState {
+                                    model_id: model_id.clone(),
+                                    policy_type: "tenant_delta".to_string(),
+                                    config: delta_bytes,
+                                    version: current_version,
+                                };
+                                if let Ok(serialized) = bincode::serialize(&delta_policy) {
+                                    updates.push(StateUpdate {
+                                        key: key.clone(),
+                                        value: serialized,
+                                        version: current_version,
+                                        actor: self.self_name.clone(),
+                                        timestamp,
+                                    });
+                                    debug!(
+                                        "Collected tenant delta: {} ({} inserts, {} evictions, version: {})",
+                                        model_id,
+                                        delta.inserts.len(),
+                                        delta.evictions.len(),
+                                        current_version,
+                                    );
+                                    emitted_tree_keys.insert(key);
+                                }
+                            }
+                        }
+                    }
 
                     // Phase 1: Scan tree_ops_pending for keys with pending ops.
                     for entry in &self.stores.tree_ops_pending {
