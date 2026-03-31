@@ -2266,7 +2266,8 @@ impl StreamingProcessor {
         let prompt_text: &str = if echo {
             match &completion_request.prompt {
                 StringOrArray::String(s) => s.as_str(),
-                StringOrArray::Array(a) => a.first().map(|s| s.as_str()).unwrap_or_default(),
+                // Array prompts are rejected by CompletionPreparationStage (Stage 1)
+                StringOrArray::Array(_) => "",
             }
         } else {
             ""
