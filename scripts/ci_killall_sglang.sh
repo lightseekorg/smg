@@ -34,20 +34,16 @@ else
 
     NODE_INFO="${NODE_IP:-$(hostname)}"
     echo "Running on node: $NODE_INFO"
-    # Check for remaining GPU processes only when full nuke was attempted
     if [ $# -gt 0 ]; then
-        # Give the GPU driver a moment to release compute contexts after kill -9
         sleep 2
-        if ! REMAINING_PIDS_RAW=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); then
-            echo "::error::GPU cleanup verification failed on node '$NODE_INFO': unable to query nvidia-smi."
+        if ! DIRTY_GPUS=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null); then
+            echo "::error::Unable to query GPU memory on node '$NODE_INFO'."
             exit 1
         fi
-        REMAINING_PIDS=$(printf '%s\n' "$REMAINING_PIDS_RAW" | awk '/^[0-9]+$/' | sort -u)
-        if [ -n "$REMAINING_PIDS" ]; then
-            echo "::error::GPU cleanup failed on node '$NODE_INFO'. Remaining processes:"
-            for pid in $REMAINING_PIDS; do
-                echo "  PID $pid: $(ps -p "$pid" -o user=,args= 2>/dev/null || echo 'process info unavailable')"
-            done
+        DIRTY_GPUS=$(echo "$DIRTY_GPUS" | awk -F', ' '$2 > 100 {print "GPU " $1 ": " $2 " MiB used"}')
+        if [ -n "$DIRTY_GPUS" ]; then
+            echo "::error::GPU not clean on node '$NODE_INFO':"
+            echo "$DIRTY_GPUS"
             exit 1
         fi
     fi
