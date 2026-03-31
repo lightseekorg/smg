@@ -52,11 +52,18 @@ impl SseEncoder {
     }
 
     /// Encode `event: {type}\ndata: {json}\n\n` (Anthropic/Responses format).
+    ///
+    /// # Panics (debug only)
+    /// Panics if `event_type` contains newline characters, which would break SSE framing.
     pub fn encode_event<T: Serialize>(
         &mut self,
         event_type: &str,
         value: &T,
     ) -> Result<Bytes, serde_json::Error> {
+        debug_assert!(
+            !event_type.contains(['\r', '\n']),
+            "event_type must not contain newlines: {event_type:?}"
+        );
         self.buf.clear();
         self.buf.extend_from_slice(b"event: ");
         self.buf.extend_from_slice(event_type.as_bytes());
@@ -210,10 +217,14 @@ impl SseDecoder {
         }
         let frame_str = match std::str::from_utf8(remaining) {
             Ok(s) => s,
-            Err(e) => return Some(Err(SseDecodeError::InvalidUtf8(e))),
+            Err(e) => {
+                self.consumed = self.buf.len();
+                return Some(Err(SseDecodeError::InvalidUtf8(e)));
+            }
         };
         // Only trim trailing newlines/CR to detect empty frames, not payload whitespace
         if frame_str.trim_end_matches(['\r', '\n']).is_empty() {
+            self.consumed = self.buf.len();
             return None;
         }
         self.consumed = self.buf.len();
