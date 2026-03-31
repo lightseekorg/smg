@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass, field
 from typing import IO, Any
 
+import yaml
+
 from .constants import (
     DEFAULT_HOST,
     DEFAULT_STARTUP_TIMEOUT,
@@ -265,9 +267,9 @@ class Worker:
         config_path = tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False, prefix="trtllm_"
         )
-        config_path.write("guided_decoding_backend: xgrammar\n")
-        for line in spec.get("trtllm_extra_config", []):
-            config_path.write(line + "\n")
+        config = {"guided_decoding_backend": "xgrammar"}
+        config.update(spec.get("trtllm_extra_config", {}))
+        yaml.dump(config, config_path, default_flow_style=False)
         config_path.close()
 
         cmd = [
