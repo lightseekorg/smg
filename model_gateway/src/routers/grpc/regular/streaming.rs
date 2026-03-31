@@ -428,19 +428,95 @@ impl StreamingProcessor {
                                 let stream_buffer = stream_buffers.entry(index).or_default();
                                 stream_buffer.push_str(&text);
 
-                                let content_chunk =
-                                    ChatCompletionStreamResponse::builder(request_id, model)
-                                        .created(created)
-                                        .add_choice_content(index, "assistant", text)
-                                        .maybe_system_fingerprint(system_fingerprint)
-                                        .build();
+                                // Route flushed text through tool parser (same
+                                // path as normal streaming chunks) so that tool
+                                // calls arriving in the stop-decoder buffer are
+                                // not silently dropped as plain content.
+                                let tool_choice_enabled = !matches!(
+                                    tool_choice,
+                                    Some(ToolChoice::Value(ToolChoiceValue::None))
+                                );
 
-                                let sse_chunk =
-                                    serde_json::to_string(&content_chunk).map_err(|e| {
-                                        format!("Failed to serialize content chunk: {e}")
-                                    })?;
-                                tx.send(Ok(Bytes::from(format!("data: {sse_chunk}\n\n"))))
-                                    .map_err(|_| "Failed to send flushed content".to_string())?;
+                                if let Some(tools_ref) = tools.as_ref() {
+                                    if tool_choice_enabled
+                                        && (tool_parser_available || used_json_schema)
+                                        && !is_specific_function
+                                    {
+                                        let tool_chunks = self
+                                            .process_tool_calls_stream(
+                                                &text,
+                                                index,
+                                                &mut tool_parsers,
+                                                &mut has_tool_calls,
+                                                tools_ref,
+                                                request_id,
+                                                model,
+                                                created,
+                                                system_fingerprint,
+                                                history_tool_calls_count,
+                                                used_json_schema,
+                                            )
+                                            .await;
+
+                                        for chunk in tool_chunks {
+                                            Self::format_sse_chunk_into(
+                                                &mut sse_buffer,
+                                                &chunk,
+                                            );
+                                            tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                                                .map_err(|_| {
+                                                    "Failed to send flushed tool chunk"
+                                                        .to_string()
+                                                })?;
+                                        }
+                                        // Text is consumed by the parser (emitted
+                                        // as tool calls or buffered internally).
+                                        // Skip sending it as plain content — same
+                                        // `continue` logic as the normal streaming
+                                        // path at line ~399.
+                                    } else {
+                                        let content_chunk =
+                                            ChatCompletionStreamResponse::builder(
+                                                request_id, model,
+                                            )
+                                            .created(created)
+                                            .add_choice_content(
+                                                index, "assistant", text,
+                                            )
+                                            .maybe_system_fingerprint(system_fingerprint)
+                                            .build();
+
+                                        let sse_chunk =
+                                            serde_json::to_string(&content_chunk)
+                                                .map_err(|e| {
+                                                    format!(
+                                                        "Failed to serialize chunk: {e}"
+                                                    )
+                                                })?;
+                                        tx.send(Ok(Bytes::from(format!(
+                                            "data: {sse_chunk}\n\n"
+                                        ))))
+                                        .map_err(|_| {
+                                            "Failed to send flushed content".to_string()
+                                        })?;
+                                    }
+                                } else {
+                                    let content_chunk =
+                                        ChatCompletionStreamResponse::builder(request_id, model)
+                                            .created(created)
+                                            .add_choice_content(index, "assistant", text)
+                                            .maybe_system_fingerprint(system_fingerprint)
+                                            .build();
+
+                                    let sse_chunk = serde_json::to_string(&content_chunk)
+                                        .map_err(|e| {
+                                            format!("Failed to serialize content chunk: {e}")
+                                        })?;
+                                    tx.send(Ok(Bytes::from(format!("data: {sse_chunk}\n\n"))))
+                                        .map_err(|_| {
+                                            "Failed to send flushed content".to_string()
+                                        })?;
+                                }
                             }
                         }
                     }
