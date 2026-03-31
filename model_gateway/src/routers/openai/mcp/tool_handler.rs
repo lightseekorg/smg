@@ -65,6 +65,7 @@ pub(crate) struct FunctionCallInProgress {
     pub call_id: String,
     pub name: String,
     pub arguments_buffer: String,
+    pub item_id: Option<String>,
     pub output_index: usize,
     pub last_obfuscation: Option<String>,
     pub assigned_output_index: Option<usize>,
@@ -76,6 +77,7 @@ impl FunctionCallInProgress {
             call_id,
             name: String::new(),
             arguments_buffer: String::new(),
+            item_id: None,
             output_index,
             last_obfuscation: None,
             assigned_output_index: None,
@@ -217,6 +219,10 @@ impl StreamingToolHandler {
         let call = self.get_or_create_call(output_index, item);
         call.call_id = call_id.to_string();
         call.name = name.to_string();
+        call.item_id = item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|id| id.to_string());
         call.assigned_output_index = Some(assigned_index);
 
         StreamAction::Forward
@@ -285,6 +291,9 @@ impl StreamingToolHandler {
 
             if let Some(call_id) = delta.get("call_id").and_then(|v| v.as_str()) {
                 call.call_id = call_id.to_string();
+            }
+            if let Some(item_id) = delta.get("id").and_then(|v| v.as_str()) {
+                call.item_id = Some(item_id.to_string());
             }
             if let Some(name) = delta.get("name").and_then(|v| v.as_str()) {
                 call.name.push_str(name);

@@ -22,5 +22,5 @@
 mod transformer;
 mod types;
 
-pub use transformer::ResponseTransformer;
+pub use transformer::{mcp_response_item_id, ResponseTransformer};
 pub use types::ResponseFormat;
