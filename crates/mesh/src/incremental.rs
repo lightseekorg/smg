@@ -252,33 +252,47 @@ impl IncrementalUpdateCollector {
                             let unsent_start = already_sent.min(pending.len());
                             let unsent_ops = &pending[unsent_start..];
                             if !unsent_ops.is_empty() {
+                                // Cap ops per delta to keep serialized size
+                                // under the gRPC message limit. Each op can
+                                // be up to ~20 KB (long prompt text), so 200
+                                // ops ≈ 4 MB which fits in 10 MB with overhead.
+                                const MAX_OPS_PER_DELTA: usize = 200;
+                                let capped_ops = if unsent_ops.len() > MAX_OPS_PER_DELTA {
+                                    &unsent_ops[..MAX_OPS_PER_DELTA]
+                                } else {
+                                    unsent_ops
+                                };
+                                let capped_version = last_sent_version + capped_ops.len() as u64;
+
                                 let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
                                 let delta = TreeStateDelta {
                                     model_id: model_id.clone(),
-                                    operations: unsent_ops.to_vec(),
+                                    operations: capped_ops.to_vec(),
                                     base_version: last_sent_version,
-                                    new_version: current_version,
+                                    new_version: capped_version,
                                 };
                                 if let Ok(delta_bytes) = delta.to_bytes() {
                                     let delta_policy = PolicyState {
                                         model_id,
                                         policy_type: "tree_state_delta".to_string(),
                                         config: delta_bytes,
-                                        version: current_version,
+                                        version: capped_version,
                                     };
                                     if let Ok(serialized) = bincode::serialize(&delta_policy) {
                                         updates.push(StateUpdate {
                                             key: key.clone(),
                                             value: serialized,
-                                            version: current_version,
+                                            version: capped_version,
                                             actor: self.self_name.clone(),
                                             timestamp,
                                         });
                                         debug!(
-                                            "Collected tree delta: {} ({} ops, version: {})",
+                                            "Collected tree delta: {} ({}/{} ops, version: {}->{})",
                                             key,
+                                            capped_ops.len(),
                                             unsent_ops.len(),
-                                            current_version
+                                            last_sent_version,
+                                            capped_version,
                                         );
                                         sent_delta = true;
                                         emitted_tree_keys.insert(key.clone());

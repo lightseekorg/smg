@@ -2369,24 +2369,18 @@ mod tests {
             "mark_sent should have trimmed the buffer: before={pending_before}, after={pending_after}",
         );
 
-        // Collector B (new peer) should still get data
+        // Collector B (new peer) — after trim, the buffer starts at a
+        // higher offset. B has last_sent=0 which is below the buffer's
+        // base_version, so no delta can be constructed. Without full-state
+        // fallback, B gets no tree updates from the collector. B would
+        // receive the tree via the initial snapshot exchange (ping_server).
         let collector_b = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
         let updates_b = collector_b.collect_updates_for_store(StoreType::Policy);
+        let tree_update_b = updates_b.iter().find(|u| u.key.starts_with("tree:"));
+        // No tree update expected — B's version gap can't be covered by delta
         assert!(
-            !updates_b.is_empty(),
-            "collector B should still get updates after A's trim"
-        );
-
-        let tree_update_b = updates_b
-            .iter()
-            .find(|u| u.key.starts_with("tree:"))
-            .expect("expected tree update for collector B");
-        let policy_b: PolicyState = bincode::deserialize(&tree_update_b.value).unwrap();
-        // Should get a delta (from remaining buffer) or full snapshot fallback
-        assert!(
-            policy_b.policy_type == "tree_state_delta" || policy_b.policy_type == "tree_snapshot",
-            "unexpected policy_type: {}",
-            policy_b.policy_type
+            tree_update_b.is_none(),
+            "new peer should not get tree delta after trim (version gap)"
         );
     }
 
@@ -2561,12 +2555,15 @@ mod tests {
             "expected oldest half to be drained"
         );
 
-        // Subsequent collection should succeed with the reduced buffer
+        // A new collector (fresh peer) can't construct a delta after trim
+        // because its last_sent=0 is below the buffer's base_version.
+        // It would receive the tree via snapshot exchange instead.
         let collector2 = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
         let updates = collector2.collect_updates_for_store(StoreType::Policy);
+        let tree_updates: Vec<_> = updates.iter().filter(|u| u.key.starts_with("tree:")).collect();
         assert!(
-            !updates.is_empty(),
-            "collection after trim should produce updates"
+            tree_updates.is_empty(),
+            "new peer should not get tree delta after trim (version gap)"
         );
     }
 
