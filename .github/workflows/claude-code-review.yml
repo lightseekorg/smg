@@ -74,7 +74,7 @@ jobs:
           claude_args: |
             --model claude-opus-4-6
             --max-turns 30
-            --disallowedTools "Edit,Write,NotebookEdit,Bash(rm:*),Bash(git push:*),Bash(git commit:*),Bash(git checkout:*),Bash(git reset:*)"
+            --allowedTools "Read,Glob,Grep,Bash,Agent,Skill,ToolSearch,TaskCreate,TaskUpdate,TaskGet"
           show_full_output: true
           plugins: "pr-review-toolkit@claude-plugins-official"
           plugin_marketplaces: |
