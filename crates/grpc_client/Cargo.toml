@@ -33,7 +33,7 @@ prost-types.workspace = true
 futures.workspace = true
 
 # Archive validation
-sha2 = "0.10"
+sha2 = "0.11"
 zip = "8.1"
 tempfile = "3.8"
 

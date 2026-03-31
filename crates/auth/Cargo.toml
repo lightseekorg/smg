@@ -30,7 +30,7 @@ thiserror.workspace = true
 tracing.workspace = true
 # Only used by auth
 jsonwebtoken = { version = "9.3", default-features = false, features = ["use_pem"] }
-sha2 = "0.10"
+sha2 = "0.11"
 url = "2.5"
 
 [dev-dependencies]
