@@ -147,47 +147,17 @@ impl MultimodalComponents {
     async fn load_configs_from_hf(
         model_id: &str,
     ) -> Result<(serde_json::Value, PreProcessorConfig)> {
-        let files = llm_tokenizer::hub::download_files_from_hf(
-            model_id,
-            &["config.json", "preprocessor_config.json"],
-        )
-        .await
-        .with_context(|| {
-            format!("Failed to download config files from HuggingFace for model: {model_id}")
-        })?;
-
-        let config_path = files.get("config.json").ok_or_else(|| {
-            anyhow::anyhow!("config.json not found in HuggingFace repo: {model_id}")
-        })?;
-        let config: serde_json::Value = std::fs::read_to_string(config_path)
+        // Reuse the tokenizer download function which downloads tokenizer files
+        // AND config files to the HF cache, returning the cache directory path.
+        // If files were already downloaded (e.g., during tokenizer init), this
+        // returns the cached path without re-downloading.
+        let cache_dir = llm_tokenizer::hub::download_tokenizer_from_hf(model_id)
+            .await
             .with_context(|| {
-                format!(
-                    "Failed to read downloaded config.json at {}",
-                    config_path.display()
-                )
-            })
-            .and_then(|s| {
-                serde_json::from_str(&s)
-                    .with_context(|| format!("Failed to parse config.json for model: {model_id}"))
+                format!("Failed to resolve HuggingFace cache for model: {model_id}")
             })?;
 
-        let pp_config_path = files.get("preprocessor_config.json").ok_or_else(|| {
-            anyhow::anyhow!("preprocessor_config.json not found in HuggingFace repo: {model_id}")
-        })?;
-        let preprocessor_config = std::fs::read_to_string(pp_config_path)
-            .with_context(|| {
-                format!(
-                    "Failed to read downloaded preprocessor_config.json at {}",
-                    pp_config_path.display()
-                )
-            })
-            .and_then(|s| {
-                PreProcessorConfig::from_json(&s).with_context(|| {
-                    format!("Failed to parse preprocessor_config.json for model: {model_id}")
-                })
-            })?;
-
-        Ok((config, preprocessor_config))
+        Self::load_configs_from_disk(&cache_dir)
     }
 }
 
