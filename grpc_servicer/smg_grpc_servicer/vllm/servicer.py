@@ -229,7 +229,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 logger.warning(msg)
                 await context.abort(grpc.StatusCode.INTERNAL, msg)
 
-            embedding = final_output.outputs.data.tolist()
+            data = final_output.outputs.data
+            if hasattr(data, "squeeze"):
+                data = data.squeeze()
+            embedding = data.tolist()
 
             return vllm_engine_pb2.EmbedResponse(
                 embedding=embedding,
