@@ -9,7 +9,7 @@ use std::{
 };
 
 use parking_lot::RwLock;
-use tracing::{debug, info, trace};
+use tracing::{debug, trace};
 
 use super::{
     service::gossip::StateUpdate,
@@ -352,7 +352,7 @@ impl IncrementalUpdateCollector {
                             .filter(|u| u.key.starts_with("tree:"))
                             .count();
                         if phase0_count > 0 {
-                            info!(
+                            debug!(
                                 phase0_updates = phase0_count,
                                 phase0_total_bytes,
                                 "Phase 0: tenant delta buffer drain produced updates"
@@ -414,7 +414,7 @@ impl IncrementalUpdateCollector {
                         // churn that the OS never reclaims.
                         const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024; // 8 MB
                         if compressed.len() > MAX_SNAPSHOT_BYTES {
-                            info!(
+                            debug!(
                                 key = %key,
                                 compressed_bytes = compressed.len(),
                                 limit = MAX_SNAPSHOT_BYTES,
@@ -455,7 +455,7 @@ impl IncrementalUpdateCollector {
                     let phase2_count = updates.len() - phase2_start;
                     let phase2_bytes: usize =
                         updates[phase2_start..].iter().map(|u| u.value.len()).sum();
-                    info!(
+                    debug!(
                         phase2_updates = phase2_count,
                         phase2_total_bytes = phase2_bytes,
                         "Phase 2: tree_configs scan {}",

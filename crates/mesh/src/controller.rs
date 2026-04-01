@@ -193,17 +193,6 @@ impl MeshController {
                     "GC: CRDT policy store operation log length"
                 );
 
-                // Log sync_connections map size and total pending retry count
-                let sync_conn_count = self.sync_connections.lock().await.len();
-                let total_pending_retries: u32 =
-                    retry_managers.values().map(|rm| rm.attempt_count()).sum();
-                log::info!(
-                    sync_connections = sync_conn_count,
-                    total_pending_retries,
-                    "Gossip round {}: connection and retry state",
-                    cnt,
-                );
-
                 // Clean up retry managers for peers no longer in cluster state
                 retry_managers.retain(|peer_name, _| map.contains_key(peer_name));
             }
@@ -427,7 +416,7 @@ impl MeshController {
         let sync_connections = self.sync_connections.clone();
 
         // Log connection lifecycle: spawn
-        log::info!(
+        log::debug!(
             peer = %peer_name,
             "spawn_sync_stream_handler called — spawning handler task"
         );
@@ -445,7 +434,7 @@ impl MeshController {
 
                 // Log active connection count at handler start
                 let active_connections = sync_connections.lock().await.len();
-                log::info!(
+                log::debug!(
                     peer = %peer_name,
                     active_connections,
                     "Sync stream handler started"
@@ -475,7 +464,7 @@ impl MeshController {
                         stores.clone(),
                         self_name.clone(),
                     ));
-                    log::info!(
+                    log::debug!(
                         peer = %peer_name,
                         "IncrementalUpdateCollector created"
                     );
@@ -1018,7 +1007,7 @@ impl MeshController {
 
                 incremental_sender_handle.abort();
                 let _ = incremental_sender_handle.await;
-                log::info!(
+                log::debug!(
                     peer = %peer_name,
                     "sync_stream_handler exited — handler dropped"
                 );
