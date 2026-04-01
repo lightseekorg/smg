@@ -9,7 +9,7 @@ use std::{
 };
 
 use parking_lot::RwLock;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 use super::{
     service::gossip::StateUpdate,
@@ -340,6 +340,26 @@ impl IncrementalUpdateCollector {
                         }
                     }
 
+                    // Phase 0 summary: log total serialized size of tenant delta updates
+                    {
+                        let phase0_total_bytes: usize = updates
+                            .iter()
+                            .filter(|u| u.key.starts_with("tree:"))
+                            .map(|u| u.value.len())
+                            .sum();
+                        let phase0_count = updates
+                            .iter()
+                            .filter(|u| u.key.starts_with("tree:"))
+                            .count();
+                        if phase0_count > 0 {
+                            info!(
+                                phase0_updates = phase0_count,
+                                phase0_total_bytes,
+                                "Phase 0: tenant delta buffer drain produced updates"
+                            );
+                        }
+                    }
+
                     // Phase 1 (removed): tree_ops_pending is no longer populated.
                     // Full prompt text is not stored per-request. Instead,
                     // checkpoint_tree_states exports from the live radix tree.
@@ -352,6 +372,7 @@ impl IncrementalUpdateCollector {
                     //   - TreeSnapshot bytes (from local checkpoint_tree_states)
                     // Both are sent LZ4-compressed as "tree_state_lz4". The
                     // receiver detects the format and converts as needed.
+                    let phase2_start = updates.len();
                     for entry in &self.stores.tree_configs {
                         let key = entry.key();
                         if emitted_tree_keys.contains(key.as_str()) {
@@ -393,11 +414,11 @@ impl IncrementalUpdateCollector {
                         // churn that the OS never reclaims.
                         const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024; // 8 MB
                         if compressed.len() > MAX_SNAPSHOT_BYTES {
-                            debug!(
-                                "Skipping oversized tree snapshot for {} ({} bytes compressed > {} limit)",
-                                key,
-                                compressed.len(),
-                                MAX_SNAPSHOT_BYTES,
+                            info!(
+                                key = %key,
+                                compressed_bytes = compressed.len(),
+                                limit = MAX_SNAPSHOT_BYTES,
+                                "Skipping oversized tree snapshot — compressed size exceeds limit"
                             );
                             // Mark as sent via a write lock so we don't retry every round.
                             drop(last_sent);
@@ -429,6 +450,21 @@ impl IncrementalUpdateCollector {
                             );
                         }
                     }
+
+                    // Phase 2 summary
+                    let phase2_count = updates.len() - phase2_start;
+                    let phase2_bytes: usize =
+                        updates[phase2_start..].iter().map(|u| u.value.len()).sum();
+                    info!(
+                        phase2_updates = phase2_count,
+                        phase2_total_bytes = phase2_bytes,
+                        "Phase 2: tree_configs scan {}",
+                        if phase2_count > 0 {
+                            "produced updates"
+                        } else {
+                            "no new updates"
+                        }
+                    );
                 }
             }
             StoreType::App => {

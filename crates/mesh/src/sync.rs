@@ -4,11 +4,14 @@
 
 use std::{
     fmt::Debug,
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use parking_lot::RwLock;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::{
     service::gossip::NodeStatus,
@@ -87,6 +90,13 @@ pub struct MeshSyncManager {
     tree_state_subscribers: Arc<RwLock<Vec<Arc<dyn TreeStateSubscriber>>>>,
     worker_state_subscribers: Arc<RwLock<Vec<Arc<dyn WorkerStateSubscriber>>>>,
 }
+
+/// Atomic counters for memory debug logging (sync_tree_insert_hash + sync_tree_operation).
+static TREE_INSERT_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Atomic counters for apply_remote_tenant_delta logging.
+static TENANT_DELTA_APPLY_COUNT: AtomicU64 = AtomicU64::new(0);
+static TENANT_DELTA_SKIP_COUNT: AtomicU64 = AtomicU64::new(0);
 
 impl MeshSyncManager {
     pub fn new(stores: Arc<StateStores>, self_name: String) -> Self {
@@ -507,6 +517,25 @@ impl MeshSyncManager {
             });
 
         self.stores.bump_tree_version(&key);
+
+        // Memory debug: log every 1000 calls
+        let call_count = TREE_INSERT_CALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if call_count.is_multiple_of(1000) {
+            let delta_buf_size: usize = self
+                .stores
+                .tenant_delta_inserts
+                .iter()
+                .map(|e| e.value().len())
+                .sum();
+            let tree_version = self.stores.tree_version(&key);
+            info!(
+                total_calls = call_count,
+                tenant_delta_inserts_buf_size = delta_buf_size,
+                tree_version,
+                model_id,
+                "sync_tree_insert_hash: periodic memory debug"
+            );
+        }
     }
 
     #[expect(
@@ -561,6 +590,25 @@ impl MeshSyncManager {
 
         // Bump the lightweight atomic version counter (O(1), no serialization).
         self.stores.bump_tree_version(&key);
+
+        // Memory debug: log every 1000 calls (shares counter with sync_tree_insert_hash)
+        let call_count = TREE_INSERT_CALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if call_count.is_multiple_of(1000) {
+            let delta_buf_size: usize = self
+                .stores
+                .tenant_delta_inserts
+                .iter()
+                .map(|e| e.value().len())
+                .sum();
+            let tree_version = self.stores.tree_version(&key);
+            info!(
+                total_calls = call_count,
+                tenant_delta_inserts_buf_size = delta_buf_size,
+                tree_version,
+                model_id,
+                "sync_tree_operation: periodic memory debug"
+            );
+        }
 
         Ok(())
     }
@@ -828,6 +876,17 @@ impl MeshSyncManager {
                 current_version,
                 "Skipping stale tenant delta"
             );
+            TENANT_DELTA_SKIP_COUNT.fetch_add(1, Ordering::Relaxed);
+            // Periodic log for skipped deltas
+            let apply_count = TENANT_DELTA_APPLY_COUNT.load(Ordering::Relaxed);
+            let skip_count = TENANT_DELTA_SKIP_COUNT.load(Ordering::Relaxed);
+            if (apply_count + skip_count).is_multiple_of(100) {
+                info!(
+                    total_applied = apply_count,
+                    total_skipped_stale = skip_count,
+                    "apply_remote_tenant_delta: periodic memory debug"
+                );
+            }
             return;
         }
 
@@ -839,6 +898,22 @@ impl MeshSyncManager {
             "Applying remote tenant delta"
         );
 
+        // Track resolved vs unresolved hashes for memory debugging.
+        // All hashes in the delta are pre-computed; "resolved" here means
+        // non-zero node_path_hash (targeted insert), "unresolved" means 0
+        // (global eviction sentinel — receiver must broadcast to all nodes).
+        let resolved_hashes = delta
+            .inserts
+            .iter()
+            .filter(|i| i.node_path_hash != 0)
+            .count()
+            + delta
+                .evictions
+                .iter()
+                .filter(|e| e.node_path_hash != crate::tree_ops::GLOBAL_EVICTION_HASH)
+                .count();
+        let unresolved_hashes = delta.inserts.len() + delta.evictions.len() - resolved_hashes;
+
         // Notify subscribers (CacheAwarePolicy) to apply directly to local tree
         let subscribers = self.tree_state_subscribers.read();
         for subscriber in subscribers.iter() {
@@ -848,6 +923,19 @@ impl MeshSyncManager {
         // Advance version and bump generation so collector re-scans
         self.stores.advance_tree_version(&key, delta.version);
         self.stores.tree_generation.fetch_add(1, Ordering::Release);
+
+        // Memory debug: log every 100 calls
+        let apply_count = TENANT_DELTA_APPLY_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        let skip_count = TENANT_DELTA_SKIP_COUNT.load(Ordering::Relaxed);
+        if apply_count.is_multiple_of(100) {
+            info!(
+                total_applied = apply_count,
+                total_skipped_stale = skip_count,
+                resolved_hashes,
+                unresolved_hashes,
+                "apply_remote_tenant_delta: periodic memory debug"
+            );
+        }
     }
 
     /// Checkpoint tree state by exporting compact snapshots from the live

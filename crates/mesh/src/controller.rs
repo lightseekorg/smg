@@ -186,6 +186,24 @@ impl MeshController {
                     self.stores.worker.len(),
                 );
 
+                // Log CRDT policy store operation log length for memory debugging
+                let policy_oplog_len = self.stores.policy.get_operation_log().len();
+                log::info!(
+                    policy_oplog_len,
+                    "GC: CRDT policy store operation log length"
+                );
+
+                // Log sync_connections map size and total pending retry count
+                let sync_conn_count = self.sync_connections.lock().await.len();
+                let total_pending_retries: u32 =
+                    retry_managers.values().map(|rm| rm.attempt_count()).sum();
+                log::info!(
+                    sync_connections = sync_conn_count,
+                    total_pending_retries,
+                    "Gossip round {}: connection and retry state",
+                    cnt,
+                );
+
                 // Clean up retry managers for peers no longer in cluster state
                 retry_managers.retain(|peer_name, _| map.contains_key(peer_name));
             }
@@ -406,6 +424,13 @@ impl MeshController {
     ) -> tokio::task::JoinHandle<()> {
         let stores = self.stores.clone();
         let sync_manager = self.sync_manager.clone();
+        let sync_connections = self.sync_connections.clone();
+
+        // Log connection lifecycle: spawn
+        log::info!(
+            peer = %peer_name,
+            "spawn_sync_stream_handler called — spawning handler task"
+        );
 
         // Create a span for the spawned task
         let span = tracing::info_span!(
@@ -418,7 +443,13 @@ impl MeshController {
             async move {
                 use tokio_stream::StreamExt;
 
-                log::info!("Sync stream handler started for peer {}", peer_name);
+                // Log active connection count at handler start
+                let active_connections = sync_connections.lock().await.len();
+                log::info!(
+                    peer = %peer_name,
+                    active_connections,
+                    "Sync stream handler started"
+                );
 
                 let sequence = Arc::new(AtomicU64::new(0));
 
@@ -444,6 +475,10 @@ impl MeshController {
                         stores.clone(),
                         self_name.clone(),
                     ));
+                    log::info!(
+                        peer = %peer_name,
+                        "IncrementalUpdateCollector created"
+                    );
                     let tx_incremental = tx.clone();
                     let self_name_incremental = self_name.clone();
                     let peer_name_incremental = peer_name.clone();
@@ -983,7 +1018,10 @@ impl MeshController {
 
                 incremental_sender_handle.abort();
                 let _ = incremental_sender_handle.await;
-                log::info!("Sync stream handler stopped for peer {}", peer_name);
+                log::info!(
+                    peer = %peer_name,
+                    "sync_stream_handler exited — handler dropped"
+                );
             }
             .instrument(span),
         )
