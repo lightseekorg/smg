@@ -2,7 +2,12 @@
 //!
 //! This module contains shared streaming logic for both Regular and PD router.
 
-use std::{collections::HashMap, io, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    sync::Arc,
+    time::Instant,
+};
 
 use axum::response::Response;
 use bytes::Bytes;
@@ -15,6 +20,7 @@ use openai_protocol::{
     common::{
         FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
     },
+    completion::{CompletionRequest, CompletionStreamChoice, CompletionStreamResponse},
     generate::GenerateRequest,
     messages::{
         self, ContentBlock, ContentBlockDelta, CreateMessageRequest, Message, MessageDelta,
@@ -2127,5 +2133,480 @@ impl StreamingProcessor {
         }
 
         result
+    }
+
+    // =========================================================================
+    // Completions API streaming support
+    // =========================================================================
+
+    /// Entry point for `/v1/completions` streaming.
+    pub fn process_completion_streaming_response(
+        self: Arc<Self>,
+        execution_result: context::ExecutionResult,
+        completion_request: Arc<CompletionRequest>,
+        dispatch: context::DispatchMetadata,
+        tokenizer: Arc<dyn Tokenizer>,
+    ) -> Response {
+        let stop_params = (
+            completion_request.stop.clone(),
+            completion_request.stop_token_ids.clone(),
+            completion_request.skip_special_tokens,
+            completion_request.no_stop_trim,
+        );
+
+        let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
+
+        match execution_result {
+            context::ExecutionResult::Single { stream } => {
+                let processor = self.clone();
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "streaming task is fire-and-forget; client disconnect terminates it"
+                )]
+                tokio::spawn(async move {
+                    let result = processor
+                        .process_completion_streaming_chunks(
+                            stream,
+                            dispatch,
+                            tokenizer,
+                            stop_params,
+                            completion_request,
+                            &tx,
+                        )
+                        .await;
+
+                    if let Err(e) = result {
+                        utils::send_error_sse(&tx, &e, "internal_error");
+                    }
+
+                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                });
+            }
+            context::ExecutionResult::Dual { prefill, decode } => {
+                let processor = self.clone();
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "streaming task is fire-and-forget; client disconnect terminates it"
+                )]
+                tokio::spawn(async move {
+                    let result = processor
+                        .process_dual_completion_streaming_chunks(
+                            prefill,
+                            *decode,
+                            dispatch,
+                            tokenizer,
+                            stop_params,
+                            completion_request,
+                            &tx,
+                        )
+                        .await;
+
+                    if let Err(e) = result {
+                        utils::send_error_sse(&tx, &e, "internal_error");
+                    }
+
+                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                });
+            }
+            context::ExecutionResult::Embedding { .. } => {
+                utils::send_error_sse(
+                    &tx,
+                    "Embeddings not supported in streaming mode",
+                    "invalid_request_error",
+                );
+                let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+            }
+        }
+
+        build_sse_response(rx)
+    }
+
+    /// Process completion streaming chunks from a single stream.
+    ///
+    /// Decodes tokens through stop decoder, handles `echo` (first chunk) and
+    /// `suffix` (after final chunk), and emits `CompletionStreamResponse` SSE
+    /// events. Supports n>1 via per-index tracking.
+    async fn process_completion_streaming_chunks(
+        &self,
+        mut grpc_stream: ProtoStream,
+        dispatch: context::DispatchMetadata,
+        tokenizer: Arc<dyn Tokenizer>,
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        completion_request: Arc<CompletionRequest>,
+        tx: &UnboundedSender<Result<Bytes, io::Error>>,
+    ) -> Result<(), String> {
+        let start_time = Instant::now();
+        let mut first_token_time: Option<Instant> = None;
+
+        let request_id = &dispatch.request_id;
+        let model = &dispatch.model;
+        let created = dispatch.created;
+        let system_fingerprint = dispatch.weight_version.as_deref();
+
+        let echo = completion_request.echo;
+        let prompt_text: &str = if echo {
+            match &completion_request.prompt {
+                StringOrArray::String(s) => s.as_str(),
+                // Array prompts are rejected by CompletionPreparationStage (Stage 1).
+                // If this arm is ever reached, it means a new code path bypassed Stage 1.
+                StringOrArray::Array(_) => {
+                    debug_assert!(false, "Array prompt reached streaming — CompletionPreparationStage should have rejected it");
+                    warn!("Array prompt reached completion streaming — CompletionPreparationStage should have rejected it");
+                    ""
+                }
+            }
+        } else {
+            ""
+        };
+        let suffix = completion_request.suffix.as_deref();
+        // TODO: wire per-token logprob streaming when backend support is available
+        let _request_logprobs = completion_request.logprobs.is_some();
+        let include_usage = completion_request
+            .stream_options
+            .as_ref()
+            .and_then(|opts| opts.include_usage)
+            .unwrap_or(false);
+
+        let mut stop_decoders: HashMap<u32, StopSequenceDecoder> = HashMap::new();
+        let mut is_firsts: HashMap<u32, bool> = HashMap::new();
+        let mut stopped_indices: HashSet<u32> = HashSet::new();
+        let mut sse_buffer = Vec::with_capacity(512);
+        let mut chunk_text = String::new();
+        // For n>1, each index shares the same prompt — use max across Complete
+        // messages rather than summing (same prompt tokenized once, not per-choice).
+        let mut total_prompt = 0u32;
+        let mut total_cached = 0u32;
+        let mut total_completion = CompletionTokenTracker::new();
+
+        while let Some(response) = grpc_stream.next().await {
+            let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
+
+            match gen_response.into_response() {
+                ProtoResponseVariant::Chunk(chunk) => {
+                    if first_token_time.is_none() {
+                        first_token_time = Some(Instant::now());
+                    }
+
+                    let index = chunk.index();
+
+                    if stopped_indices.contains(&index) {
+                        continue;
+                    }
+
+                    let is_first = is_firsts.entry(index).or_insert(true);
+                    total_completion.record_chunk(&chunk);
+
+                    let stop_decoder = stop_decoders.entry(index).or_insert_with(|| {
+                        utils::create_stop_decoder(
+                            &tokenizer,
+                            stop_params.0.as_ref(),
+                            stop_params.1.as_ref(),
+                            stop_params.2,
+                            stop_params.3,
+                        )
+                    });
+
+                    let (decoded_text, stopped) =
+                        Self::process_chunk_tokens(stop_decoder, chunk.token_ids());
+                    chunk_text.clear();
+                    chunk_text.push_str(&decoded_text);
+
+                    if *is_first {
+                        if echo {
+                            chunk_text.insert_str(0, prompt_text);
+                        }
+                        *is_first = false;
+                    }
+
+                    if !chunk_text.is_empty() {
+                        let stream_resp = CompletionStreamResponse {
+                            id: request_id.clone(),
+                            object: "text_completion".to_string(),
+                            created,
+                            choices: vec![CompletionStreamChoice {
+                                text: std::mem::take(&mut chunk_text),
+                                index,
+                                logprobs: None,
+                                finish_reason: None,
+                            }],
+                            model: model.clone(),
+                            system_fingerprint: system_fingerprint.map(String::from),
+                            usage: None,
+                        };
+
+                        Self::format_completion_sse_into(&mut sse_buffer, &stream_resp);
+                        tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                            .map_err(|_| "Channel closed".to_string())?;
+                    }
+
+                    if stopped {
+                        // Stop-decoder match takes precedence: emit "stop" even if
+                        // the backend's eventual Complete carries "length". This is
+                        // intentional — the local stop sequence fired first.
+                        stopped_indices.insert(index);
+
+                        if let Some(sfx) = suffix {
+                            let suffix_chunk = CompletionStreamResponse {
+                                id: request_id.clone(),
+                                object: "text_completion".to_string(),
+                                created,
+                                choices: vec![CompletionStreamChoice {
+                                    text: sfx.to_string(),
+                                    index,
+                                    logprobs: None,
+                                    finish_reason: None,
+                                }],
+                                model: model.clone(),
+                                system_fingerprint: system_fingerprint.map(String::from),
+                                usage: None,
+                            };
+                            Self::format_completion_sse_into(&mut sse_buffer, &suffix_chunk);
+                            tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                                .map_err(|_| "Channel closed".to_string())?;
+                        }
+
+                        let final_chunk = CompletionStreamResponse {
+                            id: request_id.clone(),
+                            object: "text_completion".to_string(),
+                            created,
+                            choices: vec![CompletionStreamChoice {
+                                text: String::new(),
+                                index,
+                                logprobs: None,
+                                finish_reason: Some("stop".to_string()),
+                            }],
+                            model: model.clone(),
+                            system_fingerprint: system_fingerprint.map(String::from),
+                            usage: None,
+                        };
+                        Self::format_completion_sse_into(&mut sse_buffer, &final_chunk);
+                        tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                            .map_err(|_| "Channel closed".to_string())?;
+                    }
+                }
+                ProtoResponseVariant::Complete(complete) => {
+                    let index = complete.index();
+                    total_prompt = total_prompt.max(complete.prompt_tokens());
+                    total_cached = total_cached.max(complete.cached_tokens());
+                    total_completion.record_complete(&complete);
+
+                    if stopped_indices.contains(&index) {
+                        continue;
+                    }
+
+                    // Handle echo when Complete arrives without any preceding Chunks
+                    // (e.g., max_tokens=0). The Chunk arm normally prepends prompt_text
+                    // on the first event, but if no Chunks arrive we must emit it here.
+                    let is_first = is_firsts.entry(index).or_insert(true);
+                    if *is_first && echo && !prompt_text.is_empty() {
+                        let echo_chunk = CompletionStreamResponse {
+                            id: request_id.clone(),
+                            object: "text_completion".to_string(),
+                            created,
+                            choices: vec![CompletionStreamChoice {
+                                text: prompt_text.to_string(),
+                                index,
+                                logprobs: None,
+                                finish_reason: None,
+                            }],
+                            model: model.clone(),
+                            system_fingerprint: system_fingerprint.map(String::from),
+                            usage: None,
+                        };
+                        Self::format_completion_sse_into(&mut sse_buffer, &echo_chunk);
+                        tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                            .map_err(|_| "Channel closed".to_string())?;
+                        *is_first = false;
+                    }
+
+                    if let Some(decoder) = stop_decoders.get_mut(&index) {
+                        if let SequenceDecoderOutput::Text(text) = decoder.flush() {
+                            if !text.is_empty() {
+                                let stream_resp = CompletionStreamResponse {
+                                    id: request_id.clone(),
+                                    object: "text_completion".to_string(),
+                                    created,
+                                    choices: vec![CompletionStreamChoice {
+                                        text,
+                                        index,
+                                        logprobs: None,
+                                        finish_reason: None,
+                                    }],
+                                    model: model.clone(),
+                                    system_fingerprint: system_fingerprint.map(String::from),
+                                    usage: None,
+                                };
+                                Self::format_completion_sse_into(&mut sse_buffer, &stream_resp);
+                                tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                                    .map_err(|_| "Channel closed".to_string())?;
+                            }
+                        }
+                    }
+
+                    if let Some(sfx) = suffix {
+                        let stream_resp = CompletionStreamResponse {
+                            id: request_id.clone(),
+                            object: "text_completion".to_string(),
+                            created,
+                            choices: vec![CompletionStreamChoice {
+                                text: sfx.to_string(),
+                                index,
+                                logprobs: None,
+                                finish_reason: None,
+                            }],
+                            model: model.clone(),
+                            system_fingerprint: system_fingerprint.map(String::from),
+                            usage: None,
+                        };
+                        Self::format_completion_sse_into(&mut sse_buffer, &stream_resp);
+                        tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                            .map_err(|_| "Channel closed".to_string())?;
+                    }
+
+                    let finish_reason = {
+                        let reason = complete.finish_reason();
+                        if reason.is_empty() || reason == "stop" {
+                            Some("stop".to_string())
+                        } else if reason == "length" || reason == "content_filter" {
+                            Some(reason.to_string())
+                        } else if let Ok(json) = serde_json::from_str::<Value>(reason) {
+                            json.get("type")
+                                .and_then(|v| v.as_str())
+                                .map(|t| match t {
+                                    "stop" | "length" | "content_filter" => t.to_string(),
+                                    other => {
+                                        warn!(unexpected_finish_reason = other, "Unmapped finish_reason type from backend, defaulting to stop");
+                                        "stop".to_string()
+                                    }
+                                })
+                                .or_else(|| Some("stop".to_string()))
+                        } else {
+                            warn!(
+                                unexpected_finish_reason = reason,
+                                "Unrecognized finish_reason from backend, defaulting to stop"
+                            );
+                            Some("stop".to_string())
+                        }
+                    };
+
+                    let final_chunk = CompletionStreamResponse {
+                        id: request_id.clone(),
+                        object: "text_completion".to_string(),
+                        created,
+                        choices: vec![CompletionStreamChoice {
+                            text: String::new(),
+                            index,
+                            logprobs: None,
+                            finish_reason,
+                        }],
+                        model: model.clone(),
+                        system_fingerprint: system_fingerprint.map(String::from),
+                        usage: None,
+                    };
+                    Self::format_completion_sse_into(&mut sse_buffer, &final_chunk);
+                    tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                        .map_err(|_| "Channel closed".to_string())?;
+                }
+                ProtoResponseVariant::None => continue,
+            }
+        }
+
+        // Mark stream as completed before usage emission — the backend stream
+        // is fully consumed at this point, so an abort would be a no-op.
+        // This ensures mark_completed runs even if the usage send fails.
+        grpc_stream.mark_completed();
+
+        if include_usage {
+            let usage_chunk = CompletionStreamResponse {
+                id: request_id.clone(),
+                object: "text_completion".to_string(),
+                created,
+                choices: vec![],
+                model: model.clone(),
+                system_fingerprint: system_fingerprint.map(String::from),
+                usage: Some(
+                    Usage::from_counts(total_prompt, total_completion.total())
+                        .with_cached_tokens(total_cached),
+                ),
+            };
+            Self::format_completion_sse_into(&mut sse_buffer, &usage_chunk);
+            let _ = tx.send(Ok(Bytes::from(sse_buffer.clone())));
+        }
+        Metrics::record_streaming_metrics(StreamingMetricsParams {
+            router_type: metrics_labels::ROUTER_GRPC,
+            backend_type: self.backend_type,
+            model_id: model,
+            endpoint: metrics_labels::ENDPOINT_COMPLETIONS,
+            ttft: first_token_time.map(|t| t.duration_since(start_time)),
+            generation_duration: start_time.elapsed(),
+            input_tokens: Some(total_prompt as u64),
+            output_tokens: total_completion.total() as u64,
+        });
+
+        Ok(())
+    }
+
+    /// PD dual-dispatch variant: consume prefill stream, then delegate decode
+    /// stream to [`Self::process_completion_streaming_chunks`].
+    #[expect(clippy::too_many_arguments)]
+    async fn process_dual_completion_streaming_chunks(
+        &self,
+        mut prefill_stream: ProtoStream,
+        decode_stream: ProtoStream,
+        dispatch: context::DispatchMetadata,
+        tokenizer: Arc<dyn Tokenizer>,
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        original_request: Arc<CompletionRequest>,
+        tx: &UnboundedSender<Result<Bytes, io::Error>>,
+    ) -> Result<(), String> {
+        while let Some(response) = prefill_stream.next().await {
+            let gen_response =
+                response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
+
+            match gen_response.into_response() {
+                ProtoResponseVariant::Complete(_) => break,
+                _ => continue,
+            }
+        }
+
+        let result = self
+            .process_completion_streaming_chunks(
+                decode_stream,
+                dispatch,
+                tokenizer,
+                stop_params,
+                original_request,
+                tx,
+            )
+            .await;
+
+        // Mark prefill stream as completed AFTER decode completes successfully
+        // This ensures that if client disconnects during decode, BOTH streams send abort
+        if result.is_ok() {
+            prefill_stream.mark_completed();
+        }
+
+        result
+    }
+
+    /// Format a `CompletionStreamResponse` into the SSE buffer.
+    #[inline]
+    fn format_completion_sse_into(buffer: &mut Vec<u8>, chunk: &CompletionStreamResponse) {
+        buffer.clear();
+        buffer.extend_from_slice(b"data: ");
+        if let Err(e) = serde_json::to_writer(&mut *buffer, chunk) {
+            error!("Failed to serialize completion SSE chunk: {}", e);
+            buffer.clear();
+            buffer.extend_from_slice(b"data: ");
+            let error_msg = json!({
+                "error": {
+                    "message": format!("Failed to serialize completion chunk: {e}"),
+                    "type": "internal_error"
+                }
+            })
+            .to_string();
+            buffer.extend_from_slice(error_msg.as_bytes());
+        }
+        buffer.extend_from_slice(b"\n\n");
     }
 }
