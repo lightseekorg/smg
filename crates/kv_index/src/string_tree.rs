@@ -897,7 +897,23 @@ impl Tree {
         self.evict_tenant_entries(tenant, current_count - max_chars);
     }
 
-    /// Helper to evict a specific number of chars for a tenant
+    /// Remove a tenant from all nodes in the tree, including root.
+    /// Used for mesh eviction propagation — when a remote node reports
+    /// that a worker evicted all its cached prefixes.
+    pub fn remove_tenant_all(&self, tenant_id: &TenantId) {
+        // collect_tenant_nodes skips root (root is never LRU-evicted),
+        // but global removal must include it.
+        self.remove_tenant_from_node(&self.root, tenant_id);
+
+        let mut nodes: Vec<(NodeRef, u64)> = Vec::new();
+        self.collect_tenant_nodes(&self.root, tenant_id, &mut nodes);
+        for (node, _) in &nodes {
+            self.remove_tenant_from_node(node, tenant_id);
+        }
+        self.tenant_char_count.remove(tenant_id);
+    }
+
+    /// Evict a specific number of chars for a tenant using LRU ordering.
     fn evict_tenant_entries(&self, tenant_id: &TenantId, chars_to_evict: usize) {
         if chars_to_evict == 0 {
             return;

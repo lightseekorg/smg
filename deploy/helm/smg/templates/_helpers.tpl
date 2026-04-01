@@ -309,14 +309,16 @@ Expects a dict with keys: worker, global, chart, defaults
 */}}
 {{- define "smg.workerImage" -}}
 {{- $workerRegistry := "" -}}
+{{- $workerRepository := "" -}}
 {{- $workerTag := "" -}}
 {{- if .worker.image -}}
 {{- $workerRegistry = .worker.image.registry | default "" -}}
+{{- $workerRepository = .worker.image.repository | default "" -}}
 {{- $workerTag = .worker.image.tag | default "" -}}
 {{- end -}}
 {{/* Engine images default to ghcr.io (gateway image is on docker.io) */}}
 {{- $registry := $workerRegistry | default "ghcr.io" -}}
-{{- $repository := .global.image.repository -}}
+{{- $repository := $workerRepository | default .global.image.repository -}}
 {{- $tag := $workerTag | default (.global.image.tag | default .chart.AppVersion) -}}
 {{- printf "%s/%s:%s" $registry $repository $tag -}}
 {{- end }}
