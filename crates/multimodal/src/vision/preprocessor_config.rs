@@ -270,8 +270,11 @@ impl PreProcessorConfig {
     }
 
     /// Parse from JSON value.
+    ///
+    /// Handles nested `media_proc_cfg` the same way as `from_json`.
     pub fn from_value(value: serde_json::Value) -> Result<Self, serde_json::Error> {
-        serde_json::from_value(value)
+        let json_str = serde_json::to_string(&value)?;
+        Self::from_json(&json_str)
     }
 
     /// Get patch size as a simple usize.
