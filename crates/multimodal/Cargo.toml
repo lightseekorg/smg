@@ -35,7 +35,6 @@ url = "2.5.4"
 llm-tokenizer.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
