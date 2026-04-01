@@ -221,19 +221,35 @@ async fn test_deepseek31_streaming_end_tokens_stripped() {
     assert!(result.normal_text.is_empty() || !result.normal_text.contains("<｜tool▁calls▁end｜>"));
 }
 
-#[test]
-fn test_deepseek31_factory_registration() {
+#[tokio::test]
+async fn test_deepseek31_factory_registration() {
     let factory = ParserFactory::new();
 
     assert!(factory.has_parser("deepseek31"));
 
-    assert!(factory.registry().has_parser_for_model("deepseek-v3.1"));
-    assert!(factory
-        .registry()
-        .has_parser_for_model("deepseek-ai/DeepSeek-V3.1"));
-    assert!(factory
-        .registry()
-        .has_parser_for_model("deepseek-ai/DeepSeek-V3.1-Terminus"));
+    // Verify V3.1 model names resolve to a parser that handles V3.1 format
+    // (raw JSON after tool_sep, no code block wrapping)
+    let v31_input = concat!(
+        "<｜tool▁calls▁begin｜>",
+        "<｜tool▁call▁begin｜>search<｜tool▁sep｜>",
+        r#"{"query": "rust"}"#,
+        "<｜tool▁call▁end｜>",
+        "<｜tool▁calls▁end｜>",
+    );
+    for model in [
+        "deepseek-v3.1",
+        "deepseek-v3.1-terminus",
+        "deepseek-ai/DeepSeek-V3.1",
+        "deepseek-ai/DeepSeek-V3.1-Terminus",
+    ] {
+        let parser = factory
+            .registry()
+            .create_for_model(model)
+            .expect("parser should exist");
+        let (_text, calls) = parser.parse_complete(v31_input).await.unwrap();
+        assert_eq!(calls.len(), 1, "model {model} should parse V3.1 format");
+        assert_eq!(calls[0].function.name, "search");
+    }
 
     // Existing V3 mappings still work
     assert!(factory.registry().has_parser_for_model("deepseek-v3"));
