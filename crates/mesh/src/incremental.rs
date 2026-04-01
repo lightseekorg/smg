@@ -75,6 +75,8 @@ struct LastScannedGenerations {
 /// Tenant deltas are sent every round (~20KB/s); full snapshots are
 /// heavier (~300KB compressed) but ensure convergence after missed
 /// deltas, new nodes joining, or network partitions.
+// FIXME: Re-enable when Layer 2 (chunked snapshots) is implemented.
+#[expect(dead_code, reason = "Reserved for Layer 2 snapshot interval")]
 const STRUCTURE_SNAPSHOT_INTERVAL: u64 = 30;
 
 /// Incremental update collector
@@ -272,19 +274,11 @@ impl IncrementalUpdateCollector {
                             // Check if it's time for a full structure snapshot
                             let round_count = rounds.entry(model_id.clone()).or_insert(0);
                             *round_count += 1;
-                            if *round_count >= STRUCTURE_SNAPSHOT_INTERVAL {
-                                *round_count = 0;
-                                // Don't emit tenant delta — let Phase 1/2 emit
-                                // full TreeState for convergence. But still drain
-                                // the buffer so it doesn't accumulate.
-                                self.stores.tenant_delta_inserts.remove(&model_id);
-                                self.stores.tenant_delta_evictions.remove(&model_id);
-                                debug!(
-                                    "Skipping tenant delta for {} — emitting full structure snapshot",
-                                    model_id
-                                );
-                                continue;
-                            }
+                            // FIXME: When Layer 2 is implemented, skip tenant delta
+                            // every STRUCTURE_SNAPSHOT_INTERVAL rounds and emit a
+                            // full structure snapshot instead. Currently checkpoint
+                            // is a no-op, so never skip — always send tenant deltas.
+                            let _ = round_count; // tracked for future Layer 2
 
                             let current_version = self.stores.tree_version(&key);
 

@@ -159,8 +159,19 @@ pub fn lz4_compress(data: &[u8]) -> Vec<u8> {
     lz4_flex::compress_prepend_size(data)
 }
 
-/// Decompress LZ4-compressed bytes.
+/// Decompress LZ4-compressed bytes with a size safety check.
+/// Rejects payloads claiming > 256 MB decompressed size to prevent
+/// OOM from corrupted or malicious size headers.
 pub fn lz4_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
+    const MAX_DECOMPRESSED_SIZE: usize = 256 * 1024 * 1024; // 256 MB
+    if data.len() >= 4 {
+        let claimed_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if claimed_size > MAX_DECOMPRESSED_SIZE {
+            return Err(format!(
+                "LZ4 claimed decompressed size {claimed_size} exceeds limit {MAX_DECOMPRESSED_SIZE}"
+            ));
+        }
+    }
     lz4_flex::decompress_size_prepended(data).map_err(|e| format!("LZ4 decompression failed: {e}"))
 }
 

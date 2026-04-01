@@ -819,17 +819,11 @@ impl MeshSyncManager {
             return;
         }
 
-        // Skip stale deltas — only process if version advances local state.
-        let current_version = self.stores.tree_version(&key);
-        if delta.version <= current_version {
-            debug!(
-                model_id = %delta.model_id,
-                delta_version = delta.version,
-                current_version,
-                "Skipping stale tenant delta"
-            );
-            return;
-        }
+        // No version check — both routers independently bump tree_version
+        // on local inserts, so the remote delta's version can be lower than
+        // the local version even though it contains novel inserts. Tenant
+        // inserts are idempotent (insert_text is a no-op if the tenant
+        // already exists at the node), so applying "stale" deltas is safe.
 
         debug!(
             model_id = %delta.model_id,

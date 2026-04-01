@@ -673,15 +673,22 @@ impl Gossip for GossipService {
                                                             == "tenant_delta"
                                                         {
                                                             // Lightweight tenant delta — no tree structure, no prompt text
-                                                            if let Ok(delta) =
-                                                                super::tree_ops::TenantDelta::from_bytes(
+                                                            match super::tree_ops::TenantDelta::from_bytes(
                                                                     &policy_state.config,
                                                                 )
                                                             {
-                                                                sync_manager
-                                                                    .apply_remote_tenant_delta(
-                                                                        delta, actor,
+                                                                Ok(delta) => {
+                                                                    sync_manager
+                                                                        .apply_remote_tenant_delta(
+                                                                            delta, actor,
+                                                                        );
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to deserialize tenant delta for model {}: {e}",
+                                                                        policy_state.model_id
                                                                     );
+                                                                }
                                                             }
                                                         } else if policy_state.policy_type
                                                             == "tree_state_delta"
