@@ -128,6 +128,11 @@ jobs:
             --reruns 2 --reruns-delay 5 \
             -s -vv
 
+      - name: Compute log artifact label
+        if: failure() || cancelled()
+        id: log-label
+        run: echo "label=$(echo '${{ inputs.test_dirs }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
       - name: Dump failed worker logs
         if: failure() || cancelled()
         run: |
@@ -135,6 +140,7 @@ jobs:
           if [ ! -d "$LOG_DIR" ]; then exit 0; fi
           SEP="============================================================"
           DASH="------------------------------------------------------------"
+          ARTIFACT="e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${{ steps.log-label.outputs.label }}"
 
           # Dump last worker log (most recent = last retry of the failed model)
           LAST_LOG=$(ls -t "$LOG_DIR"/worker-*.log 2>/dev/null | head -1)
@@ -151,15 +157,10 @@ jobs:
           # List all log files with sizes
           echo ""
           echo "$SEP"
-          echo "All worker logs in: $LOG_DIR/"
+          echo "All worker logs in artifact: $ARTIFACT"
           echo "$DASH"
           ls -lhS "$LOG_DIR"/*.log 2>/dev/null || echo "  (none)"
           echo "$SEP"
-
-      - name: Compute log artifact label
-        if: failure() || cancelled()
-        id: log-label
-        run: echo "label=$(echo '${{ inputs.test_dirs }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
 
       - name: Upload worker logs
         if: failure() || cancelled()
