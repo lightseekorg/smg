@@ -174,7 +174,7 @@ def hf_reference_embeddings(request):
     from infra.model_specs import MODEL_SPECS
 
     # Get model path from MODEL_SPECS for the embedding model
-    model_path = MODEL_SPECS.get("embedding", {}).get("model")
+    model_path = MODEL_SPECS.get("intfloat/e5-mistral-7b-instruct", {}).get("model")
     if model_path is None:
         pytest.skip("Embedding model not found in MODEL_SPECS")
 
