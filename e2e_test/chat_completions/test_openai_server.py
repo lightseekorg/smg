@@ -11,7 +11,6 @@ import json
 import logging
 
 import pytest
-from infra import is_sglang
 
 logger = logging.getLogger(__name__)
 
@@ -392,8 +391,6 @@ class TestChatCompletionGptOss(TestChatCompletion):
         super().test_chat_completion_stream(model, api_client, logprobs, parallel_sample_num)
 
     def test_stop_sequences_stream(self, model, api_client):
-        if is_sglang():
-            self.STOP_SEQUENCE_TRIMMED = True
         super().test_stop_sequences_stream(model, api_client)
 
     @pytest.mark.skip(reason="gpt-oss models don't support regex constraints")
