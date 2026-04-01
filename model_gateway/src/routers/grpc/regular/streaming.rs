@@ -2394,6 +2394,31 @@ impl StreamingProcessor {
                         continue;
                     }
 
+                    // Handle echo when Complete arrives without any preceding Chunks
+                    // (e.g., max_tokens=0). The Chunk arm normally prepends prompt_text
+                    // on the first event, but if no Chunks arrive we must emit it here.
+                    let is_first = is_firsts.entry(index).or_insert(true);
+                    if *is_first && echo && !prompt_text.is_empty() {
+                        let echo_chunk = CompletionStreamResponse {
+                            id: request_id.clone(),
+                            object: "text_completion".to_string(),
+                            created,
+                            choices: vec![CompletionStreamChoice {
+                                text: prompt_text.to_string(),
+                                index,
+                                logprobs: None,
+                                finish_reason: None,
+                            }],
+                            model: model.clone(),
+                            system_fingerprint: system_fingerprint.map(String::from),
+                            usage: None,
+                        };
+                        Self::format_completion_sse_into(&mut sse_buffer, &echo_chunk);
+                        tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                            .map_err(|_| "Channel closed".to_string())?;
+                        *is_first = false;
+                    }
+
                     if let Some(decoder) = stop_decoders.get_mut(&index) {
                         if let SequenceDecoderOutput::Text(text) = decoder.flush() {
                             if !text.is_empty() {
@@ -2482,9 +2507,6 @@ impl StreamingProcessor {
                     tx.send(Ok(Bytes::from(sse_buffer.clone())))
                         .map_err(|_| "Channel closed".to_string())?;
                 }
-                ProtoResponseVariant::Error(err) => {
-                    return Err(format!("Backend error: {}", err.message()));
-                }
                 ProtoResponseVariant::None => continue,
             }
         }
@@ -2543,11 +2565,7 @@ impl StreamingProcessor {
 
             match gen_response.into_response() {
                 ProtoResponseVariant::Complete(_) => break,
-                ProtoResponseVariant::Chunk(_) => continue,
-                ProtoResponseVariant::Error(err) => {
-                    return Err(format!("Prefill error: {}", err.message()));
-                }
-                ProtoResponseVariant::None => continue,
+                _ => continue,
             }
         }
 
