@@ -413,7 +413,7 @@ impl CacheAwarePolicy {
                 // Global eviction: remove from all nodes
                 string_tree.remove_tenant_all(&tenant_id);
             }
-            // Targeted eviction (non-zero hash) deferred until hash index
+            // TODO: targeted eviction by hash requires a hash→node index on the tree.
             // tracks eviction paths too
         }
     }

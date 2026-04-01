@@ -866,11 +866,12 @@ impl MeshSyncManager {
         reason = "Public API called by controller — removing &self is a breaking change"
     )]
     pub fn checkpoint_tree_states(&self) {
-        // No-op: tree data syncs via Layer 1 (tenant deltas, ~50 bytes each).
-        // Layer 2 (full tree snapshots) is deferred — the snapshot can be
-        // 170+ MB for large trees, and the checkpoint allocation every 10s
-        // causes allocator fragmentation. Future: chunked or incremental
-        // tree diffs for convergence (options 2/3 in the design doc).
+        // FIXME: Layer 2 (full tree snapshots) is disabled because the
+        // snapshot can be 170+ MB for large trees with long prompts, and
+        // allocating it every 10s causes allocator fragmentation. Tree data
+        // currently syncs via Layer 1 only (tenant deltas, ~50 bytes each).
+        // TODO: implement chunked snapshots or incremental tree diffs so
+        // Layer 2 works for large trees without excessive memory allocation.
     }
 }
 
