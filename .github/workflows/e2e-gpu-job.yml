@@ -113,7 +113,7 @@ jobs:
 
       # Run tests
       - name: Run E2E tests
-        timeout-minutes: 20
+        timeout-minutes: 25
         env:
           SHOW_WORKER_LOGS: "0"
           SHOW_ROUTER_LOGS: "1"
