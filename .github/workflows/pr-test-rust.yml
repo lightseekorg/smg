@@ -345,7 +345,7 @@ jobs:
           name: genai-bench-results-all-policies
           path: benchmark_**/
 
-      - name: Worker log snapshot
+      - name: Worker failure diagnostics
         if: failure() || cancelled()
         run: bash scripts/ci_dump_worker_logs.sh benchmark-logs benchmark-worker-logs
 

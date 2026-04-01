@@ -128,7 +128,7 @@ jobs:
             --reruns 2 --reruns-delay 5 \
             -s -vv
 
-      - name: Worker log snapshot
+      - name: Worker failure diagnostics
         if: failure() || cancelled()
         run: |
           LABEL=$(echo '${{ inputs.test_dirs }}' | tr '/' '-')
