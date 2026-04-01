@@ -215,7 +215,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 prompt=request.tokenized.original_text or None,
             )
 
-            pooling_params = PoolingParams()
+            pooling_params = PoolingParams(task="embed")
 
             # encode() is an async generator; collect the final result
             final_output = None
@@ -231,20 +231,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 logger.warning(msg)
                 await context.abort(grpc.StatusCode.INTERNAL, msg)
 
-            logger.info(
-                "Embed %s: input_ids=%s, prompt=%r, output data shape=%s",
-                request_id,
-                list(request.tokenized.input_ids)[:10],
-                (request.tokenized.original_text or "")[:100],
-                final_output.outputs.data.shape,
-            )
-            data = final_output.outputs.data
-            # vLLM pooler may return per-token embeddings (2D) instead of
-            # a single sequence embedding (1D). Take the last token to match
-            # the seq_pooling_type='LAST' behavior for embedding models.
-            if data.ndim == 2:
-                data = data[-1]
-            embedding = data.tolist()
+            embedding = final_output.outputs.data.tolist()
 
             return vllm_engine_pb2.EmbedResponse(
                 embedding=embedding,
