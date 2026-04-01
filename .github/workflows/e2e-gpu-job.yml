@@ -129,7 +129,7 @@ jobs:
             -s -vv
 
       - name: Dump failed worker logs
-        if: failure()
+        if: failure() || cancelled()
         run: |
           LOG_DIR="e2e-logs"
           if [ ! -d "$LOG_DIR" ]; then exit 0; fi
