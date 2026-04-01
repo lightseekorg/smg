@@ -409,6 +409,7 @@ async fn process_multimodal_parts(
 
     debug!(
         image_count = images.len(),
+        image_sizes = ?images.iter().map(|f| (f.image.width(), f.image.height())).collect::<Vec<_>>(),
         "Fetched images for multimodal processing"
     );
 
