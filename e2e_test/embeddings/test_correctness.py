@@ -140,8 +140,7 @@ def get_hf_st_embeddings(texts: str | list[str], model_path: str) -> np.ndarray:
 
     # Force CPU to avoid GPU memory conflicts in CI
     model = SentenceTransformer(model_path, trust_remote_code=True, device="cpu")
-    # Disable prompt templates so HF reference matches raw text sent to gateway
-    embeddings = model.encode(texts, normalize_embeddings=True, prompt_name=None)
+    embeddings = model.encode(texts, normalize_embeddings=True)
     return embeddings
 
 
