@@ -13,8 +13,9 @@ import grpc
 import torch
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from transformers import BatchFeature
-from vllm import EmbeddingOutput, PoolingParams, SamplingParams, TokensPrompt
+from vllm import PoolingParams, SamplingParams, TokensPrompt
 from vllm.engine.protocol import EngineClient
+from vllm.inputs import token_inputs
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.multimodal.inputs import (
@@ -209,9 +210,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if not request.HasField("tokenized"):
                 raise ValueError("EmbedRequest requires tokenized input")
 
-            prompt: TokensPrompt = {"prompt_token_ids": list(request.tokenized.input_ids)}
-            if request.tokenized.original_text:
-                prompt["prompt"] = request.tokenized.original_text
+            prompt = token_inputs(
+                prompt_token_ids=list(request.tokenized.input_ids),
+                prompt=request.tokenized.original_text or None,
+            )
 
             pooling_params = PoolingParams()
 
@@ -229,8 +231,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 logger.warning(msg)
                 await context.abort(grpc.StatusCode.INTERNAL, msg)
 
-            embedding_output = EmbeddingOutput.from_base(final_output.outputs)
-            embedding = embedding_output.embedding
+            embedding = final_output.outputs.data.tolist()
 
             return vllm_engine_pb2.EmbedResponse(
                 embedding=embedding,
