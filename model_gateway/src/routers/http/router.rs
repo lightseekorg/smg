@@ -77,13 +77,13 @@ impl Router {
         })
     }
 
-    fn select_first_worker(&self) -> Result<String, String> {
+    fn select_first_worker(&self) -> Result<Arc<dyn Worker>, String> {
         let workers = self.worker_registry.get_all();
         let healthy_workers: Vec<_> = workers.iter().filter(|w| w.is_healthy()).collect();
         if healthy_workers.is_empty() {
             Err("No workers are available".to_string())
         } else {
-            Ok(healthy_workers[0].url().to_string())
+            Ok(healthy_workers[0].clone())
         }
     }
 
@@ -91,8 +91,10 @@ impl Router {
         let headers = header_utils::copy_request_headers(&req);
 
         match self.select_first_worker() {
-            Ok(worker_url) => {
-                let mut request_builder = self.client.get(format!("{worker_url}/{endpoint}"));
+            Ok(worker) => {
+                let mut request_builder = worker
+                    .http_client()
+                    .get(format!("{}/{endpoint}", worker.url()));
                 for (name, value) in headers {
                     if header_utils::should_forward_request_header(&name) {
                         request_builder = request_builder.header(name, value);
@@ -374,7 +376,7 @@ impl Router {
             .into_iter()
             .map(|worker| {
                 let url = format!("{}/{}", worker.base_url(), endpoint);
-                let client = self.client.clone();
+                let client = worker.http_client().clone();
                 let method = method.clone();
 
                 let headers = filtered_headers.clone();
@@ -493,7 +495,7 @@ impl Router {
             }
         };
 
-        let mut request_builder = self.client.post(&endpoint_url).json(&json_val);
+        let mut request_builder = worker.http_client().post(&endpoint_url).json(&json_val);
 
         if let Some(key) = api_key {
             // Pre-allocate string with capacity to avoid reallocation
@@ -833,9 +835,9 @@ mod tests {
         let result = router.select_first_worker();
 
         assert!(result.is_ok());
-        let url = result.unwrap();
+        let worker = result.unwrap();
         // DashMap doesn't guarantee order, so just check we get one of the workers
-        assert!(url == "http://worker1:8080" || url == "http://worker2:8080");
+        assert!(worker.url() == "http://worker1:8080" || worker.url() == "http://worker2:8080");
     }
 
     #[test]
@@ -844,9 +846,7 @@ mod tests {
         let result = router.select_first_worker();
 
         assert!(result.is_ok());
-        let url = result.unwrap();
-
-        let worker = router.worker_registry.get_by_url(&url).unwrap();
+        let worker = result.unwrap();
         assert!(worker.is_healthy());
     }
 }
