@@ -325,7 +325,7 @@ class Worker:
                 log_path = os.path.join(self.log_dir, f"worker-{safe_name}.log")
             else:
                 log_path = os.path.join(tempfile.gettempdir(), f"smg-worker-{safe_name}.log")
-            self._log_file = open(log_path, "w", encoding="utf-8")
+            self._log_file = open(log_path, "w", encoding="utf-8", buffering=1)
             stdout_target = self._log_file
             stderr_target = subprocess.STDOUT
 

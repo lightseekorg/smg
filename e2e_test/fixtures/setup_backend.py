@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 import anthropic
 import openai
@@ -46,6 +47,32 @@ _WORKER_DEFAULTS = {"count": 1, "prefill": None, "decode": None}
 # Track worker startup failures — fail fast after repeated failures
 _worker_start_failures: dict[str, int] = {}  # engine -> count
 _MAX_WORKER_START_FAILURES = 3  # fail fast after this many failures (matches --reruns 2)
+_WORKER_LOG_TAIL_LINES = 200
+
+
+def _dump_first_worker_log(log_dir: str | None) -> None:
+    """Print the tail of the first worker log file to CI output for debugging."""
+    if not log_dir:
+        return
+    log_path = Path(log_dir)
+    if not log_path.is_dir():
+        return
+    logs = sorted(log_path.glob("worker-*.log"), key=lambda p: p.stat().st_mtime)
+    if not logs:
+        return
+    first_log = logs[0]
+    try:
+        lines = first_log.read_text(encoding="utf-8", errors="replace").splitlines()
+        tail = lines[-_WORKER_LOG_TAIL_LINES:]
+        sep = "=" * 60
+        print(f"\n{sep}")
+        print(f"First failed worker log: {first_log.name} (last {len(tail)} lines)")
+        print(sep)
+        for line in tail:
+            print(line)
+        print(sep)
+    except OSError:
+        pass
 
 
 def _start_workers_tracked(**kwargs) -> list:
@@ -124,6 +151,7 @@ def setup_backend(request: pytest.FixtureRequest):
 
     fail_count = _worker_start_failures.get(engine, 0)
     if fail_count >= _MAX_WORKER_START_FAILURES:
+        _dump_first_worker_log(log_dir)
         pytest.exit(
             f"Engine {engine} failed to start workers {fail_count} times — aborting test session",
             returncode=1,
