@@ -32,50 +32,59 @@ docker:
 grpc:
   - changed-files:
       - any-glob-to-any-file:
-          - 'grpc_client/**/*'
+          - 'crates/grpc_client/**/*'
+          - 'grpc_servicer/**/*'
           - 'model_gateway/src/routers/grpc/**/*'
 
 mcp:
   - changed-files:
-      - any-glob-to-any-file: 'mcp/**/*'
+      - any-glob-to-any-file: 'crates/mcp/**/*'
 
 tokenizer:
   - changed-files:
-      - any-glob-to-any-file: 'tokenizer/**/*'
+      - any-glob-to-any-file: 'crates/tokenizer/**/*'
 
 tool-parser:
   - changed-files:
-      - any-glob-to-any-file: 'tool_parser/**/*'
+      - any-glob-to-any-file: 'crates/tool_parser/**/*'
 
 reasoning-parser:
   - changed-files:
-      - any-glob-to-any-file: 'reasoning_parser/**/*'
+      - any-glob-to-any-file: 'crates/reasoning_parser/**/*'
 
 wasm:
   - changed-files:
       - any-glob-to-any-file:
-          - 'wasm/**/*'
+          - 'crates/wasm/**/*'
           - 'model_gateway/src/wasm/**/*'
 
 auth:
   - changed-files:
-      - any-glob-to-any-file: 'auth/**/*'
+      - any-glob-to-any-file: 'crates/auth/**/*'
 
 data-connector:
   - changed-files:
-      - any-glob-to-any-file: 'data_connector/**/*'
+      - any-glob-to-any-file: 'crates/data_connector/**/*'
 
 multimodal:
   - changed-files:
-      - any-glob-to-any-file: 'multimodal/**/*'
+      - any-glob-to-any-file: 'crates/multimodal/**/*'
 
 protocols:
   - changed-files:
-      - any-glob-to-any-file: 'protocols/**/*'
+      - any-glob-to-any-file: 'crates/protocols/**/*'
 
 workflow:
   - changed-files:
-      - any-glob-to-any-file: 'workflow/**/*'
+      - any-glob-to-any-file: 'crates/workflow/**/*'
+
+kv-index:
+  - changed-files:
+      - any-glob-to-any-file: 'crates/kv_index/**/*'
+
+mesh:
+  - changed-files:
+      - any-glob-to-any-file: 'crates/mesh/**/*'
 
 model-gateway:
   - changed-files:
@@ -96,8 +105,8 @@ gemini:
 realtime-api:
   - changed-files:
       - any-glob-to-any-file:
-          - 'protocols/src/realtime_*'
-          - 'protocols/src/builders/realtime/**/*'
+          - 'crates/protocols/src/realtime_*'
+          - 'crates/protocols/src/builders/realtime/**/*'
           - 'model_gateway/src/routers/openai/realtime/**/*'
 
 benchmarks:

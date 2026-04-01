@@ -48,5 +48,9 @@ tempfile = "3.8"
 name = "stop_sequence_search"
 harness = false
 
+[[bench]]
+name = "stop_decoder"
+harness = false
+
 [lints]
 workspace = true

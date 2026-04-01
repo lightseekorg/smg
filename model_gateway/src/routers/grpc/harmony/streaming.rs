@@ -297,9 +297,6 @@ impl HarmonyStreamingProcessor {
                         )?;
                     }
                 }
-                ProtoResponseVariant::Error(error_wrapper) => {
-                    return Err(format!("Server error: {}", error_wrapper.message()));
-                }
                 ProtoResponseVariant::None => {}
             }
         }
@@ -903,9 +900,6 @@ impl HarmonyStreamingProcessor {
 
                         emitter.send_event_best_effort(&event, tx);
                     }
-                }
-                ProtoResponseVariant::Error(error_wrapper) => {
-                    return Err(format!("Server error: {}", error_wrapper.message()));
                 }
                 ProtoResponseVariant::None => {}
             }

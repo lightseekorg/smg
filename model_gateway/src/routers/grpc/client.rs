@@ -12,7 +12,7 @@ use smg_grpc_client::{
 };
 
 use crate::routers::grpc::{
-    proto_wrapper::{ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream},
+    proto_wrapper::{ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest, ProtoStream},
     MultimodalData,
 };
 
@@ -246,11 +246,15 @@ impl GrpcClient {
     pub async fn embed(
         &mut self,
         req: ProtoEmbedRequest,
-    ) -> Result<ProtoEmbedResponse, tonic::Status> {
+    ) -> Result<ProtoEmbedComplete, tonic::Status> {
         match (self, req) {
             (Self::Sglang(client), ProtoEmbedRequest::Sglang(boxed_req)) => {
                 let resp = client.embed(*boxed_req).await?;
-                Ok(ProtoEmbedResponse::Sglang(resp))
+                Ok(ProtoEmbedComplete::Sglang(resp))
+            }
+            (Self::Vllm(client), ProtoEmbedRequest::Vllm(boxed_req)) => {
+                let resp = client.embed(*boxed_req).await?;
+                Ok(ProtoEmbedComplete::Vllm(resp))
             }
             #[expect(
                 clippy::panic,

@@ -1,8 +1,11 @@
 //! Compact serializable snapshot of a radix tree.
 //!
-//! Preserves the tree structure (shared prefixes stored once) for
-//! efficient mesh synchronization.  A tree with 2048 entries sharing
-//! 80% prefixes serializes to ~2-4 MB instead of ~40 MB as flat ops.
+//! Used by the mesh sync protocol as an alternative to the flat `TreeState`
+//! operation list. The structure-preserving format shares common prefixes,
+//! reducing wire size from ~40 MB to ~2-4 MB for a tree with 2048 entries
+//! sharing 80% prefixes. Receivers in `controller.rs` and `ping_server.rs`
+//! accept both `TreeState` and `TreeSnapshot` payloads under the
+//! `tree_state_lz4` policy type.
 //!
 //! Wire format: flattened pre-order node list.  Each node stores its
 //! edge label and tenant list.  Children are implicitly ordered by

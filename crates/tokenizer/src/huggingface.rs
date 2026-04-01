@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use anyhow::{Error, Result};
-use tokenizers::{processors::template::TemplateProcessing, tokenizer::Tokenizer as HfTokenizer};
+use tokenizers::{
+    processors::template::TemplateProcessing,
+    tokenizer::{step_decode_stream, Tokenizer as HfTokenizer},
+};
 use tracing::debug;
 
 use crate::{
@@ -302,6 +305,30 @@ impl Decoder for HuggingFaceTokenizer {
         self.tokenizer
             .decode(token_ids, skip_special_tokens)
             .map_err(|e| Error::msg(format!("Decoding failed: {e}")))
+    }
+
+    /// Native incremental decode using the HF `step_decode_stream`.
+    ///
+    /// This delegates to the same algorithm the default trait method uses, but
+    /// the two internal `decode()` calls go directly through the concrete
+    /// `TokenizerImpl` rather than through `dyn Decoder` vtable dispatch.
+    fn decode_step(
+        &self,
+        token_id: TokenIdType,
+        ids: &mut Vec<TokenIdType>,
+        prefix: &mut String,
+        prefix_index: &mut usize,
+        skip_special_tokens: bool,
+    ) -> Result<Option<String>> {
+        step_decode_stream(
+            &self.tokenizer,
+            vec![token_id],
+            skip_special_tokens,
+            ids,
+            prefix,
+            prefix_index,
+        )
+        .map_err(|e| Error::msg(format!("Decode stream error: {e}")))
     }
 }
 

@@ -106,14 +106,14 @@ class TestStreamingEventsLocal:
 # =============================================================================
 
 
-@pytest.mark.engine("sglang")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(2)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
-class TestStreamingEventsHarmony:
+class TestStreamingEventsGptOss:
     """Streaming event tests against local gRPC backend with Harmony model."""
 
     def test_output_item_event_emitted(self, model, api_client):

@@ -311,7 +311,6 @@ impl SglangSchedulerClient {
         request_id: String,
         original_text: Option<String>,
         token_ids: Vec<u32>,
-        log_metrics: Option<bool>,
     ) -> proto::EmbedRequest {
         proto::EmbedRequest {
             request_id,
@@ -319,7 +318,6 @@ impl SglangSchedulerClient {
                 original_text: original_text.unwrap_or_default(),
                 input_ids: token_ids,
             }),
-            log_metrics: log_metrics.unwrap_or(false), // Default to false if not specified
             ..Default::default()
         }
     }
@@ -1004,7 +1002,6 @@ mod tests {
                 original_text: "This is a test sentence for embedding".to_string(),
                 input_ids: vec![2028, 374, 264, 1296, 11914, 369, 28537], // Mock token IDs
             }),
-            log_metrics: true,
             data_parallel_rank: 0,
             ..Default::default()
         };
@@ -1016,7 +1013,6 @@ mod tests {
                 "This is a test sentence for embedding"
             );
         }
-        assert!(embed_req.log_metrics);
         assert_eq!(embed_req.data_parallel_rank, 0);
     }
 

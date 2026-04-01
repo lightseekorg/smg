@@ -14,7 +14,7 @@ use tracing::{debug, trace};
 use super::{
     service::gossip::StateUpdate,
     stores::{AppState, MembershipState, PolicyState, StateStores, StoreType, WorkerState},
-    tree_ops::{TreeState, TreeStateDelta},
+    tree_ops::{lz4_compress, TenantDelta, TreeState},
 };
 
 /// Trait for extracting version from state types
@@ -68,6 +68,17 @@ struct LastScannedGenerations {
     tree: u64,
 }
 
+/// How often to send a full tree structure snapshot for convergence,
+/// measured in gossip rounds. At the default gossip interval of ~1s,
+/// this means a full snapshot every ~30 seconds per model.
+///
+/// Tenant deltas are sent every round (~20KB/s); full snapshots are
+/// heavier (~300KB compressed) but ensure convergence after missed
+/// deltas, new nodes joining, or network partitions.
+// FIXME: Re-enable when Layer 2 (chunked snapshots) is implemented.
+#[expect(dead_code, reason = "Reserved for Layer 2 snapshot interval")]
+const STRUCTURE_SNAPSHOT_INTERVAL: u64 = 30;
+
 /// Incremental update collector
 pub struct IncrementalUpdateCollector {
     stores: Arc<StateStores>,
@@ -78,6 +89,8 @@ pub struct IncrementalUpdateCollector {
     /// Used in `mark_sent` instead of re-reading the atomic to avoid
     /// advancing `last_scanned.tree` past the batch boundary.
     collected_tree_gen: Arc<RwLock<u64>>,
+    /// Counter for gossip rounds since last full structure snapshot per model.
+    rounds_since_snapshot: Arc<RwLock<HashMap<String, u64>>>,
 }
 
 impl IncrementalUpdateCollector {
@@ -88,6 +101,7 @@ impl IncrementalUpdateCollector {
             last_sent: Arc::new(RwLock::new(LastSentVersions::default())),
             last_scanned: Arc::new(RwLock::new(LastScannedGenerations::default())),
             collected_tree_gen: Arc::new(RwLock::new(0)),
+            rounds_since_snapshot: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -150,7 +164,7 @@ impl IncrementalUpdateCollector {
     /// Skips the expensive `.all()` scan when the store generation hasn't changed.
     pub fn collect_updates_for_store(&self, store_type: StoreType) -> Vec<StateUpdate> {
         let mut updates = Vec::new();
-        let last_sent = self.last_sent.read();
+        let mut last_sent = self.last_sent.read();
         let last_scanned = self.last_scanned.read();
 
         match store_type {
@@ -225,123 +239,134 @@ impl IncrementalUpdateCollector {
                 if tree_changed {
                     let mut emitted_tree_keys = std::collections::HashSet::new();
 
-                    // Phase 1: Scan tree_ops_pending for keys with pending ops.
-                    for entry in &self.stores.tree_ops_pending {
-                        let key = entry.key();
-                        let pending = entry.value();
-                        if pending.is_empty() {
-                            continue;
-                        }
+                    // Phase 0: Drain tenant delta buffers — lightweight per-gossip-round sync.
+                    // Each TenantDelta is ~100 bytes per insert vs ~200KB for full TreeOperation.
+                    // Models emitted here are skipped in Phase 1 (no need for heavy ops).
+                    //
+                    // Every STRUCTURE_SNAPSHOT_INTERVAL rounds, skip Phase 0 for a model
+                    // and let Phase 1/2 emit a full TreeState for convergence.
+                    {
+                        let models_with_inserts: Vec<String> = self
+                            .stores
+                            .tenant_delta_inserts
+                            .iter()
+                            .filter(|entry| !entry.value().is_empty())
+                            .map(|entry| entry.key().clone())
+                            .collect();
+                        let models_with_evictions: Vec<String> = self
+                            .stores
+                            .tenant_delta_evictions
+                            .iter()
+                            .filter(|entry| !entry.value().is_empty())
+                            .map(|entry| entry.key().clone())
+                            .collect();
 
-                        let current_version = self.stores.tree_version(key);
-                        let last_sent_version =
-                            last_sent.policy.get(key.as_str()).copied().unwrap_or(0);
+                        let all_models: std::collections::HashSet<String> = models_with_inserts
+                            .into_iter()
+                            .chain(models_with_evictions)
+                            .collect();
 
-                        if current_version <= last_sent_version {
-                            continue;
-                        }
+                        let mut rounds = self.rounds_since_snapshot.write();
 
-                        // Try to send a delta with only the unsent pending ops
-                        let mut sent_delta = false;
-                        let total_pending = pending.len() as u64;
-                        let base_version = current_version.saturating_sub(total_pending);
+                        for model_id in all_models {
+                            let key = format!("tree:{model_id}");
 
-                        if last_sent_version >= base_version {
-                            let already_sent =
-                                last_sent_version.saturating_sub(base_version) as usize;
-                            let unsent_start = already_sent.min(pending.len());
-                            let unsent_ops = &pending[unsent_start..];
-                            if !unsent_ops.is_empty() {
-                                let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
-                                let delta = TreeStateDelta {
-                                    model_id: model_id.clone(),
-                                    operations: unsent_ops.to_vec(),
-                                    base_version: last_sent_version,
-                                    new_version: current_version,
-                                };
-                                if let Ok(delta_bytes) = delta.to_bytes() {
-                                    let delta_policy = PolicyState {
-                                        model_id,
-                                        policy_type: "tree_state_delta".to_string(),
-                                        config: delta_bytes,
-                                        version: current_version,
-                                    };
-                                    if let Ok(serialized) = bincode::serialize(&delta_policy) {
-                                        updates.push(StateUpdate {
-                                            key: key.clone(),
-                                            value: serialized,
-                                            version: current_version,
-                                            actor: self.self_name.clone(),
-                                            timestamp,
-                                        });
-                                        debug!(
-                                            "Collected tree delta: {} ({} ops, version: {})",
-                                            key,
-                                            unsent_ops.len(),
-                                            current_version
-                                        );
-                                        sent_delta = true;
-                                        emitted_tree_keys.insert(key.clone());
-                                    }
-                                }
-                            }
-                        }
+                            // Check if it's time for a full structure snapshot
+                            let round_count = rounds.entry(model_id.clone()).or_insert(0);
+                            *round_count += 1;
+                            // FIXME: When Layer 2 is implemented, skip tenant delta
+                            // every STRUCTURE_SNAPSHOT_INTERVAL rounds and emit a
+                            // full structure snapshot instead. Currently checkpoint
+                            // is a no-op, so never skip — always send tenant deltas.
+                            let _ = round_count; // tracked for future Layer 2
 
-                        if !sent_delta {
-                            // Full-state fallback: build TreeState from
-                            // tree_configs (if checkpointed) + pending ops.
-                            let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
-                            // Clone bytes out of the DashMap ref so no guard
-                            // is held while iterating tree_ops_pending.
-                            let config_bytes = self
+                            let current_version = self.stores.tree_version(&key);
+
+                            let inserts = self
                                 .stores
-                                .tree_configs
-                                .get(key.as_str())
-                                .map(|r| r.clone());
-                            let mut tree_state = match config_bytes.as_deref() {
-                                Some(bytes) if !bytes.is_empty() => {
-                                    match TreeState::from_bytes(bytes) {
-                                        Ok(ts) => ts,
-                                        Err(_) => {
-                                            debug!("Skipping full-state fallback for {} — config corrupted", key);
-                                            continue;
-                                        }
-                                    }
-                                }
-                                _ => TreeState::new(model_id.clone()),
-                            };
-                            for op in &**pending {
-                                tree_state.add_operation(op.clone());
+                                .tenant_delta_inserts
+                                .remove(&model_id)
+                                .map(|(_, v)| v)
+                                .unwrap_or_default();
+                            let evictions = self
+                                .stores
+                                .tenant_delta_evictions
+                                .remove(&model_id)
+                                .map(|(_, v)| v)
+                                .unwrap_or_default();
+
+                            if inserts.is_empty() && evictions.is_empty() {
+                                continue;
                             }
-                            let tree_version = tree_state.version;
-                            let full_state = PolicyState {
-                                model_id,
-                                policy_type: "tree_state".to_string(),
-                                config: tree_state.to_bytes().unwrap_or_default(),
-                                version: tree_version,
+
+                            let delta = TenantDelta {
+                                model_id: model_id.clone(),
+                                version: current_version,
+                                inserts,
+                                evictions,
                             };
-                            if let Ok(serialized) = bincode::serialize(&full_state) {
-                                updates.push(StateUpdate {
-                                    key: key.clone(),
-                                    value: serialized,
+
+                            if let Ok(delta_bytes) = delta.to_bytes() {
+                                let delta_policy = PolicyState {
+                                    model_id: model_id.clone(),
+                                    policy_type: "tenant_delta".to_string(),
+                                    config: delta_bytes,
                                     version: current_version,
-                                    actor: self.self_name.clone(),
-                                    timestamp,
-                                });
-                                debug!(
-                                    "Collected full tree state fallback: {} (version: {})",
-                                    key, current_version
-                                );
-                                emitted_tree_keys.insert(key.clone());
+                                };
+                                if let Ok(serialized) = bincode::serialize(&delta_policy) {
+                                    updates.push(StateUpdate {
+                                        key: key.clone(),
+                                        value: serialized,
+                                        version: current_version,
+                                        actor: self.self_name.clone(),
+                                        timestamp,
+                                    });
+                                    debug!(
+                                        "Collected tenant delta: {} ({} inserts, {} evictions, version: {})",
+                                        model_id,
+                                        delta.inserts.len(),
+                                        delta.evictions.len(),
+                                        current_version,
+                                    );
+                                    emitted_tree_keys.insert(key);
+                                }
                             }
                         }
                     }
 
+                    // Phase 0 summary: log total serialized size of tenant delta updates
+                    {
+                        let phase0_total_bytes: usize = updates
+                            .iter()
+                            .filter(|u| u.key.starts_with("tree:"))
+                            .map(|u| u.value.len())
+                            .sum();
+                        let phase0_count = updates
+                            .iter()
+                            .filter(|u| u.key.starts_with("tree:"))
+                            .count();
+                        if phase0_count > 0 {
+                            debug!(
+                                phase0_updates = phase0_count,
+                                phase0_total_bytes,
+                                "Phase 0: tenant delta buffer drain produced updates"
+                            );
+                        }
+                    }
+
+                    // Phase 1 (removed): tree_ops_pending is no longer populated.
+                    // Full prompt text is not stored per-request. Instead,
+                    // checkpoint_tree_states exports from the live radix tree.
+
                     // Phase 2: Scan tree_configs for keys not yet emitted
                     // (e.g., after checkpoint + buffer drain, or remote-only entries).
-                    // tree_configs already stores serialized TreeState bytes, so
-                    // we use them directly as the PolicyState config instead of
-                    // round-tripping through deserialize + re-serialize.
+                    //
+                    // tree_configs may contain either:
+                    //   - TreeState bytes (from remote full-state updates)
+                    //   - TreeSnapshot bytes (from local checkpoint_tree_states)
+                    // Both are sent LZ4-compressed as "tree_state_lz4". The
+                    // receiver detects the format and converts as needed.
+                    let phase2_start = updates.len();
                     for entry in &self.stores.tree_configs {
                         let key = entry.key();
                         if emitted_tree_keys.contains(key.as_str()) {
@@ -358,23 +383,51 @@ impl IncrementalUpdateCollector {
                         if config_bytes.is_empty() {
                             continue;
                         }
-                        // Validate the bytes are a valid TreeState and extract
-                        // the version, but use the raw bytes directly as the
-                        // config payload to avoid redundant re-serialization.
-                        let tree_version = match TreeState::from_bytes(&config_bytes) {
-                            Ok(ts) => ts.version,
-                            Err(_) => {
-                                debug!(
-                                    "Skipping tree_configs full-state for {} — config corrupted",
-                                    key
-                                );
-                                continue;
-                            }
+                        // Validate the bytes as either TreeState or TreeSnapshot
+                        // and extract the version for the PolicyState envelope.
+                        let tree_version = if let Ok(ts) = TreeState::from_bytes(&config_bytes) {
+                            ts.version
+                        } else if kv_index::snapshot::TreeSnapshot::from_bytes(&config_bytes)
+                            .is_ok()
+                        {
+                            // TreeSnapshot has no embedded version — use the
+                            // atomic tree_version counter instead.
+                            current_version
+                        } else {
+                            debug!(
+                                "Skipping tree_configs full-state for {} — config corrupted",
+                                key
+                            );
+                            continue;
                         };
+                        let compressed = lz4_compress(&config_bytes);
+                        // Skip if compressed size exceeds the gRPC message limit.
+                        // This prevents the infinite retry loop where an oversized
+                        // snapshot is serialized every round, rejected by the
+                        // controller, and retried — causing ~23 MB/s of allocator
+                        // churn that the OS never reclaims.
+                        const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024; // 8 MB
+                        if compressed.len() > MAX_SNAPSHOT_BYTES {
+                            debug!(
+                                key = %key,
+                                compressed_bytes = compressed.len(),
+                                limit = MAX_SNAPSHOT_BYTES,
+                                "Skipping oversized tree snapshot — compressed size exceeds limit"
+                            );
+                            // Mark as sent via a write lock so we don't retry every round.
+                            drop(last_sent);
+                            self.last_sent
+                                .write()
+                                .policy
+                                .insert(key.to_string(), current_version);
+                            // Re-acquire read lock for remaining iterations
+                            last_sent = self.last_sent.read();
+                            continue;
+                        }
                         let full_state = PolicyState {
                             model_id,
-                            policy_type: "tree_state".to_string(),
-                            config: config_bytes,
+                            policy_type: "tree_state_lz4".to_string(),
+                            config: compressed,
                             version: tree_version,
                         };
                         if let Ok(serialized) = bincode::serialize(&full_state) {
@@ -391,6 +444,21 @@ impl IncrementalUpdateCollector {
                             );
                         }
                     }
+
+                    // Phase 2 summary
+                    let phase2_count = updates.len() - phase2_start;
+                    let phase2_bytes: usize =
+                        updates[phase2_start..].iter().map(|u| u.value.len()).sum();
+                    debug!(
+                        phase2_updates = phase2_count,
+                        phase2_total_bytes = phase2_bytes,
+                        "Phase 2: tree_configs scan {}",
+                        if phase2_count > 0 {
+                            "produced updates"
+                        } else {
+                            "no new updates"
+                        }
+                    );
                 }
             }
             StoreType::App => {
@@ -514,24 +582,6 @@ impl IncrementalUpdateCollector {
                 }
                 StoreType::Policy => {
                     last_sent.policy.insert(update.key.clone(), update.version);
-                    // Trim pending tree ops that have been sent by THIS collector.
-                    // Do NOT remove the entire buffer — other peer collectors may
-                    // not have sent yet.  Instead, only drain operations that are
-                    // fully covered by the version we just acknowledged.  When the
-                    // buffer exceeds a safety threshold we trim unconditionally to
-                    // bound memory usage (peers that are that far behind will
-                    // receive a full-state fallback on next collection).
-                    if update.key.starts_with("tree:") {
-                        const PENDING_TRIM_THRESHOLD: usize = 4096;
-                        if let Some(mut pending) = self.stores.tree_ops_pending.get_mut(&update.key)
-                        {
-                            if pending.len() > PENDING_TRIM_THRESHOLD {
-                                // Safety trim: discard the oldest half
-                                let drain_count = pending.len() / 2;
-                                pending.drain(..drain_count);
-                            }
-                        }
-                    }
                 }
                 StoreType::App => {
                     last_sent.app.insert(update.key.clone(), update.version);

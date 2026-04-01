@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass, field
 from typing import IO, Any
 
+import yaml
+
 from .constants import (
     DEFAULT_HOST,
     DEFAULT_STARTUP_TIMEOUT,
@@ -251,8 +253,6 @@ class Worker:
             str(self.port),
             "--tensor-parallel-size",
             str(tp_size),
-            "--max-model-len",
-            "16384",
             "--gpu-memory-utilization",
             "0.9",
         ]
@@ -267,7 +267,9 @@ class Worker:
         config_path = tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False, prefix="trtllm_"
         )
-        config_path.write("guided_decoding_backend: xgrammar\n")
+        config = {"guided_decoding_backend": "xgrammar"}
+        config.update(spec.get("trtllm_extra_config", {}))
+        yaml.dump(config, config_path, default_flow_style=False)
         config_path.close()
 
         cmd = [
@@ -415,6 +417,9 @@ def start_workers(
     Returns:
         List of started Worker instances.
     """
+    if log_dir is None:
+        log_dir = os.environ.get("E2E_LOG_DIR")
+
     if engine is None:
         engine = get_runtime()
 

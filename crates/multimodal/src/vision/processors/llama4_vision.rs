@@ -30,7 +30,7 @@
 
 use std::collections::HashSet;
 
-use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage};
+use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use ndarray::{s, Array3, Array4};
 
 use crate::vision::{
@@ -258,28 +258,55 @@ impl Llama4VisionProcessor {
         }
     }
 
-    /// Pad image to target dimensions with black padding.
-    #[expect(
-        clippy::unused_self,
-        reason = "method logically belongs to the processor; keeps API consistent"
-    )]
-    fn pad_image(&self, image: &DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
-        let (w, h) = image.dimensions();
-        if w == target_w && h == target_h {
-            return image.clone();
+    /// Build a padded [C, H, W] f32 tensor from a smaller image.
+    ///
+    /// The image is placed at top-left, and the remaining canvas is filled with
+    /// the normalized value of black (0). This fuses pad + tensor conversion
+    /// into one step, avoiding an intermediate padded `RgbImage` allocation.
+    fn pad_and_normalize_to_tensor(
+        &self,
+        image: &DynamicImage,
+        canvas_w: usize,
+        canvas_h: usize,
+    ) -> Array3<f32> {
+        let (img_w, img_h, raw) = transforms::rgb_bytes(image);
+        let canvas_pixels = canvas_h * canvas_w;
+
+        // Precompute fused scale/bias: (pixel/255 - mean) / std
+        let scale: [f32; 3] = std::array::from_fn(|c| 1.0 / (255.0 * self.std[c] as f32));
+        let bias: [f32; 3] = std::array::from_fn(|c| -(self.mean[c] as f32) / (self.std[c] as f32));
+
+        let mut data = vec![0.0f32; 3 * canvas_pixels];
+        let (r_plane, rest) = data.split_at_mut(canvas_pixels);
+        let (g_plane, b_plane) = rest.split_at_mut(canvas_pixels);
+
+        // Pre-fill with normalized black: 0 * scale + bias = bias
+        r_plane.fill(bias[0]);
+        g_plane.fill(bias[1]);
+        b_plane.fill(bias[2]);
+
+        // Overwrite image region row-by-row using the shared block-optimized helper
+        let rw = img_w.min(canvas_w);
+        let rh = img_h.min(canvas_h);
+        for y in 0..rh {
+            let src_row = &raw[y * img_w * 3..y * img_w * 3 + rw * 3];
+            let dst_offset = y * canvas_w;
+            transforms::deinterleave_rgb_to_planes(
+                src_row,
+                &mut r_plane[dst_offset..dst_offset + rw],
+                &mut g_plane[dst_offset..dst_offset + rw],
+                &mut b_plane[dst_offset..dst_offset + rw],
+                scale,
+                bias,
+            );
         }
 
-        // Create black background (LLaMA 4 uses 0 for padding)
-        let black = Rgb([0u8, 0, 0]);
-        let mut padded = RgbImage::from_pixel(target_w, target_h, black);
-
-        // Copy image to top-left — avoid to_rgb8() if already RGB8
-        match image {
-            DynamicImage::ImageRgb8(rgb) => image::imageops::overlay(&mut padded, rgb, 0, 0),
-            _ => image::imageops::overlay(&mut padded, &image.to_rgb8(), 0, 0),
-        }
-
-        DynamicImage::ImageRgb8(padded)
+        #[expect(
+            clippy::expect_used,
+            reason = "data has exactly 3*canvas_h*canvas_w elements by construction"
+        )]
+        Array3::from_shape_vec((3, canvas_h, canvas_w), data)
+            .expect("shape matches pre-allocated buffer")
     }
 
     /// Split image tensor into tiles.
@@ -326,7 +353,6 @@ impl Llama4VisionProcessor {
         let (target_h, target_w) = target_size;
 
         // Step 2: Compute resize target - limit upscaling if not resize_to_max_canvas
-        // This limits how much we resize the image, but we still pad to target_size
         let resize_target = if self.resize_to_max_canvas {
             target_size
         } else {
@@ -342,22 +368,23 @@ impl Llama4VisionProcessor {
 
         let resized = transforms::resize(image, new_w, new_h, FilterType::Triangle);
 
-        // Step 4: Pad to target_size (the canvas from get_best_fit, not resize_target)
-        let padded = self.pad_image(&resized, target_w, target_h);
-
-        // Step 5: Convert to tensor and normalize
-        let tensor = transforms::to_tensor_and_normalize(&padded, &self.mean, &self.std);
+        // Fused pad + tensor: build the padded f32 tensor directly from the
+        // resized RGB bytes, avoiding an intermediate padded RgbImage allocation.
+        let tensor = if new_w != target_w || new_h != target_h {
+            self.pad_and_normalize_to_tensor(&resized, target_w as usize, target_h as usize)
+        } else {
+            transforms::to_tensor_and_normalize(&resized, &self.mean, &self.std)
+        };
 
         // Step 6: Calculate tile counts based on target_size (canvas size)
         let tile = self.tile_size as usize;
         let num_tiles_h = target_h as usize / tile;
         let num_tiles_w = target_w as usize / tile;
 
-        // Step 7: Split into tiles
+        // Step 7: Split into tiles + global tile
         let tiles = self.split_to_tiles(&tensor, num_tiles_h, num_tiles_w);
         let num_tiles = num_tiles_h * num_tiles_w;
 
-        // Step 8: Add global tile if there are multiple tiles
         let output = if num_tiles > 1 {
             let global_tile = self.create_global_image(image);
             let mut combined = Array4::<f32>::zeros((num_tiles + 1, 3, tile, tile));
@@ -508,6 +535,8 @@ impl ImagePreProcessor for Llama4VisionProcessor {
 
 #[cfg(test)]
 mod tests {
+    use image::{Rgb, RgbImage};
+
     use super::*;
 
     fn create_test_image(width: u32, height: u32, color: Rgb<u8>) -> DynamicImage {

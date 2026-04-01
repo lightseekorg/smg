@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::routers::{
     error,
     grpc::{
+        client::GrpcClient,
         common::stages::PipelineStage,
         context::{RequestContext, RequestType},
         proto_wrapper::{ProtoEmbedRequest, ProtoRequest},
@@ -32,22 +33,6 @@ impl Default for EmbeddingRequestBuildingStage {
 #[async_trait]
 impl PipelineStage for EmbeddingRequestBuildingStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
-        // Extract log_metrics from embedding or classify request (both use same backend)
-        let log_metrics = match &ctx.input.request_type {
-            RequestType::Embedding(req) => req.log_metrics,
-            RequestType::Classify(req) => req.log_metrics,
-            _ => {
-                error!(
-                    function = "EmbeddingRequestBuildingStage::execute",
-                    "Invalid request type: expected Embedding or Classify"
-                );
-                return Err(error::internal_error(
-                    "invalid_request_type",
-                    "Expected Embedding or Classify request",
-                ));
-            }
-        };
-
         // Preparation output should have tokenized input
         let prep_output = ctx.state.preparation.as_ref().ok_or_else(|| {
             error!(
@@ -81,18 +66,35 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
         // Extract original text
         let original_text = prep_output.original_text.clone();
 
-        // Use backend-specific builder to create ProtoEmbedRequest
-        // Currently only SGLang supports embedding via gRPC
-        let sglang_client = client.as_sglang();
-
-        let sglang_req = sglang_client.build_embed_request(
-            request_id.clone(),
-            original_text,
-            prep_output.token_ids.clone(),
-            log_metrics,
-        );
-
-        let proto_req = ProtoEmbedRequest::Sglang(Box::new(sglang_req));
+        // Build backend-specific embed request
+        let proto_req = match client {
+            GrpcClient::Sglang(c) => {
+                let req = c.build_embed_request(
+                    request_id.clone(),
+                    original_text,
+                    prep_output.token_ids.clone(),
+                );
+                ProtoEmbedRequest::Sglang(Box::new(req))
+            }
+            GrpcClient::Vllm(c) => {
+                let req = c.build_embed_request(
+                    request_id.clone(),
+                    original_text,
+                    prep_output.token_ids.clone(),
+                );
+                ProtoEmbedRequest::Vllm(Box::new(req))
+            }
+            GrpcClient::Trtllm(_) => {
+                error!(
+                    function = "EmbeddingRequestBuildingStage::execute",
+                    "TensorRT-LLM embedding not yet supported"
+                );
+                return Err(error::not_implemented(
+                    "unsupported_backend",
+                    "TensorRT-LLM embedding is not yet supported via gRPC",
+                ));
+            }
+        };
 
         ctx.state.proto_request = Some(ProtoRequest::Embed(proto_req));
         Ok(None)

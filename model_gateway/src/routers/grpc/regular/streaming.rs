@@ -457,9 +457,6 @@ impl StreamingProcessor {
 
                     // Don't break - continue reading all Complete messages for n>1
                 }
-                ProtoResponseVariant::Error(error) => {
-                    return Err(error.message().to_string());
-                }
                 ProtoResponseVariant::None => continue,
             }
         }
@@ -585,9 +582,6 @@ impl StreamingProcessor {
                         // Input logprobs collected but not yet used in streaming
                         // (OpenAI spec doesn't require prompt logprobs in streaming responses)
                         break;
-                    }
-                    ProtoResponseVariant::Error(error) => {
-                        return Err(format!("Prefill error: {}", error.message()));
                     }
                     _ => continue,
                 }
@@ -792,9 +786,6 @@ impl StreamingProcessor {
 
                     // Continue to process all completions if n>1
                 }
-                ProtoResponseVariant::Error(error) => {
-                    return Err(error.message().to_string());
-                }
                 ProtoResponseVariant::None => continue,
             }
         }
@@ -831,9 +822,6 @@ impl StreamingProcessor {
                             .as_ref()
                             .map(utils::convert_generate_input_logprobs);
                         break;
-                    }
-                    ProtoResponseVariant::Error(error) => {
-                        return Err(format!("Prefill error: {}", error.message()));
                     }
                     _ => continue,
                 }
@@ -999,9 +987,6 @@ impl StreamingProcessor {
                         .map_err(|_| "Failed to send finish chunk".to_string())?;
 
                     // Continue to process all completions if n>1
-                }
-                ProtoResponseVariant::Error(error) => {
-                    return Err(error.message().to_string());
                 }
                 ProtoResponseVariant::None => continue,
             }
@@ -1941,9 +1926,6 @@ impl StreamingProcessor {
                     finish_reason_str = complete.finish_reason().to_string();
                     matched_stop = complete.matched_stop_json();
                 }
-                ProtoResponseVariant::Error(error) => {
-                    return Err(error.message().to_string());
-                }
                 ProtoResponseVariant::None => continue,
             }
         }
@@ -2125,9 +2107,6 @@ impl StreamingProcessor {
                 response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
             match gen_response.into_response() {
                 ProtoResponseVariant::Complete(_) => break,
-                ProtoResponseVariant::Error(error) => {
-                    return Err(format!("Prefill error: {}", error.message()));
-                }
                 _ => continue,
             }
         }
