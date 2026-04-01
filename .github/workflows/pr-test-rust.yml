@@ -447,6 +447,7 @@ jobs:
     secrets: inherit
 
   e2e-1gpu-embeddings:
+    name: e2e-1gpu-embeddings (${{ matrix.engine }})
     needs: [build-wheel, detect-changes]
     if: >-
       always()
@@ -457,12 +458,20 @@ jobs:
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.embeddings == 'true')))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sglang
+            timeout: 20
+          - engine: vllm
+            timeout: 20
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
-      engine: sglang
+      engine: ${{ matrix.engine }}
       gpu_tier: "1"
       runner: 1-gpu
-      timeout: 20
+      timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/embeddings
       extra_deps: "sentence-transformers"
     secrets: inherit
