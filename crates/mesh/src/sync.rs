@@ -949,48 +949,13 @@ impl MeshSyncManager {
     /// prefixes.  This is much smaller than the flat `TreeState` produced
     /// by `export_tree_state` (~2-4 MB vs ~40 MB for 2048 entries sharing
     /// 80% prefixes) and avoids accumulating full prompt text in memory.
+    #[expect(clippy::unused_self, reason = "Public API called by controller — removing &self is a breaking change")]
     pub fn checkpoint_tree_states(&self) {
-        // Only re-export if tree_generation changed since last checkpoint.
-        let current_gen = self.stores.tree_generation.load(Ordering::Acquire);
-        let last_gen = self
-            .stores
-            .last_checkpoint_gen
-            .swap(current_gen, Ordering::AcqRel);
-        if current_gen == last_gen {
-            return;
-        }
-
-        let subscribers = self.tree_state_subscribers.read().clone();
-        if subscribers.is_empty() {
-            return;
-        }
-
-        let model_keys: Vec<String> = self
-            .stores
-            .tree_versions
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in model_keys {
-            let model_id = key.strip_prefix("tree:").unwrap_or(&key);
-
-            let mut snapshot_bytes: Option<Vec<u8>> = None;
-            for subscriber in &subscribers {
-                if let Some(snap) = subscriber.export_tree_snapshot(model_id) {
-                    if let Ok(bytes) = snap.to_bytes() {
-                        snapshot_bytes = Some(bytes);
-                        break;
-                    }
-                }
-            }
-
-            if let Some(bytes) = snapshot_bytes {
-                if !bytes.is_empty() {
-                    self.stores.tree_configs.insert(key, bytes);
-                }
-            }
-        }
+        // No-op: tree data syncs via Layer 1 (tenant deltas, ~50 bytes each).
+        // Layer 2 (full tree snapshots) is deferred — the snapshot can be
+        // 170+ MB for large trees, and the checkpoint allocation every 10s
+        // causes allocator fragmentation. Future: chunked or incremental
+        // tree diffs for convergence (options 2/3 in the design doc).
     }
 }
 
