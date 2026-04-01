@@ -32,6 +32,8 @@ MODEL_SPECS: dict[str, dict] = {
         "model": _resolve_model_path("meta-llama/Llama-3.1-8B-Instruct"),
         "tp": 1,
         "features": ["chat", "streaming", "function_calling"],
+        # TODO(keyang): REVERT THIS — temporary OOM trigger to validate crash log diagnostics
+        "worker_args": ["--mem-fraction-static", "1.1"],
     },
     # Small model for quick tests
     "meta-llama/Llama-3.2-1B-Instruct": {
