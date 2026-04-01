@@ -148,14 +148,15 @@ impl Sequence {
     /// caching internally.
     #[inline]
     pub fn append_token(&mut self, token_id: TokenIdType) -> Result<String> {
-        self.total_tokens += 1;
-        match self.tokenizer.decode_step(
+        let result = self.tokenizer.decode_step(
             token_id,
             &mut self.token_ids,
             &mut self.cached_prefix,
             &mut self.prefix_index,
             self.skip_special_tokens,
-        )? {
+        )?;
+        self.total_tokens += 1;
+        match result {
             Some(text) => Ok(text),
             None => Ok(String::new()),
         }

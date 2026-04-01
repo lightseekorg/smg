@@ -635,21 +635,15 @@ mod tests {
         // Token 3 ("test"): jail = "test" (4 bytes), within the 11-byte window → Held
         let result1 = decoder.process_token(3).unwrap();
         assert!(
-            matches!(
-                result1,
-                SequenceDecoderOutput::Text(_) | SequenceDecoderOutput::Held
-            ),
-            "Expected Text or Held for token within jail window, got {result1:?}"
+            matches!(result1, SequenceDecoderOutput::Held),
+            "Expected Held for token within jail window, got {result1:?}"
         );
 
         // Token 1 ("Hello"): jail = "test Hello" (10 bytes), still within window → Held
         let result2 = decoder.process_token(1).unwrap();
         assert!(
-            matches!(
-                result2,
-                SequenceDecoderOutput::Text(_) | SequenceDecoderOutput::Held
-            ),
-            "Expected Text or Held for token within jail window, got {result2:?}"
+            matches!(result2, SequenceDecoderOutput::Held),
+            "Expected Held for token within jail window, got {result2:?}"
         );
 
         // Token 2 ("world"): jail = "test Hello world" — Aho-Corasick matches
