@@ -174,7 +174,7 @@ def hf_reference_embeddings(request):
     from infra.model_specs import MODEL_SPECS
 
     # Get model path from MODEL_SPECS for the embedding model
-    model_path = MODEL_SPECS.get("embedding", {}).get("model")
+    model_path = MODEL_SPECS.get("intfloat/e5-mistral-7b-instruct", {}).get("model")
     if model_path is None:
         pytest.skip("Embedding model not found in MODEL_SPECS")
 
@@ -243,6 +243,24 @@ class TestEmbeddingCorrectness:
                 embed_idx : embed_idx + num_texts
             ].tolist()
             embed_idx += num_texts
+
+            # Debug: log input, output snippets, and norms for diagnosis
+            for j, text in enumerate(input_texts):
+                gw = embedding_gateway[j]
+                hf = embedding_hf[j]
+                gw_norm = sum(x * x for x in gw) ** 0.5
+                hf_norm = sum(x * x for x in hf) ** 0.5
+                logger.info(
+                    "Text %d: %r\n  gateway[0:5]=%s norm=%.4f dim=%d\n  hf[0:5]=%s norm=%.4f dim=%d",
+                    j,
+                    text[:60],
+                    gw[:5],
+                    gw_norm,
+                    len(gw),
+                    hf[:5],
+                    hf_norm,
+                    len(hf),
+                )
 
             similarities = compare_embeddings(embedding_gateway, embedding_hf)
             logger.info("Similarities: %s", similarities)
