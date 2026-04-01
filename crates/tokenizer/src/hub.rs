@@ -83,8 +83,13 @@ pub async fn download_files_from_hf(
             Ok(path) => {
                 results.insert(filename.to_string(), path);
             }
-            Err(_) => {
-                // File doesn't exist in repo, skip
+            Err(e) => {
+                tracing::warn!(
+                    filename = filename,
+                    model_id = model_id,
+                    error = %e,
+                    "Failed to download file from HuggingFace, skipping"
+                );
             }
         }
     }

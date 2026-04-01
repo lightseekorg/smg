@@ -88,8 +88,15 @@ impl MultimodalComponents {
         // If local config.json exists, load from disk; otherwise download from HF Hub.
         let (config, preprocessor_config) = if config_path.is_file() {
             Self::load_configs_from_disk(base_dir)?
+        } else if base_dir.is_dir() {
+            // Local directory exists but config.json is missing
+            anyhow::bail!(
+                "config.json not found in local model directory: {}. \
+                 Ensure the directory contains config.json and preprocessor_config.json.",
+                base_dir.display()
+            );
         } else {
-            debug!(
+            warn!(
                 model_id = model_id,
                 source = tokenizer_source,
                 "config.json not found locally, downloading from HuggingFace Hub"
