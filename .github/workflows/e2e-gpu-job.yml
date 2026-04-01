@@ -128,19 +128,15 @@ jobs:
             --reruns 2 --reruns-delay 5 \
             -s -vv
 
-      - name: Compute log artifact label
-        if: failure() || cancelled()
-        id: log-label
-        run: echo "label=$(echo '${{ inputs.test_dirs }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
-
-      - name: Dump failed worker logs
+      - name: Worker log snapshot
         if: failure() || cancelled()
         run: |
           LOG_DIR="e2e-logs"
           if [ ! -d "$LOG_DIR" ]; then exit 0; fi
           SEP="============================================================"
           DASH="------------------------------------------------------------"
-          ARTIFACT="e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${{ steps.log-label.outputs.label }}"
+          LABEL=$(echo '${{ inputs.test_dirs }}' | tr '/' '-')
+          ARTIFACT="e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${LABEL}"
 
           # Dump last worker log (most recent = last retry of the failed model)
           LAST_LOG=$(ls -t "$LOG_DIR"/worker-*.log 2>/dev/null | head -1)
@@ -162,11 +158,15 @@ jobs:
           ls -lhS "$LOG_DIR"/*.log 2>/dev/null || echo "  (none)"
           echo "$SEP"
 
+          # Pass label for upload step
+          echo "label=${LABEL}" >> "$GITHUB_OUTPUT"
+        id: log-snapshot
+
       - name: Upload worker logs
         if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${{ steps.log-label.outputs.label }}
+          name: e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${{ steps.log-snapshot.outputs.label }}
           path: e2e-logs/
           retention-days: 7
           if-no-files-found: ignore

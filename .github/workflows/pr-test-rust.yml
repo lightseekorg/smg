@@ -345,7 +345,35 @@ jobs:
           name: genai-bench-results-all-policies
           path: benchmark_**/
 
-      - name: Upload worker logs on failure
+      - name: Worker log snapshot
+        if: failure() || cancelled()
+        run: |
+          LOG_DIR="benchmark-logs"
+          if [ ! -d "$LOG_DIR" ]; then exit 0; fi
+          SEP="============================================================"
+          DASH="------------------------------------------------------------"
+
+          # Dump last worker log (most recent = last retry of the failed model)
+          LAST_LOG=$(ls -t "$LOG_DIR"/worker-*.log 2>/dev/null | head -1)
+          if [ -n "$LAST_LOG" ]; then
+            LINES=$(wc -l < "$LAST_LOG")
+            echo ""
+            echo "$SEP"
+            echo "Last worker log: $(basename "$LAST_LOG") (last 200 of $LINES lines)"
+            echo "$DASH"
+            tail -200 "$LAST_LOG"
+            echo "$SEP"
+          fi
+
+          # List all log files with sizes
+          echo ""
+          echo "$SEP"
+          echo "All worker logs in artifact: benchmark-worker-logs"
+          echo "$DASH"
+          ls -lhS "$LOG_DIR"/*.log 2>/dev/null || echo "  (none)"
+          echo "$SEP"
+
+      - name: Upload worker logs
         if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
