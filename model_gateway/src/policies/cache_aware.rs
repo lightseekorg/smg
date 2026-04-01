@@ -138,24 +138,16 @@ impl CacheAwarePolicy {
                         );
                     }
 
-                    // Log tree sizes for memory debugging — includes node count
-                    // and total edge bytes to identify tree growth.
-                    for tree_ref in string_trees_clone.iter() {
-                        let snap = tree_ref.value().snapshot();
-                        tracing::info!(
-                            "Tree memory: model={} nodes={} edge_bytes={} path_hash_index={}",
-                            tree_ref.key(),
-                            snap.node_count(),
-                            snap.total_edge_bytes(),
-                            path_hash_index_clone.len(),
-                        );
-                    }
-                    if string_trees_clone.is_empty() {
-                        tracing::info!(
-                            "Tree memory: no string trees, path_hash_index={}",
-                            path_hash_index_clone.len(),
-                        );
-                    }
+                    // Log tree sizes — use model count + path_hash_index only.
+                    // DO NOT call tree.snapshot() here — it clones all edge text
+                    // (~170 MB) every eviction cycle, causing allocator fragmentation.
+                    tracing::info!(
+                        "Tree memory: string_trees={} models, token_trees={} models, \
+                         path_hash_index={} entries",
+                        string_trees_clone.len(),
+                        token_trees_clone.len(),
+                        path_hash_index_clone.len(),
+                    );
                 },
             ))
         } else {
