@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use hf_hub::api::tokio::{Api, ApiBuilder};
 
@@ -61,6 +64,32 @@ fn is_tokenizer_file(filename: &str) -> bool {
 fn is_chat_template_file(filename: &str) -> bool {
     filename.ends_with(".jinja")  // Direct Jinja files
         || filename == "chat_template.json" // JSON file containing Jinja template
+}
+
+/// Download specific files from a HuggingFace model repo.
+///
+/// Returns a map of filename → local cache path for each successfully downloaded file.
+/// Files that don't exist in the repo are silently skipped.
+pub async fn download_files_from_hf(
+    model_id: &str,
+    filenames: &[&str],
+) -> anyhow::Result<HashMap<String, PathBuf>> {
+    let api = build_api()?;
+    let repo = api.model(model_id.to_string());
+    let mut results = HashMap::new();
+
+    for &filename in filenames {
+        match repo.get(filename).await {
+            Ok(path) => {
+                results.insert(filename.to_string(), path);
+            }
+            Err(_) => {
+                // File doesn't exist in repo, skip
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 /// Attempt to download tokenizer files from Hugging Face

@@ -9,7 +9,7 @@
 //! functions differ because they work with different input types (`ChatMessage` vs
 //! `InputMessage`).
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -70,6 +70,9 @@ impl MultimodalComponents {
     }
 
     /// Load or retrieve cached model config for a given model and tokenizer source path.
+    ///
+    /// If `tokenizer_source` is a local directory containing `config.json`, loads from disk.
+    /// Otherwise, treats it as a HuggingFace model ID and downloads the config files.
     pub async fn get_or_load_config(
         &self,
         model_id: &str,
@@ -79,13 +82,32 @@ impl MultimodalComponents {
             return Ok(cached.clone());
         }
 
-        let base_dir = llm_multimodal::hub::resolve_model_config_dir(tokenizer_source)
-            .await
-            .with_context(|| {
-                format!("Failed to resolve model config directory for '{tokenizer_source}'")
-            })?;
+        let base_dir = Path::new(tokenizer_source);
+        let config_path = base_dir.join("config.json");
 
-        // Load config.json
+        // If local config.json exists, load from disk; otherwise download from HF Hub.
+        let (config, preprocessor_config) = if config_path.is_file() {
+            Self::load_configs_from_disk(base_dir)?
+        } else {
+            debug!(
+                model_id = model_id,
+                source = tokenizer_source,
+                "config.json not found locally, downloading from HuggingFace Hub"
+            );
+            Self::load_configs_from_hf(tokenizer_source).await?
+        };
+
+        let model_config = Arc::new(MultimodalModelConfig {
+            config,
+            preprocessor_config,
+        });
+
+        self.model_configs
+            .insert(model_id.to_string(), model_config.clone());
+        Ok(model_config)
+    }
+
+    fn load_configs_from_disk(base_dir: &Path) -> Result<(serde_json::Value, PreProcessorConfig)> {
         let config_path = base_dir.join("config.json");
         let config: serde_json::Value = std::fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read config.json at {}", config_path.display()))
@@ -95,7 +117,6 @@ impl MultimodalComponents {
                 })
             })?;
 
-        // Load preprocessor_config.json
         let pp_config_path = base_dir.join("preprocessor_config.json");
         let preprocessor_config = std::fs::read_to_string(&pp_config_path)
             .with_context(|| {
@@ -113,14 +134,53 @@ impl MultimodalComponents {
                 })
             })?;
 
-        let model_config = Arc::new(MultimodalModelConfig {
-            config,
-            preprocessor_config,
-        });
+        Ok((config, preprocessor_config))
+    }
 
-        self.model_configs
-            .insert(model_id.to_string(), model_config.clone());
-        Ok(model_config)
+    async fn load_configs_from_hf(
+        model_id: &str,
+    ) -> Result<(serde_json::Value, PreProcessorConfig)> {
+        let files = llm_tokenizer::hub::download_files_from_hf(
+            model_id,
+            &["config.json", "preprocessor_config.json"],
+        )
+        .await
+        .with_context(|| {
+            format!("Failed to download config files from HuggingFace for model: {model_id}")
+        })?;
+
+        let config_path = files.get("config.json").ok_or_else(|| {
+            anyhow::anyhow!("config.json not found in HuggingFace repo: {model_id}")
+        })?;
+        let config: serde_json::Value = std::fs::read_to_string(config_path)
+            .with_context(|| {
+                format!(
+                    "Failed to read downloaded config.json at {}",
+                    config_path.display()
+                )
+            })
+            .and_then(|s| {
+                serde_json::from_str(&s)
+                    .with_context(|| format!("Failed to parse config.json for model: {model_id}"))
+            })?;
+
+        let pp_config_path = files.get("preprocessor_config.json").ok_or_else(|| {
+            anyhow::anyhow!("preprocessor_config.json not found in HuggingFace repo: {model_id}")
+        })?;
+        let preprocessor_config = std::fs::read_to_string(pp_config_path)
+            .with_context(|| {
+                format!(
+                    "Failed to read downloaded preprocessor_config.json at {}",
+                    pp_config_path.display()
+                )
+            })
+            .and_then(|s| {
+                PreProcessorConfig::from_json(&s).with_context(|| {
+                    format!("Failed to parse preprocessor_config.json for model: {model_id}")
+                })
+            })?;
+
+        Ok((config, preprocessor_config))
     }
 }
 
@@ -154,34 +214,6 @@ pub(crate) struct MultimodalIntermediate {
     pub field_layouts: HashMap<String, FieldLayout>,
     /// Tensor keys that should remain on CPU (vLLM `keep_on_cpu` hint).
     pub keep_on_cpu_keys: Vec<String>,
-}
-
-/// Resolve the placeholder token string for a multimodal model.
-///
-/// Loads the model config and looks up the model spec to get the placeholder
-/// token (e.g. `"<|image|>"` for Phi-3-vision). Returns `None` if the model
-/// is not recognized as multimodal.
-pub(crate) async fn resolve_placeholder_token(
-    model_id: &str,
-    tokenizer: &dyn TokenizerTrait,
-    components: &MultimodalComponents,
-    tokenizer_source: &str,
-) -> Result<Option<String>> {
-    let model_config = components
-        .get_or_load_config(model_id, tokenizer_source)
-        .await?;
-    let metadata = ModelMetadata {
-        model_id,
-        tokenizer,
-        config: &model_config.config,
-    };
-    let spec = match components.model_registry.lookup(&metadata) {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-    Ok(Some(spec.placeholder_token(&metadata).map_err(|e| {
-        anyhow::anyhow!("Failed to get placeholder token: {e}")
-    })?))
 }
 
 /// Check if any messages in the request contain multimodal content (images).
@@ -409,7 +441,6 @@ async fn process_multimodal_parts(
 
     debug!(
         image_count = images.len(),
-        image_sizes = ?images.iter().map(|f| (f.image.width(), f.image.height())).collect::<Vec<_>>(),
         "Fetched images for multimodal processing"
     );
 
@@ -417,10 +448,6 @@ async fn process_multimodal_parts(
     let model_config = components
         .get_or_load_config(model_id, tokenizer_source)
         .await?;
-    let model_type = model_config
-        .config
-        .get("model_type")
-        .and_then(|v| v.as_str());
     let metadata = ModelMetadata {
         model_id,
         tokenizer,
@@ -433,7 +460,7 @@ async fn process_multimodal_parts(
 
     let image_processor = components
         .image_processor_registry
-        .find(model_id, model_type)
+        .find(model_id)
         .ok_or_else(|| anyhow::anyhow!("No image processor found for model: {model_id}"))?;
 
     // ImagePreProcessor::preprocess takes &[DynamicImage]; images are behind Arc<ImageFrame>.
@@ -687,7 +714,11 @@ fn assemble_trtllm(intermediate: MultimodalIntermediate) -> TrtllmMultimodalData
 
 /// Serialize pixel values ndarray to raw little-endian f32 bytes + shape.
 fn serialize_pixel_values(preprocessed: &PreprocessedImages) -> (Vec<u8>, Vec<u32>) {
-    let pixel_bytes: Vec<u8> = if let Some(pixel_slice) = preprocessed.pixel_values.as_slice() {
+    let pixel_bytes: Vec<u8> = if let Some(pixel_slice) = preprocessed
+        .pixel_values
+        .as_slice()
+        .or_else(|| preprocessed.pixel_values.as_slice_memory_order())
+    {
         // Zero-copy reinterpret: &[f32] → &[u8] on little-endian (x86).
         // This replaces the per-element flat_map(to_le_bytes) which was the
         // #1 CPU hotspot (13% of SMG CPU in profiling).
