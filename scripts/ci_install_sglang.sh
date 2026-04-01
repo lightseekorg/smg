@@ -46,7 +46,7 @@ fi
 # grpc_server.py references proto types (EmbedError, EmbedComplete) that were
 # removed from our proto definitions.
 echo "Installing SGLang..."
-uv pip install "sglang[all]==0.5.10rc0"
+uv pip install --prerelease=allow "sglang[all]==0.5.10rc0"
 
 # Install flashinfer-jit-cache: sglang bundles flashinfer_python but only for attention ops.
 # Multi-GPU models need trtllm_comm kernels (fused allreduce + layernorm) which FlashInfer
