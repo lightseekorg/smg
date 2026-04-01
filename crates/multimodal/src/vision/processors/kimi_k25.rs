@@ -202,10 +202,8 @@ impl ImagePreProcessor for KimiK25Processor {
         }
 
         let image_sizes: Vec<(u32, u32)> = images.iter().map(|img| img.dimensions()).collect();
-        // Always use Kimi-K2.5's own normalization values, not the preprocessor config's
-        // fallback (which defaults to CLIP mean/std when the config can't be parsed).
-        let mean = self.default_mean();
-        let std = self.default_std();
+        let mean = config.get_image_mean();
+        let std = config.get_image_std();
 
         let mut all_patches: Vec<f32> = Vec::new();
         let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
