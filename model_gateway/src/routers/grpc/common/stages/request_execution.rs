@@ -133,7 +133,7 @@ impl PipelineStage for RequestExecutionStage {
                         }
                     }
                 },
-                ProtoRequest::Embed(req) => self.execute_single_embed(req, clients).await,
+                ProtoRequest::Embed(req) => self.execute_single_embed(req, clients, workers).await,
             }
         }
         .instrument(span)
@@ -185,6 +185,7 @@ impl RequestExecutionStage {
         &self,
         proto_request: ProtoEmbedRequest,
         clients: &mut ClientSelection,
+        workers: &WorkerSelection,
     ) -> Result<ExecutionResult, Response> {
         let client = clients.single_mut().ok_or_else(|| {
             error!(
@@ -197,7 +198,10 @@ impl RequestExecutionStage {
             )
         })?;
 
-        let complete = client.embed(proto_request).await.map_err(|e| {
+        let result = client.embed(proto_request).await;
+        workers.record_outcome(result.cb_status_code());
+
+        let complete = result.map_err(|e| {
             error!(function = "execute_single_embed", error = %e, "Failed to start embedding");
             e.to_http_error(
                 "start_embedding_failed",

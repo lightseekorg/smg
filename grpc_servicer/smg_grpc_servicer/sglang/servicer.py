@@ -278,6 +278,11 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
 
             result = await future
 
+            if "error" in result:
+                code = abort_code_from_output(result)
+                await context.abort(code, result["error"])
+                return
+
             embedding = result["embedding"]
             return sglang_scheduler_pb2.EmbedResponse(
                 embedding=embedding,

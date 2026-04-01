@@ -211,6 +211,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                     grpc.StatusCode.INVALID_ARGUMENT,
                     "EmbedRequest requires tokenized input",
                 )
+                return
 
             prompt: TokensPrompt = {"prompt_token_ids": list(request.tokenized.input_ids)}
             if request.tokenized.original_text:
@@ -232,6 +233,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                     grpc.StatusCode.INTERNAL,
                     f"Embed request {request_id} did not produce a result",
                 )
+                return
 
             embedding = final_output.outputs.data.tolist()
 
