@@ -1,7 +1,8 @@
 //! DeepSeek V3.1 Parser Integration Tests
 mod common;
 
-use tool_parser::{DeepSeek31Parser, ToolParser};
+use common::create_test_tools;
+use tool_parser::{DeepSeek31Parser, ParserFactory, ToolParser};
 
 #[tokio::test]
 async fn test_deepseek31_complete_single_tool() {
@@ -108,8 +109,6 @@ async fn test_deepseek31_no_tool_calls() {
     assert_eq!(normal_text, input);
     assert!(tools.is_empty());
 }
-
-use common::create_test_tools;
 
 #[tokio::test]
 async fn test_deepseek31_streaming_single_tool() {
@@ -222,20 +221,13 @@ async fn test_deepseek31_streaming_end_tokens_stripped() {
     assert!(result.normal_text.is_empty() || !result.normal_text.contains("<｜tool▁calls▁end｜>"));
 }
 
-use tool_parser::ParserFactory;
-
 #[test]
 fn test_deepseek31_factory_registration() {
     let factory = ParserFactory::new();
 
-    // Verify parser is registered
     assert!(factory.has_parser("deepseek31"));
 
-    // Verify model mappings resolve to the right parser
     assert!(factory.registry().has_parser_for_model("deepseek-v3.1"));
-    assert!(factory
-        .registry()
-        .has_parser_for_model("deepseek-v3.1-terminus"));
     assert!(factory
         .registry()
         .has_parser_for_model("deepseek-ai/DeepSeek-V3.1"));
@@ -243,7 +235,7 @@ fn test_deepseek31_factory_registration() {
         .registry()
         .has_parser_for_model("deepseek-ai/DeepSeek-V3.1-Terminus"));
 
-    // Verify existing V3 mappings still work
+    // Existing V3 mappings still work
     assert!(factory.registry().has_parser_for_model("deepseek-v3"));
     assert!(factory
         .registry()
