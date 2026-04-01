@@ -754,7 +754,7 @@ mod tests {
         });
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
+        let mesh_sync = Arc::new(MeshSyncManager::new(stores.clone(), "node1".to_string()));
         registry.set_mesh_sync(Some(mesh_sync.clone()));
 
         let policy = registry.get_default_policy();
@@ -782,10 +782,10 @@ mod tests {
         assert_eq!(selected, Some(0));
         // sync_tree_operation buffers tenant deltas and bumps version,
         // but does not populate tree_configs (that requires checkpoint).
-        // Verify the sync path worked by checking the tree version advanced.
+        // Verify the mesh hook actually ran by checking for buffered deltas.
         assert!(
-            mesh_sync.get_tree_state(UNKNOWN_MODEL_ID).is_none(),
-            "get_tree_state should be None until checkpoint"
+            stores.tenant_delta_inserts.get(UNKNOWN_MODEL_ID).is_some(),
+            "mesh hook should have buffered tenant delta inserts"
         );
     }
 

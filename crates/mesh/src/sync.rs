@@ -833,9 +833,11 @@ impl MeshSyncManager {
             "Applying remote tenant delta"
         );
 
-        // Notify subscribers (CacheAwarePolicy) to apply directly to local tree
-        let subscribers = self.tree_state_subscribers.read();
-        for subscriber in subscribers.iter() {
+        // Clone subscriber list before calling back — same pattern as
+        // notify_tree_state_subscribers — so we don't hold the read guard
+        // during potentially expensive subscriber callbacks.
+        let subscribers = self.tree_state_subscribers.read().clone();
+        for subscriber in &subscribers {
             subscriber.apply_tenant_delta(&delta.model_id, &delta.inserts, &delta.evictions);
         }
 

@@ -82,6 +82,12 @@ pub struct CacheAwarePolicy {
     /// Populated on local inserts with the MATCHED PREFIX from the radix
     /// tree (not the full prompt text). Consumed on remote tenant delta
     /// application. Bounded by eviction at `max_tree_size` entries.
+    ///
+    /// TODO: this index is NOT scoped by model_id — if two models produce the
+    /// same text hash but match different prefixes, the last writer wins.
+    /// Low risk in practice (most deployments serve a single model) but a
+    /// compound key `(model_id, hash)` or hashing `model_id\0text` would be
+    /// correct.  Deferring to a follow-up to avoid changing the wire format.
     path_hash_index: Arc<DashMap<u64, String>>,
 }
 

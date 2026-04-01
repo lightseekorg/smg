@@ -1,11 +1,11 @@
 //! Compact serializable snapshot of a radix tree.
 //!
-//! **Status: WIP** — types are defined and tested but not yet wired into
-//! the mesh sync protocol. Currently, Layer 2 (periodic structure snapshots)
-//! sends LZ4-compressed `TreeState` (flat operation list). This module will
-//! replace that with a structure-preserving snapshot format that shares
-//! common prefixes, reducing wire size from ~40 MB to ~2-4 MB for a tree
-//! with 2048 entries sharing 80% prefixes.
+//! Used by the mesh sync protocol as an alternative to the flat `TreeState`
+//! operation list. The structure-preserving format shares common prefixes,
+//! reducing wire size from ~40 MB to ~2-4 MB for a tree with 2048 entries
+//! sharing 80% prefixes. Receivers in `controller.rs` and `ping_server.rs`
+//! accept both `TreeState` and `TreeSnapshot` payloads under the
+//! `tree_state_lz4` policy type.
 //!
 //! Wire format: flattened pre-order node list.  Each node stores its
 //! edge label and tenant list.  Children are implicitly ordered by
