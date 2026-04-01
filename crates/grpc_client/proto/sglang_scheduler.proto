@@ -303,7 +303,7 @@ message EmbedRequest {
   // EmbedRequest doesn't use sampling_params
   SamplingParams sampling_params = 5;
 
-  bool log_metrics = 6;
+  reserved 6;  // was log_metrics — removed, SGLang-specific concern
 
   // Token type IDs for models that require them
   repeated int32 token_type_ids = 7;
@@ -317,35 +317,13 @@ message EmbedRequest {
 }
 
 message EmbedResponse {
-  string request_id = 1;
+  // Fields 1-3 reserved: old layout was request_id(1), oneof{EmbedComplete(2), EmbedError(3)}
+  reserved 1, 2, 3;
 
-  oneof response {
-    EmbedComplete complete = 2;
-    EmbedError error = 3;
-  }
-}
-
-message EmbedComplete {
-  repeated float embedding = 1;
-  uint32 prompt_tokens = 2;
-  uint32 cached_tokens = 3;
-
-  // Additional metadata
+  // Flat response — no oneof, errors via gRPC status
   uint32 embedding_dim = 4;
-
-  // For batch embeddings
-  repeated Embedding batch_embeddings = 5;
-}
-
-message Embedding {
-  repeated float values = 1;
-  int32 index = 2;
-}
-
-message EmbedError {
-  string message = 1;
-  string code = 2;
-  string details = 3;
+  repeated float embedding = 5;
+  uint32 prompt_tokens = 6;
 }
 
 // =====================
