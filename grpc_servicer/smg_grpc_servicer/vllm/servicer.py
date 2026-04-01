@@ -13,7 +13,7 @@ import grpc
 import torch
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from transformers import BatchFeature
-from vllm import PoolingParams, SamplingParams, TokensPrompt
+from vllm import EmbeddingOutput, PoolingParams, SamplingParams, TokensPrompt
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
@@ -229,10 +229,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 logger.warning(msg)
                 await context.abort(grpc.StatusCode.INTERNAL, msg)
 
-            data = final_output.outputs.data
-            if hasattr(data, "squeeze"):
-                data = data.squeeze()
-            embedding = data.tolist()
+            embedding_output = EmbeddingOutput.from_base(final_output.outputs)
+            embedding = embedding_output.embedding
 
             return vllm_engine_pb2.EmbedResponse(
                 embedding=embedding,
