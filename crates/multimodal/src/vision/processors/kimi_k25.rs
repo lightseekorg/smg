@@ -1,33 +1,17 @@
 //! Kimi-K2.5 (MoonViT) image processor.
 //!
-//! Kimi-K2.5 uses MoonViT which expects pixel_values as
-//! `[total_patches, C, patch_size, patch_size]` (4D on the engine side).
-//! The model's PatchEmbed3d applies Conv2d on each patch, so patches must NOT
-//! be flattened across the temporal dimension in the preprocessor.
+//! Matches the HuggingFace `KimiK25VisionProcessor` preprocessing pipeline:
 //!
-//! # Processing Pipeline
+//! 1. Compute scale to fit within patch limits (never upscale)
+//! 2. Resize with BICUBIC interpolation
+//! 3. Zero-pad to make dimensions divisible by factor (patch_size * merge_size)
+//! 4. Normalize with [0.5, 0.5, 0.5] mean/std
+//! 5. Extract patches as [N, C, patch_size, patch_size]
 //!
-//! 1. NaViT-style resize to fit within min/max pixel bounds
-//! 2. Align dimensions to (patch_size * merge_size) boundary
-//! 3. Convert to tensor and normalize with [0.5, 0.5, 0.5] mean/std
-//! 4. Extract patches as [C, patch_size, patch_size] per spatial position
-//!
-//! # Token Calculation
-//!
-//! ```text
-//! grid_t = 1  (for images)
-//! grid_h = resized_height / patch_size
-//! grid_w = resized_width / patch_size
-//! num_tokens = (grid_t * grid_h * grid_w) / merge_size²
-//! ```
-//!
-//! # Parameters
-//!
-//! - patch_size: 14
-//! - merge_size: 2
-//! - factor: 28 (patch_size * merge_size)
-//! - normalization: [0.5, 0.5, 0.5] mean/std
-//! - max_pixels: 3,211,264 (from in_patch_limit=16384)
+//! Key difference from Qwen-VL: Kimi resizes then zero-pads for alignment,
+//! while Qwen-VL resizes directly to factor-aligned dimensions. The model was
+//! trained with zero-padded images, so using the wrong resize strategy degrades
+//! image quality.
 
 use image::{DynamicImage, GenericImageView};
 use ndarray::Array3;
@@ -35,7 +19,7 @@ use ndarray::Array3;
 use crate::vision::{
     image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
-    transforms::{normalize, pil_to_filter, resize, to_tensor, TransformError},
+    transforms::{normalize, to_tensor, TransformError},
 };
 
 pub const KIMI_K25_MEAN: [f64; 3] = [0.5, 0.5, 0.5];
@@ -43,25 +27,26 @@ pub const KIMI_K25_STD: [f64; 3] = [0.5, 0.5, 0.5];
 
 pub const DEFAULT_PATCH_SIZE: usize = 14;
 pub const DEFAULT_MERGE_SIZE: usize = 2;
-pub const DEFAULT_MIN_PIXELS: usize = 256 * 28 * 28; // 200,704
-pub const DEFAULT_MAX_PIXELS: usize = 16384 * 14 * 14; // 3,211,264 (in_patch_limit=16384)
+/// Maximum total patches before merge (from preprocessor_config.json in_patch_limit)
+pub const DEFAULT_IN_PATCH_LIMIT: usize = 16384;
+/// Maximum patches along one spatial dimension
+pub const DEFAULT_PATCH_LIMIT_ON_ONE_SIDE: usize = 512;
 
-/// Python-compatible rounding (banker's rounding / round half to even).
-#[inline]
-fn round_half_to_even(x: f64) -> f64 {
-    let rounded = x.round();
-    if (x - x.floor() - 0.5).abs() < 1e-9 && rounded as i64 % 2 != 0 {
-        return rounded - 1.0;
-    }
-    rounded
+/// Kimi-K2.5 resize configuration for a single image.
+struct ResizeConfig {
+    new_width: usize,
+    new_height: usize,
+    pad_width: usize,
+    pad_height: usize,
+    num_tokens: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct KimiK25Processor {
     patch_size: usize,
     merge_size: usize,
-    min_pixels: usize,
-    max_pixels: usize,
+    in_patch_limit: usize,
+    patch_limit_on_one_side: usize,
 }
 
 impl Default for KimiK25Processor {
@@ -75,8 +60,8 @@ impl KimiK25Processor {
         Self {
             patch_size: DEFAULT_PATCH_SIZE,
             merge_size: DEFAULT_MERGE_SIZE,
-            min_pixels: DEFAULT_MIN_PIXELS,
-            max_pixels: DEFAULT_MAX_PIXELS,
+            in_patch_limit: DEFAULT_IN_PATCH_LIMIT,
+            patch_limit_on_one_side: DEFAULT_PATCH_LIMIT_ON_ONE_SIDE,
         }
     }
 
@@ -84,8 +69,8 @@ impl KimiK25Processor {
         Self {
             patch_size: config.get_patch_size(DEFAULT_PATCH_SIZE),
             merge_size: config.merge_size.unwrap_or(DEFAULT_MERGE_SIZE),
-            min_pixels: config.min_pixels.unwrap_or(DEFAULT_MIN_PIXELS),
-            max_pixels: config.max_pixels.unwrap_or(DEFAULT_MAX_PIXELS),
+            in_patch_limit: DEFAULT_IN_PATCH_LIMIT,
+            patch_limit_on_one_side: DEFAULT_PATCH_LIMIT_ON_ONE_SIDE,
         }
     }
 
@@ -97,74 +82,81 @@ impl KimiK25Processor {
         self.merge_size
     }
 
-    /// factor = patch_size * merge_size — dimensions must be divisible by this.
     #[inline]
-    pub fn factor(&self) -> usize {
+    fn factor(&self) -> usize {
         self.patch_size * self.merge_size
     }
 
-    /// NaViT-style smart resize: fit within min/max pixel bounds while
-    /// preserving aspect ratio and aligning to factor boundary.
-    pub fn smart_resize(
-        &self,
-        height: usize,
-        width: usize,
-    ) -> Result<(usize, usize), TransformError> {
+    /// Compute resize dimensions and padding, matching HF `navit_resize_image`.
+    ///
+    /// Never upscales (scale capped at 1.0). Pads with zeros to align to factor.
+    fn compute_resize_config(&self, width: usize, height: usize) -> ResizeConfig {
+        let ps = self.patch_size;
+        let patches_w = (width / ps).max(1) as f64;
+        let patches_h = (height / ps).max(1) as f64;
+
+        let s1 = (self.in_patch_limit as f64 / (patches_w * patches_h)).sqrt();
+        let s2 = (self.patch_limit_on_one_side * ps) as f64 / width as f64;
+        let s3 = (self.patch_limit_on_one_side * ps) as f64 / height as f64;
+        let scale = f64::min(1.0, f64::min(s1, f64::min(s2, s3)));
+
+        let new_w = ((width as f64 * scale) as usize).max(1);
+        let new_h = ((height as f64 * scale) as usize).max(1);
+        let new_w = new_w.min(self.patch_limit_on_one_side * ps);
+        let new_h = new_h.min(self.patch_limit_on_one_side * ps);
+
         let factor = self.factor();
+        let pad_width = (factor - new_w % factor) % factor;
+        let pad_height = (factor - new_h % factor) % factor;
 
-        if height < factor || width < factor {
-            return Err(TransformError::InvalidShape {
-                expected: format!("dimensions >= {factor} (patch_size * merge_size)"),
-                actual: vec![height, width],
-            });
+        let token_height = (new_h + pad_height) / factor;
+        let token_width = (new_w + pad_width) / factor;
+        let num_tokens = token_height * token_width;
+
+        ResizeConfig {
+            new_width: new_w,
+            new_height: new_h,
+            pad_width,
+            pad_height,
+            num_tokens,
+        }
+    }
+
+    /// Resize image and zero-pad to factor-aligned dimensions.
+    ///
+    /// Returns a [C, H_padded, W_padded] tensor where H_padded and W_padded
+    /// are divisible by factor.
+    fn resize_and_pad(image: &DynamicImage, cfg: &ResizeConfig) -> Array3<f32> {
+        let padded_h = cfg.new_height + cfg.pad_height;
+        let padded_w = cfg.new_width + cfg.pad_width;
+
+        // Resize using BICUBIC
+        let resized = image.resize_exact(
+            cfg.new_width as u32,
+            cfg.new_height as u32,
+            image::imageops::FilterType::CatmullRom,
+        );
+
+        // Convert to tensor [C, H, W] with values in [0, 1]
+        let tensor = to_tensor(&resized);
+
+        if cfg.pad_width == 0 && cfg.pad_height == 0 {
+            return tensor;
         }
 
-        let max_dim = height.max(width) as f64;
-        let min_dim = height.min(width) as f64;
-        if max_dim / min_dim > 200.0 {
-            return Err(TransformError::InvalidShape {
-                expected: "aspect ratio < 200:1".to_string(),
-                actual: vec![height, width],
-            });
-        }
-
-        let mut h_bar = round_half_to_even(height as f64 / factor as f64) as usize * factor;
-        let mut w_bar = round_half_to_even(width as f64 / factor as f64) as usize * factor;
-        h_bar = h_bar.max(factor);
-        w_bar = w_bar.max(factor);
-
-        if h_bar * w_bar > self.max_pixels {
-            let beta = ((height * width) as f64 / self.max_pixels as f64).sqrt();
-            h_bar = ((height as f64 / beta / factor as f64).floor() as usize) * factor;
-            w_bar = ((width as f64 / beta / factor as f64).floor() as usize) * factor;
-            h_bar = h_bar.max(factor);
-            w_bar = w_bar.max(factor);
-        } else if h_bar * w_bar < self.min_pixels {
-            let beta = (self.min_pixels as f64 / (height * width) as f64).sqrt();
-            h_bar = ((height as f64 * beta / factor as f64).ceil() as usize) * factor;
-            w_bar = ((width as f64 * beta / factor as f64).ceil() as usize) * factor;
-        }
-
-        Ok((h_bar, w_bar))
+        // Zero-pad: create padded array, copy resized data into top-left
+        let mut padded = Array3::<f32>::zeros((3, padded_h, padded_w));
+        padded
+            .slice_mut(ndarray::s![.., ..cfg.new_height, ..cfg.new_width])
+            .assign(&tensor);
+        padded
     }
 
     /// Extract [C, patch_size, patch_size] patches from a [C, H, W] tensor.
-    ///
-    /// Returns flattened `Vec<f32>` with layout `[num_patches, C * patch_size * patch_size]`.
-    /// The engine reconstructs this as `[num_patches, C, patch_size, patch_size]`.
-    fn extract_patches(
-        tensor: &Array3<f32>,
-        patch_size: usize,
-    ) -> Result<Vec<f32>, TransformError> {
+    fn extract_patches(tensor: &Array3<f32>, patch_size: usize) -> Vec<f32> {
         let channels = tensor.shape()[0];
         let height = tensor.shape()[1];
         let width = tensor.shape()[2];
-
-        if !height.is_multiple_of(patch_size) || !width.is_multiple_of(patch_size) {
-            return Err(TransformError::ShapeError(format!(
-                "Image dimensions [{height}, {width}] not divisible by patch_size {patch_size}"
-            )));
-        }
 
         let grid_h = height / patch_size;
         let grid_w = width / patch_size;
@@ -187,7 +179,7 @@ impl KimiK25Processor {
             }
         }
 
-        Ok(patches)
+        patches
     }
 }
 
@@ -212,7 +204,6 @@ impl ImagePreProcessor for KimiK25Processor {
         let image_sizes: Vec<(u32, u32)> = images.iter().map(|img| img.dimensions()).collect();
         let mean = config.get_image_mean();
         let std = config.get_image_std();
-        let filter = pil_to_filter(config.resampling);
 
         let mut all_patches: Vec<f32> = Vec::new();
         let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
@@ -221,40 +212,35 @@ impl ImagePreProcessor for KimiK25Processor {
 
         for image in images {
             let (w, h) = image.dimensions();
-            let (target_h, target_w) = self.smart_resize(h as usize, w as usize)?;
+            let cfg = self.compute_resize_config(w as usize, h as usize);
 
-            let resized = if config.do_resize.unwrap_or(true) {
-                resize(image, target_w as u32, target_h as u32, filter)
-            } else {
-                image.clone()
-            };
+            // Resize + zero-pad
+            let mut tensor = Self::resize_and_pad(image, &cfg);
 
-            let mut tensor = to_tensor(&resized);
+            // Normalize
             if config.do_normalize.unwrap_or(true) {
                 normalize(&mut tensor, &mean, &std);
             }
 
-            let grid_h = target_h / self.patch_size;
-            let grid_w = target_w / self.patch_size;
-            let grid_t = 1usize; // images always have temporal=1
+            let padded_h = cfg.new_height + cfg.pad_height;
+            let padded_w = cfg.new_width + cfg.pad_width;
+            let grid_h = padded_h / self.patch_size;
+            let grid_w = padded_w / self.patch_size;
+            let grid_t = 1usize;
 
             grid_thw_data.push(grid_t as i64);
             grid_thw_data.push(grid_h as i64);
             grid_thw_data.push(grid_w as i64);
 
             let num_patches = grid_h * grid_w;
-            // Token count after merge: (grid_t * grid_h * grid_w) / merge_size²
-            let tokens = (grid_t * grid_h * grid_w) / (self.merge_size * self.merge_size);
-            num_img_tokens.push(tokens);
+            num_img_tokens.push(cfg.num_tokens);
 
-            let patches = Self::extract_patches(&tensor, self.patch_size)?;
+            let patches = Self::extract_patches(&tensor, self.patch_size);
             all_patches.extend(patches);
             patches_per_image.push(num_patches as i64);
         }
 
         let total_patches: usize = patches_per_image.iter().map(|&n| n as usize).sum();
-        // Store as 4D [total_patches, C, patch_size, patch_size] so the engine
-        // receives the correct shape for Conv2d input via the proto shape field.
         let pixel_values = ndarray::Array4::from_shape_vec(
             (total_patches, 3, self.patch_size, self.patch_size),
             all_patches,
@@ -281,16 +267,8 @@ impl ImagePreProcessor for KimiK25Processor {
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, _config: &PreProcessorConfig) -> usize {
-        let (new_height, new_width) = match self.smart_resize(height as usize, width as usize) {
-            Ok((h, w)) => (h, w),
-            Err(_) => {
-                let factor = self.factor();
-                (factor, factor)
-            }
-        };
-        let grid_h = new_height / self.patch_size;
-        let grid_w = new_width / self.patch_size;
-        (grid_h * grid_w) / (self.merge_size * self.merge_size)
+        self.compute_resize_config(width as usize, height as usize)
+            .num_tokens
     }
 
     fn model_name(&self) -> &'static str {
@@ -298,7 +276,7 @@ impl ImagePreProcessor for KimiK25Processor {
     }
 
     fn get_processed_size(&self, _config: &PreProcessorConfig) -> Option<(u32, u32)> {
-        None // dynamic sizing
+        None
     }
 }
 
@@ -314,47 +292,72 @@ mod tests {
     }
 
     #[test]
-    fn test_kimi_k25_processor_default() {
-        let processor = KimiK25Processor::new();
-        assert_eq!(processor.patch_size(), 14);
-        assert_eq!(processor.merge_size(), 2);
-        assert_eq!(processor.factor(), 28);
+    fn test_defaults() {
+        let p = KimiK25Processor::new();
+        assert_eq!(p.patch_size(), 14);
+        assert_eq!(p.merge_size(), 2);
+        assert_eq!(p.factor(), 28);
     }
 
     #[test]
-    fn test_default_mean_std() {
-        let processor = KimiK25Processor::new();
-        assert_eq!(processor.default_mean(), KIMI_K25_MEAN);
-        assert_eq!(processor.default_std(), KIMI_K25_STD);
+    fn test_mean_std() {
+        let p = KimiK25Processor::new();
+        assert_eq!(p.default_mean(), KIMI_K25_MEAN);
+        assert_eq!(p.default_std(), KIMI_K25_STD);
     }
 
     #[test]
     fn test_model_name() {
-        let processor = KimiK25Processor::new();
-        assert_eq!(processor.model_name(), "kimi-k2.5");
+        assert_eq!(KimiK25Processor::new().model_name(), "kimi-k2.5");
     }
 
     #[test]
-    fn test_smart_resize_within_bounds() {
-        let processor = KimiK25Processor::new();
-        let (h, w) = processor.smart_resize(500, 500).unwrap();
-        assert_eq!(h % 28, 0);
-        assert_eq!(w % 28, 0);
-        assert!(h * w >= processor.min_pixels);
-        assert!(h * w <= processor.max_pixels);
+    fn test_resize_config_no_upscale() {
+        let p = KimiK25Processor::new();
+        // Small image should NOT be upscaled (scale capped at 1.0)
+        let cfg = p.compute_resize_config(100, 100);
+        assert!(cfg.new_width <= 100);
+        assert!(cfg.new_height <= 100);
+        // Padded dimensions must be factor-aligned
+        assert_eq!((cfg.new_height + cfg.pad_height) % 28, 0);
+        assert_eq!((cfg.new_width + cfg.pad_width) % 28, 0);
     }
 
     #[test]
-    fn test_smart_resize_extreme_aspect_ratio() {
-        let processor = KimiK25Processor::new();
-        assert!(processor.smart_resize(100, 30000).is_err());
+    fn test_resize_config_large_image_downscaled() {
+        let p = KimiK25Processor::new();
+        // Large image should be downscaled
+        let cfg = p.compute_resize_config(4000, 3000);
+        // Resized dimensions should be smaller than original
+        assert!(cfg.new_width < 4000);
+        assert!(cfg.new_height < 3000);
+        // Per-side patch limit must be respected (HF assertion)
+        let padded_h = cfg.new_height + cfg.pad_height;
+        let padded_w = cfg.new_width + cfg.pad_width;
+        assert!(padded_h / 14 <= DEFAULT_PATCH_LIMIT_ON_ONE_SIDE * 2);
+        assert!(padded_w / 14 <= DEFAULT_PATCH_LIMIT_ON_ONE_SIDE * 2);
     }
 
     #[test]
-    fn test_preprocess_patch_shape() {
-        let processor = KimiK25Processor::new();
+    fn test_resize_config_matches_hf_reference() {
+        let p = KimiK25Processor::new();
+        // 600x400 image: scale=1.0 (small enough), resize to 600x400,
+        // pad to (600+4=) → let's compute:
+        // factor=28, 400 % 28 = 400 - 14*28 = 400-392 = 8, pad_h = 28-8 = 20
+        // 600 % 28 = 600 - 21*28 = 600-588 = 12, pad_w = 28-12 = 16
+        let cfg = p.compute_resize_config(600, 400);
+        assert_eq!(cfg.new_width, 600);
+        assert_eq!(cfg.new_height, 400);
+        assert_eq!(cfg.pad_height, 20);
+        assert_eq!(cfg.pad_width, 16);
+        // Padded: 420 x 616, grid: 30 x 44, tokens: (30*44)/(2*2) = 330
+        assert_eq!(cfg.num_tokens, 330);
+    }
+
+    #[test]
+    fn test_preprocess_4d_output() {
+        let p = KimiK25Processor::new();
         let config = PreProcessorConfig {
-            do_resize: Some(true),
             do_normalize: Some(true),
             image_mean: Some(KIMI_K25_MEAN.to_vec()),
             image_std: Some(KIMI_K25_STD.to_vec()),
@@ -362,14 +365,13 @@ mod tests {
         };
 
         let image = create_test_image(600, 400, Rgb([128, 128, 128]));
-        let result = processor.preprocess(&[image], &config).unwrap();
+        let result = p.preprocess(&[image], &config).unwrap();
 
-        // Kimi: [total_patches, 3, 14, 14] — 4D for Conv2d
+        // 4D output: [total_patches, 3, 14, 14]
         assert_eq!(result.pixel_values.ndim(), 4);
         assert_eq!(result.pixel_values.shape()[1], 3);
         assert_eq!(result.pixel_values.shape()[2], 14);
         assert_eq!(result.pixel_values.shape()[3], 14);
-        assert!(result.pixel_values.shape()[0] > 0);
 
         assert!(result.model_specific.contains_key("grid_thws"));
         assert!(result.model_specific.contains_key("patches_per_image"));
@@ -378,15 +380,14 @@ mod tests {
 
     #[test]
     fn test_preprocess_multiple_images() {
-        let processor = KimiK25Processor::new();
+        let p = KimiK25Processor::new();
         let config = PreProcessorConfig::default();
-
         let images = vec![
             create_test_image(600, 400, Rgb([100, 100, 100])),
             create_test_image(400, 600, Rgb([150, 150, 150])),
         ];
 
-        let result = processor.preprocess(&images, &config).unwrap();
+        let result = p.preprocess(&images, &config).unwrap();
 
         assert_eq!(result.image_sizes.len(), 2);
         assert_eq!(result.num_img_tokens.len(), 2);
@@ -402,7 +403,6 @@ mod tests {
             panic!("Expected grid_thws to be IntTensor");
         }
 
-        // patches_per_image sum matches total_patches
         if let Some(ModelSpecificValue::IntTensor { data, .. }) =
             result.model_specific.get("patches_per_image")
         {
@@ -413,11 +413,10 @@ mod tests {
 
     #[test]
     fn test_calculate_num_tokens() {
-        let processor = KimiK25Processor::new();
+        let p = KimiK25Processor::new();
         let config = PreProcessorConfig::default();
-        // 448x448 → grid 32x32 → 1024 patches → 1024/4 = 256 tokens
-        let tokens = processor.calculate_num_tokens(448, 448, &config);
-        assert_eq!(tokens, 256);
+        let tokens = p.calculate_num_tokens(600, 400, &config);
+        assert_eq!(tokens, 330);
     }
 
     #[test]
@@ -428,14 +427,32 @@ mod tests {
                 width: Some(14),
             }),
             merge_size: Some(2),
-            min_pixels: Some(100000),
-            max_pixels: Some(500000),
             ..Default::default()
         };
-        let processor = KimiK25Processor::from_preprocessor_config(&config);
-        assert_eq!(processor.patch_size(), 14);
-        assert_eq!(processor.merge_size(), 2);
-        assert_eq!(processor.min_pixels, 100000);
-        assert_eq!(processor.max_pixels, 500000);
+        let p = KimiK25Processor::from_preprocessor_config(&config);
+        assert_eq!(p.patch_size(), 14);
+        assert_eq!(p.merge_size(), 2);
+    }
+
+    #[test]
+    fn test_zero_padding_applied() {
+        let p = KimiK25Processor::new();
+        let config = PreProcessorConfig {
+            do_normalize: Some(false), // skip normalization to check raw values
+            ..Default::default()
+        };
+
+        // 100x100 image with white pixels
+        let image = create_test_image(100, 100, Rgb([255, 255, 255]));
+        let result = p.preprocess(&[image], &config).unwrap();
+
+        // The padded region should contain zeros (from zero-padding)
+        let flat = result.pixel_values_flat();
+        let has_zeros = flat.contains(&0.0);
+        assert!(has_zeros, "Expected zero-padded regions in output");
+
+        // The image region should contain non-zero values (white = 1.0)
+        let has_ones = flat.iter().any(|&v| (v - 1.0).abs() < 1e-6);
+        assert!(has_ones, "Expected non-zero image values in output");
     }
 }
