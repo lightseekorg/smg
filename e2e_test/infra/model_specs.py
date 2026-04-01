@@ -29,17 +29,6 @@ def _resolve_model_path(hf_path: str) -> str:
     return hf_path
 
 
-_LLAMA_33_70B_BASE: dict = {
-    "tp": 4,
-    "features": ["chat", "streaming", "function_calling"],
-    "sglang_args": ["--mem-fraction-static=0.9"],
-    "vllm_args": [
-        "--max-model-len=131072",
-        "--gpu-memory-utilization=0.9",
-        "--enable-chunked-prefill",
-    ],
-}
-
 MODEL_SPECS: dict[str, dict] = {
     # Primary chat model - used for most tests
     "meta-llama/Llama-3.1-8B-Instruct": {
@@ -165,14 +154,33 @@ MODEL_SPECS: dict[str, dict] = {
         ],
         "startup_timeout": 1200,  # Large MoE model may need extra download/load time
     },
-    # Llama-3.3-70B family - Nightly benchmarks
+    # Llama-3.3-70B - Nightly benchmarks
     "meta-llama/Llama-3.3-70B-Instruct": {
-        **_LLAMA_33_70B_BASE,
         "model": _resolve_model_path("meta-llama/Llama-3.3-70B-Instruct"),
+        "tp": 4,
+        "features": ["chat", "streaming", "function_calling"],
+        "sglang_args": [
+            "--mem-fraction-static=0.9",
+        ],
+        "vllm_args": [
+            "--max-model-len=131072",
+            "--gpu-memory-utilization=0.9",
+            "--enable-chunked-prefill",
+        ],
     },
+    # Llama-3.3-70B FP8 - Nightly benchmarks
     "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic": {
-        **_LLAMA_33_70B_BASE,
         "model": _resolve_model_path("RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"),
+        "tp": 4,
+        "features": ["chat", "streaming", "function_calling"],
+        "sglang_args": [
+            "--mem-fraction-static=0.9",
+        ],
+        "vllm_args": [
+            "--max-model-len=131072",
+            "--gpu-memory-utilization=0.9",
+            "--enable-chunked-prefill",
+        ],
     },
 }
 
