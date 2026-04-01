@@ -231,6 +231,17 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 logger.warning(msg)
                 await context.abort(grpc.StatusCode.INTERNAL, msg)
 
+            logger.info(
+                "Embed %s: output type=%s, outputs type=%s, "
+                "outputs=%r, data type=%s, data shape=%s, data dtype=%s",
+                request_id,
+                type(final_output).__name__,
+                type(final_output.outputs).__name__,
+                final_output.outputs,
+                type(final_output.outputs.data).__name__,
+                getattr(final_output.outputs.data, "shape", "N/A"),
+                getattr(final_output.outputs.data, "dtype", "N/A"),
+            )
             embedding = final_output.outputs.data.tolist()
 
             return vllm_engine_pb2.EmbedResponse(
