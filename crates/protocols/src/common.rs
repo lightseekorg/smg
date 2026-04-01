@@ -716,3 +716,37 @@ pub enum Detail {
     #[default]
     Auto,
 }
+
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+    use serde_json::json;
+
+    use super::*;
+
+    #[derive(Deserialize)]
+    struct NullableBoolTest {
+        #[serde(default, deserialize_with = "deserialize_null_as_false")]
+        field: bool,
+    }
+
+    #[test]
+    fn test_deserialize_null_as_false() {
+        let cases = [
+            (json!({"field": true}), true),
+            (json!({"field": false}), false),
+            (json!({"field": null}), false),
+            (json!({}), false),
+        ];
+        for (input, expected) in cases {
+            let t: NullableBoolTest = serde_json::from_value(input).unwrap();
+            assert_eq!(t.field, expected);
+        }
+    }
+
+    #[test]
+    fn test_deserialize_null_as_false_rejects_non_bool() {
+        let result = serde_json::from_value::<NullableBoolTest>(json!({"field": "yes"}));
+        assert!(result.is_err());
+    }
+}
