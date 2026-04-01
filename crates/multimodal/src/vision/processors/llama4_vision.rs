@@ -326,7 +326,6 @@ impl Llama4VisionProcessor {
         let (target_h, target_w) = target_size;
 
         // Step 2: Compute resize target - limit upscaling if not resize_to_max_canvas
-        // This limits how much we resize the image, but we still pad to target_size
         let resize_target = if self.resize_to_max_canvas {
             target_size
         } else {
@@ -340,24 +339,30 @@ impl Llama4VisionProcessor {
         let new_size = Self::get_max_res_without_distortion(image_size, resize_target);
         let (new_h, new_w) = (new_size.0.max(1), new_size.1.max(1));
 
+        let t_resize = std::time::Instant::now();
         let resized = transforms::resize(image, new_w, new_h, FilterType::Triangle);
+        let resize_us = t_resize.elapsed().as_micros();
 
-        // Step 4: Pad to target_size (the canvas from get_best_fit, not resize_target)
+        // Step 4: Pad to target_size
+        let t_pad = std::time::Instant::now();
         let padded = self.pad_image(&resized, target_w, target_h);
+        let pad_us = t_pad.elapsed().as_micros();
 
         // Step 5: Convert to tensor and normalize
+        let t_tensor = std::time::Instant::now();
         let tensor = transforms::to_tensor_and_normalize(&padded, &self.mean, &self.std);
+        let tensor_us = t_tensor.elapsed().as_micros();
 
         // Step 6: Calculate tile counts based on target_size (canvas size)
         let tile = self.tile_size as usize;
         let num_tiles_h = target_h as usize / tile;
         let num_tiles_w = target_w as usize / tile;
 
-        // Step 7: Split into tiles
+        // Step 7: Split into tiles + global tile
+        let t_tile = std::time::Instant::now();
         let tiles = self.split_to_tiles(&tensor, num_tiles_h, num_tiles_w);
         let num_tiles = num_tiles_h * num_tiles_w;
 
-        // Step 8: Add global tile if there are multiple tiles
         let output = if num_tiles > 1 {
             let global_tile = self.create_global_image(image);
             let mut combined = Array4::<f32>::zeros((num_tiles + 1, 3, tile, tile));
@@ -371,6 +376,20 @@ impl Llama4VisionProcessor {
         } else {
             tiles
         };
+        let tile_us = t_tile.elapsed().as_micros();
+
+        let total_us = resize_us + pad_us + tensor_us + tile_us;
+        if total_us > 5000 {
+            tracing::debug!(
+                model = "llama4-vision",
+                resize_us = %resize_us,
+                pad_us = %pad_us,
+                tensor_us = %tensor_us,
+                tile_us = %tile_us,
+                total_us = %total_us,
+                "preprocess timing breakdown"
+            );
+        }
 
         (output, (num_tiles_h, num_tiles_w))
     }

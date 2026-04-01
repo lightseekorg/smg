@@ -126,6 +126,11 @@ lto = "fat"         # Full LTO for smaller binaries
 codegen-units = 1   # Better optimization, slower compile
 strip = true        # Strip debug symbols
 
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = false
+
 [profile.ci]
 inherits = "release"
 opt-level = 2       # Lighter optimization (still fast runtime, much faster compile)
