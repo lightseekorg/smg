@@ -435,20 +435,28 @@ async fn process_multimodal_parts(
         .lookup(&metadata)
         .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {model_id}"))?;
 
-    let image_processor = components
-        .image_processor_registry
-        .find(model_id, model_type)
-        .ok_or_else(|| anyhow::anyhow!("No image processor found for model: {model_id}"))?;
-
     let t_config = t0.elapsed();
 
-    // ImagePreProcessor::preprocess takes &[DynamicImage]; images are behind Arc<ImageFrame>.
-    // Clone cost is negligible vs. the preprocessing work itself.
-    let dynamic_images: Vec<image::DynamicImage> = images.iter().map(|f| f.image.clone()).collect();
+    // Run CPU-intensive image preprocessing on a blocking thread pool so it
+    // doesn't block the tokio async runtime under concurrent load.
+    let pp_config = model_config.preprocessor_config.clone();
+    let registry = components.image_processor_registry.clone();
+    let model_id_owned = model_id.to_string();
+    let model_type_owned = model_type.map(String::from);
+    let image_clones: Vec<image::DynamicImage> = images.iter().map(|f| f.image.clone()).collect();
 
-    let preprocessed: PreprocessedImages = image_processor
-        .preprocess(&dynamic_images, &model_config.preprocessor_config)
-        .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))?;
+    let preprocessed: PreprocessedImages = tokio::task::spawn_blocking(move || {
+        let processor = registry
+            .find(&model_id_owned, model_type_owned.as_deref())
+            .ok_or_else(|| {
+                anyhow::anyhow!("No image processor found for model: {model_id_owned}")
+            })?;
+        processor
+            .preprocess(&image_clones, &pp_config)
+            .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))??;
 
     let t_preprocess = t0.elapsed();
 
