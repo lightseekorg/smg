@@ -27,7 +27,6 @@ model: Convenience fixture that returns just the model_path from setup_backend.
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from importlib.util import find_spec
 from pathlib import Path
@@ -114,60 +113,6 @@ from fixtures import (
 from smg_client import SmgClient
 
 # ---------------------------------------------------------------------------
-# Failure diagnostics (session end)
-# ---------------------------------------------------------------------------
-
-
-def pytest_unconfigure(config):
-    """Print worker log dump and file listing after all pytest output."""
-    from collections import deque
-
-    from infra import LOG_SEPARATOR_WIDTH
-
-    log_dir = os.environ.get("E2E_LOG_DIR")
-    if not log_dir or not Path(log_dir).is_dir():
-        return
-
-    log_files = sorted(Path(log_dir).glob("*.log"), key=lambda p: p.stat().st_mtime)
-    if not log_files:
-        return
-
-    sep = "=" * LOG_SEPARATOR_WIDTH
-    dash = "-" * LOG_SEPARATOR_WIDTH
-
-    # Dump last worker log (most recent = most likely the one that failed)
-    worker_logs = [f for f in log_files if f.name.startswith("worker-")]
-    if worker_logs:
-        last_log = worker_logs[-1]
-        try:
-            with last_log.open("r", encoding="utf-8", errors="replace") as fh:
-                tail = deque(fh, maxlen=200)
-            print(f"\n{sep}")
-            print(f"Last worker log: {last_log.name} (last {len(tail)} lines)")
-            print(dash)
-            for line in tail:
-                print(line.rstrip("\n"))
-            print(sep)
-        except OSError:
-            pass
-
-    # List all log files with sizes
-    print(f"\n{sep}")
-    print(f"All worker logs in: {log_dir}/ ({len(log_files)} files)")
-    print(dash)
-    for f in log_files:
-        size = f.stat().st_size
-        if size >= 1024 * 1024:
-            size_str = f"{size / (1024 * 1024):.1f} MB"
-        elif size >= 1024:
-            size_str = f"{size / 1024:.0f} KB"
-        else:
-            size_str = f"{size} B"
-        print(f"  {f.name:<60s} ({size_str})")
-    print(sep, flush=True)
-
-
-# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
@@ -203,7 +148,6 @@ def api_client(request, setup_backend):
 __all__ = [
     # Hooks
     "pytest_runtest_logstart",
-    "pytest_unconfigure",
     "pytest_runtest_setup",
     "pytest_collection_modifyitems",
     "pytest_configure",
