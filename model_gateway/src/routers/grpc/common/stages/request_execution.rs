@@ -81,11 +81,16 @@ impl PipelineStage for RequestExecutionStage {
         let dispatch = ctx.state.dispatch.as_ref();
         let request_id = dispatch.map(|d| d.request_id.as_str()).unwrap_or("unknown");
         let model = dispatch.map(|d| d.model.as_str()).unwrap_or("unknown");
+        let request_type = match &proto_request {
+            ProtoRequest::Generate(_) => "generate",
+            ProtoRequest::Embed(_) => "embed",
+        };
 
         // Create OTEL span for gRPC request execution
         let span = info_span!(
             target: "smg::otel-trace",
-            "grpc_generate",
+            "grpc_execute",
+            request_type,
             request_id = %request_id,
             model = %model,
             mode = ?self.mode,

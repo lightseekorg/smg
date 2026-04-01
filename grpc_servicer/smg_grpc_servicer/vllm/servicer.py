@@ -207,11 +207,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
         try:
             if not request.HasField("tokenized"):
-                await context.abort(
-                    grpc.StatusCode.INVALID_ARGUMENT,
-                    "EmbedRequest requires tokenized input",
-                )
-                return
+                raise ValueError("EmbedRequest requires tokenized input")
 
             prompt: TokensPrompt = {"prompt_token_ids": list(request.tokenized.input_ids)}
             if request.tokenized.original_text:
@@ -229,11 +225,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 final_output = output
 
             if final_output is None or not final_output.finished:
-                await context.abort(
-                    grpc.StatusCode.INTERNAL,
-                    f"Embed request {request_id} did not produce a result",
-                )
-                return
+                msg = f"Embed request {request_id} did not produce a result"
+                logger.error(msg)
+                await context.abort(grpc.StatusCode.INTERNAL, msg)
 
             embedding = final_output.outputs.data.tolist()
 
