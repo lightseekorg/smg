@@ -18,7 +18,6 @@ use openai_protocol::{
     rerank::{RerankRequest, RerankResponse, RerankResult},
     responses::ResponsesRequest,
 };
-use reqwest::Client;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::error;
@@ -47,7 +46,6 @@ use crate::{
 pub struct Router {
     worker_registry: Arc<WorkerRegistry>,
     policy_registry: Arc<PolicyRegistry>,
-    client: Client,
     retry_config: RetryConfig,
 }
 
@@ -56,7 +54,6 @@ impl std::fmt::Debug for Router {
         f.debug_struct("Router")
             .field("worker_registry", &self.worker_registry)
             .field("policy_registry", &self.policy_registry)
-            .field("client", &self.client)
             .field("retry_config", &self.retry_config)
             .finish()
     }
@@ -72,7 +69,6 @@ impl Router {
         Ok(Router {
             worker_registry: ctx.worker_registry.clone(),
             policy_registry: ctx.policy_registry.clone(),
-            client: ctx.client.clone(),
             retry_config: ctx.router_config.effective_retry_config(),
         })
     }
@@ -806,7 +802,6 @@ mod tests {
         Router {
             worker_registry,
             policy_registry,
-            client: Client::new(),
             retry_config: RetryConfig::default(),
         }
     }

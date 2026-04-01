@@ -47,7 +47,6 @@ use crate::{
 pub struct PDRouter {
     pub worker_registry: Arc<WorkerRegistry>,
     pub policy_registry: Arc<PolicyRegistry>,
-    pub client: Client,
     pub retry_config: RetryConfig,
     pub api_key: Option<String>,
 }
@@ -163,7 +162,6 @@ impl PDRouter {
         Ok(PDRouter {
             worker_registry: Arc::clone(&ctx.worker_registry),
             policy_registry: Arc::clone(&ctx.policy_registry),
-            client: ctx.client.clone(),
             retry_config: ctx.router_config.effective_retry_config(),
             api_key: ctx.router_config.api_key.clone(),
         })
@@ -1378,7 +1376,6 @@ mod tests {
         PDRouter {
             worker_registry,
             policy_registry,
-            client: Client::new(),
             retry_config: RetryConfig::default(),
             api_key: Some("test_api_key".to_string()),
         }
