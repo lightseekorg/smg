@@ -22,7 +22,6 @@ use crate::{
 /// The caller is responsible for worker selection; this function receives
 /// the pre-selected worker (or an error response).
 pub(crate) async fn forward_realtime_rest(
-    client: &reqwest::Client,
     worker: Result<Arc<dyn Worker>, Response>,
     headers: Option<&HeaderMap>,
     body: &(impl serde::Serialize + Sync),
@@ -76,7 +75,8 @@ pub(crate) async fn forward_realtime_rest(
 
     let upstream_url = format!("{}{endpoint}", worker.url().trim_end_matches('/'));
 
-    let result = client
+    let result = worker
+        .http_client()
         .post(&upstream_url)
         .header("Authorization", &auth)
         .json(body)
