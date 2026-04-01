@@ -40,8 +40,13 @@ else
 fi
 
 # Install SGLang with all dependencies
+# TODO(changsu): Revert to `uv pip install "sglang[all]"` once sglang releases
+# a stable version (>= 0.5.10) that includes the smg_grpc_servicer migration
+# (sgl-project/sglang#20478). The rc0 is needed because the old built-in
+# grpc_server.py references proto types (EmbedError, EmbedComplete) that were
+# removed from our proto definitions.
 echo "Installing SGLang..."
-uv pip install "sglang[all]"
+uv pip install --prerelease=allow "sglang[all]==0.5.10rc0"
 
 # Install flashinfer-jit-cache: sglang bundles flashinfer_python but only for attention ops.
 # Multi-GPU models need trtllm_comm kernels (fused allreduce + layernorm) which FlashInfer

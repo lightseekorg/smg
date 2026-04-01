@@ -38,7 +38,7 @@ pub type Result<T> = std::result::Result<T, TransformError>;
 
 /// Extract RGB pixel data from a DynamicImage, avoiding a copy when already RGB8.
 /// Returns (width, height, raw_bytes) where raw_bytes is interleaved R,G,B,R,G,B,...
-fn rgb_bytes(image: &DynamicImage) -> (usize, usize, std::borrow::Cow<'_, [u8]>) {
+pub fn rgb_bytes(image: &DynamicImage) -> (usize, usize, std::borrow::Cow<'_, [u8]>) {
     match image {
         DynamicImage::ImageRgb8(rgb) => (
             rgb.width() as usize,
@@ -51,6 +51,53 @@ fn rgb_bytes(image: &DynamicImage) -> (usize, usize, std::borrow::Cow<'_, [u8]>)
             let h = rgb.height() as usize;
             (w, h, std::borrow::Cow::Owned(rgb.into_raw()))
         }
+    }
+}
+
+/// Deinterleave interleaved RGB bytes into separate R, G, B f32 planes with
+/// per-channel `scale` and `bias`: `plane[c][i] = rgb[i*3 + c] * scale[c] + bias[c]`.
+///
+/// Processes 8 pixels at a time so the compiler can unroll and auto-vectorize
+/// the stride-3 gather pattern.
+pub fn deinterleave_rgb_to_planes(
+    rgb: &[u8],
+    r_plane: &mut [f32],
+    g_plane: &mut [f32],
+    b_plane: &mut [f32],
+    scale: [f32; 3],
+    bias: [f32; 3],
+) {
+    let pixels = r_plane.len();
+    debug_assert_eq!(pixels, g_plane.len());
+    debug_assert_eq!(pixels, b_plane.len());
+    debug_assert!(rgb.len() >= pixels * 3);
+
+    let full_blocks = pixels / 8;
+    let remainder = pixels % 8;
+
+    for block in 0..full_blocks {
+        let dst = block * 8;
+        let src_base = dst * 3;
+        let src = &rgb[src_base..src_base + 24];
+        let rd = &mut r_plane[dst..dst + 8];
+        let gd = &mut g_plane[dst..dst + 8];
+        let bd = &mut b_plane[dst..dst + 8];
+
+        for i in 0..8 {
+            let s = i * 3;
+            rd[i] = src[s] as f32 * scale[0] + bias[0];
+            gd[i] = src[s + 1] as f32 * scale[1] + bias[1];
+            bd[i] = src[s + 2] as f32 * scale[2] + bias[2];
+        }
+    }
+
+    let tail_dst = full_blocks * 8;
+    let tail_src = tail_dst * 3;
+    for i in 0..remainder {
+        let s = tail_src + i * 3;
+        r_plane[tail_dst + i] = rgb[s] as f32 * scale[0] + bias[0];
+        g_plane[tail_dst + i] = rgb[s + 1] as f32 * scale[1] + bias[1];
+        b_plane[tail_dst + i] = rgb[s + 2] as f32 * scale[2] + bias[2];
     }
 }
 
@@ -68,11 +115,7 @@ fn build_planar_tensor(
     let (r_plane, rest) = data.split_at_mut(pixels);
     let (g_plane, b_plane) = rest.split_at_mut(pixels);
 
-    for (i, chunk) in raw.chunks_exact(3).enumerate() {
-        r_plane[i] = chunk[0] as f32 * scale[0] + bias[0];
-        g_plane[i] = chunk[1] as f32 * scale[1] + bias[1];
-        b_plane[i] = chunk[2] as f32 * scale[2] + bias[2];
-    }
+    deinterleave_rgb_to_planes(raw, r_plane, g_plane, b_plane, scale, bias);
 
     #[expect(
         clippy::expect_used,

@@ -11,7 +11,7 @@ import logging
 import os
 import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import grpc
 import msgspec
@@ -278,14 +278,16 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
 
             result = await future
 
+            if "error" in result:
+                code = abort_code_from_output(result)
+                await context.abort(code, result["error"])
+                return
+
+            embedding = result["embedding"]
             return sglang_scheduler_pb2.EmbedResponse(
-                request_id=request.request_id,
-                complete=sglang_scheduler_pb2.EmbedComplete(
-                    embedding=result["embedding"],
-                    prompt_tokens=result.get("prompt_tokens", 0),
-                    cached_tokens=0,
-                    embedding_dim=len(result["embedding"]),
-                ),
+                embedding=embedding,
+                prompt_tokens=result.get("prompt_tokens", 0),
+                embedding_dim=len(embedding),
             )
 
         except grpc.aio.AbortError:
@@ -537,7 +539,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         loads = [_convert_loads_to_protobuf(r) for r in results]
 
         return sglang_scheduler_pb2.GetLoadsResponse(
-            timestamp=datetime.now(UTC).isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             version=sglang.__version__,
             dp_rank_count=len(loads),
             loads=loads,

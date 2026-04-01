@@ -1,13 +1,10 @@
-//! Request building stage that delegates to endpoint-specific implementations
+//! Request building stage for chat and generate endpoints
 
 use async_trait::async_trait;
 use axum::response::Response;
 use tracing::error;
 
-use super::{
-    chat::ChatRequestBuildingStage, embedding::request_building::EmbeddingRequestBuildingStage,
-    generate::GenerateRequestBuildingStage,
-};
+use super::{chat::ChatRequestBuildingStage, generate::GenerateRequestBuildingStage};
 use crate::routers::{
     error as grpc_error,
     grpc::{
@@ -16,38 +13,36 @@ use crate::routers::{
     },
 };
 
-/// Request building stage (delegates to endpoint-specific implementations)
-pub(crate) struct RequestBuildingStage {
+/// Request building stage for chat and generate pipelines
+///
+/// These two request types share a single pipeline instance (`new_regular` /
+/// `new_pd`) and are dispatched here. All other request types have
+/// dedicated pipelines and wire their own request building stages directly.
+pub(crate) struct ChatGenerateRequestBuildingStage {
     chat_stage: ChatRequestBuildingStage,
     generate_stage: GenerateRequestBuildingStage,
-    embedding_stage: EmbeddingRequestBuildingStage,
 }
 
-impl RequestBuildingStage {
+impl ChatGenerateRequestBuildingStage {
     pub fn new(inject_pd_metadata: bool) -> Self {
         Self {
             chat_stage: ChatRequestBuildingStage::new(inject_pd_metadata),
             generate_stage: GenerateRequestBuildingStage::new(inject_pd_metadata),
-            embedding_stage: EmbeddingRequestBuildingStage::new(),
         }
     }
 }
 
 #[async_trait]
-impl PipelineStage for RequestBuildingStage {
+impl PipelineStage for ChatGenerateRequestBuildingStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
         match &ctx.input.request_type {
             RequestType::Chat(_) => self.chat_stage.execute(ctx).await,
             RequestType::Generate(_) => self.generate_stage.execute(ctx).await,
-            RequestType::Embedding(_) => self.embedding_stage.execute(ctx).await,
-            RequestType::Classify(_) => self.embedding_stage.execute(ctx).await,
-            request_type @ (RequestType::Completion(_)
-            | RequestType::Responses(_)
-            | RequestType::Messages(_)) => {
+            request_type => {
                 error!(
-                    function = "RequestBuildingStage::execute",
+                    function = "ChatGenerateRequestBuildingStage::execute",
                     request_type = %request_type,
-                    "{request_type} request type reached regular request building stage"
+                    "{request_type} should not reach this stage"
                 );
                 Err(grpc_error::internal_error(
                     "wrong_pipeline",
@@ -58,6 +53,6 @@ impl PipelineStage for RequestBuildingStage {
     }
 
     fn name(&self) -> &'static str {
-        "RequestBuilding"
+        "ChatGenerateRequestBuilding"
     }
 }

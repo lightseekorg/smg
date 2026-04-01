@@ -632,6 +632,42 @@ impl VllmEngineClient {
         Ok(grpc_request)
     }
 
+    /// Build an EmbedRequest for embedding/classify endpoints
+    #[expect(
+        clippy::unused_self,
+        reason = "method receiver kept for consistent public API across gRPC backends"
+    )]
+    pub fn build_embed_request(
+        &self,
+        request_id: String,
+        original_text: Option<String>,
+        token_ids: Vec<u32>,
+    ) -> proto::EmbedRequest {
+        proto::EmbedRequest {
+            request_id,
+            tokenized: Some(proto::TokenizedInput {
+                original_text: original_text.unwrap_or_default(),
+                input_ids: token_ids,
+            }),
+        }
+    }
+
+    /// Submit an embedding request
+    pub async fn embed(
+        &self,
+        req: proto::EmbedRequest,
+    ) -> Result<proto::EmbedResponse, tonic::Status> {
+        let mut client = self.client.clone();
+        let mut request = Request::new(req);
+
+        if let Err(e) = self.trace_injector.inject(request.metadata_mut()) {
+            warn!("Failed to inject trace context: {}", e);
+        }
+
+        let response = client.embed(request).await?;
+        Ok(response.into_inner())
+    }
+
     fn build_grpc_sampling_params_from_completion(
         request: &CompletionRequest,
     ) -> Result<proto::SamplingParams, String> {
@@ -907,7 +943,7 @@ mod tests {
                 "This is a test sentence for embedding"
             );
         }
-        // vLLM: no data_parallel_rank or log_metrics in EmbedRequest
+        // vLLM: no data_parallel_rank in EmbedRequest
     }
 
     #[tokio::test]

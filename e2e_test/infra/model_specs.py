@@ -61,9 +61,10 @@ MODEL_SPECS: dict[str, dict] = {
     # Thinking/reasoning model (larger)
     "Qwen/Qwen3-30B-A3B": {
         "model": _resolve_model_path("Qwen/Qwen3-30B-A3B"),
-        "tp": 4,
+        "tp": 1,
         "features": ["chat", "streaming", "thinking", "reasoning"],
         "vllm_args": [] if _is_nightly else ["--enforce-eager"],
+        "trtllm_extra_config": {"kv_cache_config": {"free_gpu_memory_fraction": 0.8}},
     },
     # Mistral for function calling
     "mistralai/Mistral-7B-Instruct-v0.3": {
@@ -82,11 +83,24 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["embedding"],
     },
-    # GPT-OSS model (Harmony)
+    # GPT-OSS models (Harmony)
     "openai/gpt-oss-20b": {
         "model": _resolve_model_path("openai/gpt-oss-20b"),
         "tp": 2,
         "features": ["chat", "streaming", "reasoning", "harmony"],
+        "vllm_args": [
+            "--structured-outputs-config",
+            '{"enable_in_reasoning": true}',
+        ],
+    },
+    "openai/gpt-oss-120b": {
+        "model": _resolve_model_path("openai/gpt-oss-120b"),
+        "tp": 4,
+        "features": ["chat", "streaming", "reasoning", "harmony"],
+        "vllm_args": [
+            "--structured-outputs-config",
+            '{"enable_in_reasoning": true}',
+        ],
     },
     # MiniMax M2 - nightly benchmarks
     "minimaxai/minimax-m2": {
@@ -101,14 +115,6 @@ MODEL_SPECS: dict[str, dict] = {
         "model": _resolve_model_path("Qwen/Qwen3-VL-8B-Instruct"),
         "tp": 1,
         "features": ["chat", "streaming", "multimodal"],
-    },
-    # Llama-4-Scout (17B with 16 experts) - Multimodal tests
-    "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
-        "model": _resolve_model_path("meta-llama/Llama-4-Scout-17B-16E-Instruct"),
-        "tp": 4,
-        "features": ["chat", "streaming", "multimodal", "moe"],
-        "vllm_args": ["--max-model-len", "196608"],
-        "startup_timeout": 1200,
     },
     # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
@@ -125,6 +131,52 @@ MODEL_SPECS: dict[str, dict] = {
             "--trust-remote-code",
             "--max-model-len=163840",  # 160K context length (vLLM)
             "--attention-backend=FLASHINFER",  # FLASHINFER attention backend
+        ],
+        "startup_timeout": 1200,  # Large MoE model may need extra download/load time
+    },
+    # Llama-4-Scout (17B with 16 experts) - Nightly benchmarks and Multimodal tests
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
+        "model": _resolve_model_path("meta-llama/Llama-4-Scout-17B-16E-Instruct"),
+        "tp": 4,
+        "features": ["chat", "streaming", "function_calling", "multimodal", "moe"],
+        "worker_args": [
+            "--context-length=196608",
+            "--attention-backend=fa3",
+            "--cuda-graph-max-bs=256",
+            "--max-running-requests=300",
+            "--mem-fraction-static=0.85",
+        ],
+        "vllm_args": [
+            "--max-model-len=196608",
+        ],
+        "startup_timeout": 1200,  # Large MoE model may need extra download/load time
+    },
+    # Llama-3.3-70B - Nightly benchmarks
+    "meta-llama/Llama-3.3-70B-Instruct": {
+        "model": _resolve_model_path("meta-llama/Llama-3.3-70B-Instruct"),
+        "tp": 4,
+        "features": ["chat", "streaming", "function_calling"],
+        "worker_args": [
+            "--mem-fraction-static=0.9",
+        ],
+        "vllm_args": [
+            "--max-model-len=131072",
+            "--gpu-memory-utilization=0.9",
+            "--enable-chunked-prefill",
+        ],
+    },
+    # Llama-3.3-70B FP8 - Nightly benchmarks
+    "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic": {
+        "model": _resolve_model_path("RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"),
+        "tp": 4,
+        "features": ["chat", "streaming", "function_calling"],
+        "worker_args": [
+            "--mem-fraction-static=0.9",
+        ],
+        "vllm_args": [
+            "--max-model-len=131072",
+            "--gpu-memory-utilization=0.9",
+            "--enable-chunked-prefill",
         ],
     },
 }

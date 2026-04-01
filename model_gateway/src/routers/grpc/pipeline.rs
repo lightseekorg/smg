@@ -40,7 +40,8 @@ use super::{
                 MessagePreparationStage, MessageRequestBuildingStage,
                 MessageResponseProcessingStage,
             },
-            *,
+            ChatGeneratePreparationStage, ChatGenerateRequestBuildingStage,
+            ChatGenerateResponseProcessingStage,
         },
         streaming,
     },
@@ -132,17 +133,20 @@ impl RequestPipeline {
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(PreparationStage::new()),
+            Box::new(ChatGeneratePreparationStage::new()),
             Box::new(WorkerSelectionStage::new(
                 worker_registry,
                 policy_registry,
                 WorkerSelectionMode::Regular,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(RequestBuildingStage::new(false)), // No PD metadata
+            Box::new(ChatGenerateRequestBuildingStage::new(false)), // No PD metadata
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
-            Box::new(ResponseProcessingStage::new(processor, streaming_processor)),
+            Box::new(ChatGenerateResponseProcessingStage::new(
+                processor,
+                streaming_processor,
+            )),
         ];
 
         Self {
@@ -235,17 +239,20 @@ impl RequestPipeline {
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(PreparationStage::new()),
+            Box::new(ChatGeneratePreparationStage::new()),
             Box::new(WorkerSelectionStage::new(
                 worker_registry,
                 policy_registry,
                 WorkerSelectionMode::PrefillDecode,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(RequestBuildingStage::new(true)), // Inject PD metadata
+            Box::new(ChatGenerateRequestBuildingStage::new(true)), // Inject PD metadata
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
-            Box::new(ResponseProcessingStage::new(processor, streaming_processor)),
+            Box::new(ChatGenerateResponseProcessingStage::new(
+                processor,
+                streaming_processor,
+            )),
         ];
 
         Self {

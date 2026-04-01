@@ -22,20 +22,16 @@ pub fn parse_proto_response(json_value: &Value) -> Result<proto::GenerateRespons
         proto_response.response = Some(proto::generate_response::Response::Complete(
             parse_complete(complete_json),
         ));
-    } else if let Some(error_json) = json_value.get("error") {
-        proto_response.response = Some(proto::generate_response::Response::Error(parse_error(
-            error_json,
-        )));
     } else {
-        return Err("Response JSON must contain 'chunk', 'complete', or 'error' field");
+        return Err("Response JSON must contain 'chunk' or 'complete' field");
     }
 
     Ok(proto_response)
 }
 
-/// Check if a proto response is a terminal response (complete or error)
+/// Check if a proto response is terminal (complete)
 pub fn is_terminal_response(json_value: &Value) -> bool {
-    json_value.get("complete").is_some() || json_value.get("error").is_some()
+    json_value.get("complete").is_some()
 }
 
 fn parse_chunk(json: &Value) -> proto::GenerateStreamChunk {
@@ -107,25 +103,5 @@ fn parse_complete(json: &Value) -> proto::GenerateComplete {
         input_logprobs: None,
         matched_stop: None,
         index: 0,
-    }
-}
-
-fn parse_error(json: &Value) -> proto::GenerateError {
-    proto::GenerateError {
-        message: json
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        http_status_code: json
-            .get("http_status_code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("500")
-            .to_string(),
-        details: json
-            .get("details")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
     }
 }

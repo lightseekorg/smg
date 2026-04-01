@@ -145,7 +145,6 @@ pub unsafe extern "C" fn sgl_stream_read_next(
                     let is_complete = matches!(
                         proto_response.response,
                         Some(proto::generate_response::Response::Complete(_))
-                            | Some(proto::generate_response::Response::Error(_))
                     );
 
                     *response_json_out = result_cstr.into_raw();

@@ -13,8 +13,9 @@ import grpc
 import torch
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from transformers import BatchFeature
-from vllm import SamplingParams, TokensPrompt
+from vllm import PoolingParams, SamplingParams, TokensPrompt
 from vllm.engine.protocol import EngineClient
+from vllm.inputs import token_inputs
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.multimodal.inputs import (
@@ -53,7 +54,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
     Handles 6 RPCs:
     - Generate: Streaming text generation
-    - Embed: Embeddings (TODO)
+    - Embed: Embeddings
     - HealthCheck: Health probe
     - Abort: Cancel requests out-of-band
     - GetModelInfo: Model metadata
@@ -193,7 +194,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         Handle embedding requests.
 
-        TODO: Implement in Phase 4
+        Calls vLLM's encode() API with PoolingParams and returns the embedding vector.
 
         Args:
             request: The EmbedRequest protobuf
@@ -202,8 +203,50 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Returns:
             EmbedResponse protobuf
         """
-        logger.warning("Embed RPC not yet implemented")
-        await context.abort(grpc.StatusCode.UNIMPLEMENTED, "Embed RPC not yet implemented")
+        request_id = request.request_id
+        logger.info("Embed request %s", request_id)
+
+        try:
+            if not request.HasField("tokenized"):
+                raise ValueError("EmbedRequest requires tokenized input")
+
+            prompt = token_inputs(
+                prompt_token_ids=list(request.tokenized.input_ids),
+                prompt=request.tokenized.original_text or None,
+            )
+
+            pooling_params = PoolingParams(task="embed")
+
+            # encode() is an async generator; collect the final result
+            final_output = None
+            async for output in self.engine.encode(
+                prompt=prompt,
+                pooling_params=pooling_params,
+                request_id=request_id,
+            ):
+                final_output = output
+
+            if final_output is None or not final_output.finished:
+                msg = f"Embed request {request_id} did not produce a result"
+                logger.warning(msg)
+                await context.abort(grpc.StatusCode.INTERNAL, msg)
+
+            embedding = final_output.outputs.data.tolist()
+
+            return vllm_engine_pb2.EmbedResponse(
+                embedding=embedding,
+                prompt_tokens=len(final_output.prompt_token_ids),
+                embedding_dim=len(embedding),
+            )
+
+        except grpc.aio.AbortError:
+            raise
+        except ValueError as e:
+            logger.warning("Embed invalid request %s: %s", request_id, e)
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+        except Exception as e:
+            logger.exception("Embed failed for request %s", request_id)
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
 
     async def HealthCheck(
         self,

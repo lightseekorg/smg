@@ -1,4 +1,7 @@
-//! Response processing stage that delegates to endpoint-specific implementations
+//! Response processing stage for the chat + generate pipeline
+//!
+//! Dispatches to ChatResponseProcessingStage or GenerateResponseProcessingStage
+//! based on request type. Only used by new_regular() and new_pd() pipelines.
 
 use std::sync::Arc;
 
@@ -6,11 +9,7 @@ use async_trait::async_trait;
 use axum::response::Response;
 use tracing::error;
 
-use super::{
-    chat::ChatResponseProcessingStage, classify::ClassifyResponseProcessingStage,
-    embedding::response_processing::EmbeddingResponseProcessingStage,
-    generate::GenerateResponseProcessingStage,
-};
+use super::{chat::ChatResponseProcessingStage, generate::GenerateResponseProcessingStage};
 use crate::routers::{
     error,
     grpc::{
@@ -20,15 +19,13 @@ use crate::routers::{
     },
 };
 
-/// Response processing stage (delegates to endpoint-specific implementations)
-pub(crate) struct ResponseProcessingStage {
+/// Response processing stage for chat + generate pipelines
+pub(crate) struct ChatGenerateResponseProcessingStage {
     chat_stage: ChatResponseProcessingStage,
     generate_stage: GenerateResponseProcessingStage,
-    embedding_stage: EmbeddingResponseProcessingStage,
-    classify_stage: ClassifyResponseProcessingStage,
 }
 
-impl ResponseProcessingStage {
+impl ChatGenerateResponseProcessingStage {
     pub fn new(
         processor: processor::ResponseProcessor,
         streaming_processor: Arc<streaming::StreamingProcessor>,
@@ -39,27 +36,21 @@ impl ResponseProcessingStage {
                 streaming_processor.clone(),
             ),
             generate_stage: GenerateResponseProcessingStage::new(processor, streaming_processor),
-            embedding_stage: EmbeddingResponseProcessingStage::new(),
-            classify_stage: ClassifyResponseProcessingStage::new(),
         }
     }
 }
 
 #[async_trait]
-impl PipelineStage for ResponseProcessingStage {
+impl PipelineStage for ChatGenerateResponseProcessingStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
         match &ctx.input.request_type {
             RequestType::Chat(_) => self.chat_stage.execute(ctx).await,
             RequestType::Generate(_) => self.generate_stage.execute(ctx).await,
-            RequestType::Embedding(_) => self.embedding_stage.execute(ctx).await,
-            RequestType::Classify(_) => self.classify_stage.execute(ctx).await,
-            request_type @ (RequestType::Completion(_)
-            | RequestType::Responses(_)
-            | RequestType::Messages(_)) => {
+            request_type => {
                 error!(
-                    function = "ResponseProcessingStage::execute",
+                    function = "ChatGenerateResponseProcessingStage::execute",
                     request_type = %request_type,
-                    "{request_type} request type reached regular response processing stage"
+                    "{request_type} should not reach this stage"
                 );
                 Err(error::internal_error(
                     "wrong_pipeline",
@@ -70,6 +61,6 @@ impl PipelineStage for ResponseProcessingStage {
     }
 
     fn name(&self) -> &'static str {
-        "ResponseProcessing"
+        "ChatGenerateResponseProcessing"
     }
 }
