@@ -147,14 +147,10 @@ impl MultimodalComponents {
     async fn load_configs_from_hf(
         model_id: &str,
     ) -> Result<(serde_json::Value, PreProcessorConfig)> {
-        // Reuse the tokenizer download function which downloads tokenizer files
-        // AND config files to the HF cache, returning the cache directory path.
-        // If files were already downloaded (e.g., during tokenizer init), this
-        // returns the cached path without re-downloading.
-        let cache_dir = llm_tokenizer::hub::download_tokenizer_from_hf(model_id)
+        let cache_dir = llm_tokenizer::hub::download_model_configs_from_hf(model_id)
             .await
             .with_context(|| {
-                format!("Failed to resolve HuggingFace cache for model: {model_id}")
+                format!("Failed to download config files from HuggingFace for model: {model_id}")
             })?;
 
         Self::load_configs_from_disk(&cache_dir)

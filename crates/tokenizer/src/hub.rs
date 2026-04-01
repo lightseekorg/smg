@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use hf_hub::api::tokio::{Api, ApiBuilder};
 
@@ -66,35 +63,33 @@ fn is_chat_template_file(filename: &str) -> bool {
         || filename == "chat_template.json" // JSON file containing Jinja template
 }
 
-/// Download specific files from a HuggingFace model repo.
+/// Download model config files (config.json, preprocessor_config.json) from HuggingFace.
 ///
-/// Returns a map of filename → local cache path for each successfully downloaded file.
-/// Files that don't exist in the repo are silently skipped.
-pub async fn download_files_from_hf(
-    model_id: &str,
-    filenames: &[&str],
-) -> anyhow::Result<HashMap<String, PathBuf>> {
+/// Returns the cache directory containing the downloaded files.
+/// Uses the same HF Hub cache as tokenizer downloads.
+pub async fn download_model_configs_from_hf(model_id: &str) -> anyhow::Result<PathBuf> {
     let api = build_api()?;
     let repo = api.model(model_id.to_string());
-    let mut results = HashMap::new();
 
-    for &filename in filenames {
+    let config_files = ["config.json", "preprocessor_config.json"];
+    let mut cache_dir = None;
+
+    for filename in &config_files {
         match repo.get(filename).await {
             Ok(path) => {
-                results.insert(filename.to_string(), path);
+                if cache_dir.is_none() {
+                    cache_dir = path.parent().map(|p| p.to_path_buf());
+                }
             }
             Err(e) => {
-                tracing::warn!(
-                    filename = filename,
-                    model_id = model_id,
-                    error = %e,
-                    "Failed to download file from HuggingFace, skipping"
-                );
+                return Err(anyhow::anyhow!(
+                    "Failed to download '{filename}' from model '{model_id}': {e}"
+                ));
             }
         }
     }
 
-    Ok(results)
+    cache_dir.ok_or_else(|| anyhow::anyhow!("No config files downloaded for model '{model_id}'"))
 }
 
 /// Attempt to download tokenizer files from Hugging Face
