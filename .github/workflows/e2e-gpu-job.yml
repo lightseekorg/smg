@@ -136,7 +136,7 @@ jobs:
           SEP="============================================================"
           DASH="------------------------------------------------------------"
 
-          # Dump last worker log (most recent = most likely the one that failed)
+          # Dump last worker log (most recent = last retry of the failed model)
           LAST_LOG=$(ls -t "$LOG_DIR"/worker-*.log 2>/dev/null | head -1)
           if [ -n "$LAST_LOG" ]; then
             LINES=$(wc -l < "$LAST_LOG")

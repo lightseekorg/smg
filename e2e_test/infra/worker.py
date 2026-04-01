@@ -458,8 +458,8 @@ def start_workers(
                 logger.info("Staggering launch by %ds", LAUNCH_STAGGER_DELAY)
                 time.sleep(LAUNCH_STAGGER_DELAY)
 
-            worker.start(timeout=timeout, wait_ready=wait_ready)
             workers.append(worker)
+            worker.start(timeout=timeout, wait_ready=wait_ready)
     except Exception:
         stop_workers(workers)
         raise
