@@ -18,7 +18,7 @@ SEP="============================================================"
 DASH="------------------------------------------------------------"
 
 # Dump last worker log (most recent = last retry of the failed model)
-LAST_LOG=$(ls -t "$LOG_DIR"/worker-*.log 2>/dev/null | head -1)
+LAST_LOG=$(ls -t "$LOG_DIR"/worker-*.log 2>/dev/null | head -1 || true)
 if [ -n "$LAST_LOG" ]; then
     TOTAL=$(wc -l < "$LAST_LOG")
     SHOW=$(( TOTAL < 200 ? TOTAL : 200 ))
