@@ -19,7 +19,7 @@ use ndarray::Array3;
 use crate::vision::{
     image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
-    transforms::{normalize, to_tensor, TransformError},
+    transforms::{self, TransformError},
 };
 
 pub const KIMI_K25_MEAN: [f64; 3] = [0.5, 0.5, 0.5];
@@ -122,13 +122,20 @@ impl KimiK25Processor {
         }
     }
 
-    /// Resize image and zero-pad to factor-aligned dimensions.
+    /// Fused resize + zero-pad + normalize into a single [C, H_padded, W_padded] tensor.
     ///
-    /// Returns a [C, H_padded, W_padded] tensor where H_padded and W_padded
-    /// are divisible by factor.
-    fn resize_and_pad(image: &DynamicImage, cfg: &ResizeConfig) -> Array3<f32> {
-        let padded_h = cfg.new_height + cfg.pad_height;
-        let padded_w = cfg.new_width + cfg.pad_width;
+    /// Avoids intermediate allocations by:
+    /// 1. Allocating the final padded canvas directly
+    /// 2. Pre-filling with normalized black (bias value)
+    /// 3. Deinterleaving + normalizing the image region in one pass
+    fn resize_pad_and_normalize(
+        image: &DynamicImage,
+        cfg: &ResizeConfig,
+        mean: &[f64; 3],
+        std: &[f64; 3],
+    ) -> Array3<f32> {
+        let canvas_h = cfg.new_height + cfg.pad_height;
+        let canvas_w = cfg.new_width + cfg.pad_width;
 
         // Resize using BICUBIC
         let resized = image.resize_exact(
@@ -137,22 +144,51 @@ impl KimiK25Processor {
             image::imageops::FilterType::CatmullRom,
         );
 
-        // Convert to tensor [C, H, W] with values in [0, 1]
-        let tensor = to_tensor(&resized);
+        let (img_w, img_h, raw) = transforms::rgb_bytes(&resized);
+        let canvas_pixels = canvas_h * canvas_w;
 
-        if cfg.pad_width == 0 && cfg.pad_height == 0 {
-            return tensor;
+        // Precompute fused scale/bias: pixel/255 → normalized
+        // output[c][i] = raw[i*3+c] / 255.0 * (1/std[c]) + (-mean[c]/std[c])
+        let scale: [f32; 3] = std::array::from_fn(|c| 1.0 / (255.0 * std[c] as f32));
+        let bias: [f32; 3] = std::array::from_fn(|c| -(mean[c] as f32) / (std[c] as f32));
+
+        let mut data = vec![0.0f32; 3 * canvas_pixels];
+        let (r_plane, rest) = data.split_at_mut(canvas_pixels);
+        let (g_plane, b_plane) = rest.split_at_mut(canvas_pixels);
+
+        // Pre-fill with normalized black: (0/255 - mean) / std = bias
+        r_plane.fill(bias[0]);
+        g_plane.fill(bias[1]);
+        b_plane.fill(bias[2]);
+
+        // Overwrite image region row-by-row using vectorized deinterleave
+        let rw = img_w.min(canvas_w);
+        let rh = img_h.min(canvas_h);
+        for y in 0..rh {
+            let src_row = &raw[y * img_w * 3..y * img_w * 3 + rw * 3];
+            let dst_offset = y * canvas_w;
+            transforms::deinterleave_rgb_to_planes(
+                src_row,
+                &mut r_plane[dst_offset..dst_offset + rw],
+                &mut g_plane[dst_offset..dst_offset + rw],
+                &mut b_plane[dst_offset..dst_offset + rw],
+                scale,
+                bias,
+            );
         }
 
-        // Zero-pad: create padded array, copy resized data into top-left
-        let mut padded = Array3::<f32>::zeros((3, padded_h, padded_w));
-        padded
-            .slice_mut(ndarray::s![.., ..cfg.new_height, ..cfg.new_width])
-            .assign(&tensor);
-        padded
+        #[expect(
+            clippy::expect_used,
+            reason = "data has exactly 3*canvas_h*canvas_w elements by construction"
+        )]
+        Array3::from_shape_vec((3, canvas_h, canvas_w), data)
+            .expect("shape matches pre-allocated buffer")
     }
 
-    /// Extract [C, patch_size, patch_size] patches from a [C, H, W] tensor.
+    /// Extract [C, patch_size, patch_size] patches from a contiguous [C, H, W] tensor.
+    ///
+    /// Uses row-based `copy_from_slice` instead of per-element indexing so the
+    /// compiler can auto-vectorize the inner copy.
     fn extract_patches(tensor: &Array3<f32>, patch_size: usize) -> Vec<f32> {
         let channels = tensor.shape()[0];
         let height = tensor.shape()[1];
@@ -165,15 +201,25 @@ impl KimiK25Processor {
 
         let mut patches = Vec::with_capacity(num_patches * patch_features);
 
+        // Get contiguous slice for direct row addressing
+        let flat = tensor.as_standard_layout();
+        #[expect(
+            clippy::expect_used,
+            reason = "as_standard_layout guarantees contiguous C-order memory"
+        )]
+        let data = flat
+            .as_slice()
+            .expect("as_standard_layout guarantees contiguous memory");
+
         for gh in 0..grid_h {
             for gw in 0..grid_w {
                 let h_start = gh * patch_size;
                 let w_start = gw * patch_size;
                 for c in 0..channels {
+                    let plane_offset = c * height * width;
                     for ph in 0..patch_size {
-                        for pw in 0..patch_size {
-                            patches.push(tensor[[c, h_start + ph, w_start + pw]]);
-                        }
+                        let row_start = plane_offset + (h_start + ph) * width + w_start;
+                        patches.extend_from_slice(&data[row_start..row_start + patch_size]);
                     }
                 }
             }
@@ -214,13 +260,8 @@ impl ImagePreProcessor for KimiK25Processor {
             let (w, h) = image.dimensions();
             let cfg = self.compute_resize_config(w as usize, h as usize);
 
-            // Resize + zero-pad
-            let mut tensor = Self::resize_and_pad(image, &cfg);
-
-            // Normalize
-            if config.do_normalize.unwrap_or(true) {
-                normalize(&mut tensor, &mean, &std);
-            }
+            // Fused resize + pad + normalize in one pass (avoids 2 extra allocations)
+            let tensor = Self::resize_pad_and_normalize(image, &cfg, &mean, &std);
 
             let padded_h = cfg.new_height + cfg.pad_height;
             let padded_w = cfg.new_width + cfg.pad_width;
@@ -438,21 +479,29 @@ mod tests {
     fn test_zero_padding_applied() {
         let p = KimiK25Processor::new();
         let config = PreProcessorConfig {
-            do_normalize: Some(false), // skip normalization to check raw values
+            image_mean: Some(KIMI_K25_MEAN.to_vec()),
+            image_std: Some(KIMI_K25_STD.to_vec()),
             ..Default::default()
         };
 
-        // 100x100 image with white pixels
+        // 100x100 white image — after normalization: (255/255 - 0.5) / 0.5 = 1.0
+        // Padded region: (0/255 - 0.5) / 0.5 = -1.0
         let image = create_test_image(100, 100, Rgb([255, 255, 255]));
         let result = p.preprocess(&[image], &config).unwrap();
 
-        // The padded region should contain zeros (from zero-padding)
         let flat = result.pixel_values_flat();
-        let has_zeros = flat.contains(&0.0);
-        assert!(has_zeros, "Expected zero-padded regions in output");
+        // Padded region should be normalized black (-1.0)
+        let has_neg_ones = flat.iter().any(|&v| (v - (-1.0)).abs() < 1e-6);
+        assert!(
+            has_neg_ones,
+            "Expected normalized-black padding (-1.0) in output"
+        );
 
-        // The image region should contain non-zero values (white = 1.0)
+        // Image region should be normalized white (1.0)
         let has_ones = flat.iter().any(|&v| (v - 1.0).abs() < 1e-6);
-        assert!(has_ones, "Expected non-zero image values in output");
+        assert!(
+            has_ones,
+            "Expected normalized-white image values (1.0) in output"
+        );
     }
 }
