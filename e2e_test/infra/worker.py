@@ -298,6 +298,7 @@ class Worker:
     def _build_env(self) -> dict[str, str]:
         """Build environment variables for the worker process."""
         env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.gpu_ids))
 
         # TRT-LLM multi-GPU needs NCCL tuning for CI compatibility
@@ -325,7 +326,7 @@ class Worker:
                 log_path = os.path.join(self.log_dir, f"worker-{safe_name}.log")
             else:
                 log_path = os.path.join(tempfile.gettempdir(), f"smg-worker-{safe_name}.log")
-            self._log_file = open(log_path, "w", encoding="utf-8", buffering=1)
+            self._log_file = open(log_path, "w", encoding="utf-8")
             stdout_target = self._log_file
             stderr_target = subprocess.STDOUT
 

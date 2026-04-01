@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
+from collections import deque
 from pathlib import Path
 
 import anthropic
@@ -52,25 +54,29 @@ _WORKER_LOG_TAIL_LINES = 200
 
 def _dump_first_worker_log(log_dir: str | None) -> None:
     """Print the tail of the first worker log file to CI output for debugging."""
-    if not log_dir:
+    if log_dir:
+        search_path = Path(log_dir)
+        pattern = "worker-*.log"
+    else:
+        search_path = Path(tempfile.gettempdir())
+        pattern = "smg-worker-*.log"
+
+    if not search_path.is_dir():
         return
-    log_path = Path(log_dir)
-    if not log_path.is_dir():
-        return
-    logs = sorted(log_path.glob("worker-*.log"), key=lambda p: p.stat().st_mtime)
+    logs = sorted(search_path.glob(pattern), key=lambda p: p.stat().st_mtime)
     if not logs:
         return
     first_log = logs[0]
     try:
-        lines = first_log.read_text(encoding="utf-8", errors="replace").splitlines()
-        tail = lines[-_WORKER_LOG_TAIL_LINES:]
+        with first_log.open("r", encoding="utf-8", errors="replace") as f:
+            tail = deque(f, maxlen=_WORKER_LOG_TAIL_LINES)
         sep = "=" * 60
         print(f"\n{sep}")
         print(f"First failed worker log: {first_log.name} (last {len(tail)} lines)")
         print(sep)
         for line in tail:
-            print(line)
-        print(sep)
+            print(line.rstrip("\n"))
+        print(sep, flush=True)
     except OSError:
         pass
 
