@@ -226,7 +226,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
             if final_output is None or not final_output.finished:
                 msg = f"Embed request {request_id} did not produce a result"
-                logger.error(msg)
+                logger.warning(msg)
                 await context.abort(grpc.StatusCode.INTERNAL, msg)
 
             embedding = final_output.outputs.data.tolist()
