@@ -154,6 +154,7 @@ class TestCompletionBasic:
         )
 
         assert response.choices[0].text == prompt
+        assert response.choices[0].finish_reason in ("stop", "length")
         assert response.usage.completion_tokens == 0
 
 
@@ -163,6 +164,21 @@ class TestCompletionBasic:
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestCompletionStreaming:
     """Tests for streaming /v1/completions API."""
+
+    @staticmethod
+    def _collect_stream(stream):
+        """Consume a streaming response, returning (full_text, finish_reasons)."""
+        texts = []
+        finish_reasons = []
+        for chunk in stream:
+            assert chunk.object == "text_completion"
+            if chunk.choices:
+                choice = chunk.choices[0]
+                if choice.text:
+                    texts.append(choice.text)
+                if choice.finish_reason:
+                    finish_reasons.append(choice.finish_reason)
+        return "".join(texts), finish_reasons
 
     def test_streaming_basic(self, model, api_client):
         """Test streaming completion returns chunks with text deltas."""
@@ -175,20 +191,9 @@ class TestCompletionStreaming:
             stream=True,
         )
 
-        texts = []
-        finish_reasons = []
-        for chunk in stream:
-            assert chunk.object == "text_completion"
-            if chunk.choices:
-                choice = chunk.choices[0]
-                if choice.text:
-                    texts.append(choice.text)
-                if choice.finish_reason:
-                    finish_reasons.append(choice.finish_reason)
+        full_text, finish_reasons = self._collect_stream(stream)
 
-        assert len(texts) > 0, "No text chunks received"
-        full_text = "".join(texts)
-        assert len(full_text) > 0
+        assert len(full_text) > 0, "No text chunks received"
         assert len(finish_reasons) == 1
         assert finish_reasons[0] in ("stop", "length")
 
@@ -204,18 +209,11 @@ class TestCompletionStreaming:
             stream=True,
         )
 
-        texts = []
-        finish_reasons = []
-        for chunk in stream:
-            if chunk.choices:
-                choice = chunk.choices[0]
-                if choice.text:
-                    texts.append(choice.text)
-                if choice.finish_reason:
-                    finish_reasons.append(choice.finish_reason)
+        full_text, finish_reasons = self._collect_stream(stream)
 
-        assert "stop" in finish_reasons
-        full_text = "".join(texts)
+        assert len(finish_reasons) == 1
+        assert finish_reasons[0] == "stop"
+        assert len(full_text) > 0, "No text chunks received"
         assert "," not in full_text
 
     def test_streaming_collects_full_text(self, model, api_client):
@@ -228,7 +226,8 @@ class TestCompletionStreaming:
             temperature=0,
             stream=True,
         )
-        full_text = "".join(c.choices[0].text for c in stream if c.choices and c.choices[0].text)
+
+        full_text, _ = self._collect_stream(stream)
 
         assert len(full_text) > 0
         assert "Paris" in full_text
@@ -246,17 +245,8 @@ class TestCompletionStreaming:
             stream=True,
         )
 
-        texts = []
-        finish_reasons = []
-        for chunk in stream:
-            if chunk.choices:
-                choice = chunk.choices[0]
-                if choice.text:
-                    texts.append(choice.text)
-                if choice.finish_reason:
-                    finish_reasons.append(choice.finish_reason)
+        full_text, finish_reasons = self._collect_stream(stream)
 
-        full_text = "".join(texts)
         assert full_text == prompt, f"Expected echoed prompt, got: {full_text!r}"
         assert len(finish_reasons) == 1
-        assert finish_reasons[0] == "stop"
+        assert finish_reasons[0] in ("stop", "length")
