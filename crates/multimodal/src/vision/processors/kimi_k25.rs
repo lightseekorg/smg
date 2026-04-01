@@ -122,7 +122,14 @@ impl ImagePreProcessor for KimiK25Processor {
         images: &[DynamicImage],
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedImages, TransformError> {
-        self.inner.preprocess(images, config)
+        let mut result = self.inner.preprocess(images, config)?;
+
+        // Kimi-K2.5 engine expects "grid_thws" instead of Qwen-VL's "image_grid_thw"
+        if let Some(val) = result.model_specific.remove("image_grid_thw") {
+            result.model_specific.insert("grid_thws".to_string(), val);
+        }
+
+        Ok(result)
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
@@ -190,8 +197,8 @@ mod tests {
         assert_eq!(result.pixel_values.ndim(), 2);
         assert!(result.pixel_values.shape()[0] > 0);
 
-        // Check image_grid_thw and patches_per_image are present
-        assert!(result.model_specific.contains_key("image_grid_thw"));
+        // Check grid_thws and patches_per_image are present
+        assert!(result.model_specific.contains_key("grid_thws"));
         assert!(result.model_specific.contains_key("patches_per_image"));
 
         assert!(result.num_img_tokens[0] > 0);
@@ -214,12 +221,12 @@ mod tests {
         assert_eq!(result.pixel_values.ndim(), 2);
 
         if let Some(ModelSpecificValue::IntTensor { data, shape }) =
-            result.model_specific.get("image_grid_thw")
+            result.model_specific.get("grid_thws")
         {
             assert_eq!(shape, &[2, 3]);
             assert_eq!(data.len(), 6);
         } else {
-            panic!("Expected image_grid_thw to be IntTensor");
+            panic!("Expected grid_thws to be IntTensor");
         }
     }
 }
