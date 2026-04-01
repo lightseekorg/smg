@@ -356,11 +356,12 @@ message GenerateResponse {
   // Request ID echo
   string request_id = 1;
 
+  reserved 4;  // was GenerateError — removed, errors use gRPC status
+
   // Response type (oneof ensures exactly one is set)
   oneof response {
     GenerateStreamChunk chunk = 2;   // Streaming delta
     GenerateComplete complete = 3;    // Final response
-    GenerateError error = 4;          // Error response
   }
 }
 
@@ -442,13 +443,6 @@ message PerfMetrics {
   double kv_cache_transfer_start = 5; // KV cache transfer start (disagg)
   double kv_cache_transfer_end = 6;   // KV cache transfer end (disagg)
   int64 kv_cache_size = 7;           // KV cache size in bytes
-}
-
-// Error response
-message GenerateError {
-  string message = 1;   // Human-readable error message
-  string type = 2;      // Error type (e.g., "InvalidRequest", "InternalError")
-  int32 code = 3;       // Error code
 }
 
 // ============================================================================

@@ -31,7 +31,7 @@ classifiers = [
 
 [project.optional-dependencies]
 vllm = ["vllm>=0.17.1"]
-sglang = ["sglang>=0.5.9"]
+sglang = ["sglang>=0.5.10rc0"]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "vllm>=0.17.1"]
 
 [project.urls]

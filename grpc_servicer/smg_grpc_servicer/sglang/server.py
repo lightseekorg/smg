@@ -393,13 +393,12 @@ def _execute_grpc_server_warmup(server_args: ServerArgs):
             # Send the warmup request
             try:
                 responses = list(stub.Generate(warmup_request, timeout=600))
-                # Check if we got a valid response
-                if responses and not responses[-1].HasField("error"):
+                # Check if we got a valid complete response (errors use gRPC status, not in-band)
+                if responses and responses[-1].HasField("complete"):
                     logger.info("gRPC warmup request completed successfully")
                     success = True
                 else:
-                    error_msg = responses[-1].error.message if responses else "No response"
-                    logger.warning(f"gRPC warmup request returned error: {error_msg}")
+                    logger.warning("gRPC warmup request returned no complete response")
                     success = False
             except Exception as e:
                 error_msg = f"gRPC warmup request failed: {e}"

@@ -11,7 +11,7 @@ import logging
 import os
 import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import grpc
 import msgspec
@@ -537,7 +537,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         loads = [_convert_loads_to_protobuf(r) for r in results]
 
         return sglang_scheduler_pb2.GetLoadsResponse(
-            timestamp=datetime.now(UTC).isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             version=sglang.__version__,
             dp_rank_count=len(loads),
             loads=loads,
