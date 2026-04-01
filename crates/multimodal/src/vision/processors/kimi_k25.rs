@@ -30,7 +30,7 @@
 //! - max_pixels: 3,211,264 (from in_patch_limit=16384)
 
 use image::{DynamicImage, GenericImageView};
-use ndarray::{Array2, Array3};
+use ndarray::Array3;
 
 use crate::vision::{
     image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
@@ -214,9 +214,6 @@ impl ImagePreProcessor for KimiK25Processor {
         let std = config.get_image_std();
         let filter = pil_to_filter(config.resampling);
 
-        // Kimi patches are [C, patch_size, patch_size] — no temporal flattening
-        let patch_features = 3 * self.patch_size * self.patch_size;
-
         let mut all_patches: Vec<f32> = Vec::new();
         let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
         let mut grid_thw_data = Vec::with_capacity(images.len() * 3);
@@ -256,12 +253,18 @@ impl ImagePreProcessor for KimiK25Processor {
         }
 
         let total_patches: usize = patches_per_image.iter().map(|&n| n as usize).sum();
-        let pixel_values = Array2::from_shape_vec((total_patches, patch_features), all_patches)
-            .map_err(|e| {
-                TransformError::ShapeError(format!(
-                    "Failed to create pixel_values [{total_patches}, {patch_features}]: {e}"
-                ))
-            })?;
+        // Store as 4D [total_patches, C, patch_size, patch_size] so the engine
+        // receives the correct shape for Conv2d input via the proto shape field.
+        let pixel_values = ndarray::Array4::from_shape_vec(
+            (total_patches, 3, self.patch_size, self.patch_size),
+            all_patches,
+        )
+        .map_err(|e| {
+            TransformError::ShapeError(format!(
+                "Failed to create pixel_values [{total_patches}, 3, {}, {}]: {e}",
+                self.patch_size, self.patch_size
+            ))
+        })?;
 
         let result =
             PreprocessedImages::new_dynamic(pixel_values.into_dyn(), num_img_tokens, image_sizes)
@@ -361,9 +364,11 @@ mod tests {
         let image = create_test_image(600, 400, Rgb([128, 128, 128]));
         let result = processor.preprocess(&[image], &config).unwrap();
 
-        // Kimi: [total_patches, 3 * 14 * 14] = [total_patches, 588]
-        assert_eq!(result.pixel_values.ndim(), 2);
-        assert_eq!(result.pixel_values.shape()[1], 3 * 14 * 14);
+        // Kimi: [total_patches, 3, 14, 14] — 4D for Conv2d
+        assert_eq!(result.pixel_values.ndim(), 4);
+        assert_eq!(result.pixel_values.shape()[1], 3);
+        assert_eq!(result.pixel_values.shape()[2], 14);
+        assert_eq!(result.pixel_values.shape()[3], 14);
         assert!(result.pixel_values.shape()[0] > 0);
 
         assert!(result.model_specific.contains_key("grid_thws"));
@@ -385,7 +390,8 @@ mod tests {
 
         assert_eq!(result.image_sizes.len(), 2);
         assert_eq!(result.num_img_tokens.len(), 2);
-        assert_eq!(result.pixel_values.shape()[1], 588);
+        assert_eq!(result.pixel_values.ndim(), 4);
+        assert_eq!(result.pixel_values.shape()[1], 3);
 
         if let Some(ModelSpecificValue::IntTensor { data, shape }) =
             result.model_specific.get("grid_thws")
