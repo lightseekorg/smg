@@ -491,6 +491,24 @@ impl MeshSyncManager {
     /// The policy store version is bumped so the generation-based collector
     /// detects the change, but the `config` blob is NOT updated on every call.
     /// It is rebuilt lazily by the collector when a full-state fallback is needed.
+    /// Lightweight sync: accepts a pre-computed hash + tenant, avoiding
+    /// the 80k+ String allocation from TreeKey::Text on every request.
+    pub fn sync_tree_insert_hash(&self, model_id: &str, path_hash: u64, tenant: &str) {
+        let key = tree_state_key(model_id);
+
+        self.stores
+            .tenant_delta_inserts
+            .entry(model_id.to_string())
+            .or_default()
+            .push(TenantInsert {
+                node_path_hash: path_hash,
+                worker_url: tenant.to_string(),
+                epoch: self.stores.tree_version(&key),
+            });
+
+        self.stores.bump_tree_version(&key);
+    }
+
     #[expect(
         clippy::unnecessary_wraps,
         reason = "Public API — callers handle Result; changing return type is a cross-crate break"

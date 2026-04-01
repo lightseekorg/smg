@@ -137,6 +137,15 @@ impl CacheAwarePolicy {
                             max_tree_size
                         );
                     }
+
+                    // Log tree sizes for memory debugging.
+                    tracing::info!(
+                        "Tree memory: string_trees={} models, token_trees={} models, \
+                         path_hash_index={} entries",
+                        string_trees_clone.len(),
+                        token_trees_clone.len(),
+                        path_hash_index_clone.len(),
+                    );
                 },
             ))
         } else {
@@ -330,6 +339,18 @@ impl CacheAwarePolicy {
         }
     }
 
+    /// Notify mesh that a tree insert happened. Only the pre-computed hash
+    /// is passed — NOT the full prompt text — to avoid 80k+ String clones
+    /// on every request (16 MB/s of allocator churn at 200 rps).
+    fn sync_insert_hash(&self, model_id: &str, path_hash: u64, tenant: &str) {
+        let mesh_sync = self.mesh_sync.read().clone();
+        if let Some(mesh_sync) = mesh_sync {
+            let mesh_model_id = Self::normalize_mesh_model_id(model_id);
+            mesh_sync.sync_tree_insert_hash(mesh_model_id, path_hash, tenant);
+        }
+    }
+
+    /// Legacy: sync with full TreeKey (used by token path and min-load path).
     fn sync_insert_operation(&self, model_id: &str, key: TreeKey, tenant: &str) {
         let mesh_sync = self.mesh_sync.read().clone();
         if let Some(mesh_sync) = mesh_sync {
@@ -545,7 +566,9 @@ impl CacheAwarePolicy {
                 // would recreate the memory leak. Layer 2 snapshots handle
                 // convergence for entries from the imbalanced-load path.
 
-                self.sync_insert_operation(model_id, TreeKey::Text(text.to_string()), worker_url);
+                // Use hash-based sync to avoid 80k+ String clone.
+                let path_hash = smg_mesh::hash_node_path(text);
+                self.sync_insert_hash(model_id, path_hash, worker_url);
             } else {
                 debug!(
                     "Warning: No string tree found for model '{}', skipping cache update",
@@ -860,11 +883,8 @@ impl CacheAwarePolicy {
                 let path_hash = smg_mesh::hash_node_path(text);
                 self.path_hash_index.insert(path_hash, matched_prefix);
 
-                self.sync_insert_operation(
-                    model_id,
-                    TreeKey::Text(text.to_string()),
-                    workers[idx].url(),
-                );
+                // Use hash-based sync to avoid cloning 80k+ prompt text.
+                self.sync_insert_hash(model_id, path_hash, workers[idx].url());
 
                 workers[idx].increment_processed();
                 return Some(idx);

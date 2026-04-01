@@ -146,6 +146,46 @@ impl MeshController {
                     self.stores.membership.len(),
                     self.stores.app.len(),
                 );
+
+                // Log all mesh data structure sizes for memory debugging.
+                let tree_configs_bytes: usize = self
+                    .stores
+                    .tree_configs
+                    .iter()
+                    .map(|e| e.value().len())
+                    .sum();
+                let tenant_inserts: usize = self
+                    .stores
+                    .tenant_delta_inserts
+                    .iter()
+                    .map(|e| e.value().len())
+                    .sum();
+                let tenant_evictions: usize = self
+                    .stores
+                    .tenant_delta_evictions
+                    .iter()
+                    .map(|e| e.value().len())
+                    .sum();
+                let tree_ops_pending: usize = self
+                    .stores
+                    .tree_ops_pending
+                    .iter()
+                    .map(|e| e.value().len())
+                    .sum();
+                log::info!(
+                    "Mesh memory: tree_configs={} entries ({} bytes), tree_versions={}, \
+                     tenant_inserts={}, tenant_evictions={}, tree_ops_pending={}, \
+                     policy_crdt={}, worker_crdt={}",
+                    self.stores.tree_configs.len(),
+                    tree_configs_bytes,
+                    self.stores.tree_versions.len(),
+                    tenant_inserts,
+                    tenant_evictions,
+                    tree_ops_pending,
+                    self.stores.policy.len(),
+                    self.stores.worker.len(),
+                );
+
                 // Clean up retry managers for peers no longer in cluster state
                 retry_managers.retain(|peer_name, _| map.contains_key(peer_name));
             }
