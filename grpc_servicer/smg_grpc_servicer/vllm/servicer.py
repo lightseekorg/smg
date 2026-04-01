@@ -232,17 +232,19 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 await context.abort(grpc.StatusCode.INTERNAL, msg)
 
             logger.info(
-                "Embed %s: output type=%s, outputs type=%s, "
-                "outputs=%r, data type=%s, data shape=%s, data dtype=%s",
+                "Embed %s: input_ids=%s, prompt=%r, output data shape=%s",
                 request_id,
-                type(final_output).__name__,
-                type(final_output.outputs).__name__,
-                final_output.outputs,
-                type(final_output.outputs.data).__name__,
-                getattr(final_output.outputs.data, "shape", "N/A"),
-                getattr(final_output.outputs.data, "dtype", "N/A"),
+                list(request.tokenized.input_ids)[:10],
+                (request.tokenized.original_text or "")[:100],
+                final_output.outputs.data.shape,
             )
-            embedding = final_output.outputs.data.tolist()
+            data = final_output.outputs.data
+            # vLLM pooler may return per-token embeddings (2D) instead of
+            # a single sequence embedding (1D). Take the last token to match
+            # the seq_pooling_type='LAST' behavior for embedding models.
+            if data.ndim == 2:
+                data = data[-1]
+            embedding = data.tolist()
 
             return vllm_engine_pb2.EmbedResponse(
                 embedding=embedding,
