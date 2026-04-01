@@ -443,7 +443,12 @@ pub fn is_tiktoken_file(path: &Path) -> bool {
 
 impl Encoder for TiktokenTokenizer {
     fn encode(&self, input: &str, _add_special_tokens: bool) -> Result<Encoding> {
-        let tokens = self.tokenizer.encode_ordinary(input);
+        // Always use encode_with_special_tokens so that special token strings
+        // in the input (e.g., <|media_pad|> from chat templates) are recognized
+        // as single tokens rather than split into BPE sub-tokens.
+        // This matches HuggingFace tokenizer behavior where added special tokens
+        // are always recognized in input text regardless of add_special_tokens.
+        let tokens = self.tokenizer.encode_with_special_tokens(input);
         Ok(Encoding::Tiktoken(tokens))
     }
 
