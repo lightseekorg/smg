@@ -114,35 +114,57 @@ from fixtures import (
 from smg_client import SmgClient
 
 # ---------------------------------------------------------------------------
-# Failure diagnostics
+# Failure diagnostics (session end)
 # ---------------------------------------------------------------------------
 
 
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    """Print worker log summary on test failure."""
+def pytest_unconfigure(config):
+    """Print worker log dump and file listing after all pytest output."""
+    from collections import deque
+
     from infra import LOG_SEPARATOR_WIDTH
-
-    outcome = yield
-    report = outcome.get_result()
-
-    if not report.failed:
-        return
 
     log_dir = os.environ.get("E2E_LOG_DIR")
     if not log_dir or not Path(log_dir).is_dir():
         return
 
-    logs = sorted(p.name for p in Path(log_dir).glob("*.log") if p.is_file())
-    if logs:
-        print(f"\n{'!' * LOG_SEPARATOR_WIDTH}")
-        print(f"Worker logs available in CI artifacts ({len(logs)} files)")
-        # Show only the most recent logs to avoid flooding the console
-        for f in logs[-5:]:
-            print(f"  {f}")
-        if len(logs) > 5:
-            print(f"  ... and {len(logs) - 5} more")
-        print(f"{'!' * LOG_SEPARATOR_WIDTH}")
+    log_files = sorted(Path(log_dir).glob("*.log"), key=lambda p: p.stat().st_mtime)
+    if not log_files:
+        return
+
+    sep = "=" * LOG_SEPARATOR_WIDTH
+    dash = "-" * LOG_SEPARATOR_WIDTH
+
+    # Dump last worker log (most recent = most likely the one that failed)
+    worker_logs = [f for f in log_files if f.name.startswith("worker-")]
+    if worker_logs:
+        last_log = worker_logs[-1]
+        try:
+            with last_log.open("r", encoding="utf-8", errors="replace") as fh:
+                tail = deque(fh, maxlen=200)
+            print(f"\n{sep}")
+            print(f"Last worker log: {last_log.name} (last {len(tail)} lines)")
+            print(dash)
+            for line in tail:
+                print(line.rstrip("\n"))
+            print(sep)
+        except OSError:
+            pass
+
+    # List all log files with sizes
+    print(f"\n{sep}")
+    print(f"All worker logs in: {log_dir}/ ({len(log_files)} files)")
+    print(dash)
+    for f in log_files:
+        size = f.stat().st_size
+        if size >= 1024 * 1024:
+            size_str = f"{size / (1024 * 1024):.1f} MB"
+        elif size >= 1024:
+            size_str = f"{size / 1024:.0f} KB"
+        else:
+            size_str = f"{size} B"
+        print(f"  {f.name:<60s} ({size_str})")
+    print(sep, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +203,7 @@ def api_client(request, setup_backend):
 __all__ = [
     # Hooks
     "pytest_runtest_logstart",
-    "pytest_runtest_makereport",
+    "pytest_unconfigure",
     "pytest_runtest_setup",
     "pytest_collection_modifyitems",
     "pytest_configure",
