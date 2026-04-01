@@ -407,18 +407,12 @@ async fn process_multimodal_parts(
         ));
     }
 
-    let image_sizes: Vec<(u32, u32)> = images
-        .iter()
-        .map(|f| (f.image.width(), f.image.height()))
-        .collect();
     debug!(
         image_count = images.len(),
-        ?image_sizes,
         "Fetched images for multimodal processing"
     );
 
     // Step 2: Resolve model spec and preprocess images
-    let t_config = std::time::Instant::now();
     let model_config = components
         .get_or_load_config(model_id, tokenizer_source)
         .await?;
@@ -440,23 +434,18 @@ async fn process_multimodal_parts(
         .image_processor_registry
         .find(model_id, model_type)
         .ok_or_else(|| anyhow::anyhow!("No image processor found for model: {model_id}"))?;
-    let config_us = t_config.elapsed().as_micros();
 
     // ImagePreProcessor::preprocess takes &[DynamicImage]; images are behind Arc<ImageFrame>.
     // Clone cost is negligible vs. the preprocessing work itself.
-    let t_preprocess = std::time::Instant::now();
     let dynamic_images: Vec<image::DynamicImage> = images.iter().map(|f| f.image.clone()).collect();
 
     let preprocessed: PreprocessedImages = image_processor
         .preprocess(&dynamic_images, &model_config.preprocessor_config)
         .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))?;
-    let preprocess_us = t_preprocess.elapsed().as_micros();
 
     debug!(
         num_images = preprocessed.num_img_tokens.len(),
         total_tokens = preprocessed.num_img_tokens.iter().sum::<usize>(),
-        config_us,
-        preprocess_us,
         "Image preprocessing complete"
     );
 

@@ -38,7 +38,7 @@ pub type Result<T> = std::result::Result<T, TransformError>;
 
 /// Extract RGB pixel data from a DynamicImage, avoiding a copy when already RGB8.
 /// Returns (width, height, raw_bytes) where raw_bytes is interleaved R,G,B,R,G,B,...
-fn rgb_bytes(image: &DynamicImage) -> (usize, usize, std::borrow::Cow<'_, [u8]>) {
+pub fn rgb_bytes(image: &DynamicImage) -> (usize, usize, std::borrow::Cow<'_, [u8]>) {
     match image {
         DynamicImage::ImageRgb8(rgb) => (
             rgb.width() as usize,
@@ -51,6 +51,53 @@ fn rgb_bytes(image: &DynamicImage) -> (usize, usize, std::borrow::Cow<'_, [u8]>)
             let h = rgb.height() as usize;
             (w, h, std::borrow::Cow::Owned(rgb.into_raw()))
         }
+    }
+}
+
+/// Deinterleave interleaved RGB bytes into separate R, G, B f32 planes with
+/// per-channel `scale` and `bias`: `plane[c][i] = rgb[i*3 + c] * scale[c] + bias[c]`.
+///
+/// Processes 8 pixels at a time so the compiler can unroll and auto-vectorize
+/// the stride-3 gather pattern.
+pub fn deinterleave_rgb_to_planes(
+    rgb: &[u8],
+    r_plane: &mut [f32],
+    g_plane: &mut [f32],
+    b_plane: &mut [f32],
+    scale: [f32; 3],
+    bias: [f32; 3],
+) {
+    let pixels = r_plane.len();
+    debug_assert_eq!(pixels, g_plane.len());
+    debug_assert_eq!(pixels, b_plane.len());
+    debug_assert!(rgb.len() >= pixels * 3);
+
+    let full_blocks = pixels / 8;
+    let remainder = pixels % 8;
+
+    for block in 0..full_blocks {
+        let dst = block * 8;
+        let src_base = dst * 3;
+        let src = &rgb[src_base..src_base + 24];
+        let rd = &mut r_plane[dst..dst + 8];
+        let gd = &mut g_plane[dst..dst + 8];
+        let bd = &mut b_plane[dst..dst + 8];
+
+        for i in 0..8 {
+            let s = i * 3;
+            rd[i] = src[s] as f32 * scale[0] + bias[0];
+            gd[i] = src[s + 1] as f32 * scale[1] + bias[1];
+            bd[i] = src[s + 2] as f32 * scale[2] + bias[2];
+        }
+    }
+
+    let tail_dst = full_blocks * 8;
+    let tail_src = tail_dst * 3;
+    for i in 0..remainder {
+        let s = tail_src + i * 3;
+        r_plane[tail_dst + i] = rgb[s] as f32 * scale[0] + bias[0];
+        g_plane[tail_dst + i] = rgb[s + 1] as f32 * scale[1] + bias[1];
+        b_plane[tail_dst + i] = rgb[s + 2] as f32 * scale[2] + bias[2];
     }
 }
 
@@ -68,36 +115,7 @@ fn build_planar_tensor(
     let (r_plane, rest) = data.split_at_mut(pixels);
     let (g_plane, b_plane) = rest.split_at_mut(pixels);
 
-    // Deinterleave RGB → planar f32 with scale+bias.
-    // Process 8 pixels (24 bytes) at a time for better auto-vectorization.
-    // The fixed inner loop lets the compiler unroll and use SIMD gather+convert.
-    let full_blocks = pixels / 8;
-    let remainder = pixels % 8;
-
-    for block in 0..full_blocks {
-        let dst = block * 8;
-        let src_base = dst * 3;
-        let src = &raw[src_base..src_base + 24];
-        let rd = &mut r_plane[dst..dst + 8];
-        let gd = &mut g_plane[dst..dst + 8];
-        let bd = &mut b_plane[dst..dst + 8];
-
-        for i in 0..8 {
-            let s = i * 3;
-            rd[i] = src[s] as f32 * scale[0] + bias[0];
-            gd[i] = src[s + 1] as f32 * scale[1] + bias[1];
-            bd[i] = src[s + 2] as f32 * scale[2] + bias[2];
-        }
-    }
-
-    let tail_dst = full_blocks * 8;
-    let tail_src = tail_dst * 3;
-    for i in 0..remainder {
-        let s = tail_src + i * 3;
-        r_plane[tail_dst + i] = raw[s] as f32 * scale[0] + bias[0];
-        g_plane[tail_dst + i] = raw[s + 1] as f32 * scale[1] + bias[1];
-        b_plane[tail_dst + i] = raw[s + 2] as f32 * scale[2] + bias[2];
-    }
+    deinterleave_rgb_to_planes(raw, r_plane, g_plane, b_plane, scale, bias);
 
     #[expect(
         clippy::expect_used,
@@ -365,64 +383,6 @@ pub fn pil_to_filter(resampling: Option<usize>) -> FilterType {
         Some(4) | Some(5) => FilterType::Triangle,
         _ => FilterType::Triangle,
     }
-}
-
-/// Build a padded [C, H, W] f32 tensor from a smaller image.
-///
-/// The image is placed at top-left, and the remaining canvas is filled with
-/// the normalized value of black (0). This fuses `pad_image` + `to_tensor_and_normalize`
-/// into one step, avoiding an intermediate padded `RgbImage` allocation.
-///
-/// This is used by LLaMA 4 which pads with black (0) before tiling.
-pub fn pad_and_normalize_to_tensor(
-    image: &DynamicImage,
-    canvas_w: usize,
-    canvas_h: usize,
-    mean: &[f64; 3],
-    std: &[f64; 3],
-) -> Array3<f32> {
-    let (img_w, img_h, raw) = rgb_bytes(image);
-    let canvas_pixels = canvas_h * canvas_w;
-
-    // Precompute fused scale/bias: (pixel/255 - mean) / std
-    let scale: [f32; 3] = std::array::from_fn(|c| 1.0 / (255.0 * std[c] as f32));
-    let bias: [f32; 3] = std::array::from_fn(|c| -(mean[c] as f32) / (std[c] as f32));
-    // Normalized value of black (0): 0 * scale + bias = bias
-    let pad_val = bias;
-
-    let mut data = vec![0.0f32; 3 * canvas_pixels];
-    let (r_plane, rest) = data.split_at_mut(canvas_pixels);
-    let (g_plane, b_plane) = rest.split_at_mut(canvas_pixels);
-
-    // Pre-fill with padding value
-    r_plane.fill(pad_val[0]);
-    g_plane.fill(pad_val[1]);
-    b_plane.fill(pad_val[2]);
-
-    // Overwrite image region row-by-row
-    let rw = img_w.min(canvas_w);
-    let rh = img_h.min(canvas_h);
-    for y in 0..rh {
-        let src_row = &raw[y * img_w * 3..y * img_w * 3 + rw * 3];
-        let dst_offset = y * canvas_w;
-        let rd = &mut r_plane[dst_offset..dst_offset + rw];
-        let gd = &mut g_plane[dst_offset..dst_offset + rw];
-        let bd = &mut b_plane[dst_offset..dst_offset + rw];
-
-        for x in 0..rw {
-            let s = x * 3;
-            rd[x] = src_row[s] as f32 * scale[0] + bias[0];
-            gd[x] = src_row[s + 1] as f32 * scale[1] + bias[1];
-            bd[x] = src_row[s + 2] as f32 * scale[2] + bias[2];
-        }
-    }
-
-    #[expect(
-        clippy::expect_used,
-        reason = "data has exactly 3*canvas_h*canvas_w elements by construction"
-    )]
-    Array3::from_shape_vec((3, canvas_h, canvas_w), data)
-        .expect("shape matches pre-allocated buffer")
 }
 
 /// Calculate mean color of an image as RGB.

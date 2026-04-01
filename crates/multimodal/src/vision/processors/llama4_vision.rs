@@ -258,6 +258,57 @@ impl Llama4VisionProcessor {
         }
     }
 
+    /// Build a padded [C, H, W] f32 tensor from a smaller image.
+    ///
+    /// The image is placed at top-left, and the remaining canvas is filled with
+    /// the normalized value of black (0). This fuses pad + tensor conversion
+    /// into one step, avoiding an intermediate padded `RgbImage` allocation.
+    fn pad_and_normalize_to_tensor(
+        &self,
+        image: &DynamicImage,
+        canvas_w: usize,
+        canvas_h: usize,
+    ) -> Array3<f32> {
+        let (img_w, img_h, raw) = transforms::rgb_bytes(image);
+        let canvas_pixels = canvas_h * canvas_w;
+
+        // Precompute fused scale/bias: (pixel/255 - mean) / std
+        let scale: [f32; 3] = std::array::from_fn(|c| 1.0 / (255.0 * self.std[c] as f32));
+        let bias: [f32; 3] = std::array::from_fn(|c| -(self.mean[c] as f32) / (self.std[c] as f32));
+
+        let mut data = vec![0.0f32; 3 * canvas_pixels];
+        let (r_plane, rest) = data.split_at_mut(canvas_pixels);
+        let (g_plane, b_plane) = rest.split_at_mut(canvas_pixels);
+
+        // Pre-fill with normalized black: 0 * scale + bias = bias
+        r_plane.fill(bias[0]);
+        g_plane.fill(bias[1]);
+        b_plane.fill(bias[2]);
+
+        // Overwrite image region row-by-row using the shared block-optimized helper
+        let rw = img_w.min(canvas_w);
+        let rh = img_h.min(canvas_h);
+        for y in 0..rh {
+            let src_row = &raw[y * img_w * 3..y * img_w * 3 + rw * 3];
+            let dst_offset = y * canvas_w;
+            transforms::deinterleave_rgb_to_planes(
+                src_row,
+                &mut r_plane[dst_offset..dst_offset + rw],
+                &mut g_plane[dst_offset..dst_offset + rw],
+                &mut b_plane[dst_offset..dst_offset + rw],
+                scale,
+                bias,
+            );
+        }
+
+        #[expect(
+            clippy::expect_used,
+            reason = "data has exactly 3*canvas_h*canvas_w elements by construction"
+        )]
+        Array3::from_shape_vec((3, canvas_h, canvas_w), data)
+            .expect("shape matches pre-allocated buffer")
+    }
+
     /// Split image tensor into tiles.
     fn split_to_tiles(
         &self,
@@ -320,13 +371,7 @@ impl Llama4VisionProcessor {
         // Fused pad + tensor: build the padded f32 tensor directly from the
         // resized RGB bytes, avoiding an intermediate padded RgbImage allocation.
         let tensor = if new_w != target_w || new_h != target_h {
-            transforms::pad_and_normalize_to_tensor(
-                &resized,
-                target_w as usize,
-                target_h as usize,
-                &self.mean,
-                &self.std,
-            )
+            self.pad_and_normalize_to_tensor(&resized, target_w as usize, target_h as usize)
         } else {
             transforms::to_tensor_and_normalize(&resized, &self.mean, &self.std)
         };
