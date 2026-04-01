@@ -162,7 +162,7 @@ impl IncrementalUpdateCollector {
     /// Skips the expensive `.all()` scan when the store generation hasn't changed.
     pub fn collect_updates_for_store(&self, store_type: StoreType) -> Vec<StateUpdate> {
         let mut updates = Vec::new();
-        let last_sent = self.last_sent.read();
+        let mut last_sent = self.last_sent.read();
         let last_scanned = self.last_scanned.read();
 
         match store_type {
@@ -386,6 +386,29 @@ impl IncrementalUpdateCollector {
                             continue;
                         };
                         let compressed = lz4_compress(&config_bytes);
+                        // Skip if compressed size exceeds the gRPC message limit.
+                        // This prevents the infinite retry loop where an oversized
+                        // snapshot is serialized every round, rejected by the
+                        // controller, and retried — causing ~23 MB/s of allocator
+                        // churn that the OS never reclaims.
+                        const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024; // 8 MB
+                        if compressed.len() > MAX_SNAPSHOT_BYTES {
+                            debug!(
+                                "Skipping oversized tree snapshot for {} ({} bytes compressed > {} limit)",
+                                key,
+                                compressed.len(),
+                                MAX_SNAPSHOT_BYTES,
+                            );
+                            // Mark as sent via a write lock so we don't retry every round.
+                            drop(last_sent);
+                            self.last_sent
+                                .write()
+                                .policy
+                                .insert(key.to_string(), current_version);
+                            // Re-acquire read lock for remaining iterations
+                            last_sent = self.last_sent.read();
+                            continue;
+                        }
                         let full_state = PolicyState {
                             model_id,
                             policy_type: "tree_state_lz4".to_string(),

@@ -855,6 +855,15 @@ impl StateStores {
         let before =
             self.tree_configs.len() + self.tree_versions.len() + self.tree_ops_pending.len();
 
+        // Clear tree_configs to release stale snapshot bytes. After eviction
+        // trims the radix tree, the stored snapshot is oversized. Clearing
+        // forces the next checkpoint to re-export a fresh (smaller) snapshot.
+        // Bump tree_generation so checkpoint detects the change.
+        if !self.tree_configs.is_empty() {
+            self.tree_configs.clear();
+            self.tree_generation.fetch_add(1, Ordering::Release);
+        }
+
         // tree_configs is the authoritative store — NEVER remove entries
         // that still have data. Only remove if the model is truly gone
         // (no config, no pending ops, no version counter).

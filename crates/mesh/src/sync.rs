@@ -845,7 +845,6 @@ impl MeshSyncManager {
     /// 80% prefixes) and avoids accumulating full prompt text in memory.
     pub fn checkpoint_tree_states(&self) {
         // Only re-export if tree_generation changed since last checkpoint.
-        // Prevents allocating large TreeSnapshot bytes every 10s when idle.
         let current_gen = self.stores.tree_generation.load(Ordering::Acquire);
         let last_gen = self
             .stores
