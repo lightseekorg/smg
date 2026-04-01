@@ -113,7 +113,7 @@ impl OpenAIRouter {
         model_id: &str,
         headers: Option<&HeaderMap>,
     ) -> Result<Arc<dyn Worker>, Response> {
-        WorkerSelector::new(&self.worker_registry, &self.shared_components.client)
+        WorkerSelector::new(&self.worker_registry)
             .select_worker(&SelectWorkerRequest {
                 model_id,
                 headers,
