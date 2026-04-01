@@ -141,6 +141,21 @@ class TestCompletionBasic:
             response.usage.prompt_tokens + response.usage.completion_tokens
         )
 
+    def test_non_streaming_echo_max_tokens_zero(self, model, api_client):
+        """Test that echo=True with max_tokens=0 returns just the prompt."""
+
+        prompt = "The capital of France is"
+        response = api_client.completions.create(
+            model=model,
+            prompt=prompt,
+            max_tokens=0,
+            temperature=0,
+            echo=True,
+        )
+
+        assert response.choices[0].text == prompt
+        assert response.usage.completion_tokens == 0
+
 
 @pytest.mark.engine("sglang", "vllm")
 @pytest.mark.gpu(1)
@@ -217,3 +232,31 @@ class TestCompletionStreaming:
 
         assert len(full_text) > 0
         assert "Paris" in full_text
+
+    def test_streaming_echo_max_tokens_zero(self, model, api_client):
+        """Test that echo=True with max_tokens=0 streams just the prompt."""
+
+        prompt = "The capital of France is"
+        stream = api_client.completions.create(
+            model=model,
+            prompt=prompt,
+            max_tokens=0,
+            temperature=0,
+            echo=True,
+            stream=True,
+        )
+
+        texts = []
+        finish_reasons = []
+        for chunk in stream:
+            if chunk.choices:
+                choice = chunk.choices[0]
+                if choice.text:
+                    texts.append(choice.text)
+                if choice.finish_reason:
+                    finish_reasons.append(choice.finish_reason)
+
+        full_text = "".join(texts)
+        assert full_text == prompt, f"Expected echoed prompt, got: {full_text!r}"
+        assert len(finish_reasons) == 1
+        assert finish_reasons[0] == "stop"
