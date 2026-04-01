@@ -25,7 +25,7 @@ use openai_protocol::{
     common::ContentPart,
     messages::{ImageSource, InputContent, InputContentBlock, InputMessage, Role},
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::routers::grpc::{
     client::GrpcClient,
@@ -374,6 +374,8 @@ async fn process_multimodal_parts(
     components: &MultimodalComponents,
     tokenizer_source: &str,
 ) -> Result<MultimodalOutput> {
+    let t0 = std::time::Instant::now();
+
     let mut tracker = AsyncMultiModalTracker::new(components.media_connector.clone());
 
     for part in content_parts {
@@ -407,6 +409,8 @@ async fn process_multimodal_parts(
         ));
     }
 
+    let t_fetch = t0.elapsed();
+
     debug!(
         image_count = images.len(),
         image_sizes = ?images.iter().map(|f| (f.image.width(), f.image.height())).collect::<Vec<_>>(),
@@ -436,6 +440,8 @@ async fn process_multimodal_parts(
         .find(model_id, model_type)
         .ok_or_else(|| anyhow::anyhow!("No image processor found for model: {model_id}"))?;
 
+    let t_config = t0.elapsed();
+
     // ImagePreProcessor::preprocess takes &[DynamicImage]; images are behind Arc<ImageFrame>.
     // Clone cost is negligible vs. the preprocessing work itself.
     let dynamic_images: Vec<image::DynamicImage> = images.iter().map(|f| f.image.clone()).collect();
@@ -443,6 +449,8 @@ async fn process_multimodal_parts(
     let preprocessed: PreprocessedImages = image_processor
         .preprocess(&dynamic_images, &model_config.preprocessor_config)
         .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))?;
+
+    let t_preprocess = t0.elapsed();
 
     debug!(
         num_images = preprocessed.num_img_tokens.len(),
@@ -473,6 +481,23 @@ async fn process_multimodal_parts(
         search_token_id,
         im_token_id,
         &prompt_replacements,
+    );
+
+    let t_expand = t0.elapsed();
+
+    info!(
+        fetch_ms = t_fetch.as_millis() as u64,
+        config_ms = (t_config - t_fetch).as_millis() as u64,
+        preprocess_ms = (t_preprocess - t_config).as_millis() as u64,
+        expand_ms = (t_expand - t_preprocess).as_millis() as u64,
+        total_ms = t_expand.as_millis() as u64,
+        image_count = images.len(),
+        image_pixels = images
+            .iter()
+            .map(|f| f.image.width() as u64 * f.image.height() as u64)
+            .sum::<u64>(),
+        total_tokens = preprocessed.num_img_tokens.iter().sum::<usize>(),
+        "Multimodal preprocessing timing"
     );
 
     debug!(
@@ -607,14 +632,20 @@ pub(crate) fn assemble_multimodal_data(
     intermediate: MultimodalIntermediate,
     client: &GrpcClient,
 ) -> MultimodalData {
-    match client {
+    let t0 = std::time::Instant::now();
+    let result = match client {
         GrpcClient::Sglang(_) => MultimodalData::Sglang(assemble_sglang(intermediate)),
         GrpcClient::Vllm(_) => MultimodalData::Vllm(assemble_vllm(intermediate)),
         GrpcClient::Trtllm(_) => MultimodalData::Trtllm(assemble_trtllm(intermediate)),
         GrpcClient::Mlx(_) => unreachable!(
             "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
         ),
-    }
+    };
+    info!(
+        serialize_ms = t0.elapsed().as_millis() as u64,
+        "Multimodal assembly/serialization timing"
+    );
+    result
 }
 
 fn assemble_sglang(intermediate: MultimodalIntermediate) -> SglangMultimodalData {
