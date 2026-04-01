@@ -128,8 +128,8 @@ strip = true        # Strip debug symbols
 
 [profile.profiling]
 inherits = "release"
-debug = 1
-strip = false
+debug = 1           # Line-level debug info for flamegraphs
+strip = false       # Keep symbols
 
 [profile.ci]
 inherits = "release"

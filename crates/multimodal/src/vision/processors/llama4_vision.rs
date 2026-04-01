@@ -30,7 +30,7 @@
 
 use std::collections::HashSet;
 
-use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage};
+use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use ndarray::{s, Array3, Array4};
 
 use crate::vision::{
@@ -258,30 +258,6 @@ impl Llama4VisionProcessor {
         }
     }
 
-    /// Pad image to target dimensions with black padding.
-    #[expect(
-        clippy::unused_self,
-        reason = "method logically belongs to the processor; keeps API consistent"
-    )]
-    fn pad_image(&self, image: &DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
-        let (w, h) = image.dimensions();
-        if w == target_w && h == target_h {
-            return image.clone();
-        }
-
-        // Create black background (LLaMA 4 uses 0 for padding)
-        let black = Rgb([0u8, 0, 0]);
-        let mut padded = RgbImage::from_pixel(target_w, target_h, black);
-
-        // Copy image to top-left — avoid to_rgb8() if already RGB8
-        match image {
-            DynamicImage::ImageRgb8(rgb) => image::imageops::overlay(&mut padded, rgb, 0, 0),
-            _ => image::imageops::overlay(&mut padded, &image.to_rgb8(), 0, 0),
-        }
-
-        DynamicImage::ImageRgb8(padded)
-    }
-
     /// Split image tensor into tiles.
     fn split_to_tiles(
         &self,
@@ -339,19 +315,21 @@ impl Llama4VisionProcessor {
         let new_size = Self::get_max_res_without_distortion(image_size, resize_target);
         let (new_h, new_w) = (new_size.0.max(1), new_size.1.max(1));
 
-        let t_resize = std::time::Instant::now();
         let resized = transforms::resize(image, new_w, new_h, FilterType::Triangle);
-        let resize_us = t_resize.elapsed().as_micros();
 
-        // Step 4: Pad to target_size
-        let t_pad = std::time::Instant::now();
-        let padded = self.pad_image(&resized, target_w, target_h);
-        let pad_us = t_pad.elapsed().as_micros();
-
-        // Step 5: Convert to tensor and normalize
-        let t_tensor = std::time::Instant::now();
-        let tensor = transforms::to_tensor_and_normalize(&padded, &self.mean, &self.std);
-        let tensor_us = t_tensor.elapsed().as_micros();
+        // Fused pad + tensor: build the padded f32 tensor directly from the
+        // resized RGB bytes, avoiding an intermediate padded RgbImage allocation.
+        let tensor = if new_w != target_w || new_h != target_h {
+            transforms::pad_and_normalize_to_tensor(
+                &resized,
+                target_w as usize,
+                target_h as usize,
+                &self.mean,
+                &self.std,
+            )
+        } else {
+            transforms::to_tensor_and_normalize(&resized, &self.mean, &self.std)
+        };
 
         // Step 6: Calculate tile counts based on target_size (canvas size)
         let tile = self.tile_size as usize;
@@ -359,7 +337,6 @@ impl Llama4VisionProcessor {
         let num_tiles_w = target_w as usize / tile;
 
         // Step 7: Split into tiles + global tile
-        let t_tile = std::time::Instant::now();
         let tiles = self.split_to_tiles(&tensor, num_tiles_h, num_tiles_w);
         let num_tiles = num_tiles_h * num_tiles_w;
 
@@ -376,20 +353,6 @@ impl Llama4VisionProcessor {
         } else {
             tiles
         };
-        let tile_us = t_tile.elapsed().as_micros();
-
-        let total_us = resize_us + pad_us + tensor_us + tile_us;
-        if total_us > 5000 {
-            tracing::debug!(
-                model = "llama4-vision",
-                resize_us = %resize_us,
-                pad_us = %pad_us,
-                tensor_us = %tensor_us,
-                tile_us = %tile_us,
-                total_us = %total_us,
-                "preprocess timing breakdown"
-            );
-        }
 
         (output, (num_tiles_h, num_tiles_w))
     }
@@ -527,6 +490,8 @@ impl ImagePreProcessor for Llama4VisionProcessor {
 
 #[cfg(test)]
 mod tests {
+    use image::{Rgb, RgbImage};
+
     use super::*;
 
     fn create_test_image(width: u32, height: u32, color: Rgb<u8>) -> DynamicImage {
