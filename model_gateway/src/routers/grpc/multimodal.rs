@@ -25,7 +25,7 @@ use openai_protocol::{
     common::ContentPart,
     messages::{ImageSource, InputContent, InputContentBlock, InputMessage, Role},
 };
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 use crate::routers::grpc::{
     client::GrpcClient,
@@ -412,10 +412,19 @@ async fn process_multimodal_parts(
         ));
     }
 
-    debug!(
-        image_count = images.len(),
-        "Fetched images for multimodal processing"
-    );
+    // Log image details at info level for debugging multimodal pipeline
+    for (i, img) in images.iter().enumerate() {
+        let (w, h) = (img.image.width(), img.image.height());
+        let color_type = format!("{:?}", img.image.color());
+        info!(
+            index = i,
+            width = w,
+            height = h,
+            color_type = %color_type,
+            raw_bytes_len = img.raw_bytes.len(),
+            "Fetched image for multimodal processing"
+        );
+    }
 
     // Step 2: Resolve model spec and preprocess images
     let model_config = components
@@ -444,11 +453,25 @@ async fn process_multimodal_parts(
         .preprocess(&dynamic_images, &model_config.preprocessor_config)
         .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))?;
 
-    debug!(
+    info!(
         num_images = preprocessed.num_img_tokens.len(),
         total_tokens = preprocessed.num_img_tokens.iter().sum::<usize>(),
+        pixel_values_shape = ?preprocessed.pixel_values.shape(),
+        num_img_tokens = ?preprocessed.num_img_tokens,
+        model_specific_keys = ?preprocessed.model_specific.keys().collect::<Vec<_>>(),
         "Image preprocessing complete"
     );
+    // Log first few pixel values for debugging
+    let flat = preprocessed.pixel_values_flat();
+    if flat.len() >= 10 {
+        info!(
+            first_10_pixels = ?&flat[..10],
+            last_10_pixels = ?&flat[flat.len()-10..],
+            pixel_min = flat.iter().copied().fold(f32::INFINITY, f32::min),
+            pixel_max = flat.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+            "Pixel values sample"
+        );
+    }
 
     // Step 3: Compute prompt replacements and expand tokens.
     let prompt_replacements = spec
@@ -475,12 +498,13 @@ async fn process_multimodal_parts(
         &prompt_replacements,
     );
 
-    debug!(
+    info!(
         original_len = token_ids.len(),
         expanded_len = expanded.token_ids.len(),
         placeholder_count = expanded.placeholders.len(),
         ?search_token_id,
         ?im_token_id,
+        placeholders = ?expanded.placeholders.iter().map(|p| (p.offset, p.length)).collect::<Vec<_>>(),
         "Token expansion complete"
     );
 
@@ -619,6 +643,11 @@ pub(crate) fn assemble_multimodal_data(
 
 fn assemble_sglang(intermediate: MultimodalIntermediate) -> SglangMultimodalData {
     let (pixel_values, pixel_values_shape) = serialize_pixel_values(&intermediate.preprocessed);
+    info!(
+        pixel_values_bytes = pixel_values.len(),
+        pixel_values_shape = ?pixel_values_shape,
+        "Serialized pixel_values for sglang"
+    );
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
     let image_data = intermediate
         .images
