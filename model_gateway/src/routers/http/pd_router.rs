@@ -47,7 +47,6 @@ use crate::{
 pub struct PDRouter {
     pub worker_registry: Arc<WorkerRegistry>,
     pub policy_registry: Arc<PolicyRegistry>,
-    pub client: Client,
     pub retry_config: RetryConfig,
     pub api_key: Option<String>,
 }
@@ -70,10 +69,10 @@ impl PDRouter {
         headers: Option<Vec<(String, String)>>,
     ) -> Response {
         let workers = self.worker_registry.get_prefill_workers();
-        let first_worker_url = workers.first().map(|w| w.url().to_string());
 
-        if let Some(worker_url) = first_worker_url {
-            self.proxy_to_worker(worker_url, endpoint, headers).await
+        if let Some(worker) = workers.first() {
+            self.proxy_to_worker(worker.as_ref(), endpoint, headers)
+                .await
         } else {
             error::service_unavailable("no_prefill_servers", "No prefill servers available")
         }
@@ -81,12 +80,12 @@ impl PDRouter {
 
     async fn proxy_to_worker(
         &self,
-        worker_url: String,
+        worker: &dyn Worker,
         endpoint: &str,
         headers: Option<Vec<(String, String)>>,
     ) -> Response {
-        let url = format!("{worker_url}/{endpoint}");
-        let mut request_builder = self.client.get(&url);
+        let url = format!("{}/{endpoint}", worker.url());
+        let mut request_builder = worker.http_client().get(&url);
 
         if let Some(headers) = headers {
             for (name, value) in headers {
@@ -163,7 +162,6 @@ impl PDRouter {
         Ok(PDRouter {
             worker_registry: Arc::clone(&ctx.worker_registry),
             policy_registry: Arc::clone(&ctx.policy_registry),
-            client: ctx.client.clone(),
             retry_config: ctx.router_config.effective_retry_config(),
             api_key: ctx.router_config.api_key.clone(),
         })
@@ -557,9 +555,9 @@ impl PDRouter {
         inject_trace_context_http(&mut headers_with_trace);
         let headers = Some(&headers_with_trace);
 
-        // Build both requests
+        // Build both requests using per-worker HTTP clients
         let prefill_request = self.build_post_with_headers(
-            &self.client,
+            prefill.http_client(),
             prefill.url(),
             context.route,
             &json_request,
@@ -567,7 +565,7 @@ impl PDRouter {
             false,
         );
         let decode_request = self.build_post_with_headers(
-            &self.client,
+            decode.http_client(),
             decode.url(),
             context.route,
             &json_request,
@@ -1143,10 +1141,13 @@ impl RouterTrait for PDRouter {
             }
         };
 
-        let prefill_url = format!("{}/health_generate", prefill.url());
         let (prefill_result, decode_result) = tokio::join!(
-            self.client.get(&prefill_url).send(),
-            self.client
+            prefill
+                .http_client()
+                .get(format!("{}/health_generate", prefill.url()))
+                .send(),
+            decode
+                .http_client()
                 .get(format!("{}/health_generate", decode.url()))
                 .send()
         );
@@ -1375,7 +1376,6 @@ mod tests {
         PDRouter {
             worker_registry,
             policy_registry,
-            client: Client::new(),
             retry_config: RetryConfig::default(),
             api_key: Some("test_api_key".to_string()),
         }

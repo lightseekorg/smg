@@ -40,7 +40,6 @@ impl GeminiRouter {
         let request_timeout = Duration::from_secs(ctx.router_config.request_timeout_secs);
 
         let shared_components = Arc::new(SharedComponents {
-            client: ctx.client.clone(),
             worker_registry: ctx.worker_registry.clone(),
             mcp_orchestrator,
             request_timeout,

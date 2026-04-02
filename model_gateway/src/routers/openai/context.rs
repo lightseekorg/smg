@@ -34,9 +34,7 @@ pub enum RequestType {
 }
 
 #[derive(Clone)]
-pub struct SharedComponents {
-    pub client: reqwest::Client,
-}
+pub struct SharedComponents {}
 
 pub struct ResponsesComponents {
     pub shared: Arc<SharedComponents>,
@@ -52,13 +50,6 @@ pub enum ComponentRefs {
 }
 
 impl ComponentRefs {
-    pub fn client(&self) -> &reqwest::Client {
-        match self {
-            ComponentRefs::Shared(s) => &s.client,
-            ComponentRefs::Responses(r) => &r.shared.client,
-        }
-    }
-
     pub fn mcp_orchestrator(&self) -> Option<&Arc<McpOrchestrator>> {
         match self {
             ComponentRefs::Shared(_) => None,

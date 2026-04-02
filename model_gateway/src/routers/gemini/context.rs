@@ -25,9 +25,6 @@ use crate::core::{Worker, WorkerRegistry};
 ///
 /// TODO: Create InteractionsStorage and add in context
 pub(crate) struct SharedComponents {
-    /// HTTP client for upstream requests.
-    pub client: reqwest::Client,
-
     /// Worker registry for model → worker resolution.
     pub worker_registry: Arc<WorkerRegistry>,
 

@@ -52,8 +52,8 @@ pub(crate) async fn non_stream_request_execution(
     let provider = ApiProvider::Gemini;
     let auth_header = provider.extract_auth_header(ctx.input.headers.as_ref(), worker.api_key());
     let request_builder = provider.apply_headers(
-        ctx.components
-            .client
+        worker
+            .http_client()
             .post(upstream_url)
             .json(&payload)
             .timeout(ctx.components.request_timeout),

@@ -75,7 +75,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         prepare_mcp_tools_as_functions(&mut payload, &session);
 
         match execute_tool_loop(
-            ctx.components.client(),
+            worker.http_client(),
             &url,
             ctx.headers(),
             payload,
@@ -94,7 +94,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             }
         }
     } else {
-        let mut request_builder = ctx.components.client().post(&url).json(&payload);
+        let mut request_builder = worker.http_client().post(&url).json(&payload);
         let auth_header = extract_auth_header(ctx.headers(), worker.api_key());
         request_builder = apply_provider_headers(request_builder, &url, auth_header.as_ref());
 

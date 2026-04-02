@@ -1046,7 +1046,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         None
     };
 
-    let client = ctx.components.client().clone();
+    let client = worker.http_client().clone();
     let req = match ctx.into_streaming_context() {
         Ok(r) => r,
         Err(msg) => {

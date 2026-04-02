@@ -57,7 +57,7 @@ pub(super) async fn route_chat(
         bool_to_static_str(streaming),
     );
 
-    let selector = WorkerSelector::new(deps.worker_registry, &deps.shared_components.client);
+    let selector = WorkerSelector::new(deps.worker_registry);
     let worker = match selector
         .select_worker(&SelectWorkerRequest {
             model_id: model,
@@ -141,7 +141,7 @@ pub(super) async fn route_chat(
     )]
     let payload_ref = ctx.payload().expect("Payload not prepared");
     let payload_json = Arc::new(payload_ref.json.clone());
-    let client = ctx.components.client().clone();
+    let client = worker.http_client().clone();
     let headers_cloned = Arc::new(ctx.headers().cloned());
     let worker_api_key = Arc::new(worker.api_key().cloned());
     let is_streaming = ctx.is_streaming();

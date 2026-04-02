@@ -85,9 +85,7 @@ impl OpenAIRouter {
             .ok_or_else(|| "MCP manager not initialized in AppContext".to_string())?
             .clone();
 
-        let shared_components = Arc::new(SharedComponents {
-            client: ctx.client.clone(),
-        });
+        let shared_components = Arc::new(SharedComponents {});
 
         let responses_components = Arc::new(ResponsesComponents {
             shared: Arc::clone(&shared_components),
@@ -113,7 +111,7 @@ impl OpenAIRouter {
         model_id: &str,
         headers: Option<&HeaderMap>,
     ) -> Result<Arc<dyn Worker>, Response> {
-        WorkerSelector::new(&self.worker_registry, &self.shared_components.client)
+        WorkerSelector::new(&self.worker_registry)
             .select_worker(&SelectWorkerRequest {
                 model_id,
                 headers,
@@ -182,7 +180,6 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         let model = body.model.as_deref().unwrap_or_default();
         let worker = self.select_worker(model, headers).await;
         forward_realtime_rest(
-            &self.shared_components.client,
             worker,
             headers,
             body,
@@ -202,7 +199,6 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         let model = body.session.model.as_deref().unwrap_or_default();
         let worker = self.select_worker(model, headers).await;
         forward_realtime_rest(
-            &self.shared_components.client,
             worker,
             headers,
             body,
@@ -221,7 +217,6 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         let model = body.model.as_deref().unwrap_or_default();
         let worker = self.select_worker(model, headers).await;
         forward_realtime_rest(
-            &self.shared_components.client,
             worker,
             headers,
             body,
