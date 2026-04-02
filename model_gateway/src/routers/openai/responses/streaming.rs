@@ -719,13 +719,12 @@ pub(super) fn handle_streaming_with_tool_interception(
             previous_response_id: previous_response_id.as_deref(),
             session: Some(&session),
         };
+        let provider = ApiProvider::from_url(&url_clone);
+        let auth_header = provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
 
         loop {
             // Make streaming request
             let mut request_builder = client_clone.post(&url_clone).json(&current_payload);
-            let provider = ApiProvider::from_url(&url_clone);
-            let auth_header =
-                provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
             request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
             request_builder = request_builder.header("Accept", "text/event-stream");
 

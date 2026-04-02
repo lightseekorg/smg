@@ -513,11 +513,11 @@ pub(crate) async fn execute_tool_loop(
         "Starting tool loop: max_tool_calls={:?}, max_iterations={}",
         max_tool_calls, DEFAULT_MAX_ITERATIONS
     );
+    let provider = ApiProvider::from_url(url);
+    let auth_header = provider.extract_auth_header(headers, worker_api_key);
 
     loop {
         let request_builder = client.post(url).json(&current_payload);
-        let provider = ApiProvider::from_url(url);
-        let auth_header = provider.extract_auth_header(headers, worker_api_key);
         let request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
 
         let response = request_builder
