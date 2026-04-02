@@ -223,10 +223,21 @@ pub async fn ensure_mcp_servers(
                 tool = %tool_name,
                 "Adding static server for built-in tool routing"
             );
-            if !mcp_servers
-                .iter()
-                .any(|b| b.server_key == server_name || b.label == server_name)
-            {
+            let builtin_server_url = orchestrator.get_server_config(&server_name).and_then(|cfg| {
+                match cfg.transport {
+                    McpTransport::Sse { url, .. } | McpTransport::Streamable { url, .. } => {
+                        Some(url)
+                    }
+                    McpTransport::Stdio { .. } => None,
+                }
+            });
+            let already_bound = mcp_servers.iter().any(|b| {
+                b.server_key == server_name
+                    || builtin_server_url
+                        .as_ref()
+                        .is_some_and(|url| b.server_key == *url)
+            });
+            if !already_bound {
                 mcp_servers.push(McpServerBinding {
                     label: server_name.clone(),
                     server_key: server_name,
@@ -285,18 +296,28 @@ pub async fn ensure_request_mcp_client(
             else {
                 continue;
             };
-
-            // If request already provided an MCP tool with this label/url, reuse it.
-            if inputs
-                .iter()
-                .any(|input| input.label == server_name || input.url.as_deref() == Some(&server_name))
-            {
-                continue;
-            }
-
             let Some(server_cfg) = mcp_orchestrator.get_server_config(&server_name) else {
                 continue;
             };
+            let configured_url = match &server_cfg.transport {
+                McpTransport::Sse { url, .. } | McpTransport::Streamable { url, .. } => {
+                    Some(url.clone())
+                }
+                McpTransport::Stdio { .. } => None,
+            };
+
+            // If request already provided this exact builtin server identity, reuse it.
+            if inputs
+                .iter()
+                .any(|input| {
+                    input.label == server_name && input.url.is_none()
+                        || configured_url
+                            .as_ref()
+                            .is_some_and(|url| input.url.as_deref() == Some(url.as_str()))
+                })
+            {
+                continue;
+            }
 
             match server_cfg.transport {
                 McpTransport::Sse { url, token, headers }
@@ -691,5 +712,35 @@ mod tests {
         let mcp_servers = result.unwrap();
         assert_eq!(mcp_servers.len(), 1);
         assert_eq!(mcp_servers[0].label, "search-server");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_mcp_servers_does_not_dedupe_builtin_by_request_label() {
+        let orchestrator = create_test_orchestrator_with_builtin().await;
+
+        // Request-scoped dynamic MCP uses same label as builtin server name,
+        // but points to a different URL. Builtin static server must still be added.
+        let inputs = vec![McpServerInput {
+            label: "search-server".to_string(),
+            url: Some("http://localhost:7777/other".to_string()),
+            authorization: None,
+            headers: HashMap::new(),
+            allowed_tools: None,
+        }];
+
+        let builtin_types = vec![BuiltinToolType::WebSearchPreview];
+        let result = ensure_mcp_servers(&orchestrator, &inputs, &builtin_types).await;
+
+        assert!(result.is_some());
+        let mcp_servers = result.unwrap();
+
+        // One dynamic + one static builtin.
+        assert_eq!(mcp_servers.len(), 2);
+        assert!(
+            mcp_servers
+                .iter()
+                .any(|b| b.server_key == "search-server"),
+            "builtin static server should be present"
+        );
     }
 }
