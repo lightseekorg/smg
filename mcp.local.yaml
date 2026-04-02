@@ -2,8 +2,6 @@ servers:
   - name: generate_image
     protocol: streamable
     url: http://localhost:8080/mcp
-    headers:
-      opc-compartment-id: ""
     builtin_type: image_generation
     builtin_tool_name: generate_image
     tools:

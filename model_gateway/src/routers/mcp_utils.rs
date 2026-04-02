@@ -2,7 +2,6 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use axum::http::HeaderMap;
 use openai_protocol::responses::ResponseTool;
 use smg_mcp::{
     BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpTransport,
@@ -202,49 +201,6 @@ pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
         .collect()
 }
 
-/// Build per-request headers to forward to builtin MCP servers.
-///
-/// Any header key declared in builtin server transport `headers` in MCP config
-/// is eligible for pass-through from the incoming request (same header name).
-/// If the request contains a non-empty value for that key, it is added to the
-/// returned map and later merged into dynamic builtin MCP connections.
-pub fn extract_builtin_request_headers(
-    orchestrator: &Arc<McpOrchestrator>,
-    tools: &[ResponseTool],
-    request_headers: Option<&HeaderMap>,
-) -> HashMap<String, String> {
-    let mut passthrough = HashMap::new();
-    let Some(request_headers) = request_headers else {
-        return passthrough;
-    };
-
-    for builtin_type in extract_builtin_types(tools) {
-        let Some((server_name, _, _)) = orchestrator.find_builtin_server(builtin_type) else {
-            continue;
-        };
-        let Some(server_cfg) = orchestrator.get_server_config(&server_name) else {
-            continue;
-        };
-        let configured_headers = match server_cfg.transport {
-            McpTransport::Sse { headers, .. } | McpTransport::Streamable { headers, .. } => headers,
-            McpTransport::Stdio { .. } => HashMap::new(),
-        };
-
-        for header_name in configured_headers.keys() {
-            if let Some(v) = request_headers
-                .get(header_name.as_str())
-                .and_then(|v| v.to_str().ok())
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
-                passthrough.insert(header_name.clone(), v.to_string());
-            }
-        }
-    }
-
-    passthrough
-}
-
 /// Unified MCP server connection logic shared by all routers.
 ///
 /// Connects dynamic/static MCP servers described by `inputs`, then adds
@@ -297,11 +253,9 @@ pub async fn ensure_mcp_servers(
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
-    default_headers: Option<&HashMap<String, String>>,
+    _default_headers: Option<&HashMap<String, String>>,
 ) -> Option<Vec<McpServerBinding>> {
-    let default_headers = default_headers.cloned().unwrap_or_default();
-
-    let mut inputs: Vec<McpServerInput> = tools
+    let inputs: Vec<McpServerInput> = tools
         .iter()
         .filter_map(|tool| match tool {
             ResponseTool::Mcp(mcp) => {
@@ -318,58 +272,8 @@ pub async fn ensure_request_mcp_client(
         .collect();
 
     let builtin_types = extract_builtin_types(tools);
-    let mut builtin_types_requiring_static = builtin_types.clone();
 
-    // For builtin tool routing, forward request-scoped headers (e.g. opc-compartment-id)
-    // to MCP servers declared in mcp.local.yaml.
-    if !default_headers.is_empty() {
-        for &builtin_type in &builtin_types {
-            let Some((server_name, _, _)) = mcp_orchestrator.find_builtin_server(builtin_type)
-            else {
-                continue;
-            };
-            let Some(server_cfg) = mcp_orchestrator.get_server_config(&server_name) else {
-                continue;
-            };
-
-            match server_cfg.transport {
-                McpTransport::Sse { url, token, headers }
-                | McpTransport::Streamable { url, token, headers } => {
-                    let allowed_header_keys: std::collections::HashSet<String> =
-                        headers.keys().cloned().collect();
-                    let mut merged_headers = headers;
-                    for (k, v) in &default_headers {
-                        if allowed_header_keys.contains(k) {
-                            merged_headers.insert(k.clone(), v.clone());
-                        }
-                    }
-
-                    if let Some(existing) = inputs.iter_mut().find(|input| {
-                        (input.label == server_name && input.url.is_none())
-                            || input.url.as_deref() == Some(url.as_str())
-                    }) {
-                        for (k, v) in merged_headers {
-                            existing.headers.insert(k, v);
-                        }
-                        builtin_types_requiring_static.retain(|t| *t != builtin_type);
-                        continue;
-                    }
-
-                    inputs.push(McpServerInput {
-                        label: server_name,
-                        url: Some(url),
-                        authorization: token,
-                        headers: merged_headers,
-                        allowed_tools: None,
-                    });
-                    builtin_types_requiring_static.retain(|t| *t != builtin_type);
-                }
-                McpTransport::Stdio { .. } => {}
-            }
-        }
-    }
-
-    ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types_requiring_static).await
+    ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types).await
 }
 
 #[cfg(test)]

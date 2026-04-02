@@ -1017,7 +1017,7 @@ pub(super) fn handle_streaming_with_tool_interception(
 
 /// Main entry point for streaming responses
 pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
-    use crate::routers::mcp_utils::{ensure_request_mcp_client, extract_builtin_request_headers};
+    use crate::routers::mcp_utils::ensure_request_mcp_client;
 
     let worker = match ctx.worker() {
         Some(w) => w.clone(),
@@ -1040,8 +1040,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     };
     // Check for MCP tools and create request context if needed
     let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        let default_mcp_headers = extract_builtin_request_headers(&mcp_orchestrator, tools, ctx.headers());
-        ensure_request_mcp_client(&mcp_orchestrator, tools, Some(&default_mcp_headers)).await
+        ensure_request_mcp_client(&mcp_orchestrator, tools, None).await
     } else {
         None
     };

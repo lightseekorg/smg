@@ -12,6 +12,7 @@ use futures::stream::{self, StreamExt};
 use openai_protocol::responses::ResponseTool;
 
 use super::{
+    config::BuiltinToolType,
     orchestrator::{McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput},
     UNKNOWN_SERVER_KEY,
 };
@@ -266,10 +267,34 @@ impl<'a> McpToolSession<'a> {
     ///
     /// Convenience method that returns `Passthrough` if the tool is not found.
     pub fn tool_response_format(&self, tool_name: &str) -> ResponseFormat {
-        self.exposed_name_map
-            .get(tool_name)
-            .map(|binding| binding.response_format.clone())
-            .unwrap_or(ResponseFormat::Passthrough)
+        let Some(binding) = self.exposed_name_map.get(tool_name) else {
+            return ResponseFormat::Passthrough;
+        };
+
+        if !matches!(binding.response_format, ResponseFormat::Passthrough) {
+            return binding.response_format.clone();
+        }
+
+        // Dynamic builtin connections can discover tools with passthrough defaults.
+        // Recover configured builtin response format by matching server/tool identity.
+        for builtin_type in [
+            BuiltinToolType::WebSearchPreview,
+            BuiltinToolType::CodeInterpreter,
+            BuiltinToolType::ImageGeneration,
+            BuiltinToolType::FileSearch,
+        ] {
+            let Some((server_name, builtin_tool_name, response_format)) =
+                self.orchestrator.find_builtin_server(builtin_type)
+            else {
+                continue;
+            };
+            if binding.server_label == server_name && binding.resolved_tool_name == builtin_tool_name
+            {
+                return response_format;
+            }
+        }
+
+        binding.response_format.clone()
     }
 
     /// Build function-tool JSON payloads for upstream model calls.
