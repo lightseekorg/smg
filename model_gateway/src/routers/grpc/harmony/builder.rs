@@ -811,7 +811,7 @@ impl HarmonyBuilder {
                     tool_calls,
                     reasoning_content,
                 } => {
-                    if let Some(calls) = tool_calls {
+                    if let Some(calls) = tool_calls.as_ref().filter(|c| !c.is_empty()) {
                         // Per Harmony spec: when tool calls are present, include
                         // previous reasoning as a separate analysis channel message
                         // because the model calls tools as part of its chain-of-thought.
