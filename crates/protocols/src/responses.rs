@@ -335,6 +335,18 @@ pub enum ResponseOutputItem {
         status: ImageGenerationCallStatus,
         #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        revised_prompt: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        background: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_format: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
     },
 }
 
@@ -1552,7 +1564,9 @@ mod tests {
         .expect("image_generation_call output item should deserialize");
 
         match item {
-            ResponseOutputItem::ImageGenerationCall { id, status, result } => {
+            ResponseOutputItem::ImageGenerationCall {
+                id, status, result, ..
+            } => {
                 assert_eq!(id, "ig_123");
                 assert_eq!(status, ImageGenerationCallStatus::Completed);
                 assert_eq!(result.as_deref(), Some("ZmFrZV9pbWFnZQ=="));
