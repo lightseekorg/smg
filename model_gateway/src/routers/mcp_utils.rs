@@ -263,16 +263,11 @@ pub async fn ensure_request_mcp_client(
         .iter()
         .filter_map(|tool| match tool {
             ResponseTool::Mcp(mcp) => {
-                let mut headers = default_headers.clone();
-                for (k, v) in mcp.headers.clone().unwrap_or_default() {
-                    headers.insert(k, v);
-                }
-
                 Some(McpServerInput {
                     label: mcp.server_label.clone(),
                     url: mcp.server_url.clone(),
                     authorization: mcp.authorization.clone(),
-                    headers,
+                    headers: mcp.headers.clone().unwrap_or_default(),
                     allowed_tools: mcp.allowed_tools.clone(),
                 })
             }

@@ -523,7 +523,7 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
-            ResponseFormat::ImageGenerationCall => return None,
+            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
             ResponseFormat::Passthrough => return None,
         };
         Some(self.emit_tool_event(event_type, output_index, item_id))
@@ -1082,9 +1082,12 @@ mod tests {
             completed.get("type").and_then(|v| v.as_str()),
             Some(ImageGenerationCallEvent::COMPLETED)
         );
-        assert!(
-            searching.is_none(),
-            "image_generation_call should not emit searching/interpreting event"
+        assert_eq!(
+            searching
+                .as_ref()
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str()),
+            Some(ImageGenerationCallEvent::GENERATING)
         );
     }
 
