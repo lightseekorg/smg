@@ -8,14 +8,17 @@ use openai_protocol::{
         ResponseReasoningContent, ResponsesRequest, ResponsesResponse, StringOrContentParts,
     },
 };
-use serde_json::{from_value, to_string, Value};
+use serde_json::{from_value, Value};
 use smg_data_connector::{ResponseId, ResponseStorageError};
 use smg_mcp::McpToolSession;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use super::execution::ToolResult;
-use crate::routers::{error, grpc::common::responses::ResponsesContext};
+use crate::routers::{
+    error, grpc::common::responses::ResponsesContext,
+    tool_output_context::compact_tool_output_for_model_context,
+};
 
 /// Record of a single MCP tool call execution
 ///
@@ -126,13 +129,10 @@ pub(super) fn build_next_request_with_tools(
 
     // Add tool results
     for tool_result in tool_results {
-        // Serialize tool output to string
-        let output_str = to_string(&tool_result.output)
-            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize tool output: {e}\"}}"));
-
         // Update the corresponding tool call with output and completed status
         // Find and update the matching FunctionToolCall
         if let Some(ResponseInputOutputItem::FunctionToolCall {
+            name: _,
             output,
             status,
             ..
@@ -140,7 +140,11 @@ pub(super) fn build_next_request_with_tools(
             .iter_mut()
             .find(|item| matches!(item, ResponseInputOutputItem::FunctionToolCall { call_id, .. } if call_id == &tool_result.call_id))
         {
-            *output = Some(output_str);
+            *output = Some(compact_tool_output_for_model_context(
+                false,
+                &tool_result.output,
+                tool_result.is_error,
+            ));
             *status = if tool_result.is_error {
                 Some("failed".to_string())
             } else {

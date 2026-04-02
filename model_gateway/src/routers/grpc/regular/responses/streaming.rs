@@ -718,22 +718,73 @@ async fn execute_tool_loop_streaming_internal(
 
                 let success = !tool_output.is_error;
                 let output_str = tool_output.output.to_string();
+                let is_image_generation = matches!(response_format, ResponseFormat::ImageGenerationCall);
+                // Use centralized transformation so streaming payload fields/status stay
+                // consistent with non-streaming and storage paths.
+                let output_item = tool_output.to_response_item();
 
                 if success {
-                    // Emit tool_call.completed
-                    let event =
-                        emitter.emit_tool_call_completed(output_index, &item_id, &response_format);
-                    emitter.send_event(&event, &tx)?;
+                    // For image_generation_call, preserve status from transformer output
+                    // instead of forcing "completed".
+                    let image_status = if is_image_generation {
+                        match &output_item {
+                            ResponseOutputItem::ImageGenerationCall { status, .. } => Some(status),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
 
-                    // Build complete item with output
-                    let mut item_done = json!({
-                        "id": item_id,
-                        "type": item_type,
-                        "name": tool_output.tool_name,
-                        "status": "completed",
-                        "arguments": tool_output.arguments_str,
-                        "output": output_str
-                    });
+                    // Emit tool_call.completed only for terminal/success statuses.
+                    let should_emit_completed = match image_status {
+                        Some(openai_protocol::responses::ImageGenerationCallStatus::InProgress)
+                        | Some(openai_protocol::responses::ImageGenerationCallStatus::Generating) => false,
+                        _ => true,
+                    };
+                    if should_emit_completed {
+                        let event = emitter.emit_tool_call_completed(
+                            output_index,
+                            &item_id,
+                            &response_format,
+                        );
+                        emitter.send_event(&event, &tx)?;
+                    }
+
+                    // Build complete item.
+                    // image_generation_call uses `result` rather than `output`.
+                    let mut item_done = if is_image_generation {
+                        let status_str = match image_status {
+                            Some(openai_protocol::responses::ImageGenerationCallStatus::InProgress) => "in_progress",
+                            Some(openai_protocol::responses::ImageGenerationCallStatus::Generating) => "generating",
+                            Some(openai_protocol::responses::ImageGenerationCallStatus::Failed) => "failed",
+                            _ => "completed",
+                        };
+                        let result_str = tool_output
+                            .output
+                            .as_object()
+                            .and_then(|obj| obj.get("result"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                            .or_else(|| tool_output.output.as_str().map(String::from))
+                            .unwrap_or_else(|| tool_output.output.to_string());
+                        json!({
+                            "id": item_id,
+                            "type": item_type,
+                            "name": tool_output.tool_name,
+                            "status": status_str,
+                            "arguments": tool_output.arguments_str,
+                            "result": result_str
+                        })
+                    } else {
+                        json!({
+                            "id": item_id,
+                            "type": item_type,
+                            "name": tool_output.tool_name,
+                            "status": "completed",
+                            "arguments": tool_output.arguments_str,
+                            "output": output_str
+                        })
+                    };
                     attach_mcp_server_label(
                         &mut item_done,
                         Some(tool_output.server_label.as_str()),
@@ -756,14 +807,26 @@ async fn execute_tool_loop_streaming_internal(
                     emitter.send_event(&event, &tx)?;
 
                     // Build failed item
-                    let mut item_done = json!({
-                        "id": item_id,
-                        "type": item_type,
-                        "name": tool_output.tool_name,
-                        "status": "failed",
-                        "arguments": tool_output.arguments_str,
-                        "error": err_text
-                    });
+                    let mut item_done = if is_image_generation {
+                        // image_generation_call status set matches protocol enum.
+                        json!({
+                            "id": item_id,
+                            "type": item_type,
+                            "name": tool_output.tool_name,
+                            "status": "failed",
+                            "arguments": tool_output.arguments_str,
+                            "result": err_text
+                        })
+                    } else {
+                        json!({
+                            "id": item_id,
+                            "type": item_type,
+                            "name": tool_output.tool_name,
+                            "status": "failed",
+                            "arguments": tool_output.arguments_str,
+                            "error": err_text
+                        })
+                    };
                     attach_mcp_server_label(
                         &mut item_done,
                         Some(tool_output.server_label.as_str()),
@@ -791,9 +854,6 @@ async fn execute_tool_loop_streaming_internal(
                         metrics_labels::RESULT_ERROR
                     },
                 );
-
-                // Use the centralized tool output transformer from MCP crate output type.
-                let output_item = tool_output.to_response_item();
 
                 // Record the call in state with transformed output item
                 state.record_call(

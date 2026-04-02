@@ -20,8 +20,12 @@ use smg_data_connector::{
 };
 use smg_mcp::McpToolSession;
 use tracing::{debug, warn};
+use serde_json::Value;
 
-use crate::routers::{error, grpc::common::responses::ResponsesContext};
+use crate::routers::{
+    error, grpc::common::responses::ResponsesContext,
+    tool_output_context::compact_tool_output_for_model_context,
+};
 
 // ============================================================================
 // Tool Loop State
@@ -62,8 +66,18 @@ impl ToolLoopState {
         args_json_str: String,
         output_str: String,
         output_item: ResponseOutputItem,
-        _success: bool,
+        success: bool,
     ) {
+        let is_image_generation =
+            matches!(&output_item, ResponseOutputItem::ImageGenerationCall { .. });
+        let output_value =
+            serde_json::from_str::<Value>(&output_str).unwrap_or(Value::String(output_str));
+        let model_context_output = compact_tool_output_for_model_context(
+            is_image_generation,
+            &output_value,
+            !success,
+        );
+
         // Add function_tool_call item with both arguments and output
         let id = call_id.clone();
         self.conversation_history
@@ -72,7 +86,7 @@ impl ToolLoopState {
                 call_id,
                 name: tool_name,
                 arguments: args_json_str,
-                output: Some(output_str),
+                output: Some(model_context_output),
                 status: Some("completed".to_string()),
             });
 

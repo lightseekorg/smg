@@ -1038,7 +1038,6 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
             return error::internal_error("internal_error", "MCP orchestrator required");
         }
     };
-
     // Check for MCP tools and create request context if needed
     let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
         ensure_request_mcp_client(&mcp_orchestrator, tools).await
