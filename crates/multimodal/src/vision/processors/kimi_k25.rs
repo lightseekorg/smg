@@ -137,8 +137,9 @@ impl KimiK25Processor {
         let canvas_h = cfg.new_height + cfg.pad_height;
         let canvas_w = cfg.new_width + cfg.pad_width;
 
-        // Resize using BICUBIC
-        let resized = image.resize_exact(
+        // Resize using SIMD-accelerated BICUBIC (fast_image_resize)
+        let resized = transforms::resize(
+            image,
             cfg.new_width as u32,
             cfg.new_height as u32,
             image::imageops::FilterType::CatmullRom,
