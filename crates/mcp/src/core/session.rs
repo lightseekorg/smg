@@ -12,7 +12,6 @@ use futures::stream::{self, StreamExt};
 use openai_protocol::responses::ResponseTool;
 
 use super::{
-    config::BuiltinToolType,
     orchestrator::{McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput},
     UNKNOWN_SERVER_KEY,
 };
@@ -117,13 +116,11 @@ impl<'a> McpToolSession<'a> {
         let (exposed_name_map, exposed_name_by_qualified) =
             Self::build_exposed_function_tools(&mcp_tools, &mcp_servers);
 
-        // Filter out all servers configured with builtin_type from the visible list.
+        // Filter out servers configured with builtin_type from the visible list.
         let builtin_names = orchestrator.builtin_server_names();
         let visible_mcp_servers: Vec<McpServerBinding> = mcp_servers
             .iter()
-            .filter(|b| {
-                !builtin_names.contains(&b.server_key) && !builtin_names.contains(&b.label)
-            })
+            .filter(|b| !builtin_names.contains(&b.server_key))
             .cloned()
             .collect();
 
@@ -267,34 +264,10 @@ impl<'a> McpToolSession<'a> {
     ///
     /// Convenience method that returns `Passthrough` if the tool is not found.
     pub fn tool_response_format(&self, tool_name: &str) -> ResponseFormat {
-        let Some(binding) = self.exposed_name_map.get(tool_name) else {
-            return ResponseFormat::Passthrough;
-        };
-
-        if !matches!(binding.response_format, ResponseFormat::Passthrough) {
-            return binding.response_format.clone();
-        }
-
-        // Dynamic builtin connections can discover tools with passthrough defaults.
-        // Recover configured builtin response format by matching server/tool identity.
-        for builtin_type in [
-            BuiltinToolType::WebSearchPreview,
-            BuiltinToolType::CodeInterpreter,
-            BuiltinToolType::ImageGeneration,
-            BuiltinToolType::FileSearch,
-        ] {
-            let Some((server_name, builtin_tool_name, response_format)) =
-                self.orchestrator.find_builtin_server(builtin_type)
-            else {
-                continue;
-            };
-            if binding.server_label == server_name && binding.resolved_tool_name == builtin_tool_name
-            {
-                return response_format;
-            }
-        }
-
-        binding.response_format.clone()
+        self.exposed_name_map
+            .get(tool_name)
+            .map(|binding| binding.response_format.clone())
+            .unwrap_or(ResponseFormat::Passthrough)
     }
 
     /// Build function-tool JSON payloads for upstream model calls.
@@ -422,9 +395,9 @@ impl<'a> McpToolSession<'a> {
                 exposed_name,
                 ExposedToolBinding {
                     server_key,
-                    response_format: entry.response_format.clone(),
                     server_label,
                     resolved_tool_name,
+                    response_format: entry.response_format.clone(),
                 },
             );
         }

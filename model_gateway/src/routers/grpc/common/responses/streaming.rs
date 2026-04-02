@@ -173,11 +173,7 @@ impl ResponseStreamEventEmitter {
 
                         // Update status based on success.
                         if tool_result.is_error {
-                            if item_type.as_deref() == Some(ItemType::IMAGE_GENERATION_CALL) {
-                                item_data["status"] = json!("failed");
-                            } else {
-                                item_data["status"] = json!("failed");
-                            }
+                            item_data["status"] = json!("failed");
                         }
                         break;
                     }
