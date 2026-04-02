@@ -220,10 +220,10 @@ class Worker:
             if self.ib_device:
                 cmd.extend(["--disaggregation-ib-device", self.ib_device])
 
-        # Additional worker args from model spec (e.g., --context-length)
-        worker_args = spec.get("worker_args", [])
-        if worker_args:
-            cmd.extend(worker_args)
+        # Additional SGLang args from model spec (e.g., --context-length)
+        sglang_args = spec.get("sglang_args", [])
+        if sglang_args:
+            cmd.extend(sglang_args)
 
         return cmd
 
