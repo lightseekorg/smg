@@ -222,9 +222,9 @@ impl ToolParser for DeepSeek31Parser {
                 // JSON bytes. The partial_tool_call_regex group 2 greedily captures
                 // everything after <｜tool▁sep｜>, including any trailing end tokens.
                 let func_args_clean = func_args_raw
+                    .trim_end_matches("<｜end▁of▁sentence｜>")
                     .trim_end_matches("<｜tool▁calls▁end｜>")
                     .trim_end_matches("<｜tool▁call▁end｜>")
-                    .trim_end_matches("<｜end▁of▁sentence｜>")
                     .trim_end();
 
                 let argument_diff = func_args_clean

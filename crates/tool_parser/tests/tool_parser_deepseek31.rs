@@ -229,12 +229,13 @@ async fn test_deepseek31_streaming_end_marker_not_leaked_into_args() {
     let tools = create_test_tools();
     let mut parser = DeepSeek31Parser::new();
 
-    // End marker arrives in the same chunk as the final JSON bytes.
+    // End markers arrive in the same chunk as the final JSON bytes.
     // The partial_tool_call_regex greedily captures everything after <｜tool▁sep｜>,
     // including trailing end tokens — these must not leak into streamed arguments.
+    // Uses the realistic three-token sequence the model emits.
     let chunks = vec![
         "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>search<｜tool▁sep｜>",
-        r#"{"query": "rust"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#,
+        r#"{"query": "rust"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#,
     ];
 
     let mut collected_args = String::new();
@@ -245,14 +246,16 @@ async fn test_deepseek31_streaming_end_marker_not_leaked_into_args() {
         }
     }
 
-    assert!(
-        !collected_args.contains("<｜tool▁call▁end｜>"),
-        "end marker must not leak into streamed arguments: {collected_args}"
-    );
-    assert!(
-        !collected_args.contains("<｜tool▁calls▁end｜>"),
-        "end marker must not leak into streamed arguments: {collected_args}"
-    );
+    for marker in [
+        "<｜tool▁call▁end｜>",
+        "<｜tool▁calls▁end｜>",
+        "<｜end▁of▁sentence｜>",
+    ] {
+        assert!(
+            !collected_args.contains(marker),
+            "end marker '{marker}' must not leak into streamed arguments: {collected_args}"
+        );
+    }
 }
 
 #[tokio::test]
