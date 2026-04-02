@@ -1558,3 +1558,144 @@ class TestToolChoiceMistral(_TestToolChoiceBase):
     def test_complex_parameters_required_non_streaming(self, model, api_client):
         """Validate complex nested parameter schemas in non-streaming required mode."""
         super().test_complex_parameters_required_non_streaming(model, api_client)
+
+
+# =============================================================================
+# Multi-Turn Tool Call Tests
+# Regression for: assistant messages with tool_calls serialized without
+# `content` key due to skip_serializing_none, causing chat template crash.
+# Fix: always serialize Assistant `content` field (even as null) via serde
+# attrs in protocols crate (crates/protocols/src/chat.rs).
+# =============================================================================
+
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a location.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "City name"},
+            },
+            "required": ["location"],
+        },
+    },
+}
+
+
+@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.gpu(2)
+@pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
+@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
+class TestMultiTurnToolCall:
+    """Multi-turn conversations where the assistant calls a tool and receives the result."""
+
+    def test_tool_result_followup(self, model, api_client):
+        """Model should use tool result to form a final text response."""
+        # Step 1: get tool call
+        response = api_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
+            tools=[WEATHER_TOOL],
+            tool_choice="required",
+            temperature=0,
+            max_tokens=256,
+        )
+
+        msg = response.choices[0].message
+        assert msg.tool_calls, "Expected a tool call in step 1"
+        tool_call = msg.tool_calls[0]
+        assert tool_call.function.name == "get_weather"
+
+        # Step 2: send tool result and get final answer
+        response2 = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "What's the weather in Tokyo?"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": tool_call.id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_call.function.name,
+                                "arguments": tool_call.function.arguments,
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(
+                        {"temperature": 22, "unit": "celsius", "condition": "sunny"}
+                    ),
+                },
+            ],
+            tools=[WEATHER_TOOL],
+            temperature=0,
+            max_tokens=256,
+        )
+
+        msg2 = response2.choices[0].message
+        assert msg2.content, "Model should reply with text after receiving tool result"
+
+    def test_tool_result_followup_streaming(self, model, api_client):
+        """Streaming follow-up with tool result should produce text content."""
+        # Step 1: get tool call
+        response = api_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "What's the weather in Paris?"}],
+            tools=[WEATHER_TOOL],
+            tool_choice="required",
+            temperature=0,
+            max_tokens=256,
+        )
+
+        msg = response.choices[0].message
+        assert msg.tool_calls
+        tool_call = msg.tool_calls[0]
+
+        # Step 2: stream the follow-up
+        stream = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "What's the weather in Paris?"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": tool_call.id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_call.function.name,
+                                "arguments": tool_call.function.arguments,
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(
+                        {"temperature": 18, "unit": "celsius", "condition": "cloudy"}
+                    ),
+                },
+            ],
+            tools=[WEATHER_TOOL],
+            temperature=0,
+            max_tokens=256,
+            stream=True,
+        )
+
+        content_parts = []
+        for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                content_parts.append(delta.content)
+
+        assert "".join(content_parts), "Streaming follow-up should produce text content"

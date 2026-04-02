@@ -64,7 +64,7 @@ pub struct CompletionRequest {
     pub stop: Option<StringOrArray>,
 
     /// Whether to stream back partial progress
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_false")]
     pub stream: bool,
 
     /// Options for streaming response

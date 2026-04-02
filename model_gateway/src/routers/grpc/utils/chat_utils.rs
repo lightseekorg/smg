@@ -131,6 +131,15 @@ pub(crate) fn process_content_format(
                 .map_err(|e| format!("Failed to serialize message: {e}"))?;
 
             if let Some(obj) = message_json.as_object_mut() {
+                // Ensure assistant messages always have a content key.
+                // skip_serializing_none omits content when None, but chat templates
+                // expect `message['content'] is none` to work (key present, value null/empty).
+                if obj.get("role").and_then(|v| v.as_str()) == Some("assistant")
+                    && !obj.contains_key("content")
+                {
+                    obj.insert("content".to_string(), Value::String(String::new()));
+                }
+
                 if let Some(content_value) = obj.get_mut("content") {
                     transform_content_field(content_value, content_format, image_placeholder);
                 }

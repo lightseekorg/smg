@@ -6,9 +6,10 @@ use validator::Validate;
 
 use super::{
     common::{
-        default_true, validate_stop, ChatLogProbs, ContentPart, Function, FunctionCall,
-        FunctionChoice, GenerationRequest, ResponseFormat, StreamOptions, StringOrArray, Tool,
-        ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference, Usage,
+        default_true, deserialize_null_as_false, validate_stop, ChatLogProbs, ContentPart,
+        Function, FunctionCall, FunctionChoice, GenerationRequest, ResponseFormat, StreamOptions,
+        StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference,
+        Usage,
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
@@ -165,7 +166,7 @@ pub struct ChatCompletionRequest {
     pub logit_bias: Option<HashMap<String, f32>>,
 
     /// Whether to return log probabilities of the output tokens
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_false")]
     pub logprobs: bool,
 
     /// Deprecated: Replaced by max_completion_tokens
@@ -218,7 +219,7 @@ pub struct ChatCompletionRequest {
     pub stop: Option<StringOrArray>,
 
     /// If set, partial message deltas will be sent
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_false")]
     pub stream: bool,
 
     /// Options for streaming response
