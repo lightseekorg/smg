@@ -442,7 +442,7 @@ fn send_tool_call_intermediate_event(
         ResponseFormat::WebSearchCall => (WebSearchCallEvent::SEARCHING, "ws_"),
         ResponseFormat::CodeInterpreterCall => (CodeInterpreterCallEvent::INTERPRETING, "ci_"),
         ResponseFormat::FileSearchCall => (FileSearchCallEvent::SEARCHING, "fs_"),
-        ResponseFormat::ImageGenerationCall => return true, // no intermediate event
+        ResponseFormat::ImageGenerationCall => (ImageGenerationCallEvent::GENERATING, "ig_"),
         ResponseFormat::Passthrough => return true, // mcp_call has no intermediate event
     };
 

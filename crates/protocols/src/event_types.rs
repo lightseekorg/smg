@@ -267,16 +267,22 @@ impl fmt::Display for FileSearchCallEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ImageGenerationCallEvent {
     InProgress,
+    Generating,
+    PartialImage,
     Completed,
 }
 
 impl ImageGenerationCallEvent {
     pub const IN_PROGRESS: &'static str = "response.image_generation_call.in_progress";
+    pub const GENERATING: &'static str = "response.image_generation_call.generating";
+    pub const PARTIAL_IMAGE: &'static str = "response.image_generation_call.partial_image";
     pub const COMPLETED: &'static str = "response.image_generation_call.completed";
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InProgress => Self::IN_PROGRESS,
+            Self::Generating => Self::GENERATING,
+            Self::PartialImage => Self::PARTIAL_IMAGE,
             Self::Completed => Self::COMPLETED,
         }
     }

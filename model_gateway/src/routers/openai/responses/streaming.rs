@@ -7,7 +7,7 @@
 //! - MCP tool execution loops within streaming responses
 //! - Event transformation and output index remapping
 
-use std::{borrow::Cow, collections::HashMap, io, sync::Arc};
+use std::{borrow::Cow, io, sync::Arc};
 
 use axum::{
     body::Body,
@@ -1019,7 +1019,7 @@ pub(super) fn handle_streaming_with_tool_interception(
 
 /// Main entry point for streaming responses
 pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
-    use crate::routers::mcp_utils::ensure_request_mcp_client;
+    use crate::routers::mcp_utils::{ensure_request_mcp_client, extract_builtin_request_headers};
 
     let worker = match ctx.worker() {
         Some(w) => w.clone(),
@@ -1040,19 +1040,9 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
             return error::internal_error("internal_error", "MCP orchestrator required");
         }
     };
-    let mut default_mcp_headers = HashMap::new();
-    if let Some(v) = ctx
-        .headers()
-        .and_then(|h| h.get("opc-compartment-id"))
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        default_mcp_headers.insert("opc-compartment-id".to_string(), v.to_string());
-    }
-
     // Check for MCP tools and create request context if needed
     let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
+        let default_mcp_headers = extract_builtin_request_headers(&mcp_orchestrator, tools, ctx.headers());
         ensure_request_mcp_client(&mcp_orchestrator, tools, Some(&default_mcp_headers)).await
     } else {
         None
