@@ -132,7 +132,7 @@ pub(super) fn build_next_request_with_tools(
         // Update the corresponding tool call with output and completed status
         // Find and update the matching FunctionToolCall
         if let Some(ResponseInputOutputItem::FunctionToolCall {
-            name,
+            name: _,
             output,
             status,
             ..
@@ -141,7 +141,7 @@ pub(super) fn build_next_request_with_tools(
             .find(|item| matches!(item, ResponseInputOutputItem::FunctionToolCall { call_id, .. } if call_id == &tool_result.call_id))
         {
             *output = Some(compact_tool_output_for_model_context(
-                name,
+                false,
                 &tool_result.output,
                 tool_result.is_error,
             ));

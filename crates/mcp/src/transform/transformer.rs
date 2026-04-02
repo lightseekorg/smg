@@ -13,30 +13,6 @@ use super::ResponseFormat;
 pub struct ResponseTransformer;
 
 impl ResponseTransformer {
-    fn is_explicit_image_generation_payload(result: &Value) -> bool {
-        let Some(payload) = Self::image_payload_from_wrapped_content(result) else {
-            return false;
-        };
-        let Some(obj) = payload.as_object() else {
-            return false;
-        };
-
-        if obj
-            .get("type")
-            .and_then(|v| v.as_str())
-            .is_some_and(|t| t == "image_generation_call")
-        {
-            return true;
-        }
-
-        obj.contains_key("revised_prompt")
-            || obj.contains_key("background")
-            || obj.contains_key("output_format")
-            || obj.contains_key("quality")
-            || obj.contains_key("size")
-            || obj.contains_key("action")
-    }
-
     fn image_payload_from_wrapped_content(result: &Value) -> Option<Value> {
         // Already a direct object payload.
         if result.as_object().is_some_and(|obj| {
@@ -97,12 +73,6 @@ impl ResponseTransformer {
         tool_name: &str,
         arguments: &str,
     ) -> ResponseOutputItem {
-        if matches!(format, ResponseFormat::Passthrough)
-            && Self::is_explicit_image_generation_payload(result)
-        {
-            return Self::to_image_generation_call(result, tool_call_id);
-        }
-
         match format {
             ResponseFormat::Passthrough => {
                 Self::to_mcp_call(result, tool_call_id, server_label, tool_name, arguments)
@@ -706,6 +676,58 @@ mod tests {
                 assert_eq!(status, ImageGenerationCallStatus::Completed);
                 assert_eq!(result.as_deref(), Some("ZmFrZV9iYXNlNjQ="));
                 assert_eq!(action.as_deref(), Some("generate"));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_passthrough_with_generic_action_payload_stays_mcp_call() {
+        let result = json!({
+            "action": "run",
+            "size": "small",
+            "quality": "high"
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::Passthrough,
+            "req-1005",
+            "server",
+            "some_tool",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::McpCall { id, .. } => {
+                assert_eq!(id, "req-1005");
+            }
+            _ => panic!("Expected McpCall"),
+        }
+    }
+
+    #[test]
+    fn test_passthrough_with_image_specific_fields_is_converted() {
+        let result = json!({
+            "result": "ZmFrZV9iYXNlNjQ=",
+            "output_format": "png",
+            "model": "openai.gpt-image-1.5"
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::Passthrough,
+            "req-1006",
+            "server",
+            "some_tool",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall { id, status, result, .. } => {
+                assert_eq!(id, "ig_req-1006");
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+                assert_eq!(result.as_deref(), Some("ZmFrZV9iYXNlNjQ="));
             }
             _ => panic!("Expected ImageGenerationCall"),
         }

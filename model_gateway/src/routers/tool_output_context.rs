@@ -3,11 +3,11 @@ use serde_json::{json, Value};
 const MAX_TOOL_OUTPUT_CONTEXT_CHARS: usize = 4096;
 
 pub fn compact_tool_output_for_model_context(
-    tool_name: &str,
+    is_image_generation: bool,
     output: &Value,
     is_error: bool,
 ) -> String {
-    if tool_name == "generate_image" {
+    if is_image_generation {
         let status = output
             .as_object()
             .and_then(|o| o.get("status"))
@@ -53,7 +53,7 @@ pub fn compact_tool_output_str_for_model_context(
 ) -> String {
     if is_image_generation || tool_name == "generate_image" {
         if let Ok(value) = serde_json::from_str::<Value>(output_str) {
-            return compact_tool_output_for_model_context("generate_image", &value, is_error);
+            return compact_tool_output_for_model_context(true, &value, is_error);
         }
         return json!({
             "tool": "generate_image",

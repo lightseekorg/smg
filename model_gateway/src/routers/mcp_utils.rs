@@ -267,20 +267,7 @@ pub async fn ensure_mcp_servers(
                 tool = %tool_name,
                 "Adding static server for built-in tool routing"
             );
-            let builtin_server_url = orchestrator.get_server_config(&server_name).and_then(|cfg| {
-                match cfg.transport {
-                    McpTransport::Sse { url, .. } | McpTransport::Streamable { url, .. } => {
-                        Some(url)
-                    }
-                    McpTransport::Stdio { .. } => None,
-                }
-            });
-            let already_bound = mcp_servers.iter().any(|b| {
-                b.server_key == server_name
-                    || builtin_server_url
-                        .as_ref()
-                        .is_some_and(|url| b.server_key == *url)
-            });
+            let already_bound = mcp_servers.iter().any(|b| b.server_key == server_name);
             if !already_bound {
                 mcp_servers.push(McpServerBinding {
                     label: server_name.clone(),
@@ -331,9 +318,10 @@ pub async fn ensure_request_mcp_client(
         .collect();
 
     let builtin_types = extract_builtin_types(tools);
+    let mut builtin_types_requiring_static = builtin_types.clone();
 
-    // For builtin tool routing, prefer dynamic per-request connections when we
-    // have default headers (e.g. opc-compartment-id) to propagate.
+    // For builtin tool routing, forward request-scoped headers (e.g. opc-compartment-id)
+    // to MCP servers declared in mcp.local.yaml.
     if !default_headers.is_empty() {
         for &builtin_type in &builtin_types {
             let Some((server_name, _, _)) = mcp_orchestrator.find_builtin_server(builtin_type)
@@ -343,33 +331,30 @@ pub async fn ensure_request_mcp_client(
             let Some(server_cfg) = mcp_orchestrator.get_server_config(&server_name) else {
                 continue;
             };
-            let configured_url = match &server_cfg.transport {
-                McpTransport::Sse { url, .. } | McpTransport::Streamable { url, .. } => {
-                    Some(url.clone())
-                }
-                McpTransport::Stdio { .. } => None,
-            };
-
-            // If request already provided this exact builtin server identity, reuse it.
-            if inputs
-                .iter()
-                .any(|input| {
-                    input.label == server_name && input.url.is_none()
-                        || configured_url
-                            .as_ref()
-                            .is_some_and(|url| input.url.as_deref() == Some(url.as_str()))
-                })
-            {
-                continue;
-            }
 
             match server_cfg.transport {
                 McpTransport::Sse { url, token, headers }
                 | McpTransport::Streamable { url, token, headers } => {
+                    let allowed_header_keys: std::collections::HashSet<String> =
+                        headers.keys().cloned().collect();
                     let mut merged_headers = headers;
                     for (k, v) in &default_headers {
-                        merged_headers.insert(k.clone(), v.clone());
+                        if allowed_header_keys.contains(k) {
+                            merged_headers.insert(k.clone(), v.clone());
+                        }
                     }
+
+                    if let Some(existing) = inputs.iter_mut().find(|input| {
+                        (input.label == server_name && input.url.is_none())
+                            || input.url.as_deref() == Some(url.as_str())
+                    }) {
+                        for (k, v) in merged_headers {
+                            existing.headers.insert(k, v);
+                        }
+                        builtin_types_requiring_static.retain(|t| *t != builtin_type);
+                        continue;
+                    }
+
                     inputs.push(McpServerInput {
                         label: server_name,
                         url: Some(url),
@@ -377,13 +362,14 @@ pub async fn ensure_request_mcp_client(
                         headers: merged_headers,
                         allowed_tools: None,
                     });
+                    builtin_types_requiring_static.retain(|t| *t != builtin_type);
                 }
                 McpTransport::Stdio { .. } => {}
             }
         }
     }
 
-    ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types).await
+    ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types_requiring_static).await
 }
 
 #[cfg(test)]

@@ -141,8 +141,11 @@ pub(crate) async fn execute_streaming_tool_calls(
                 if !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number) {
                     return false;
                 }
-                let model_context_output =
-                    compact_tool_output_for_model_context(&call.name, &error_output, true);
+                let model_context_output = compact_tool_output_for_model_context(
+                    matches!(response_format, ResponseFormat::ImageGenerationCall),
+                    &error_output,
+                    true,
+                );
                 state.record_call(
                     call.call_id,
                     call.name,
@@ -180,7 +183,7 @@ pub(crate) async fn execute_streaming_tool_calls(
         );
 
         let model_context_output = compact_tool_output_for_model_context(
-            &tool_output.tool_name,
+            matches!(response_format, ResponseFormat::ImageGenerationCall),
             &tool_output.output,
             tool_output.is_error,
         );
@@ -612,8 +615,11 @@ pub(crate) async fn execute_tool_loop(
                         metrics_labels::RESULT_ERROR,
                     );
 
-                    let model_context_output =
-                        compact_tool_output_for_model_context(&call.name, &error_json, true);
+                    let model_context_output = compact_tool_output_for_model_context(
+                            matches!(response_format, ResponseFormat::ImageGenerationCall),
+                            &error_json,
+                            true,
+                        );
                     state.record_call(
                         call.call_id,
                         call.name,
@@ -654,7 +660,10 @@ pub(crate) async fn execute_tool_loop(
             );
 
             let model_context_output = compact_tool_output_for_model_context(
-                &tool_output.tool_name,
+                matches!(
+                    session.tool_response_format(&tool_output.tool_name),
+                    ResponseFormat::ImageGenerationCall
+                ),
                 &tool_output.output,
                 tool_output.is_error,
             );
