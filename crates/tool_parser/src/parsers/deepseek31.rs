@@ -218,9 +218,18 @@ impl ToolParser for DeepSeek31Parser {
                     .map(|s| s.as_str())
                     .unwrap_or("");
 
-                let argument_diff = func_args_raw
+                // Strip end markers that may arrive in the same chunk as the final
+                // JSON bytes. The partial_tool_call_regex group 2 greedily captures
+                // everything after <｜tool▁sep｜>, including any trailing end tokens.
+                let func_args_clean = func_args_raw
+                    .trim_end_matches("<｜tool▁calls▁end｜>")
+                    .trim_end_matches("<｜tool▁call▁end｜>")
+                    .trim_end_matches("<｜end▁of▁sentence｜>")
+                    .trim_end();
+
+                let argument_diff = func_args_clean
                     .strip_prefix(last_sent)
-                    .unwrap_or(func_args_raw);
+                    .unwrap_or(func_args_clean);
 
                 if !argument_diff.is_empty() {
                     calls.push(ToolCallItem {
@@ -233,8 +242,8 @@ impl ToolParser for DeepSeek31Parser {
                     }
                 }
 
-                if helpers::is_complete_json(func_args_raw) {
-                    if let Ok(parsed_args) = serde_json::from_str::<Value>(func_args_raw) {
+                if helpers::is_complete_json(func_args_clean) {
+                    if let Ok(parsed_args) = serde_json::from_str::<Value>(func_args_clean) {
                         let tool_id = self.current_tool_id as usize;
                         if tool_id < self.prev_tool_call_arr.len() {
                             if let Some(obj) = self.prev_tool_call_arr[tool_id].as_object_mut() {

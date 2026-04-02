@@ -213,12 +213,46 @@ async fn test_deepseek31_streaming_end_tokens_stripped() {
     let tools = create_test_tools();
     let mut parser = DeepSeek31Parser::new();
 
-    // After tool calls complete, end tokens may arrive as separate chunks
-    let result = parser
-        .parse_incremental("<｜tool▁calls▁end｜>", &tools)
-        .await
-        .unwrap();
-    assert!(result.normal_text.is_empty() || !result.normal_text.contains("<｜tool▁calls▁end｜>"));
+    // Both <｜tool▁calls▁end｜> and <｜end▁of▁sentence｜> must not leak into normal_text
+    for end_token in ["<｜tool▁calls▁end｜>", "<｜end▁of▁sentence｜>"] {
+        parser.reset();
+        let result = parser.parse_incremental(end_token, &tools).await.unwrap();
+        assert!(
+            result.normal_text.is_empty() || !result.normal_text.contains(end_token),
+            "end token '{end_token}' should be stripped from normal_text"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_deepseek31_streaming_end_marker_not_leaked_into_args() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeek31Parser::new();
+
+    // End marker arrives in the same chunk as the final JSON bytes.
+    // The partial_tool_call_regex greedily captures everything after <｜tool▁sep｜>,
+    // including trailing end tokens — these must not leak into streamed arguments.
+    let chunks = vec![
+        "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>search<｜tool▁sep｜>",
+        r#"{"query": "rust"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#,
+    ];
+
+    let mut collected_args = String::new();
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            collected_args.push_str(&call.parameters);
+        }
+    }
+
+    assert!(
+        !collected_args.contains("<｜tool▁call▁end｜>"),
+        "end marker must not leak into streamed arguments: {collected_args}"
+    );
+    assert!(
+        !collected_args.contains("<｜tool▁calls▁end｜>"),
+        "end marker must not leak into streamed arguments: {collected_args}"
+    );
 }
 
 #[tokio::test]
