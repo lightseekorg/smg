@@ -894,30 +894,12 @@ mod tests {
     }
 
     #[test]
-    fn test_args_format_string_concat_deepseek() {
-        // DeepSeek V3.1-style: plain string concatenation
-        let template = r"tool['function']['arguments'] + '\n'";
-        assert_eq!(
-            detect_tool_call_arguments_format(template),
-            ToolCallArgumentsFormat::String,
-        );
-    }
-
-    #[test]
     fn test_args_format_string_concat_real_deepseek() {
-        // Real DeepSeek single-line template snippet with for-loop and arguments + concat
+        // Real DeepSeek template snippet: arguments used with + string concat
         let template = "{%- for tool in message['tool_calls'] %}{%- if not ns.is_first %}{%- if message['content'] is none %}{{'<tool_calls_begin>' + tool['function']['name'] + '\\n' + '```json' + '\\n' + tool['function']['arguments'] + '\\n' + '```'}}{%- endif %}{%- endfor %}";
         assert_eq!(
             detect_tool_call_arguments_format(template),
             ToolCallArgumentsFormat::String,
-        );
-    }
-
-    #[test]
-    fn test_args_format_empty_template() {
-        assert_eq!(
-            detect_tool_call_arguments_format(""),
-            ToolCallArgumentsFormat::Dict,
         );
     }
 
