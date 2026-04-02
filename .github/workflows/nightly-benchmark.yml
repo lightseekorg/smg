@@ -348,6 +348,9 @@ jobs:
       matrix:
         model:
           - { id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8, slug: meta-llama-Llama-4-Maverick-17B-128E-Instruct-FP8, test_class: TestNightlyLlama4MaverickSingle }
+          - id: mistralai/Devstral-2-123B-Instruct-2512
+            slug: mistralai-Devstral-2-123B-Instruct-2512
+            test_class: TestNightlyDevstral123bSingle
           # Pausing MiniMax M2 nightly benchmark
           # - { id: minimaxai/minimax-m2, slug: minimaxai-minimax-m2, test_class: TestNightlyMinimaxM2Single }
         variant:
