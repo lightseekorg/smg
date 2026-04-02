@@ -8,60 +8,17 @@ use openai_protocol::{
         ResponseReasoningContent, ResponsesRequest, ResponsesResponse, StringOrContentParts,
     },
 };
-use serde_json::{from_value, json, to_string, Value};
+use serde_json::{from_value, Value};
 use smg_data_connector::{ResponseId, ResponseStorageError};
 use smg_mcp::McpToolSession;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use super::execution::ToolResult;
-use crate::routers::{error, grpc::common::responses::ResponsesContext};
-
-const MAX_TOOL_OUTPUT_CONTEXT_CHARS: usize = 4096;
-
-fn compact_tool_output_for_model_context(
-    tool_name: &str,
-    output: &Value,
-    is_error: bool,
-) -> String {
-    if tool_name == "generate_image" {
-        let status = output
-            .as_object()
-            .and_then(|o| o.get("status"))
-            .and_then(|v| v.as_str())
-            .unwrap_or(if is_error { "failed" } else { "completed" });
-        let error = output
-            .as_object()
-            .and_then(|o| o.get("error"))
-            .and_then(|v| v.as_str());
-        let has_result = output
-            .as_object()
-            .and_then(|o| o.get("result"))
-            .is_some();
-        return json!({
-            "tool": "generate_image",
-            "status": status,
-            "has_result": has_result,
-            "error": error,
-            "note": "binary image payload omitted from model context"
-        })
-        .to_string();
-    }
-
-    let raw = to_string(output)
-        .unwrap_or_else(|e| format!("{{\"error\":\"Failed to serialize tool output: {e}\"}}"));
-    if raw.chars().count() > MAX_TOOL_OUTPUT_CONTEXT_CHARS {
-        let preview: String = raw.chars().take(MAX_TOOL_OUTPUT_CONTEXT_CHARS).collect();
-        json!({
-            "truncated": true,
-            "original_chars": raw.chars().count(),
-            "preview": preview
-        })
-        .to_string()
-    } else {
-        raw
-    }
-}
+use crate::routers::{
+    error, grpc::common::responses::ResponsesContext,
+    tool_output_context::compact_tool_output_for_model_context,
+};
 
 /// Record of a single MCP tool call execution
 ///

@@ -30,49 +30,11 @@ use tracing::{debug, info, warn};
 use super::tool_handler::FunctionCallInProgress;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::{error, header_utils::apply_request_headers, mcp_utils::DEFAULT_MAX_ITERATIONS},
+    routers::{
+        error, header_utils::apply_request_headers, mcp_utils::DEFAULT_MAX_ITERATIONS,
+        tool_output_context::compact_tool_output_for_model_context,
+    },
 };
-
-const MAX_TOOL_OUTPUT_CONTEXT_CHARS: usize = 4096;
-
-fn compact_tool_output_for_model_context(tool_name: &str, output: &Value, is_error: bool) -> String {
-    if tool_name == "generate_image" {
-        let status = output
-            .as_object()
-            .and_then(|o| o.get("status"))
-            .and_then(|v| v.as_str())
-            .unwrap_or(if is_error { "failed" } else { "completed" });
-        let error = output
-            .as_object()
-            .and_then(|o| o.get("error"))
-            .and_then(|v| v.as_str());
-        let has_result = output
-            .as_object()
-            .and_then(|o| o.get("result"))
-            .is_some();
-        return json!({
-            "tool": "generate_image",
-            "status": status,
-            "has_result": has_result,
-            "error": error,
-            "note": "binary image payload omitted from model context"
-        })
-        .to_string();
-    }
-
-    let raw = output.to_string();
-    if raw.chars().count() > MAX_TOOL_OUTPUT_CONTEXT_CHARS {
-        let truncated: String = raw.chars().take(MAX_TOOL_OUTPUT_CONTEXT_CHARS).collect();
-        json!({
-            "truncated": true,
-            "original_chars": raw.chars().count(),
-            "preview": truncated
-        })
-        .to_string()
-    } else {
-        raw
-    }
-}
 
 /// State for tracking multi-turn tool calling loop
 pub(crate) struct ToolLoopState {
