@@ -100,6 +100,7 @@ MODEL_SPECS: dict[str, dict] = {
         "model": _resolve_model_path("openai/gpt-oss-120b"),
         "tp": 4,
         "features": ["chat", "streaming", "reasoning", "harmony"],
+        "startup_timeout": 600,
         "vllm_args": [
             "--structured-outputs-config",
             '{"enable_in_reasoning": true}',
