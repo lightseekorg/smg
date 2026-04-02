@@ -720,7 +720,8 @@ pub(super) fn handle_streaming_with_tool_interception(
             session: Some(&session),
         };
         let provider = ApiProvider::from_url(&url_clone);
-        let auth_header = provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
+        let auth_header =
+            provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
 
         loop {
             // Make streaming request
