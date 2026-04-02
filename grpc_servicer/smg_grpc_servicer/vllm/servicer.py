@@ -5,6 +5,7 @@ vLLM gRPC Servicer
 Implements the VllmEngine gRPC service on top of vLLM's EngineClient.
 """
 
+import asyncio
 import itertools
 import time
 from collections.abc import AsyncGenerator
@@ -12,6 +13,10 @@ from collections.abc import AsyncGenerator
 import grpc
 import torch
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
+from smg_grpc_servicer.vllm.kv_events import (
+    UnsupportedKvEventLayoutError,
+    VllmKvEventBridge,
+)
 from transformers import BatchFeature
 from vllm import PoolingParams, SamplingParams, TokensPrompt
 from vllm.engine.protocol import EngineClient
@@ -49,13 +54,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     """
     gRPC servicer implementing the VllmEngine service.
 
-    Handles 6 RPCs:
+    Handles 7 RPCs:
     - Generate: Streaming text generation
     - Embed: Embeddings
     - HealthCheck: Health probe
     - Abort: Cancel requests out-of-band
     - GetModelInfo: Model metadata
     - GetServerInfo: Server state
+    - SubscribeKvEvents: KV cache event streaming
     """
 
     def __init__(self, async_llm: EngineClient, start_time: float):
@@ -68,6 +74,11 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         self.engine = async_llm
         self.start_time = start_time
+        self.kv_event_bridge = VllmKvEventBridge(
+            async_llm.vllm_config.kv_events_config,
+            async_llm.vllm_config.parallel_config.data_parallel_size,
+        )
+        self.kv_event_bridge.start()
         logger.info("VllmEngineServicer initialized")
 
     async def Generate(
@@ -357,6 +368,39 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             kv_connector=kv_connector,
             kv_role=kv_role,
         )
+
+    async def SubscribeKvEvents(
+        self,
+        request,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncGenerator[object, None]:
+        """
+        Stream KV cache events to the caller.
+        """
+        if not self.kv_event_bridge.enabled:
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "KV cache events are not enabled for this vLLM server",
+            )
+
+        try:
+            # grpc.aio defers headers until the first yield unless they are
+            # sent explicitly. Send them now so tonic callers don't block on
+            # subscribe_kv_events(...).await when the stream is idle.
+            await context.send_initial_metadata(())
+            async for batch in self.kv_event_bridge.subscribe(request.start_sequence_number):
+                yield batch
+        except asyncio.CancelledError:
+            raise
+        except UnsupportedKvEventLayoutError as e:
+            logger.exception("Unsupported KV event layout in SubscribeKvEvents")
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(e))
+        except Exception as e:
+            logger.exception("Error in SubscribeKvEvents")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+
+    async def shutdown(self) -> None:
+        await self.kv_event_bridge.shutdown()
 
     # ========== Helper methods ==========
 
