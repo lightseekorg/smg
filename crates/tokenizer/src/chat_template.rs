@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use minijinja::{
     context,
     machinery::{
-        ast::{Expr, Stmt},
+        ast::{BinOpKind, Expr, Stmt},
         parse, WhitespaceConfig,
     },
     syntax::SyntaxConfig,
@@ -57,66 +57,20 @@ impl std::fmt::Display for ChatTemplateContentFormat {
 
 /// Detect the tool call arguments format expected by a Jinja2 chat template.
 ///
-/// Inspects the template text for how `arguments` is used:
-/// - If a dict-consuming filter (`|tojson`, `|items`, `|dictsort`, `|tojson(...)`) is applied,
-///   the template expects arguments as dicts → return `Dict`.
-/// - If `arguments` appears in the template without such filters (plain string concatenation),
-///   the template expects arguments as JSON strings → return `String`.
-/// - If `arguments` does not appear at all (no tool support), default to `Dict`
-///   (the Transformers convention).
+/// Uses AST parsing to check if `arguments` is used in a string concatenation
+/// (`+` operator). If so, returns `String`. Otherwise defaults to `Dict`
+/// (the Transformers convention, used by 22+ models).
+///
+/// Only DeepSeek V3/R1 family templates use string concatenation for arguments.
 pub fn detect_tool_call_arguments_format(template: &str) -> ToolCallArgumentsFormat {
     detect_template_formats(template).1
 }
 
-/// Detect both content format and tool call arguments format in a single pass.
-///
-/// The content format detection parses the AST, while the arguments format
-/// detection is a lightweight string scan. Combining them avoids redundant work
-/// when both are needed (e.g., during tokenizer initialization).
+/// Detect both content format and tool call arguments format in a single AST pass.
 pub fn detect_template_formats(
     template: &str,
 ) -> (ChatTemplateContentFormat, ToolCallArgumentsFormat) {
-    let content_format = detect_chat_template_content_format(template);
-    let arguments_format = detect_arguments_format_from_text(template);
-    (content_format, arguments_format)
-}
-
-/// Lightweight string-scan detection of tool call arguments format.
-///
-/// Dict is the Transformers convention and the overwhelming majority of models.
-/// Only DeepSeek V3/R1 family templates use plain string concatenation.
-/// So we detect the string pattern and default to dict.
-fn detect_arguments_format_from_text(template: &str) -> ToolCallArgumentsFormat {
-    // No mention of arguments at all → default to dict
-    if !template.contains("arguments") {
-        return ToolCallArgumentsFormat::Dict;
-    }
-
-    // Detect the string-concat pattern: `arguments` followed (after closing
-    // brackets/quotes/whitespace) by `+` (Jinja string concatenation).
-    // All known DeepSeek templates use: tool['function']['arguments'] + '...'
-    let bytes = template.as_bytes();
-    let mut pos = 0;
-    while let Some(idx) = template[pos..].find("arguments") {
-        let start = pos + idx + "arguments".len();
-        let mut i = start;
-        // Skip closing syntax chars: ] ' " ) } and whitespace
-        while i < bytes.len()
-            && matches!(
-                bytes[i],
-                b']' | b'\'' | b'"' | b')' | b'}' | b' ' | b'\t' | b'\n' | b'\r'
-            )
-        {
-            i += 1;
-        }
-        if i < bytes.len() && bytes[i] == b'+' {
-            return ToolCallArgumentsFormat::String;
-        }
-        pos = start;
-    }
-
-    // Default: dict (Transformers convention, used by Llama, Qwen, GLM, MiniMax, etc.)
-    ToolCallArgumentsFormat::Dict
+    detect_formats_with_ast(template)
 }
 
 /// Detect the content format expected by a Jinja2 chat template
@@ -158,6 +112,8 @@ struct Detector<'a> {
     scope: std::collections::VecDeque<String>,
     scope_set: std::collections::HashSet<String>,
     flags: Flags,
+    /// Whether `arguments` is used in a `+` or `~` concatenation (DeepSeek pattern)
+    args_concat: bool,
 }
 
 impl<'a> Detector<'a> {
@@ -167,12 +123,13 @@ impl<'a> Detector<'a> {
             scope: std::collections::VecDeque::new(),
             scope_set: std::collections::HashSet::new(),
             flags: Flags::default(),
+            args_concat: false,
         }
     }
 
-    fn run(mut self) -> Flags {
+    fn run(mut self) -> (Flags, bool) {
         self.walk_stmt(self.ast);
-        self.flags
+        (self.flags, self.args_concat)
     }
 
     fn push_scope(&mut self, var: String) {
@@ -237,9 +194,43 @@ impl<'a> Detector<'a> {
         }
     }
 
+    /// Check if an expression accesses "arguments" via `.arguments` or `['arguments']`
+    fn accesses_arguments(expr: &Expr) -> bool {
+        match expr {
+            Expr::GetAttr(g) => g.name == "arguments",
+            Expr::GetItem(g) => Self::is_const_str(&g.subscript_expr, "arguments"),
+            _ => false,
+        }
+    }
+
+    /// Recursively check if any sub-expression in a tree accesses "arguments"
+    fn tree_accesses_arguments(expr: &Expr) -> bool {
+        if Self::accesses_arguments(expr) {
+            return true;
+        }
+        match expr {
+            Expr::BinOp(op) => {
+                Self::tree_accesses_arguments(&op.left) || Self::tree_accesses_arguments(&op.right)
+            }
+            Expr::Filter(f) => f
+                .expr
+                .as_ref()
+                .is_some_and(|e| Self::tree_accesses_arguments(e)),
+            Expr::GetAttr(g) => Self::tree_accesses_arguments(&g.expr),
+            Expr::GetItem(g) => Self::tree_accesses_arguments(&g.expr),
+            _ => false,
+        }
+    }
+
+    /// Check if a BinOp uses `+` or `~` with an `arguments` access on either side
+    fn is_args_concat(op: &minijinja::machinery::ast::BinOp) -> bool {
+        matches!(op.op, BinOpKind::Add | BinOpKind::Concat)
+            && (Self::tree_accesses_arguments(&op.left) || Self::tree_accesses_arguments(&op.right))
+    }
+
     fn walk_stmt(&mut self, stmt: &Stmt) {
-        // Early exit if we've already detected an OpenAI pattern
-        if self.flags.any() {
+        // Early exit only when both detections are complete
+        if self.flags.any() && self.args_concat {
             return;
         }
 
@@ -292,6 +283,9 @@ impl<'a> Detector<'a> {
             }
             Stmt::EmitExpr(e) => {
                 self.inspect_expr_for_structure(&e.expr);
+                if !self.args_concat {
+                    self.check_expr_for_args_concat(&e.expr);
+                }
             }
             // {% set content = message.content %}
             Stmt::Set(s) => {
@@ -366,6 +360,25 @@ impl<'a> Detector<'a> {
         }
     }
 
+    /// Recursively check if an expression contains `arguments` used in `+` or `~` concat.
+    fn check_expr_for_args_concat(&mut self, expr: &Expr) {
+        if self.args_concat {
+            return;
+        }
+        match expr {
+            Expr::BinOp(op) => {
+                if Self::is_args_concat(op) {
+                    self.args_concat = true;
+                } else {
+                    self.check_expr_for_args_concat(&op.left);
+                    self.check_expr_for_args_concat(&op.right);
+                }
+            }
+            Expr::Const(_) => {}
+            _ => {}
+        }
+    }
+
     fn scan_macro_body(body: &[Stmt], has_type_check: &mut bool, has_loop: &mut bool) {
         for s in body {
             if *has_type_check && *has_loop {
@@ -396,6 +409,11 @@ impl<'a> Detector<'a> {
 /// AST-based detection using minijinja's unstable machinery
 /// Single-pass detector with scope tracking
 fn detect_format_with_ast(template: &str) -> ChatTemplateContentFormat {
+    detect_formats_with_ast(template).0
+}
+
+/// Parse the template AST once and detect both content format and arguments format.
+fn detect_formats_with_ast(template: &str) -> (ChatTemplateContentFormat, ToolCallArgumentsFormat) {
     let ast = match parse(
         template,
         "template",
@@ -403,15 +421,55 @@ fn detect_format_with_ast(template: &str) -> ChatTemplateContentFormat {
         WhitespaceConfig::default(),
     ) {
         Ok(ast) => ast,
-        Err(_) => return ChatTemplateContentFormat::String,
+        Err(_) => {
+            // AST parse failed (e.g. incomplete template snippet).
+            // Fall back to string scan for arguments format.
+            return (
+                ChatTemplateContentFormat::String,
+                detect_arguments_format_fallback(template),
+            );
+        }
     };
 
-    let flags = Detector::new(&ast).run();
-    if flags.any() {
+    let (flags, args_concat) = Detector::new(&ast).run();
+
+    let content_format = if flags.any() {
         ChatTemplateContentFormat::OpenAI
     } else {
         ChatTemplateContentFormat::String
+    };
+
+    let arguments_format = if args_concat {
+        ToolCallArgumentsFormat::String
+    } else {
+        ToolCallArgumentsFormat::Dict
+    };
+
+    (content_format, arguments_format)
+}
+
+/// Fallback string-scan for arguments format when AST parsing fails.
+/// Only used when the template cannot be parsed (rare).
+fn detect_arguments_format_fallback(template: &str) -> ToolCallArgumentsFormat {
+    if !template.contains("arguments") {
+        return ToolCallArgumentsFormat::Dict;
     }
+    let bytes = template.as_bytes();
+    let mut pos = 0;
+    while let Some(idx) = template[pos..].find("arguments") {
+        let start = pos + idx + "arguments".len();
+        let mut i = start;
+        while i < bytes.len()
+            && matches!(bytes[i], b']' | b'\'' | b'"' | b' ' | b'\t' | b'\n' | b'\r')
+        {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'+' {
+            return ToolCallArgumentsFormat::String;
+        }
+        pos = start;
+    }
+    ToolCallArgumentsFormat::Dict
 }
 
 /// Parameters for chat template application
@@ -894,9 +952,19 @@ mod tests {
     }
 
     #[test]
-    fn test_args_format_string_concat_real_deepseek() {
-        // Real DeepSeek template snippet: arguments used with + string concat
-        let template = "{%- for tool in message['tool_calls'] %}{%- if not ns.is_first %}{%- if message['content'] is none %}{{'<tool_calls_begin>' + tool['function']['name'] + '\\n' + '```json' + '\\n' + tool['function']['arguments'] + '\\n' + '```'}}{%- endif %}{%- endfor %}";
+    fn test_args_format_string_concat_ast() {
+        // Complete parseable DeepSeek-style template: arguments in + concat (AST path)
+        let template = "{% for message in messages %}{% for tool in message['tool_calls'] %}{{ tool['function']['arguments'] + '\\n' }}{% endfor %}{% endfor %}";
+        assert_eq!(
+            detect_tool_call_arguments_format(template),
+            ToolCallArgumentsFormat::String,
+        );
+    }
+
+    #[test]
+    fn test_args_format_string_concat_fallback() {
+        // Incomplete template snippet that fails AST parse → exercises fallback
+        let template = "{%- for tool in message['tool_calls'] %}{{'```json' + '\\n' + tool['function']['arguments'] + '\\n' + '```'}}{%- endfor %}";
         assert_eq!(
             detect_tool_call_arguments_format(template),
             ToolCallArgumentsFormat::String,
@@ -905,8 +973,8 @@ mod tests {
 
     #[test]
     fn test_args_format_dict_tojson() {
-        // Llama/Qwen style: arguments|tojson → defaults to dict (no + concat)
-        let template = r"{{ tool['function']['arguments']|tojson }}";
+        // Llama/Qwen style: arguments|tojson (AST path, no + concat)
+        let template = "{% for message in messages %}{% for tool in message['tool_calls'] %}{{ tool['function']['arguments']|tojson }}{% endfor %}{% endfor %}";
         assert_eq!(
             detect_tool_call_arguments_format(template),
             ToolCallArgumentsFormat::Dict,
@@ -915,9 +983,8 @@ mod tests {
 
     #[test]
     fn test_args_format_dict_iteration() {
-        // Llama 4 / GLM / MiniMax: dict iteration → defaults to dict (no + concat)
-        let template =
-            r"{%- for param in tool_call.arguments %}{{ tool_call.arguments[param] }}{%- endfor %}";
+        // Llama 4 style: direct dict iteration (AST path, no + concat)
+        let template = "{% for message in messages %}{% for param in message.arguments %}{{ message.arguments[param] }}{% endfor %}{% endfor %}";
         assert_eq!(
             detect_tool_call_arguments_format(template),
             ToolCallArgumentsFormat::Dict,
