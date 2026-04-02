@@ -358,12 +358,12 @@ impl CacheAwarePolicy {
         }
     }
 
-    /// Legacy: sync with full TreeKey (used by token path and min-load path).
-    fn sync_insert_operation(&self, model_id: &str, key: TreeKey, tenant: &str) {
+    /// Deferred token allocation: only allocate `Vec` for TreeKey if mesh sync is active.
+    fn sync_insert_tokens(&self, model_id: &str, tokens: &[u32], tenant: &str) {
         let mesh_sync = self.mesh_sync.read().clone();
         if let Some(mesh_sync) = mesh_sync {
             let op = TreeOperation::Insert(TreeInsertOp {
-                key,
+                key: TreeKey::Tokens(tokens.to_vec()),
                 tenant: tenant.to_string(),
             });
             let mesh_model_id = Self::normalize_mesh_model_id(model_id);
@@ -557,7 +557,7 @@ impl CacheAwarePolicy {
                 .map(|entry| entry.value().clone());
             if let Some(tree) = tree {
                 tree.insert_tokens(tokens, worker_url);
-                self.sync_insert_operation(model_id, TreeKey::Tokens(tokens.to_vec()), worker_url);
+                self.sync_insert_tokens(model_id, tokens, worker_url);
             }
         } else if let Some(text) = info.request_text {
             // HTTP request: update string tree
@@ -820,11 +820,7 @@ impl CacheAwarePolicy {
                 // sequence on the receiving side. Token trees rely on Layer 2
                 // (periodic structure snapshots) for cross-node convergence,
                 // not tenant deltas.
-                self.sync_insert_operation(
-                    model_id,
-                    TreeKey::Tokens(tokens.to_vec()),
-                    workers[idx].url(),
-                );
+                self.sync_insert_tokens(model_id, tokens, workers[idx].url());
                 workers[idx].increment_processed();
                 return Some(idx);
             }
