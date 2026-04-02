@@ -132,7 +132,34 @@ fn detect_arguments_format_from_text(template: &str) -> ToolCallArgumentsFormat 
         pos = start;
     }
 
-    // Template mentions `arguments` but doesn't use dict filters → string concat style
+    // Pattern 2: Direct dict iteration without pipe filter (Llama 4 style)
+    //   {% for param in tool_call.arguments %}  →  iterates over dict keys
+    // We look for "in" followed by something ending in "arguments" then "%}"
+    // This catches: `for X in tool_call.arguments`, `for X in tc.arguments`, etc.
+    if template.contains("in") {
+        let mut pos2 = 0;
+        while let Some(idx) = template[pos2..].find("arguments") {
+            let arg_start = pos2 + idx;
+            // Look backwards from "arguments" for "in " preceded by a variable name and "for "
+            // We just need to verify this "arguments" is preceded by " in " somewhere on the same line
+            let line_start = template[..arg_start].rfind('\n').map_or(0, |p| p + 1);
+            let line_before = &template[line_start..arg_start];
+            if line_before.contains(" in ") && line_before.contains("for ") {
+                return ToolCallArgumentsFormat::Dict;
+            }
+            pos2 = arg_start + "arguments".len();
+        }
+    }
+
+    // Pattern 3: Alias-then-dict-method pattern (GLM, MiniMax style)
+    //   {% set _args = tc.arguments %} ... _args.items()
+    // If the template mentions both "arguments" and ".items()" it's treating
+    // arguments as a dict through an intermediate variable.
+    if template.contains(".items()") {
+        return ToolCallArgumentsFormat::Dict;
+    }
+
+    // Template mentions `arguments` but doesn't use dict filters or iteration → string concat
     ToolCallArgumentsFormat::String
 }
 
@@ -964,6 +991,37 @@ mod tests {
     fn test_args_format_empty_template() {
         assert_eq!(
             detect_tool_call_arguments_format(""),
+            ToolCallArgumentsFormat::Dict,
+        );
+    }
+
+    #[test]
+    fn test_args_format_direct_dict_iteration_llama4() {
+        // Llama 4 style: iterates directly over dict keys, no |items filter
+        let template =
+            r"{%- for param in tool_call.arguments %}{{ tool_call.arguments[param] }}{%- endfor %}";
+        assert_eq!(
+            detect_tool_call_arguments_format(template),
+            ToolCallArgumentsFormat::Dict,
+        );
+    }
+
+    #[test]
+    fn test_args_format_alias_then_items_glm() {
+        // GLM-4.6/minimax-m2 style: alias to local var, then .items()
+        let template = r"{% set _args = tc.arguments %}{% for k, v in _args.items() %}{{ k }}={{ v }}{% endfor %}";
+        assert_eq!(
+            detect_tool_call_arguments_format(template),
+            ToolCallArgumentsFormat::Dict,
+        );
+    }
+
+    #[test]
+    fn test_args_format_is_string_check_qwen3() {
+        // Qwen3 style: checks if arguments is string, falls back to |tojson
+        let template = r"{%- if tool_call.arguments is string %}{{ tool_call.arguments }}{%- else %}{{ tool_call.arguments | tojson }}{%- endif %}";
+        assert_eq!(
+            detect_tool_call_arguments_format(template),
             ToolCallArgumentsFormat::Dict,
         );
     }
