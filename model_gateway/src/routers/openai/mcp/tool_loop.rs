@@ -9,7 +9,7 @@
 //! - Metadata injection for MCP operations
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     io,
 };
 
@@ -20,7 +20,7 @@ use openai_protocol::{
         is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent,
         ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent, WebSearchCallEvent,
     },
-    responses::{generate_id, ResponseInput, ResponseTool, ResponsesRequest},
+    responses::{generate_id, ResponseInput, ResponsesRequest},
 };
 use serde_json::{json, to_value, Value};
 use smg_mcp::{McpToolSession, ResponseFormat, ResponseTransformer, ToolExecutionInput};
@@ -101,7 +101,6 @@ pub(crate) async fn execute_streaming_tool_calls(
     state: &mut ToolLoopState,
     sequence_number: &mut u64,
     model_id: &str,
-    image_tool_options: Option<&HashMap<String, Value>>,
 ) -> bool {
     for call in pending_calls {
         if call.name.is_empty() {
@@ -155,12 +154,14 @@ pub(crate) async fn execute_streaming_tool_calls(
                 continue;
             }
         };
-        apply_image_tool_defaults(
-            &mut arguments,
-            &call.name,
-            session,
-            image_tool_options,
-        );
+        if call.name == "generate_image" {
+            if let Some(obj) = arguments.as_object_mut() {
+                obj.insert(
+                    "model".to_string(),
+                    Value::String("openai.gpt-image-1.5".to_string()),
+                );
+            }
+        }
 
         if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
             return false;
@@ -569,7 +570,6 @@ pub(crate) async fn execute_tool_loop(
     session: &McpToolSession<'_>,
 ) -> Result<Value, String> {
     let mut state = ToolLoopState::new(original_body.input.clone());
-    let image_tool_options = extract_image_tool_options(original_body);
     let max_tool_calls = original_body.max_tool_calls.map(|n| n as usize);
     let base_payload = initial_payload.clone();
     let tools_json = base_payload.get("tools").cloned().unwrap_or(json!([]));
@@ -682,12 +682,14 @@ pub(crate) async fn execute_tool_loop(
                     continue;
                 }
             };
-            apply_image_tool_defaults(
-                &mut arguments,
-                &call.name,
-                session,
-                image_tool_options.as_ref(),
-            );
+            if call.name == "generate_image" {
+                if let Some(obj) = arguments.as_object_mut() {
+                    obj.insert(
+                        "model".to_string(),
+                        Value::String("openai.gpt-image-1.5".to_string()),
+                    );
+                }
+            }
 
             debug!(
                 "Calling MCP tool '{}' with args: {}",
@@ -743,98 +745,6 @@ pub(crate) async fn execute_tool_loop(
             false,
         )?;
     }
-}
-
-pub(crate) fn extract_image_tool_options(
-    request: &ResponsesRequest,
-) -> Option<HashMap<String, Value>> {
-    request.tools.as_ref().and_then(|tools| {
-        tools.iter().find_map(|tool| {
-            let ResponseTool::ImageGeneration(image_tool) = tool else {
-                return None;
-            };
-            Some(image_tool.options.clone())
-        })
-    })
-}
-
-fn get_non_empty_string_option(
-    options: Option<&HashMap<String, Value>>,
-    key: &str,
-) -> Option<String> {
-    options
-        .and_then(|m| m.get(key))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn apply_image_tool_defaults(
-    arguments: &mut Value,
-    call_name: &str,
-    session: &McpToolSession<'_>,
-    image_tool_options: Option<&HashMap<String, Value>>,
-) {
-    // For MCP generate_image tool calls, always use the internal default model.
-    // This keeps behavior deterministic regardless of model-generated arguments.
-    if call_name == "generate_image" {
-        if let Some(obj) = arguments.as_object_mut() {
-            obj.insert(
-                "model".to_string(),
-                Value::String("openai.gpt-image-1.5".to_string()),
-            );
-        }
-    }
-
-    if !matches!(
-        session.tool_response_format(call_name),
-        ResponseFormat::ImageGenerationCall
-    ) {
-        return;
-    }
-
-    let revised_prompt = arguments.get("revised_prompt").cloned().unwrap_or(Value::Null);
-
-    let background = get_non_empty_string_option(image_tool_options, "background")
-        .unwrap_or_else(|| "auto".to_string());
-    let size =
-        get_non_empty_string_option(image_tool_options, "size").unwrap_or_else(|| "auto".to_string());
-    let quality = get_non_empty_string_option(image_tool_options, "quality")
-        .unwrap_or_else(|| "auto".to_string());
-    let output_format = get_non_empty_string_option(image_tool_options, "output_format")
-        .unwrap_or_else(|| "png".to_string());
-    let moderation = get_non_empty_string_option(image_tool_options, "moderation")
-        .unwrap_or_else(|| "auto".to_string());
-
-    let model = if call_name == "generate_image" {
-        "openai.gpt-image-1.5".to_string()
-    } else {
-        get_non_empty_string_option(image_tool_options, "model")
-            .filter(|v| !v.eq_ignore_ascii_case("default"))
-            .unwrap_or_else(|| "openai.gpt-image-1.5".to_string())
-    };
-
-    let mut mapped = json!({
-        "revised_prompt": revised_prompt,
-        "background": background,
-        "size": size,
-        "quality": quality,
-        "output_format": output_format,
-        "moderation": moderation,
-        "model": model,
-        "stream": false
-    });
-
-    if let Some(compression) = image_tool_options
-        .and_then(|m| m.get("output_compression"))
-        .filter(|v| !v.is_null())
-        .cloned()
-    {
-        mapped["output_compression"] = compression;
-    }
-
-    *arguments = mapped;
 }
 
 /// Build an incomplete response when limits are exceeded

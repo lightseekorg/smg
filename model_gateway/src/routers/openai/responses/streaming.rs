@@ -48,9 +48,9 @@ use crate::{
         openai::{
             context::{RequestContext, StreamingEventContext, StreamingRequest},
             mcp::{
-                build_resume_payload, execute_streaming_tool_calls, extract_image_tool_options,
-                inject_mcp_metadata_streaming, prepare_mcp_tools_as_functions,
-                send_mcp_list_tools_events, StreamAction, StreamingToolHandler, ToolLoopState,
+                build_resume_payload, execute_streaming_tool_calls, inject_mcp_metadata_streaming,
+                prepare_mcp_tools_as_functions, send_mcp_list_tools_events, StreamAction,
+                StreamingToolHandler, ToolLoopState,
             },
         },
         persistence_utils::persist_conversation_items,
@@ -968,7 +968,6 @@ pub(super) fn handle_streaming_with_tool_interception(
             }
 
             // Execute all pending tool calls
-            let image_tool_options = extract_image_tool_options(&original_request);
             if !execute_streaming_tool_calls(
                 pending_calls,
                 &session,
@@ -976,7 +975,6 @@ pub(super) fn handle_streaming_with_tool_interception(
                 &mut state,
                 &mut sequence_number,
                 &original_request.model,
-                image_tool_options.as_ref(),
             )
             .await
             {
