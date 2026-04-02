@@ -1564,7 +1564,8 @@ class TestToolChoiceMistral(_TestToolChoiceBase):
 # Multi-Turn Tool Call Tests
 # Regression for: assistant messages with tool_calls serialized without
 # `content` key due to skip_serializing_none, causing chat template crash.
-# Fix: inject "content": null in process_content_format for such messages.
+# Fix: always serialize Assistant `content` field (even as null) via serde
+# attrs in protocols crate (crates/protocols/src/chat.rs).
 # =============================================================================
 
 WEATHER_TOOL = {
@@ -1584,9 +1585,9 @@ WEATHER_TOOL = {
 
 
 @pytest.mark.engine("sglang", "vllm", "trtllm")
-@pytest.mark.gpu(1)
-@pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
-@pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
+@pytest.mark.gpu(2)
+@pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestMultiTurnToolCall:
