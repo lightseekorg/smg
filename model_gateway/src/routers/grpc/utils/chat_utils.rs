@@ -888,4 +888,40 @@ mod tests {
         assert_eq!(content_array[0]["type"], "text");
         assert_eq!(content_array[1], json!({"type": "image"}));
     }
+
+    #[test]
+    fn test_process_content_format_injects_null_content_for_tool_calls() {
+        use openai_protocol::common::{FunctionCallResponse, ToolCall};
+
+        // Assistant message with tool_calls and no content — skip_serializing_none
+        // omits the `content` key entirely. The fix must inject `"content": null`
+        // so chat templates that check `message['content'] is none` work correctly.
+        let messages = vec![ChatMessage::Assistant {
+            content: None,
+            name: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".to_string(),
+                tool_type: "function".to_string(),
+                function: FunctionCallResponse {
+                    name: "get_weather".to_string(),
+                    arguments: Some("{\"location\": \"Tokyo\"}".to_string()),
+                },
+            }]),
+            reasoning_content: None,
+        }];
+
+        let result =
+            process_content_format(&messages, ChatTemplateContentFormat::String, None).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert!(
+            result[0].get("content").is_some(),
+            "content key must be present for assistant messages with tool_calls"
+        );
+        assert!(
+            result[0]["content"].is_null(),
+            "content must be null (not undefined) for assistant messages with tool_calls"
+        );
+        assert!(result[0].get("tool_calls").is_some());
+    }
 }

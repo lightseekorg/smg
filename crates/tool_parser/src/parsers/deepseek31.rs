@@ -221,11 +221,22 @@ impl ToolParser for DeepSeek31Parser {
                 // Strip end markers that may arrive in the same chunk as the final
                 // JSON bytes. The partial_tool_call_regex group 2 greedily captures
                 // everything after <｜tool▁sep｜>, including any trailing end tokens.
-                let func_args_clean = func_args_raw
-                    .trim_end_matches("<｜end▁of▁sentence｜>")
-                    .trim_end_matches("<｜tool▁calls▁end｜>")
-                    .trim_end_matches("<｜tool▁call▁end｜>")
-                    .trim_end();
+                // Use an iterative loop so stacked markers in any order are all removed.
+                const END_MARKERS: [&str; 3] = [
+                    "<｜end▁of▁sentence｜>",
+                    "<｜tool▁calls▁end｜>",
+                    "<｜tool▁call▁end｜>",
+                ];
+                let mut func_args_clean = func_args_raw.trim_end();
+                loop {
+                    let before = func_args_clean;
+                    for marker in END_MARKERS {
+                        func_args_clean = func_args_clean.trim_end_matches(marker).trim_end();
+                    }
+                    if func_args_clean == before {
+                        break;
+                    }
+                }
 
                 let argument_diff = func_args_clean
                     .strip_prefix(last_sent)

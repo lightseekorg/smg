@@ -246,6 +246,14 @@ async fn test_deepseek31_streaming_end_marker_not_leaked_into_args() {
         }
     }
 
+    assert!(
+        !collected_args.is_empty(),
+        "expected streamed argument chunks in marker-leak scenario"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&collected_args).expect("streamed args should be valid JSON");
+    assert_eq!(parsed["query"], "rust");
+
     for marker in [
         "<｜tool▁call▁end｜>",
         "<｜tool▁calls▁end｜>",
