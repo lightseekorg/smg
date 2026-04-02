@@ -262,9 +262,15 @@ fn convert_assistant_message(
             let mut obj = serde_json::Map::new();
             obj.insert("role".into(), Value::String("assistant".into()));
 
-            if !text_parts.is_empty() {
-                obj.insert("content".into(), Value::String(text_parts.join("")));
-            }
+            // Always emit content — null when tool-calls-only, text otherwise.
+            // Chat templates check `message['content'] is none` and fail if the
+            // key is absent (undefined != none in Jinja).
+            let content = if text_parts.is_empty() {
+                Value::Null
+            } else {
+                Value::String(text_parts.join(""))
+            };
+            obj.insert("content".into(), content);
             if !tool_calls.is_empty() {
                 obj.insert("tool_calls".into(), Value::Array(tool_calls));
             }
