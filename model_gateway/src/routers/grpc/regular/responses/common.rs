@@ -20,10 +20,11 @@ use smg_data_connector::{
 };
 use smg_mcp::McpToolSession;
 use tracing::{debug, warn};
+use serde_json::Value;
 
 use crate::routers::{
     error, grpc::common::responses::ResponsesContext,
-    tool_output_context::compact_tool_output_str_for_model_context,
+    tool_output_context::compact_tool_output_for_model_context,
 };
 
 // ============================================================================
@@ -69,10 +70,11 @@ impl ToolLoopState {
     ) {
         let is_image_generation =
             matches!(&output_item, ResponseOutputItem::ImageGenerationCall { .. });
-        let model_context_output = compact_tool_output_str_for_model_context(
-            &tool_name,
-            &output_str,
+        let output_value =
+            serde_json::from_str::<Value>(&output_str).unwrap_or(Value::String(output_str));
+        let model_context_output = compact_tool_output_for_model_context(
             is_image_generation,
+            &output_value,
             !success,
         );
 

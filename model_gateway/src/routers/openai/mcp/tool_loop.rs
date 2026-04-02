@@ -221,7 +221,12 @@ pub(crate) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpT
         if let Some(arr) = v.as_array_mut() {
             retained_tools = arr
                 .drain(..)
-                .filter(|item| item.get("type").and_then(|v| v.as_str()) == Some(ItemType::FUNCTION))
+                .filter(|item| {
+                    item.get("type")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s == ItemType::FUNCTION)
+                        .unwrap_or(false)
+                })
                 .collect();
         }
     }

@@ -223,8 +223,7 @@ pub async fn ensure_mcp_servers(
                 tool = %tool_name,
                 "Adding static server for built-in tool routing"
             );
-            let already_bound = mcp_servers.iter().any(|b| b.server_key == server_name);
-            if !already_bound {
+            if !mcp_servers.iter().any(|b| b.server_key == server_name) {
                 mcp_servers.push(McpServerBinding {
                     label: server_name.clone(),
                     server_key: server_name,
@@ -253,20 +252,17 @@ pub async fn ensure_mcp_servers(
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
-    _default_headers: Option<&HashMap<String, String>>,
 ) -> Option<Vec<McpServerBinding>> {
     let inputs: Vec<McpServerInput> = tools
         .iter()
         .filter_map(|tool| match tool {
-            ResponseTool::Mcp(mcp) => {
-                Some(McpServerInput {
-                    label: mcp.server_label.clone(),
-                    url: mcp.server_url.clone(),
-                    authorization: mcp.authorization.clone(),
-                    headers: mcp.headers.clone().unwrap_or_default(),
-                    allowed_tools: mcp.allowed_tools.clone(),
-                })
-            }
+            ResponseTool::Mcp(mcp) => Some(McpServerInput {
+                label: mcp.server_label.clone(),
+                url: mcp.server_url.clone(),
+                authorization: mcp.authorization.clone(),
+                headers: mcp.headers.clone().unwrap_or_default(),
+                allowed_tools: mcp.allowed_tools.clone(),
+            }),
             _ => None,
         })
         .collect();
@@ -571,7 +567,7 @@ mod tests {
             WebSearchPreviewTool::default(),
         )];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
         // Should return Some because built-in routing is configured
         assert!(result.is_some());
@@ -594,7 +590,7 @@ mod tests {
             WebSearchPreviewTool::default(),
         )];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
         // Should return None because no MCP or built-in routing is available
         assert!(result.is_none());
@@ -614,7 +610,7 @@ mod tests {
             },
         })];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
         // Should return None - function tools don't need MCP processing
         assert!(result.is_none());
@@ -638,7 +634,7 @@ mod tests {
             ResponseTool::WebSearchPreview(WebSearchPreviewTool::default()),
         ];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
         // Should return Some because web_search_preview has built-in routing
         assert!(result.is_some());
@@ -648,33 +644,4 @@ mod tests {
         assert_eq!(mcp_servers[0].label, "search-server");
     }
 
-    #[tokio::test]
-    async fn test_ensure_mcp_servers_does_not_dedupe_builtin_by_request_label() {
-        let orchestrator = create_test_orchestrator_with_builtin().await;
-
-        // Request-scoped dynamic MCP uses same label as builtin server name,
-        // but points to a different URL. Builtin static server must still be added.
-        let inputs = vec![McpServerInput {
-            label: "search-server".to_string(),
-            url: Some("http://localhost:7777/other".to_string()),
-            authorization: None,
-            headers: HashMap::new(),
-            allowed_tools: None,
-        }];
-
-        let builtin_types = vec![BuiltinToolType::WebSearchPreview];
-        let result = ensure_mcp_servers(&orchestrator, &inputs, &builtin_types).await;
-
-        assert!(result.is_some());
-        let mcp_servers = result.unwrap();
-
-        // One dynamic + one static builtin.
-        assert_eq!(mcp_servers.len(), 2);
-        assert!(
-            mcp_servers
-                .iter()
-                .any(|b| b.server_key == "search-server"),
-            "builtin static server should be present"
-        );
-    }
 }

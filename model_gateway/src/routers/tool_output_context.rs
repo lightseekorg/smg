@@ -44,37 +44,3 @@ pub fn compact_tool_output_for_model_context(
         raw
     }
 }
-
-pub fn compact_tool_output_str_for_model_context(
-    tool_name: &str,
-    output_str: &str,
-    is_image_generation: bool,
-    is_error: bool,
-) -> String {
-    if is_image_generation || tool_name == "generate_image" {
-        if let Ok(value) = serde_json::from_str::<Value>(output_str) {
-            return compact_tool_output_for_model_context(true, &value, is_error);
-        }
-        return json!({
-            "tool": "generate_image",
-            "status": if is_error { "failed" } else { "completed" },
-            "note": "binary image payload omitted from model context"
-        })
-        .to_string();
-    }
-
-    if output_str.chars().count() > MAX_TOOL_OUTPUT_CONTEXT_CHARS {
-        let preview: String = output_str
-            .chars()
-            .take(MAX_TOOL_OUTPUT_CONTEXT_CHARS)
-            .collect();
-        json!({
-            "truncated": true,
-            "original_chars": output_str.chars().count(),
-            "preview": preview
-        })
-        .to_string()
-    } else {
-        output_str.to_string()
-    }
-}
