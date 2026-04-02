@@ -223,7 +223,10 @@ pub async fn ensure_mcp_servers(
                 tool = %tool_name,
                 "Adding static server for built-in tool routing"
             );
-            if !mcp_servers.iter().any(|b| b.server_key == server_name) {
+            if !mcp_servers
+                .iter()
+                .any(|b| b.server_key == server_name || b.label == server_name)
+            {
                 mcp_servers.push(McpServerBinding {
                     label: server_name.clone(),
                     server_key: server_name,
@@ -252,35 +255,11 @@ pub async fn ensure_mcp_servers(
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
+    default_headers: Option<&HashMap<String, String>>,
 ) -> Option<Vec<McpServerBinding>> {
-    let inputs: Vec<McpServerInput> = tools
-        .iter()
-        .filter_map(|tool| match tool {
-            ResponseTool::Mcp(mcp) => Some(McpServerInput {
-                label: mcp.server_label.clone(),
-                url: mcp.server_url.clone(),
-                authorization: mcp.authorization.clone(),
-                headers: mcp.headers.clone().unwrap_or_default(),
-                allowed_tools: mcp.allowed_tools.clone(),
-            }),
-            _ => None,
-        })
-        .collect();
+    let default_headers = default_headers.cloned().unwrap_or_default();
 
-    let builtin_types = extract_builtin_types(tools);
-
-    ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types).await
-}
-
-/// Like [`ensure_request_mcp_client`], but injects default headers for dynamic MCP servers.
-///
-/// Headers explicitly provided in the request tool config take precedence.
-pub async fn ensure_request_mcp_client_with_headers(
-    mcp_orchestrator: &Arc<McpOrchestrator>,
-    tools: &[ResponseTool],
-    default_headers: &HashMap<String, String>,
-) -> Option<Vec<McpServerBinding>> {
-    let inputs: Vec<McpServerInput> = tools
+    let mut inputs: Vec<McpServerInput> = tools
         .iter()
         .filter_map(|tool| match tool {
             ResponseTool::Mcp(mcp) => {
@@ -302,6 +281,47 @@ pub async fn ensure_request_mcp_client_with_headers(
         .collect();
 
     let builtin_types = extract_builtin_types(tools);
+
+    // For builtin tool routing, prefer dynamic per-request connections when we
+    // have default headers (e.g. opc-compartment-id) to propagate.
+    if !default_headers.is_empty() {
+        for &builtin_type in &builtin_types {
+            let Some((server_name, _, _)) = mcp_orchestrator.find_builtin_server(builtin_type)
+            else {
+                continue;
+            };
+
+            // If request already provided an MCP tool with this label/url, reuse it.
+            if inputs
+                .iter()
+                .any(|input| input.label == server_name || input.url.as_deref() == Some(&server_name))
+            {
+                continue;
+            }
+
+            let Some(server_cfg) = mcp_orchestrator.get_server_config(&server_name) else {
+                continue;
+            };
+
+            match server_cfg.transport {
+                McpTransport::Sse { url, token, headers }
+                | McpTransport::Streamable { url, token, headers } => {
+                    let mut merged_headers = default_headers.clone();
+                    for (k, v) in headers {
+                        merged_headers.insert(k, v);
+                    }
+                    inputs.push(McpServerInput {
+                        label: server_name,
+                        url: Some(url),
+                        authorization: token,
+                        headers: merged_headers,
+                        allowed_tools: None,
+                    });
+                }
+                McpTransport::Stdio { .. } => {}
+            }
+        }
+    }
 
     ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types).await
 }
@@ -601,7 +621,7 @@ mod tests {
             WebSearchPreviewTool::default(),
         )];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
 
         // Should return Some because built-in routing is configured
         assert!(result.is_some());
@@ -624,7 +644,7 @@ mod tests {
             WebSearchPreviewTool::default(),
         )];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
 
         // Should return None because no MCP or built-in routing is available
         assert!(result.is_none());
@@ -644,7 +664,7 @@ mod tests {
             },
         })];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
 
         // Should return None - function tools don't need MCP processing
         assert!(result.is_none());
@@ -668,7 +688,7 @@ mod tests {
             ResponseTool::WebSearchPreview(WebSearchPreviewTool::default()),
         ];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
 
         // Should return Some because web_search_preview has built-in routing
         assert!(result.is_some());

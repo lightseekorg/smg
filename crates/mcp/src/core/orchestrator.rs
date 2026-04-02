@@ -899,6 +899,21 @@ impl McpOrchestrator {
         None
     }
 
+    /// Get a cloned static server config by server name.
+    ///
+    /// Checks connected static servers first, then falls back to initial config.
+    pub fn get_server_config(&self, server_name: &str) -> Option<McpServerConfig> {
+        if let Some(entry) = self.static_servers.get(server_name) {
+            return Some(entry.config.clone());
+        }
+
+        self.config
+            .servers
+            .iter()
+            .find(|cfg| cfg.name == server_name)
+            .cloned()
+    }
+
     /// Returns the set of server names that have `builtin_type` configured.
     pub fn builtin_server_names(&self) -> HashSet<String> {
         let mut names = HashSet::new();
