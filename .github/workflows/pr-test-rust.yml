@@ -345,7 +345,11 @@ jobs:
           name: genai-bench-results-all-policies
           path: benchmark_**/
 
-      - name: Upload worker logs on failure
+      - name: Worker failure diagnostics
+        if: failure() || cancelled()
+        run: bash scripts/ci_dump_worker_logs.sh benchmark-logs benchmark-worker-logs
+
+      - name: Upload worker logs
         if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
