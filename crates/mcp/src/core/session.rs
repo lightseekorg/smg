@@ -12,7 +12,6 @@ use futures::stream::{self, StreamExt};
 use openai_protocol::responses::ResponseTool;
 
 use super::{
-    config::BuiltinToolType,
     orchestrator::{McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput},
     UNKNOWN_SERVER_KEY,
 };
@@ -115,18 +114,14 @@ impl<'a> McpToolSession<'a> {
             );
         }
         let (exposed_name_map, exposed_name_by_qualified) =
-            Self::build_exposed_function_tools(orchestrator, &mcp_tools, &mcp_servers);
+            Self::build_exposed_function_tools(&mcp_tools, &mcp_servers);
 
-        // Filter out servers configured with builtin_type from the visible list.
-        let image_builtin_name = orchestrator
-            .find_builtin_server(BuiltinToolType::ImageGeneration)
-            .map(|(server_name, _, _)| server_name);
+        // Filter out all servers configured with builtin_type from the visible list.
+        let builtin_names = orchestrator.builtin_server_names();
         let visible_mcp_servers: Vec<McpServerBinding> = mcp_servers
             .iter()
             .filter(|b| {
-                image_builtin_name.as_ref().is_none_or(|name| {
-                    b.server_key != *name && b.label != *name
-                })
+                !builtin_names.contains(&b.server_key) && !builtin_names.contains(&b.label)
             })
             .cloned()
             .collect();
@@ -341,7 +336,6 @@ impl<'a> McpToolSession<'a> {
     }
 
     fn build_exposed_function_tools(
-        orchestrator: &McpOrchestrator,
         tools: &[ToolEntry],
         mcp_servers: &[McpServerBinding],
     ) -> (
@@ -364,12 +358,6 @@ impl<'a> McpToolSession<'a> {
             HashMap::with_capacity(tools.len());
         let mut exposed_name_by_qualified: HashMap<QualifiedToolName, String> =
             HashMap::with_capacity(tools.len());
-        let builtin_format_overrides: HashMap<(String, String), ResponseFormat> = orchestrator
-            .find_builtin_server(BuiltinToolType::ImageGeneration)
-            .map(|(server_name, tool_name, response_format)| {
-                HashMap::from([((server_name, tool_name), response_format)])
-            })
-            .unwrap_or_default();
 
         for entry in tools {
             let server_key = entry.server_key().to_string();
@@ -409,10 +397,7 @@ impl<'a> McpToolSession<'a> {
                 exposed_name,
                 ExposedToolBinding {
                     server_key,
-                    response_format: builtin_format_overrides
-                        .get(&(server_label.clone(), resolved_tool_name.clone()))
-                        .cloned()
-                        .unwrap_or_else(|| entry.response_format.clone()),
+                    response_format: entry.response_format.clone(),
                     server_label,
                     resolved_tool_name,
                 },
