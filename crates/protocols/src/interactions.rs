@@ -9,7 +9,7 @@ use serde_with::skip_serializing_none;
 use validator::{Validate, ValidationError};
 
 use super::{
-    common::{default_true, Function, GenerationRequest},
+    common::{default_true, deserialize_null_as_false, Function, GenerationRequest},
     sampling_params::validate_top_p_value,
     validated::Normalizable,
 };
@@ -48,7 +48,7 @@ pub struct InteractionsRequest {
     pub response_mime_type: Option<String>,
 
     /// Whether to stream the response
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_false")]
     pub stream: bool,
 
     /// Whether to store the interaction (default: true)
