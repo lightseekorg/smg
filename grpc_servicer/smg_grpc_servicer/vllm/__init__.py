@@ -1,8 +1,9 @@
-"""vLLM gRPC servicers -- VllmEngine proto service and standard health check."""
+"""vLLM gRPC servicers — VllmEngine, VllmRender, and standard health check."""
 
 import logging
 
 from smg_grpc_servicer.vllm.health_servicer import VllmHealthServicer
+from smg_grpc_servicer.vllm.render_servicer import RenderGrpcServicer
 from smg_grpc_servicer.vllm.servicer import VllmEngineServicer
 
 # Attach the top-level ``smg_grpc_servicer`` logger to the vllm logging
@@ -14,4 +15,4 @@ _pkg_logger.handlers = list(_vllm_logger.handlers)
 _pkg_logger.setLevel(_vllm_logger.level)
 _pkg_logger.propagate = False
 
-__all__ = ["VllmEngineServicer", "VllmHealthServicer"]
+__all__ = ["VllmEngineServicer", "VllmHealthServicer", "RenderGrpcServicer"]
