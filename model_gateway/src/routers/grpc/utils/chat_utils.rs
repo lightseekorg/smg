@@ -134,20 +134,6 @@ pub(crate) fn process_content_format(
                 if let Some(content_value) = obj.get_mut("content") {
                     transform_content_field(content_value, content_format, image_placeholder);
                 }
-
-                // Ensure assistant messages with tool_calls always have a `content` key.
-                // `skip_serializing_none` omits `content` when it is `None`, but chat
-                // templates (e.g. DeepSeek V3.1) check `message['content'] is none`,
-                // which evaluates to false when the key is absent because MiniJinja
-                // returns `undefined` for missing keys, not `none`. Injecting
-                // `"content": null` matches the OpenAI SDK convention and is safe for
-                // all major model templates (Llama, Qwen, Mistral).
-                if obj.get("role").and_then(|v| v.as_str()) == Some("assistant")
-                    && obj.contains_key("tool_calls")
-                    && !obj.contains_key("content")
-                {
-                    obj.insert("content".to_string(), Value::Null);
-                }
             }
 
             Ok(message_json)
@@ -890,12 +876,13 @@ mod tests {
     }
 
     #[test]
-    fn test_process_content_format_injects_null_content_for_tool_calls() {
+    fn test_process_content_format_null_content_for_tool_calls() {
         use openai_protocol::common::{FunctionCallResponse, ToolCall};
 
-        // Assistant message with tool_calls and no content — skip_serializing_none
-        // omits the `content` key entirely. The fix must inject `"content": null`
-        // so chat templates that check `message['content'] is none` work correctly.
+        // Assistant messages with tool_calls and no content must serialize `content`
+        // as null (not omit it). ChatMessage::Assistant no longer uses
+        // skip_serializing_none on `content` so this is guaranteed at the protocol
+        // level, but we keep this test as a regression guard.
         let messages = vec![ChatMessage::Assistant {
             content: None,
             name: None,

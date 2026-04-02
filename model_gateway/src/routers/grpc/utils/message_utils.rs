@@ -267,12 +267,6 @@ fn convert_assistant_message(
             }
             if !tool_calls.is_empty() {
                 obj.insert("tool_calls".into(), Value::Array(tool_calls));
-                // Ensure `content` is always present when tool_calls exist.
-                // Same fix as process_content_format: chat templates check
-                // `message['content'] is none` which fails on undefined keys.
-                if !obj.contains_key("content") {
-                    obj.insert("content".into(), Value::Null);
-                }
             }
             if !thinking_parts.is_empty() {
                 obj.insert(

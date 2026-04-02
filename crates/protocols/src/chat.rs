@@ -21,26 +21,33 @@ use crate::{
 // Chat Messages
 // ============================================================================
 
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "role")]
 pub enum ChatMessage {
     #[serde(rename = "system")]
     System {
         content: MessageContent,
+        #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
     #[serde(rename = "user")]
     User {
         content: MessageContent,
+        #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
     #[serde(rename = "assistant")]
     Assistant {
+        // Always serialized — even as `null` when None — so chat templates that
+        // check `message['content'] is none` work correctly when tool_calls is set.
+        // This matches the OpenAI SDK convention and the OpenAI API spec.
         content: Option<MessageContent>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ToolCall>>,
         /// Reasoning content for O1-style models (SGLang extension)
+        #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
     },
     #[serde(rename = "tool")]
@@ -53,7 +60,9 @@ pub enum ChatMessage {
     #[serde(rename = "developer")]
     Developer {
         content: MessageContent,
+        #[serde(skip_serializing_if = "Option::is_none")]
         tools: Option<Vec<Tool>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
 }
