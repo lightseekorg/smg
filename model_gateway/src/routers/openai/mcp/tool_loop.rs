@@ -8,10 +8,7 @@
 //! - Payload transformation for MCP tool interception
 //! - Metadata injection for MCP operations
 
-use std::{
-    collections::HashSet,
-    io,
-};
+use std::io;
 
 use axum::http::HeaderMap;
 use bytes::Bytes;
@@ -35,6 +32,8 @@ use crate::{
         tool_output_context::compact_tool_output_for_model_context,
     },
 };
+
+const IMAGE_MODEL: &str = "openai.gpt-image-1.5";
 
 /// State for tracking multi-turn tool calling loop
 pub(crate) struct ToolLoopState {
@@ -154,14 +153,7 @@ pub(crate) async fn execute_streaming_tool_calls(
                 continue;
             }
         };
-        if call.name == "generate_image" {
-            if let Some(obj) = arguments.as_object_mut() {
-                obj.insert(
-                    "model".to_string(),
-                    Value::String("openai.gpt-image-1.5".to_string()),
-                );
-            }
-        }
+        sanitize_generate_image_arguments(&call.name, &mut arguments);
 
         if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
             return false;
@@ -221,67 +213,17 @@ pub(crate) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpT
         return;
     };
 
-    let mut requested_allowed_tools: HashSet<String> = HashSet::new();
     let mut retained_tools: Vec<Value> = Vec::new();
     if let Some(v) = obj.get_mut("tools") {
         if let Some(arr) = v.as_array_mut() {
             retained_tools = arr
                 .drain(..)
-                .filter(|item| {
-                    let item_type = item.get("type").and_then(|v| v.as_str());
-                    if item_type == Some("mcp") {
-                        if let Some(allowed) = item.get("allowed_tools").and_then(|v| v.as_array()) {
-                            for name in allowed.iter().filter_map(|v| v.as_str()) {
-                                if !name.trim().is_empty() {
-                                    requested_allowed_tools.insert(name.trim().to_string());
-                                }
-                            }
-                        }
-                    }
-                    item_type == Some(ItemType::FUNCTION)
-                })
+                .filter(|item| item.get("type").and_then(|v| v.as_str()) == Some(ItemType::FUNCTION))
                 .collect();
         }
     }
 
-    let mut session_tools = session.build_function_tools_json();
-    if !requested_allowed_tools.is_empty() {
-        session_tools.retain(|tool| {
-            let Some(name) = tool.get("name").and_then(|v| v.as_str()) else {
-                return false;
-            };
-            if requested_allowed_tools.contains(name) {
-                return true;
-            }
-            name.rsplit_once("__")
-                .is_some_and(|(_, suffix)| requested_allowed_tools.contains(suffix))
-        });
-    }
-    for tool in &mut session_tools {
-        let is_generate_image = tool
-            .get("name")
-            .and_then(|v| v.as_str())
-            .is_some_and(|name| {
-                name == "generate_image" || name.rsplit_once("__").is_some_and(|(_, s)| s == "generate_image")
-            });
-        if !is_generate_image {
-            continue;
-        }
-        if let Some(tool_obj) = tool.as_object_mut() {
-            tool_obj.insert(
-                "parameters".to_string(),
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "revised_prompt": { "type": "string" }
-                    },
-                    "required": ["revised_prompt"],
-                    "additionalProperties": true
-                }),
-            );
-        }
-    }
-
+    let session_tools = session.build_function_tools_json();
     let mut tools_json = Vec::with_capacity(retained_tools.len() + session_tools.len());
     tools_json.append(&mut retained_tools);
     tools_json.extend(session_tools);
@@ -682,14 +624,7 @@ pub(crate) async fn execute_tool_loop(
                     continue;
                 }
             };
-            if call.name == "generate_image" {
-                if let Some(obj) = arguments.as_object_mut() {
-                    obj.insert(
-                        "model".to_string(),
-                        Value::String("openai.gpt-image-1.5".to_string()),
-                    );
-                }
-            }
+            sanitize_generate_image_arguments(&call.name, &mut arguments);
 
             debug!(
                 "Calling MCP tool '{}' with args: {}",
@@ -849,6 +784,26 @@ fn build_mcp_call_item(
         "output": output,
         "server_label": server_label
     })
+}
+
+fn sanitize_generate_image_arguments(call_name: &str, arguments: &mut Value) {
+    if call_name != "generate_image" {
+        return;
+    }
+    let revised_prompt = arguments
+        .as_object()
+        .and_then(|obj| {
+            obj.get("revised_prompt")
+                .and_then(|v| v.as_str())
+                .or_else(|| obj.get("prompt").and_then(|v| v.as_str()))
+        })
+        .unwrap_or("")
+        .to_string();
+
+    *arguments = json!({
+        "model": IMAGE_MODEL,
+        "revised_prompt": revised_prompt
+    });
 }
 
 /// Build a transformed output item using ResponseTransformer
