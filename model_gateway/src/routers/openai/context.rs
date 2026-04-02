@@ -44,6 +44,7 @@ pub struct ResponsesComponents {
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
+    pub metrics_store: Arc<metrics_service::MetricsStore>,
 }
 
 pub enum ComponentRefs {
@@ -84,6 +85,13 @@ impl ComponentRefs {
         match self {
             ComponentRefs::Shared(_) => None,
             ComponentRefs::Responses(r) => Some(&r.conversation_item_storage),
+        }
+    }
+
+    pub fn metrics_store(&self) -> Option<&Arc<metrics_service::MetricsStore>> {
+        match self {
+            ComponentRefs::Shared(_) => None,
+            ComponentRefs::Responses(r) => Some(&r.metrics_store),
         }
     }
 }
@@ -194,11 +202,13 @@ pub struct StorageHandles {
     pub response: Arc<dyn ResponseStorage>,
     pub conversation: Arc<dyn ConversationStorage>,
     pub conversation_item: Arc<dyn ConversationItemStorage>,
+    pub metrics_store: Option<Arc<metrics_service::MetricsStore>>,
     pub request_context: Option<StorageRequestContext>,
 }
 
 pub struct OwnedStreamingContext {
     pub url: String,
+    pub worker_url: String,
     pub payload: Value,
     pub original_body: ResponsesRequest,
     pub previous_response_id: Option<String>,
@@ -227,9 +237,12 @@ impl RequestContext {
             .conversation_item_storage()
             .ok_or("Conversation item storage required")?
             .clone();
+        let metrics_store = self.components.metrics_store().cloned();
+        let worker_url = self.worker().ok_or("Worker required")?.url().to_string();
 
         Ok(OwnedStreamingContext {
             url: payload_state.url,
+            worker_url,
             payload: payload_state.json,
             original_body,
             previous_response_id: payload_state.previous_response_id,
@@ -237,6 +250,7 @@ impl RequestContext {
                 response,
                 conversation,
                 conversation_item,
+                metrics_store,
                 request_context: self.storage_request_context,
             },
         })

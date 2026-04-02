@@ -139,7 +139,11 @@ impl ChatResponseProcessingStage {
             .await?;
 
         // Store the final response
-        ctx.state.response.final_response = Some(FinalResponse::Chat(response));
+        ctx.state.response.final_response = Some(FinalResponse::Chat(response.clone()));
+
+        // Piggyback token-count snapshots during non-streaming responses overrides
+        // active load counts (in_flight_requests) with 0, silencing the actual load.
+        // We rely purely on DirectScrape for accurate concurrency and usage tracking.
 
         Ok(None)
     }
