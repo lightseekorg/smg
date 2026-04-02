@@ -52,7 +52,7 @@ fn bench_sync_allocation(c: &mut Criterion) {
                     black_box(tokens),
                     black_box("tenant-a"),
                     black_box(mesh_sync_active),
-                )
+                );
             });
         },
     );
@@ -67,7 +67,7 @@ fn bench_sync_allocation(c: &mut Criterion) {
                     black_box(tokens),
                     black_box("tenant-a"),
                     black_box(mesh_sync_active),
-                )
+                );
             });
         },
     );
