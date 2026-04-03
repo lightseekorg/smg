@@ -360,7 +360,7 @@ mod tests {
                 assert_eq!(v[0], "Paris is the capital.");
                 assert_eq!(v[1], "London is in England.");
             }
-            _ => panic!("Expected text_2 to be parsed as array"),
+            StringOrVec::Single(_) => panic!("Expected text_2 to be parsed as array"),
         }
     }
 
@@ -378,7 +378,7 @@ mod tests {
             StringOrVec::Single(s) => {
                 assert_eq!(s, "Paris is the capital.");
             }
-            _ => panic!("Expected text_2 to be parsed as single string"),
+            StringOrVec::Array(_) => panic!("Expected text_2 to be parsed as single string"),
         }
     }
 
