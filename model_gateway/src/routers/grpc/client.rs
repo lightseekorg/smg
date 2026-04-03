@@ -23,7 +23,7 @@ pub struct HealthCheckResponse {
     pub message: String,
 }
 
-/// Polymorphic gRPC client that wraps SGLang, vLLM, or TensorRT-LLM
+/// Polymorphic gRPC client that wraps SGLang, vLLM, TensorRT-LLM, or MLX
 #[derive(Clone)]
 pub enum GrpcClient {
     Sglang(SglangSchedulerClient),

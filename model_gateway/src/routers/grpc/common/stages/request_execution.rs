@@ -113,9 +113,9 @@ impl PipelineStage for RequestExecutionStage {
                                 self.execute_dual_dispatch(req, clients, workers).await
                             }
                             Some(RuntimeType::Trtllm)
+                            | Some(RuntimeType::Mlx)
                             | Some(RuntimeType::External)
-                            | Some(RuntimeType::Unspecified)
-                            | Some(RuntimeType::Mlx) => {
+                            | Some(RuntimeType::Unspecified) => {
                                 error!(
                                     function = "RequestExecutionStage::execute",
                                     runtime_type = ?runtime_type,
