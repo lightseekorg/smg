@@ -607,6 +607,7 @@ pub(crate) fn assemble_multimodal_data(
         GrpcClient::Sglang(_) => MultimodalData::Sglang(assemble_sglang(intermediate)),
         GrpcClient::Vllm(_) => MultimodalData::Vllm(assemble_vllm(intermediate)),
         GrpcClient::Trtllm(_) => MultimodalData::Trtllm(assemble_trtllm(intermediate)),
+        GrpcClient::Mlx(_) => unreachable!("MLX backend does not support multimodal inputs"),
     }
 }
 
