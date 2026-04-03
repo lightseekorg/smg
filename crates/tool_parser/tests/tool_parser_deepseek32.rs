@@ -1,6 +1,7 @@
 //! DeepSeek V3.2 Parser Integration Tests
 mod common;
 
+use common::create_test_tools;
 use tool_parser::{DeepSeek32Parser, ToolParser};
 
 #[tokio::test]
@@ -153,4 +154,116 @@ async fn test_deepseek32_no_tool_calls() {
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(normal_text, input);
     assert!(tools.is_empty());
+}
+
+#[tokio::test]
+async fn test_deepseek32_streaming_single_tool() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeek32Parser::new();
+
+    let chunks = vec![
+        "<｜DSML｜function_calls>\n",
+        "<｜DSML｜invoke name=\"get_weather\">\n",
+        "<｜DSML｜parameter name=\"location\" string=\"true\">",
+        "Beijing",
+        "</｜DSML｜parameter>\n",
+        "<｜DSML｜parameter name=\"units\" string=\"true\">",
+        "celsius",
+        "</｜DSML｜parameter>\n",
+        "</｜DSML｜invoke>\n",
+        "</｜DSML｜function_calls>",
+    ];
+
+    let mut found_name = false;
+    let mut collected_args = String::new();
+
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if let Some(name) = call.name {
+                assert_eq!(name, "get_weather");
+                found_name = true;
+            }
+            if !call.parameters.is_empty() {
+                collected_args.push_str(&call.parameters);
+            }
+        }
+    }
+
+    assert!(found_name, "Should have found tool name during streaming");
+    assert!(!collected_args.is_empty(), "Should have streamed arguments");
+}
+
+#[tokio::test]
+async fn test_deepseek32_streaming_multiple_tools() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeek32Parser::new();
+
+    let chunks = vec![
+        "<｜DSML｜function_calls>\n",
+        "<｜DSML｜invoke name=\"search\">\n",
+        "<｜DSML｜parameter name=\"query\" string=\"true\">rust</｜DSML｜parameter>\n",
+        "</｜DSML｜invoke>\n",
+        "<｜DSML｜invoke name=\"get_weather\">\n",
+        "<｜DSML｜parameter name=\"location\" string=\"true\">Tokyo</｜DSML｜parameter>\n",
+        "</｜DSML｜invoke>\n",
+        "</｜DSML｜function_calls>",
+    ];
+
+    let mut tool_names: Vec<String> = Vec::new();
+
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if let Some(name) = call.name {
+                tool_names.push(name);
+            }
+        }
+    }
+
+    assert_eq!(tool_names, vec!["search", "get_weather"]);
+}
+
+#[tokio::test]
+async fn test_deepseek32_streaming_text_before_tools() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeek32Parser::new();
+
+    let chunks = vec![
+        "Here is ",
+        "the result\n\n",
+        "<｜DSML｜function_calls>\n",
+        "<｜DSML｜invoke name=\"search\">\n",
+        "<｜DSML｜parameter name=\"query\" string=\"true\">test</｜DSML｜parameter>\n",
+        "</｜DSML｜invoke>\n",
+        "</｜DSML｜function_calls>",
+    ];
+
+    let mut normal_text = String::new();
+    let mut found_tool = false;
+
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        normal_text.push_str(&result.normal_text);
+        for call in result.calls {
+            if call.name.is_some() {
+                found_tool = true;
+            }
+        }
+    }
+
+    assert!(normal_text.contains("Here is the result"));
+    assert!(found_tool);
+}
+
+#[tokio::test]
+async fn test_deepseek32_streaming_end_tokens_stripped() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeek32Parser::new();
+
+    let result = parser
+        .parse_incremental("</｜DSML｜function_calls>", &tools)
+        .await
+        .unwrap();
+    assert!(!result.normal_text.contains("</｜DSML｜function_calls>"));
 }

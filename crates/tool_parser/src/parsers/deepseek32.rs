@@ -252,11 +252,191 @@ impl ToolParser for DeepSeek32Parser {
 
     async fn parse_incremental(
         &mut self,
-        _chunk: &str,
-        _tools: &[Tool],
+        chunk: &str,
+        tools: &[Tool],
     ) -> ParserResult<StreamingParseResult> {
-        // Placeholder — implemented in Task 2
-        Ok(StreamingParseResult::default())
+        self.buffer.push_str(chunk);
+        let current_text = self.buffer.clone();
+
+        // Check for DSML markers or partial DSML prefixes
+        let has_dsml = self.has_tool_markers(&current_text)
+            || current_text.contains("<｜DSML｜invoke");
+        let has_partial_prefix = current_text.ends_with('<')
+            || current_text.ends_with("<｜")
+            || current_text.ends_with("</")
+            || current_text.ends_with("</｜");
+
+        if !has_dsml && !has_partial_prefix {
+            let mut normal_text = std::mem::take(&mut self.buffer);
+            for end_token in [
+                "</｜DSML｜function_calls>",
+                "</｜DSML｜invoke>",
+                "</｜DSML｜parameter>",
+                "<｜end▁of▁sentence｜>",
+            ] {
+                normal_text = normal_text.replace(end_token, "");
+            }
+            return Ok(StreamingParseResult {
+                normal_text,
+                calls: vec![],
+            });
+        }
+
+        // If we have partial prefix but no actual DSML content, buffer and wait
+        if !has_dsml && has_partial_prefix {
+            return Ok(StreamingParseResult::default());
+        }
+
+        let tool_indices = helpers::get_tool_indices(tools);
+        let mut all_calls: Vec<ToolCallItem> = Vec::new();
+
+        // Process invoke blocks in a loop (handles multiple complete invokes in buffer)
+        loop {
+            let buf_snapshot = self.buffer.clone();
+            let invoke_match = self.invoke_regex.captures(&buf_snapshot);
+
+            let captures = match invoke_match {
+                Some(c) => c,
+                None => break,
+            };
+
+            let func_name = captures
+                .get(1)
+                .map_or(String::new(), |m| m.as_str().trim().to_string());
+            let invoke_content = captures
+                .get(2)
+                .map_or(String::new(), |m| m.as_str().to_string());
+            let is_complete = captures
+                .get(3)
+                .map_or(false, |m| m.as_str().contains("</｜DSML｜invoke>"));
+            let match_end = captures.get(0).map(|m| m.end());
+            drop(captures);
+
+            // Skip if tool name is not in provided tools list
+            if !func_name.is_empty() && !tool_indices.contains_key(func_name.as_str()) {
+                tracing::debug!("Invalid tool name '{}' - skipping", func_name);
+                if is_complete {
+                    if let Some(end) = match_end {
+                        self.buffer = self.buffer[end..].to_string();
+                    }
+                }
+                break;
+            }
+
+            // Initialize state on first tool
+            if self.current_tool_id == -1 {
+                self.current_tool_id = 0;
+                self.prev_tool_call_arr = Vec::new();
+                self.streamed_args_for_tool = vec![String::new()];
+            }
+
+            helpers::ensure_capacity(
+                self.current_tool_id,
+                &mut self.prev_tool_call_arr,
+                &mut self.streamed_args_for_tool,
+            );
+
+            // Emit tool name if not sent
+            if !self.current_tool_name_sent && !func_name.is_empty() {
+                all_calls.push(ToolCallItem {
+                    tool_index: self.current_tool_id as usize,
+                    name: Some(func_name.to_string()),
+                    parameters: String::new(),
+                });
+                self.current_tool_name_sent = true;
+
+                let tool_id = self.current_tool_id as usize;
+                if self.prev_tool_call_arr.len() <= tool_id {
+                    self.prev_tool_call_arr
+                        .resize_with(tool_id + 1, || Value::Null);
+                }
+                self.prev_tool_call_arr[tool_id] = serde_json::json!({
+                    "name": func_name,
+                    "arguments": {},
+                });
+            }
+
+            // Parse current arguments (partial or complete)
+            let current_args = self.parse_parameters_from_dsml(&invoke_content, !is_complete);
+            let tool_id = self.current_tool_id as usize;
+
+            // Compute diff against what we've already sent
+            let sent_len = self
+                .streamed_args_for_tool
+                .get(tool_id)
+                .map(|s| s.len())
+                .unwrap_or(0);
+
+            let prev_args = if tool_id < self.prev_tool_call_arr.len() {
+                self.prev_tool_call_arr[tool_id]
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            };
+
+            let argument_diff = if is_complete {
+                if sent_len < current_args.len() {
+                    Some(current_args[sent_len..].to_string())
+                } else {
+                    Some(String::new())
+                }
+            } else if let Some(prev) = &prev_args {
+                if current_args != *prev {
+                    let prefix = helpers::find_common_prefix(prev, &current_args);
+                    if prefix.len() > sent_len {
+                        Some(prefix[sent_len..].to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(diff) = argument_diff {
+                if !diff.is_empty() {
+                    if tool_id < self.streamed_args_for_tool.len() {
+                        self.streamed_args_for_tool[tool_id].push_str(&diff);
+                    }
+                    all_calls.push(ToolCallItem {
+                        tool_index: tool_id,
+                        name: None,
+                        parameters: diff,
+                    });
+                }
+            }
+
+            // Update prev state
+            if tool_id < self.prev_tool_call_arr.len() {
+                self.prev_tool_call_arr[tool_id] = serde_json::json!({
+                    "name": func_name,
+                    "arguments": current_args,
+                });
+            }
+
+            // If invoke is complete, advance to next tool
+            if is_complete {
+                if let Some(end) = match_end {
+                    self.buffer = self.buffer[end..].to_string();
+                } else {
+                    self.buffer.clear();
+                }
+                self.current_tool_id += 1;
+                self.current_tool_name_sent = false;
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        Ok(StreamingParseResult {
+            normal_text: String::new(),
+            calls: all_calls,
+        })
     }
 
     fn has_tool_markers(&self, text: &str) -> bool {
