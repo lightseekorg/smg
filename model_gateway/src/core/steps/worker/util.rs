@@ -88,16 +88,17 @@ pub(crate) async fn try_grpc_reachable(url: &str, timeout_secs: u64) -> Result<(
         format!("grpc://{}", strip_protocol(url))
     };
 
-    let (sglang, vllm, trtllm) = tokio::join!(
+    let (sglang, vllm, trtllm, mlx) = tokio::join!(
         do_grpc_health_check(&grpc_url, timeout_secs, "sglang"),
         do_grpc_health_check(&grpc_url, timeout_secs, "vllm"),
         do_grpc_health_check(&grpc_url, timeout_secs, "trtllm"),
+        do_grpc_health_check(&grpc_url, timeout_secs, "mlx"),
     );
 
-    match (sglang, vllm, trtllm) {
-        (Ok(()), _, _) | (_, Ok(()), _) | (_, _, Ok(())) => Ok(()),
-        (Err(e1), Err(e2), Err(e3)) => Err(format!(
-            "gRPC not reachable (tried sglang, vllm, trtllm): sglang={e1}, vllm={e2}, trtllm={e3}",
+    match (sglang, vllm, trtllm, mlx) {
+        (Ok(()), _, _, _) | (_, Ok(()), _, _) | (_, _, Ok(()), _) | (_, _, _, Ok(())) => Ok(()),
+        (Err(e1), Err(e2), Err(e3), Err(e4)) => Err(format!(
+            "gRPC not reachable (tried sglang, vllm, trtllm, mlx): sglang={e1}, vllm={e2}, trtllm={e3}, mlx={e4}",
         )),
     }
 }

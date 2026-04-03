@@ -94,6 +94,16 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
                     "TensorRT-LLM embedding is not yet supported via gRPC",
                 ));
             }
+            GrpcClient::Mlx(_) => {
+                error!(
+                    function = "EmbeddingRequestBuildingStage::execute",
+                    "MLX embedding not supported"
+                );
+                return Err(error::not_implemented(
+                    "unsupported_backend",
+                    "MLX embedding is not supported via gRPC",
+                ));
+            }
         };
 
         ctx.state.proto_request = Some(ProtoRequest::Embed(proto_req));
