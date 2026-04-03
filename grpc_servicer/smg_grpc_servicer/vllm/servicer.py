@@ -272,7 +272,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         logger.info("Score request %s", request_id)
 
         try:
-            pooling_params = PoolingParams(task="score")
+            # vLLM deprecated the "score" task (PR #37537); cross-encoder
+            # rerankers are now handled under "classify".
+            pooling_params = PoolingParams(task="classify")
 
             results = []
             total_prompt_tokens = 0
