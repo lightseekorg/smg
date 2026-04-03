@@ -50,10 +50,9 @@ pub struct DeepSeek32Parser {
 
 /// DSML token fragments for stripping partial closing tags during streaming.
 /// Applied in reverse order using character-level right-trimming, following
-/// SGLang's approach. For parameter end: `</｜DSML｜parameter>` is split as
-/// `["</", "｜DSML｜", "parameter>"]`. For invoke end: `["</", "｜DSML｜", "invoke>"]`.
-const DSML_PARAM_END_FRAGMENTS: &[&str] = &["</", "｜DSML｜", "parameter>"];
-const DSML_INVOKE_END_FRAGMENTS: &[&str] = &["</", "｜DSML｜", "invoke>"];
+/// SGLang's exact fragment definitions.
+const DSML_PARAM_END_FRAGMENTS: &[&str] = &["</", "｜DSML｜", "parameter"];
+const DSML_INVOKE_END_FRAGMENTS: &[&str] = &["</", "｜DSML｜", "inv", "oke"];
 
 /// Strip trailing DSML fragment characters from a string.
 /// Iterates fragments in reverse, stripping any trailing characters
@@ -148,15 +147,24 @@ impl DeepSeek32Parser {
         }
 
         // Partial parameter matching for streaming
+        // Following SGLang: strip DSML fragments from remaining content BEFORE
+        // running the partial regex, so the regex captures a clean value.
         if allow_partial {
-            if let Some(cap) = self.partial_parameter_regex.captures(invoke_content) {
+            // Find where the last complete parameter match ended
+            let last_match_end = self
+                .parameter_complete_regex
+                .find_iter(invoke_content)
+                .last()
+                .map(|m| m.end())
+                .unwrap_or(0);
+
+            let remaining = &invoke_content[last_match_end..];
+            let cleaned = strip_dsml_trailing(remaining, DSML_PARAM_END_FRAGMENTS);
+
+            if let Some(cap) = self.partial_parameter_regex.captures(&cleaned) {
                 let name = cap.get(1).map_or("", |m| m.as_str());
                 let is_string = cap.get(2).map_or("true", |m| m.as_str());
-                let raw_value = cap.get(3).map_or("", |m| m.as_str()).trim();
-
-                // Strip trailing DSML fragments from partial value
-                let value = strip_dsml_trailing(raw_value, DSML_PARAM_END_FRAGMENTS);
-                let value = value.trim();
+                let value = cap.get(3).map_or("", |m| m.as_str()).trim();
 
                 // Only add if we have actual content and this param isn't already complete
                 if !value.is_empty() && !params.contains_key(name) {
