@@ -102,6 +102,11 @@ pub trait Tokenizer: Encoder + Decoder {
         ThinkingToggle::None
     }
 
+    /// Whether the template injects `<think>` in the generation prompt.
+    fn think_in_prefill(&self) -> bool {
+        false
+    }
+
     /// Set or override the chat template.
     ///
     /// Returns an error if the template fails to parse or the tokenizer

@@ -160,6 +160,10 @@ impl ReasoningParser for BaseReasoningParser {
         self.in_reasoning = true;
     }
 
+    fn mark_think_start_stripped(&mut self) {
+        self.stripped_think_start = true;
+    }
+
     fn model_type(&self) -> &str {
         &self.model_type
     }

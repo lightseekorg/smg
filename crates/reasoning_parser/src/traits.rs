@@ -81,6 +81,12 @@ pub trait ReasoningParser: Send + Sync {
     /// so the parser should treat output as reasoning from the start without
     /// waiting for a `<think>` tag in the generated output.
     fn mark_reasoning_started(&mut self);
+
+    /// Mark that the `<think>` start token was already consumed (in the prefill).
+    ///
+    /// Prevents the streaming parser from trying to find and strip `<think>`
+    /// from the model output when the template already included it.
+    fn mark_think_start_stripped(&mut self);
 }
 
 /// Error types for reasoning parsing operations.

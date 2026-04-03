@@ -516,6 +516,10 @@ impl TokenizerTrait for TiktokenTokenizer {
         self.chat_template.thinking_toggle()
     }
 
+    fn think_in_prefill(&self) -> bool {
+        self.chat_template.think_in_prefill()
+    }
+
     fn set_chat_template(&mut self, template: String) -> Result<()> {
         self.chat_template.set(template)
     }

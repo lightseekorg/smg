@@ -65,6 +65,10 @@ impl ReasoningParser for DeepSeekR1Parser {
     fn mark_reasoning_started(&mut self) {
         self.base.mark_reasoning_started();
     }
+
+    fn mark_think_start_stripped(&mut self) {
+        self.base.mark_think_start_stripped();
+    }
 }
 
 #[cfg(test)]

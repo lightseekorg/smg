@@ -275,6 +275,10 @@ impl Tokenizer for CachedTokenizer {
     fn thinking_toggle(&self) -> ThinkingToggle {
         self.inner.thinking_toggle()
     }
+
+    fn think_in_prefill(&self) -> bool {
+        self.inner.think_in_prefill()
+    }
 }
 
 #[cfg(test)]

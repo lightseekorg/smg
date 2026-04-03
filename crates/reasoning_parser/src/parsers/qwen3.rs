@@ -65,6 +65,10 @@ impl ReasoningParser for Qwen3Parser {
     fn mark_reasoning_started(&mut self) {
         self.base.mark_reasoning_started();
     }
+
+    fn mark_think_start_stripped(&mut self) {
+        self.base.mark_think_start_stripped();
+    }
 }
 
 /// QwenThinking parser - variant that assumes reasoning from start.
@@ -123,6 +127,10 @@ impl ReasoningParser for QwenThinkingParser {
 
     fn mark_reasoning_started(&mut self) {
         self.base.mark_reasoning_started();
+    }
+
+    fn mark_think_start_stripped(&mut self) {
+        self.base.mark_think_start_stripped();
     }
 }
 
