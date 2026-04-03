@@ -234,11 +234,6 @@ impl<'a> Detector<'a> {
     }
 
     fn walk_stmt(&mut self, stmt: &Stmt) {
-        // Early exit if we've already detected an OpenAI pattern
-        if self.flags.any() {
-            return;
-        }
-
         match stmt {
             Stmt::Template(t) => {
                 for ch in &t.children {
