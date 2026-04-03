@@ -10,7 +10,7 @@ use tracing::debug;
 use crate::{
     chat_template::{
         load_chat_template_from_file, ChatTemplateContentFormat, ChatTemplateParams,
-        ChatTemplateState, ThinkingToggle,
+        ChatTemplateState, ThinkingKeyName, ThinkingToggle,
     },
     traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait},
 };
@@ -377,6 +377,9 @@ impl TokenizerTrait for HuggingFaceTokenizer {
         self.chat_template.thinking_toggle()
     }
 
+    fn thinking_key_name(&self) -> Option<ThinkingKeyName> {
+        self.chat_template.thinking_key_name()
+    }
     fn think_in_prefill(&self) -> bool {
         self.chat_template.think_in_prefill()
     }

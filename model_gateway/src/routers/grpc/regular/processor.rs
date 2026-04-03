@@ -110,7 +110,10 @@ impl ResponseProcessor {
             // If the template injected `<think>` in the prefill (thinking toggle
             // is supported and effectively ON), start in reasoning mode.
             if utils::should_mark_reasoning_started(
-                utils::extract_thinking_from_kwargs(original_request.chat_template_kwargs.as_ref()),
+                utils::extract_thinking_from_kwargs(
+                    original_request.chat_template_kwargs.as_ref(),
+                    tokenizer.as_ref(),
+                ),
                 tokenizer.as_ref(),
             ) {
                 parser.mark_reasoning_started();

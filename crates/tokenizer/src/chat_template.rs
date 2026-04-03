@@ -39,6 +39,15 @@ impl std::fmt::Display for ChatTemplateContentFormat {
 }
 
 /// Result of detecting the thinking/reasoning toggle in a chat template.
+/// The variable name the template uses for the thinking toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingKeyName {
+    /// Template uses `enable_thinking` (Qwen3, GLM, Nemotron)
+    EnableThinking,
+    /// Template uses `thinking` (DeepSeek V3.1, Kimi-K2.5)
+    Thinking,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThinkingToggle {
     /// Template has no thinking toggle. The model either always reasons
@@ -58,7 +67,7 @@ pub enum ThinkingToggle {
 
 /// Detect whether the chat template supports a thinking/reasoning toggle
 /// and what its default value is.
-pub fn detect_thinking_toggle(template: &str) -> ThinkingToggle {
+pub fn detect_thinking_toggle(template: &str) -> (ThinkingToggle, Option<ThinkingKeyName>) {
     let has_enable_thinking = template.contains("enable_thinking");
     // Trailing space prevents matching "thinking_mode", "thinking_budget", etc.
     let has_thinking_var = template.contains("if thinking ")
@@ -67,25 +76,30 @@ pub fn detect_thinking_toggle(template: &str) -> ThinkingToggle {
         || template.contains("set thinking ");
 
     if !has_enable_thinking && !has_thinking_var {
-        return ThinkingToggle::None;
+        return (ThinkingToggle::None, None);
     }
+
+    // Both false already returned None above
+    let key_name = if has_enable_thinking {
+        ThinkingKeyName::EnableThinking
+    } else {
+        // has_thinking_var must be true here
+        ThinkingKeyName::Thinking
+    };
 
     // Check if the template explicitly defaults thinking to false/off.
     // DeepSeek V3.1 pattern: {% if not thinking is defined %}{% set thinking = false %}
     if template.contains("set thinking = false") || template.contains("set thinking=false") {
-        return ThinkingToggle::DefaultOff;
+        return (ThinkingToggle::DefaultOff, Some(key_name));
     }
     if template.contains("set enable_thinking = false")
         || template.contains("set enable_thinking=false")
     {
-        return ThinkingToggle::DefaultOff;
+        return (ThinkingToggle::DefaultOff, Some(key_name));
     }
 
-    // All other models default to thinking ON:
-    // - "enable_thinking is defined and enable_thinking is false" → only disable when explicit
-    // - "set enable_thinking = enable_thinking if ... else True" → explicit default True
-    // - "enable_thinking is defined and not enable_thinking" → only disable when explicit
-    ThinkingToggle::DefaultOn
+    // All other models default to thinking ON
+    (ThinkingToggle::DefaultOn, Some(key_name))
 }
 
 /// Detect the content format expected by a Jinja2 chat template
@@ -413,10 +427,22 @@ fn detect_format_with_ast(template: &str) -> ChatTemplateContentFormat {
 }
 
 /// Single-pass detection of content format, think-in-prefill, and thinking toggle.
-fn detect_all(template: &str) -> (ChatTemplateContentFormat, bool, ThinkingToggle) {
-    let thinking_toggle = detect_thinking_toggle(template);
+fn detect_all(
+    template: &str,
+) -> (
+    ChatTemplateContentFormat,
+    bool,
+    ThinkingToggle,
+    Option<ThinkingKeyName>,
+) {
+    let (thinking_toggle, thinking_key_name) = detect_thinking_toggle(template);
     let (content_format, think_in_prefill) = detect_all_with_ast(template);
-    (content_format, think_in_prefill, thinking_toggle)
+    (
+        content_format,
+        think_in_prefill,
+        thinking_toggle,
+        thinking_key_name,
+    )
 }
 
 /// AST detection of content format and think-in-prefill.
@@ -739,6 +765,8 @@ pub struct ChatTemplateState {
     content_format: ChatTemplateContentFormat,
     /// Thinking toggle support detected from the template.
     thinking_toggle: ThinkingToggle,
+    /// The variable name used for the thinking toggle (if any).
+    thinking_key_name: Option<ThinkingKeyName>,
     /// Whether the template injects `<think>` in the generation prompt.
     think_in_prefill: bool,
 }
@@ -756,13 +784,14 @@ impl std::fmt::Debug for ChatTemplateState {
 
 impl ChatTemplateState {
     pub fn new(template: Option<String>) -> Result<Self> {
-        let (content_format, think_in_prefill, thinking_toggle) =
+        let (content_format, think_in_prefill, thinking_toggle, thinking_key_name) =
             template.as_ref().map(|t| detect_all(t)).unwrap_or_default();
         let env = template.map(build_environment).transpose()?;
         Ok(Self {
             env,
             content_format,
             thinking_toggle,
+            thinking_key_name,
             think_in_prefill,
         })
     }
@@ -776,6 +805,7 @@ impl ChatTemplateState {
             env: None,
             content_format: ChatTemplateContentFormat::default(),
             thinking_toggle: ThinkingToggle::None,
+            thinking_key_name: None,
             think_in_prefill: false,
         }
     }
@@ -797,10 +827,12 @@ impl ChatTemplateState {
     }
 
     pub fn set(&mut self, template: String) -> Result<()> {
-        let (content_format, think_in_prefill, thinking_toggle) = detect_all(&template);
+        let (content_format, think_in_prefill, thinking_toggle, thinking_key_name) =
+            detect_all(&template);
         let env = build_environment(template)?;
         self.content_format = content_format;
         self.thinking_toggle = thinking_toggle;
+        self.thinking_key_name = thinking_key_name;
         self.think_in_prefill = think_in_prefill;
         self.env = Some(env);
         Ok(())
@@ -812,6 +844,10 @@ impl ChatTemplateState {
 
     pub fn thinking_toggle(&self) -> ThinkingToggle {
         self.thinking_toggle
+    }
+
+    pub fn thinking_key_name(&self) -> Option<ThinkingKeyName> {
+        self.thinking_key_name
     }
 
     pub fn think_in_prefill(&self) -> bool {
