@@ -43,7 +43,7 @@ impl std::fmt::Display for ChatTemplateContentFormat {
 pub enum ThinkingToggle {
     /// Template has no thinking toggle. The model either always reasons
     /// (e.g. DeepSeek R1) or never does — controlled by the parser's
-    /// `initial_in_reasoning` config.
+    /// `always_in_reasoning` config.
     None,
     /// Template supports a thinking toggle that defaults to ON.
     /// If the user doesn't pass anything, thinking is enabled.
