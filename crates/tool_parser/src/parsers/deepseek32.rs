@@ -60,7 +60,9 @@ const DSML_INVOKE_END_FRAGMENTS: &[&str] = &["</", "｜DSML｜", "inv", "oke"];
 fn strip_dsml_trailing(s: &str, fragments: &[&str]) -> String {
     let mut result = s.to_string();
     for fragment in fragments.iter().rev() {
-        result = result.trim_end_matches(|c: char| fragment.contains(c)).to_string();
+        result = result
+            .trim_end_matches(|c: char| fragment.contains(c))
+            .to_string();
     }
     result
 }
