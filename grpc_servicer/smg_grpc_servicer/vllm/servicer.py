@@ -15,18 +15,23 @@ from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from transformers import BatchFeature
 from vllm import PoolingParams, SamplingParams, TokensPrompt
 from vllm.engine.protocol import EngineClient
-from vllm.inputs import token_inputs
+try:
+    from vllm.inputs import token_inputs
+except ImportError:
+    from vllm.inputs import tokens_input as token_inputs
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     PlaceholderRange,
-    mm_inputs,
 )
-from vllm.multimodal.inputs import (
-    MultiModalInputs as VllmMultiModalInputs,
-)
+try:
+    from vllm.multimodal.inputs import mm_inputs
+    from vllm.multimodal.inputs import MultiModalInputs as VllmMultiModalInputs
+except ImportError:
+    mm_inputs = None
+    VllmMultiModalInputs = None
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 
