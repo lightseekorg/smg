@@ -235,12 +235,18 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
                             })?
                     }
-                    RequestType::Responses(_) => {
-                        return Err(error::bad_request(
-                            "mlx_responses_not_supported",
-                            "Responses API is not supported with MLX backend".to_string(),
-                        ));
-                    }
+                    RequestType::Responses(request) => mlx_client
+                        .build_generate_request_from_responses(
+                            request_id,
+                            request.as_ref(),
+                            placeholder_processed_text,
+                            prep.token_ids.clone(),
+                            prep.tool_constraints.clone(),
+                        )
+                        .map_err(|e| {
+                            error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build MLX generate request from responses");
+                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
+                        })?,
                     RequestType::Embedding(_) => {
                         return Err(error::bad_request(
                             "harmony_embedding_not_supported",
