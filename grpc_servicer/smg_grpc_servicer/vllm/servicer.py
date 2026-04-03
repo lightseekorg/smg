@@ -15,9 +15,8 @@ from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from transformers import BatchFeature
 from vllm import PoolingParams, SamplingParams, TokensPrompt
 from vllm.engine.protocol import EngineClient
-from vllm.inputs import token_inputs
 from vllm.inputs.engine import MultiModalInput as VllmMultiModalInput
-from vllm.inputs.engine import mm_input
+from vllm.inputs.engine import mm_input, tokens_input
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.multimodal.inputs import (
@@ -208,7 +207,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if not request.HasField("tokenized"):
                 raise ValueError("EmbedRequest requires tokenized input")
 
-            prompt = token_inputs(
+            prompt = tokens_input(
                 prompt_token_ids=list(request.tokenized.input_ids),
                 prompt=request.tokenized.original_text or None,
             )
