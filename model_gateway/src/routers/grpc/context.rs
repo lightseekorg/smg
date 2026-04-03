@@ -520,6 +520,7 @@ impl RequestContext {
             RequestType::Messages(req) => req.stream.unwrap_or(false),
             RequestType::Embedding(_) => false, // Embeddings are never streaming
             RequestType::Classify(_) => false,  // Classification is never streaming
+            RequestType::Score(_) => false,     // Score is never streaming
         }
     }
 
