@@ -27,7 +27,7 @@ pub use l1::{L1Cache, L1CacheStats};
 use rayon::prelude::*;
 
 use crate::{
-    chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
+    chat_template::{ChatTemplateContentFormat, ChatTemplateParams, ToolCallArgumentsFormat},
     traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer},
 };
 
@@ -270,6 +270,10 @@ impl Tokenizer for CachedTokenizer {
 
     fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
         self.inner.chat_template_content_format()
+    }
+
+    fn tool_call_arguments_format(&self) -> ToolCallArgumentsFormat {
+        self.inner.tool_call_arguments_format()
     }
 }
 

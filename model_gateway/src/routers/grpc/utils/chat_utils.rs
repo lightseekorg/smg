@@ -5,7 +5,7 @@ use std::{collections::HashMap, io, sync::Arc};
 use axum::response::Response;
 use bytes::Bytes;
 use llm_tokenizer::{
-    chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
+    chat_template::{ChatTemplateContentFormat, ChatTemplateParams, ToolCallArgumentsFormat},
     stop::StopSequenceDecoderBuilder,
     traits::Tokenizer,
     StopSequenceDecoder,
@@ -388,8 +388,11 @@ pub fn process_chat_messages(
         let mut transformed_messages =
             process_content_format(&request.messages, content_format, image_placeholder)?;
 
-        // Process tool call arguments in assistant messages
-        process_tool_call_arguments(&mut transformed_messages)?;
+        // Process tool call arguments in assistant messages (string→dict)
+        // only when the chat template expects dict arguments (uses |tojson etc.)
+        if tokenizer.tool_call_arguments_format() == ToolCallArgumentsFormat::Dict {
+            process_tool_call_arguments(&mut transformed_messages)?;
+        }
 
         // Convert tools to JSON values for template processing
         let tools_json: Option<Vec<Value>> = request

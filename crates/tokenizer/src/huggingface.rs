@@ -10,7 +10,7 @@ use tracing::debug;
 use crate::{
     chat_template::{
         load_chat_template_from_file, ChatTemplateContentFormat, ChatTemplateParams,
-        ChatTemplateState,
+        ChatTemplateState, ToolCallArgumentsFormat,
     },
     traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait},
 };
@@ -371,6 +371,10 @@ impl TokenizerTrait for HuggingFaceTokenizer {
 
     fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
         self.chat_template.content_format()
+    }
+
+    fn tool_call_arguments_format(&self) -> ToolCallArgumentsFormat {
+        self.chat_template.arguments_format()
     }
 
     fn set_chat_template(&mut self, template: String) -> Result<()> {

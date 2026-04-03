@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use llm_tokenizer::{
-    chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
+    chat_template::{ChatTemplateContentFormat, ChatTemplateParams, ToolCallArgumentsFormat},
     traits::Tokenizer,
 };
 use openai_protocol::{
@@ -57,8 +57,11 @@ pub fn process_messages(
         transformed_messages.insert(0, json!({"role": "system", "content": system_text}));
     }
 
-    // Step 3: Process tool call arguments in assistant messages (reuse from chat_utils)
-    chat_utils::process_tool_call_arguments(&mut transformed_messages)?;
+    // Step 3: Process tool call arguments in assistant messages (string→dict)
+    // only when the chat template expects dict arguments (uses |tojson etc.)
+    if tokenizer.tool_call_arguments_format() == ToolCallArgumentsFormat::Dict {
+        chat_utils::process_tool_call_arguments(&mut transformed_messages)?;
+    }
 
     // Step 4: Serialize tools to JSON values for template processing
     let tools_json: Option<Vec<Value>> = chat_tools
