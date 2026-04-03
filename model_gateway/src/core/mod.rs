@@ -24,6 +24,7 @@ pub mod steps;
 pub mod token_bucket;
 pub mod worker;
 pub mod worker_builder;
+pub mod worker_event;
 pub mod worker_manager;
 pub mod worker_registry;
 pub mod worker_service;
