@@ -48,35 +48,23 @@ pub struct DeepSeek32Parser {
     streamed_args_for_tool: Vec<String>,
 }
 
-/// DSML fragment suffixes to strip from partial content during streaming.
-/// When a DSML closing tag arrives across chunks, the buffer may end with
-/// partial fragments like `</｜DSML｜para...` or `</｜DSML｜inv...`.
-const DSML_TRAILING_FRAGMENTS: &[&str] = &[
-    "</｜DSML｜parameter>",
-    "</｜DSML｜parameter",
-    "</｜DSML｜paramete",
-    "</｜DSML｜paramet",
-    "</｜DSML｜parame",
-    "</｜DSML｜param",
-    "</｜DSML｜para",
-    "</｜DSML｜par",
-    "</｜DSML｜pa",
-    "</｜DSML｜p",
-    "</｜DSML｜invoke>",
-    "</｜DSML｜invoke",
-    "</｜DSML｜invok",
-    "</｜DSML｜invo",
-    "</｜DSML｜inv",
-    "</｜DSML｜in",
-    "</｜DSML｜i",
-    "</｜DSML｜",
-    "</｜DSML",
-    "</｜DSM",
-    "</｜DS",
-    "</｜D",
-    "</｜",
-    "</",
-];
+/// DSML token fragments for stripping partial closing tags during streaming.
+/// Applied in reverse order using character-level right-trimming, following
+/// SGLang's approach. For parameter end: `</｜DSML｜parameter>` is split as
+/// `["</", "｜DSML｜", "parameter>"]`. For invoke end: `["</", "｜DSML｜", "invoke>"]`.
+const DSML_PARAM_END_FRAGMENTS: &[&str] = &["</", "｜DSML｜", "parameter>"];
+const DSML_INVOKE_END_FRAGMENTS: &[&str] = &["</", "｜DSML｜", "invoke>"];
+
+/// Strip trailing DSML fragment characters from a string.
+/// Iterates fragments in reverse, stripping any trailing characters
+/// that appear in each fragment (mimics Python's `str.rstrip`).
+fn strip_dsml_trailing(s: &str, fragments: &[&str]) -> String {
+    let mut result = s.to_string();
+    for fragment in fragments.iter().rev() {
+        result = result.trim_end_matches(|c: char| fragment.contains(c)).to_string();
+    }
+    result
+}
 
 impl DeepSeek32Parser {
     /// Create a new DeepSeek V3.2 parser
@@ -135,14 +123,7 @@ impl DeepSeek32Parser {
         // Direct JSON path
         if trimmed.starts_with('{') {
             if allow_partial {
-                let mut result = trimmed.to_string();
-                for fragment in DSML_TRAILING_FRAGMENTS {
-                    if let Some(stripped) = result.strip_suffix(fragment) {
-                        result = stripped.to_string();
-                        break;
-                    }
-                }
-                return result;
+                return strip_dsml_trailing(trimmed, DSML_INVOKE_END_FRAGMENTS);
             } else if trimmed.ends_with('}') {
                 return trimmed.to_string();
             }
@@ -174,13 +155,7 @@ impl DeepSeek32Parser {
                 let raw_value = cap.get(3).map_or("", |m| m.as_str()).trim();
 
                 // Strip trailing DSML fragments from partial value
-                let mut value = raw_value.to_string();
-                for fragment in DSML_TRAILING_FRAGMENTS {
-                    if let Some(stripped) = value.strip_suffix(fragment) {
-                        value = stripped.to_string();
-                        break;
-                    }
-                }
+                let value = strip_dsml_trailing(raw_value, DSML_PARAM_END_FRAGMENTS);
                 let value = value.trim();
 
                 // Only add if we have actual content and this param isn't already complete
