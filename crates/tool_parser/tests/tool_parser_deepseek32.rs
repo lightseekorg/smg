@@ -130,7 +130,7 @@ async fn test_deepseek32_complete_malformed_skips() {
     );
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
-    assert!(tools.len() >= 1);
+    assert!(!tools.is_empty());
     assert!(tools.iter().any(|t| t.function.name == "translate"));
 }
 
@@ -266,4 +266,53 @@ async fn test_deepseek32_streaming_end_tokens_stripped() {
         .await
         .unwrap();
     assert!(!result.normal_text.contains("</｜DSML｜function_calls>"));
+}
+
+use tool_parser::ParserFactory;
+
+#[tokio::test]
+async fn test_deepseek32_factory_registration() {
+    let factory = ParserFactory::new();
+
+    assert!(factory.has_parser("deepseek32"));
+
+    // V3.2 DSML models resolve to deepseek32 parser
+    let dsml_input = concat!(
+        "<｜DSML｜function_calls>\n",
+        "<｜DSML｜invoke name=\"search\">\n",
+        "<｜DSML｜parameter name=\"query\" string=\"true\">test</｜DSML｜parameter>\n",
+        "</｜DSML｜invoke>\n",
+        "</｜DSML｜function_calls>",
+    );
+    for model in ["deepseek-v3.2", "deepseek-ai/DeepSeek-V3.2"] {
+        let parser = factory
+            .registry()
+            .create_for_model(model)
+            .expect("parser should exist");
+        let (_text, calls) = parser.parse_complete(dsml_input).await.unwrap();
+        assert_eq!(calls.len(), 1, "model {model} should parse DSML format");
+        assert_eq!(calls[0].function.name, "search");
+    }
+
+    // V3.2-Exp resolves to deepseek31 parser (V3.1 format)
+    let v31_input = concat!(
+        "<｜tool▁calls▁begin｜>",
+        "<｜tool▁call▁begin｜>search<｜tool▁sep｜>",
+        r#"{"query": "test"}"#,
+        "<｜tool▁call▁end｜>",
+        "<｜tool▁calls▁end｜>",
+    );
+    for model in ["deepseek-v3.2-exp", "deepseek-ai/DeepSeek-V3.2-Exp"] {
+        let parser = factory
+            .registry()
+            .create_for_model(model)
+            .expect("parser should exist");
+        let (_text, calls) = parser.parse_complete(v31_input).await.unwrap();
+        assert_eq!(calls.len(), 1, "model {model} should parse V3.1 format");
+        assert_eq!(calls[0].function.name, "search");
+    }
+
+    // Existing V3 and V3.1 mappings still work
+    assert!(factory.registry().has_parser_for_model("deepseek-v3"));
+    assert!(factory.registry().has_parser_for_model("deepseek-v3.1"));
 }

@@ -259,8 +259,8 @@ impl ToolParser for DeepSeek32Parser {
         let current_text = self.buffer.clone();
 
         // Check for DSML markers or partial DSML prefixes
-        let has_dsml = self.has_tool_markers(&current_text)
-            || current_text.contains("<｜DSML｜invoke");
+        let has_dsml =
+            self.has_tool_markers(&current_text) || current_text.contains("<｜DSML｜invoke");
         let has_partial_prefix = current_text.ends_with('<')
             || current_text.ends_with("<｜")
             || current_text.ends_with("</")
@@ -308,7 +308,7 @@ impl ToolParser for DeepSeek32Parser {
                 .map_or(String::new(), |m| m.as_str().to_string());
             let is_complete = captures
                 .get(3)
-                .map_or(false, |m| m.as_str().contains("</｜DSML｜invoke>"));
+                .is_some_and(|m| m.as_str().contains("</｜DSML｜invoke>"));
             let match_end = captures.get(0).map(|m| m.end());
             drop(captures);
 
@@ -383,15 +383,15 @@ impl ToolParser for DeepSeek32Parser {
                     Some(String::new())
                 }
             } else if let Some(prev) = &prev_args {
-                if current_args != *prev {
+                if current_args == *prev {
+                    None
+                } else {
                     let prefix = helpers::find_common_prefix(prev, &current_args);
                     if prefix.len() > sent_len {
                         Some(prefix[sent_len..].to_string())
                     } else {
                         None
                     }
-                } else {
-                    None
                 }
             } else {
                 None
