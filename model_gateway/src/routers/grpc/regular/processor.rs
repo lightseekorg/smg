@@ -104,6 +104,8 @@ impl ResponseProcessor {
             );
 
             let mut parser = pooled_parser.lock().await;
+            // Reset pooled parser to clean state before each request
+            parser.reset();
 
             // If the template injected `<think>` in the prefill (thinking toggle
             // is supported and effectively ON), start in reasoning mode.
@@ -578,6 +580,8 @@ impl ResponseProcessor {
                 &messages_request.model,
             );
             let mut parser = pooled_parser.lock().await;
+            // Reset pooled parser to clean state before each request
+            parser.reset();
 
             // If the template injected `<think>` in the prefill, start in reasoning mode.
             {
