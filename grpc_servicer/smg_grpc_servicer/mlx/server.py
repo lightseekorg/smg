@@ -118,8 +118,8 @@ async def serve_grpc(args):
     await server.start()
     logger.info("gRPC server listening on %s", listen_addr)
 
-    servicer.start_generation_loop()
-
+    # Warmup BEFORE starting the generation loop (batch_generator.next() is
+    # not thread-safe — only one caller at a time)
     logger.info("Running warmup generation...")
     try:
         warmup_ids = [1]
@@ -134,6 +134,7 @@ async def serve_grpc(args):
     except Exception:
         logger.warning("Warmup failed (non-fatal)", exc_info=True)
 
+    servicer.start_generation_loop()
     health_servicer.set_serving()
     logger.info("Server ready — model: %s", args.model)
 
