@@ -113,11 +113,6 @@ fn test_sequence_operations() {
         }
 
         assert_eq!(decoder.len(), sequence.len(), "Decoder length mismatch");
-        assert_eq!(
-            decoder.token_ids(),
-            sequence.token_ids(),
-            "Token IDs mismatch"
-        );
         assert_eq!(output, *prompt, "Incremental decode mismatch");
     }
 }

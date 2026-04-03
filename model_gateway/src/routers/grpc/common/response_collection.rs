@@ -4,7 +4,7 @@
 //! Both regular and harmony processors use these functions to avoid duplication.
 
 use axum::response::Response;
-use tracing::{error as trace_error, warn};
+use tracing::error as trace_error;
 
 use crate::routers::{
     error,
@@ -114,16 +114,6 @@ async fn collect_stream_responses(
                 match gen_response.into_response() {
                     ProtoResponseVariant::Complete(complete) => {
                         all_responses.push(complete);
-                    }
-                    ProtoResponseVariant::Error(err) => {
-                        // In-band error (legacy): backends should use context.abort() instead.
-                        // Kept for backward compatibility during the transition.
-                        warn!(function = "collect_stream_responses", worker = %worker_name, error = %err.message(), "Worker sent in-band error (legacy path, backend should use context.abort)");
-                        // Don't mark as completed - let Drop send abort for error cases
-                        return Err(error::internal_error(
-                            "worker_generation_failed",
-                            format!("{} generation failed: {}", worker_name, err.message()),
-                        ));
                     }
                     ProtoResponseVariant::Chunk(_chunk) => {
                         // Streaming chunk - no action needed

@@ -26,7 +26,7 @@ concurrency:
 env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
-  GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.3
+  GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.4
 
 jobs:
   pre-commit:
@@ -329,19 +329,34 @@ jobs:
       - name: Run benchmarks
         env:
           ROUTER_LOCAL_MODEL_PATH: /models
+          E2E_LOG_DIR: benchmark-logs
         run: |
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          mkdir -p benchmark-logs
+          bash scripts/ci_killall_sglang.sh "nuke_gpus"
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 pytest e2e_test/benchmarks \
             --ignore=e2e_test/benchmarks/test_go_bindings_perf.py \
             --ignore=e2e_test/benchmarks/test_nightly_perf.py \
             -s -vv
 
       - name: Upload benchmark results
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: genai-bench-results-all-policies
           path: benchmark_**/
+
+      - name: Worker failure diagnostics
+        if: failure() || cancelled()
+        run: bash scripts/ci_dump_worker_logs.sh benchmark-logs benchmark-worker-logs
+
+      - name: Upload worker logs
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-worker-logs
+          path: benchmark-logs/
+          if-no-files-found: ignore
+          retention-days: 7
 
   detect-changes:
     runs-on: ubuntu-latest
@@ -422,27 +437,21 @@ jobs:
         include:
           - engine: sglang
             timeout: 30
-            runner: 1-gpu
-            test_filter: ""
           - engine: vllm
             timeout: 20
-            runner: 1-gpu
-            test_filter: ""
           - engine: trtllm
             timeout: 90
-            runner: 1-gpu-h100
-            test_filter: ""
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
       gpu_tier: "1"
-      runner: ${{ matrix.runner }}
+      runner: 1-gpu-h100
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/chat_completions
-      test_filter: ${{ matrix.test_filter }}
     secrets: inherit
 
   e2e-1gpu-embeddings:
+    name: e2e-1gpu-embeddings (${{ matrix.engine }})
     needs: [build-wheel, detect-changes]
     if: >-
       always()
@@ -453,12 +462,20 @@ jobs:
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.embeddings == 'true')))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sglang
+            timeout: 20
+          - engine: vllm
+            timeout: 20
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
-      engine: sglang
+      engine: ${{ matrix.engine }}
       gpu_tier: "1"
       runner: 1-gpu
-      timeout: 20
+      timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/embeddings
       extra_deps: "sentence-transformers"
     secrets: inherit
@@ -487,7 +504,7 @@ jobs:
     with:
       engine: ${{ matrix.engine }}
       gpu_tier: "1"
-      runner: 1-gpu
+      runner: 1-gpu-h100
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/router
       test_filter: "--ignore=e2e_test/router/test_pd_mmlu.py"
@@ -496,13 +513,24 @@ jobs:
   # === 2 GPU ===
 
   e2e-2gpu-chat:
+    name: e2e-2gpu-chat (${{ matrix.engine }})
     needs: [e2e-1gpu-chat]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sglang
+            timeout: 20
+          - engine: vllm
+            timeout: 20
+          - engine: trtllm
+            timeout: 30
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
-      engine: sglang
+      engine: ${{ matrix.engine }}
       gpu_tier: "2"
       runner: 2-gpu-h100
-      timeout: 20
+      timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/chat_completions
     secrets: inherit
 
@@ -565,11 +593,11 @@ jobs:
       matrix:
         include:
           - engine: sglang
-            timeout: 20
-          - engine: vllm
-            timeout: 20
-          - engine: trtllm
             timeout: 30
+          - engine: vllm
+            timeout: 30
+          - engine: trtllm
+            timeout: 45
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
@@ -800,7 +828,7 @@ jobs:
 
       - name: Run Go OAI server E2E tests
         run: |
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          bash scripts/ci_killall_sglang.sh "nuke_gpus"
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
           export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/models" \
@@ -857,14 +885,14 @@ jobs:
 
       - name: Run Go bindings benchmark
         run: |
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          bash scripts/ci_killall_sglang.sh "nuke_gpus"
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
           export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/models" \
             pytest e2e_test/benchmarks/test_go_bindings_perf.py -s -vv
 
       - name: Upload benchmark results
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: genai-bench-results-go-bindings

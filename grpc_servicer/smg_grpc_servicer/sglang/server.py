@@ -393,13 +393,12 @@ def _execute_grpc_server_warmup(server_args: ServerArgs):
             # Send the warmup request
             try:
                 responses = list(stub.Generate(warmup_request, timeout=600))
-                # Check if we got a valid response
-                if responses and not responses[-1].HasField("error"):
+                # Check if we got a valid complete response (errors use gRPC status, not in-band)
+                if responses and responses[-1].HasField("complete"):
                     logger.info("gRPC warmup request completed successfully")
                     success = True
                 else:
-                    error_msg = responses[-1].error.message if responses else "No response"
-                    logger.warning(f"gRPC warmup request returned error: {error_msg}")
+                    logger.warning("gRPC warmup request returned no complete response")
                     success = False
             except Exception as e:
                 error_msg = f"gRPC warmup request failed: {e}"
@@ -419,11 +418,12 @@ def _execute_grpc_server_warmup(server_args: ServerArgs):
 
             try:
                 response = stub.Embed(warmup_request, timeout=600)
-                if not response.HasField("error"):
+                # EmbedResponse is flat; errors use gRPC status, not in-band
+                if response.embedding_dim > 0:
                     logger.info("gRPC warmup request completed successfully")
                     success = True
                 else:
-                    logger.warning(f"gRPC warmup request returned error: {response.error.message}")
+                    logger.warning("gRPC warmup: embed response has zero embedding_dim")
                     success = False
             except Exception as e:
                 error_msg = f"gRPC warmup request failed: {e}"

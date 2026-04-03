@@ -811,8 +811,29 @@ impl HarmonyBuilder {
                     tool_calls,
                     reasoning_content,
                 } => {
-                    if let Some(calls) = tool_calls {
-                        // Create one message per tool call with channel="commentary"
+                    if let Some(calls) = tool_calls.as_ref().filter(|c| !c.is_empty()) {
+                        // Per Harmony spec: when tool calls are present, include
+                        // previous reasoning as a separate analysis channel message
+                        // because the model calls tools as part of its chain-of-thought.
+                        if let Some(reasoning) = reasoning_content {
+                            if !reasoning.is_empty() {
+                                let analysis_msg = HarmonyMessage {
+                                    author: Author {
+                                        role: Role::Assistant,
+                                        name: name.clone(),
+                                    },
+                                    recipient: None,
+                                    content: vec![Content::Text(TextContent {
+                                        text: reasoning.clone(),
+                                    })],
+                                    channel: Some("analysis".to_string()),
+                                    content_type: None,
+                                };
+                                harmony_messages.push(analysis_msg);
+                            }
+                        }
+
+                        // Tool calls go to commentary channel
                         for call in calls {
                             let function_name = &call.function.name;
                             let arguments = call.function.arguments.clone().unwrap_or_default();
@@ -830,19 +851,13 @@ impl HarmonyBuilder {
                             harmony_messages.push(tool_call_msg);
                         }
                     } else {
-                        // Regular assistant message with content
-                        // Combine content with reasoning if present
-                        let mut text = content
+                        // Per Harmony spec: drop previous CoT/analysis content on
+                        // subsequent turns when the response ended with a final
+                        // channel message. Only emit the final content.
+                        let text = content
                             .as_ref()
                             .map(|c| c.to_simple_string())
                             .unwrap_or_default();
-
-                        if let Some(reasoning) = reasoning_content {
-                            if !text.is_empty() {
-                                text.push('\n');
-                            }
-                            text.push_str(reasoning);
-                        }
 
                         let harmony_msg = HarmonyMessage {
                             author: Author {

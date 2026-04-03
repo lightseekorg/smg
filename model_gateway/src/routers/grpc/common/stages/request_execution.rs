@@ -13,10 +13,7 @@ use crate::{
             context::{
                 ClientSelection, ExecutionResult, LoadGuards, RequestContext, WorkerSelection,
             },
-            proto_wrapper::{
-                ProtoEmbedRequest, ProtoEmbedResponseVariant, ProtoGenerateRequest, ProtoRequest,
-                ProtoStream,
-            },
+            proto_wrapper::{ProtoEmbedRequest, ProtoGenerateRequest, ProtoRequest, ProtoStream},
             utils::tonic_ext::{TonicResultExt, TonicStatusExt},
         },
     },
@@ -84,11 +81,16 @@ impl PipelineStage for RequestExecutionStage {
         let dispatch = ctx.state.dispatch.as_ref();
         let request_id = dispatch.map(|d| d.request_id.as_str()).unwrap_or("unknown");
         let model = dispatch.map(|d| d.model.as_str()).unwrap_or("unknown");
+        let request_type = match &proto_request {
+            ProtoRequest::Generate(_) => "generate",
+            ProtoRequest::Embed(_) => "embed",
+        };
 
         // Create OTEL span for gRPC request execution
         let span = info_span!(
             target: "smg::otel-trace",
-            "grpc_generate",
+            "grpc_execute",
+            request_type,
             request_id = %request_id,
             model = %model,
             mode = ?self.mode,
@@ -136,7 +138,7 @@ impl PipelineStage for RequestExecutionStage {
                         }
                     }
                 },
-                ProtoRequest::Embed(req) => self.execute_single_embed(req, clients).await,
+                ProtoRequest::Embed(req) => self.execute_single_embed(req, clients, workers).await,
             }
         }
         .instrument(span)
@@ -188,6 +190,7 @@ impl RequestExecutionStage {
         &self,
         proto_request: ProtoEmbedRequest,
         clients: &mut ClientSelection,
+        workers: &WorkerSelection,
     ) -> Result<ExecutionResult, Response> {
         let client = clients.single_mut().ok_or_else(|| {
             error!(
@@ -200,7 +203,10 @@ impl RequestExecutionStage {
             )
         })?;
 
-        let response = client.embed(proto_request).await.map_err(|e| {
+        let result = client.embed(proto_request).await;
+        workers.record_outcome(result.cb_status_code());
+
+        let complete = result.map_err(|e| {
             error!(function = "execute_single_embed", error = %e, "Failed to start embedding");
             e.to_http_error(
                 "start_embedding_failed",
@@ -208,32 +214,7 @@ impl RequestExecutionStage {
             )
         })?;
 
-        match response.into_response() {
-            ProtoEmbedResponseVariant::Complete(complete) => {
-                Ok(ExecutionResult::Embedding { response: complete })
-            }
-            ProtoEmbedResponseVariant::Error(e) => {
-                error!(
-                    function = "execute_single_embed",
-                    error = %e.message(),
-                    "Embedding execution failed"
-                );
-                Err(error::internal_error(
-                    "embedding_execution_failed",
-                    e.message().to_string(),
-                ))
-            }
-            ProtoEmbedResponseVariant::None => {
-                error!(
-                    function = "execute_single_embed",
-                    "Embedding execution returned no response"
-                );
-                Err(error::internal_error(
-                    "embedding_no_response",
-                    "Embedding execution returned no response",
-                ))
-            }
-        }
+        Ok(ExecutionResult::Embedding { response: complete })
     }
 
     async fn execute_dual_dispatch(

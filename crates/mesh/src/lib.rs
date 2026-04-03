@@ -41,4 +41,8 @@ pub use stores::{
 pub use sync::{
     MeshSyncManager, OptionalMeshSyncManager, TreeStateSubscriber, WorkerStateSubscriber,
 };
-pub use tree_ops::{TreeInsertOp, TreeKey, TreeOperation, TreeRemoveOp, TreeState};
+pub use tree_ops::{
+    hash_node_path, hash_token_path, lz4_compress, lz4_decompress, TenantDelta, TenantEvict,
+    TenantInsert, TreeInsertOp, TreeKey, TreeOperation, TreeRemoveOp, TreeState,
+    GLOBAL_EVICTION_HASH,
+};

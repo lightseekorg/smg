@@ -167,13 +167,13 @@ class TestLargeMaxNewTokens:
 # =============================================================================
 
 
-@pytest.mark.engine("sglang")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(2)
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
-class TestHarmonyValidation:
+class TestGptOssValidation:
     """Validation tests for Harmony models (GPT-OSS)."""
 
     def test_ignore_eos_rejected(self, model, api_client):

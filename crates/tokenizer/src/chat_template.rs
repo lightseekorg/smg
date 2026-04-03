@@ -62,7 +62,11 @@ struct Flags {
 
 impl Flags {
     fn any(self) -> bool {
-        self.saw_iteration || self.saw_structure || self.saw_assignment || self.saw_macro
+        // `saw_assignment` alone (e.g. `set content = message.content`) is NOT sufficient
+        // to classify as OpenAI format. Many string-format templates (Qwen3, etc.) use this
+        // pattern to extract content into a local variable, then check `content is string`.
+        // Without iteration or structural access, the template handles string content only.
+        self.saw_iteration || self.saw_structure || self.saw_macro
     }
 }
 

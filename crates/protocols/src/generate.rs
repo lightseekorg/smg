@@ -5,7 +5,7 @@ use serde_json::Value;
 use validator::Validate;
 
 use super::{
-    common::{default_true, GenerationRequest, InputIds},
+    common::{default_true, deserialize_null_as_false, GenerationRequest, InputIds},
     sampling_params::SamplingParams,
 };
 use crate::validated::Normalizable;
@@ -80,7 +80,7 @@ pub struct GenerateRequest {
     pub return_text_in_logprobs: bool,
 
     /// Whether to stream the response
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_false")]
     pub stream: bool,
 
     /// Whether to log metrics for this request (e.g. health_generate calls do not log metrics)
