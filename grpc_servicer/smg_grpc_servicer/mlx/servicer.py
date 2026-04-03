@@ -61,3 +61,65 @@ class MlxEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             transitions={"normal": stop_sequences},
             initial="normal",
         )
+
+    @staticmethod
+    def _build_output_logprobs(token_id, logprobs_array, num_logprobs):
+        """Build OutputLogProbs proto from an mlx logprobs array."""
+        if num_logprobs is None:
+            return None
+
+        import mlx.core as mx
+
+        token_logprob = logprobs_array[token_id].item()
+
+        top_k = min(num_logprobs, logprobs_array.shape[0])
+        top_indices = mx.argpartition(logprobs_array, kth=-top_k)[-top_k:]
+        top_values = logprobs_array[top_indices]
+        sort_order = mx.argsort(top_values)[::-1]
+        top_indices = top_indices[sort_order]
+        top_values = top_values[sort_order]
+
+        top_logprobs = vllm_engine_pb2.TopLogProbs(
+            token_ids=[int(i) for i in top_indices.tolist()],
+            values=[float(v) for v in top_values.tolist()],
+        )
+
+        return vllm_engine_pb2.OutputLogProbs(
+            token_ids=[token_id],
+            token_logprobs=[token_logprob],
+            top_logprobs=[top_logprobs],
+        )
+
+    @staticmethod
+    def _chunk_response(token_ids, prompt_tokens, completion_tokens, cached_tokens, index, output_logprobs=None):
+        """Build a GenerateStreamChunk response."""
+        chunk = vllm_engine_pb2.GenerateStreamChunk(
+            token_ids=token_ids,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+            index=index,
+        )
+        if output_logprobs is not None:
+            chunk.output_logprobs.CopyFrom(output_logprobs)
+        return vllm_engine_pb2.GenerateResponse(chunk=chunk)
+
+    @staticmethod
+    def _complete_response(output_ids, finish_reason, prompt_tokens, completion_tokens, cached_tokens, index, output_logprobs=None, matched_token_id=None):
+        """Build a GenerateComplete response."""
+        kwargs = {}
+        if matched_token_id is not None:
+            kwargs["matched_token_id"] = matched_token_id
+
+        complete = vllm_engine_pb2.GenerateComplete(
+            output_ids=output_ids,
+            finish_reason=finish_reason,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+            index=index,
+            **kwargs,
+        )
+        if output_logprobs is not None:
+            complete.output_logprobs.CopyFrom(output_logprobs)
+        return vllm_engine_pb2.GenerateResponse(complete=complete)
