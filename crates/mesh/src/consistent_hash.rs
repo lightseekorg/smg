@@ -87,7 +87,52 @@ impl ConsistentHashRing {
 
     /// Check if a node is an owner of a key
     pub fn is_owner(&self, key: &str, node_name: &str) -> bool {
-        self.get_owners(key).contains(&node_name.to_string())
+        if self.ring.is_empty() {
+            return false;
+        }
+
+        let key_hash = Self::hash(key);
+        let total_unique_nodes = self.node_hashes.len();
+
+        // Zero allocation. Stack-allocated array for tracking unique nodes.
+        let mut seen_nodes = [""; NUM_OWNERS];
+        let mut seen_count = 0;
+
+        // Safety guard to prevent boundary wrap-around infinite looping
+        let mut iterations = 0;
+        let max_iterations = self.ring.len();
+
+        let mut iter = self.ring.range(key_hash..);
+
+        while seen_count < NUM_OWNERS
+            && seen_count < total_unique_nodes
+            && iterations < max_iterations
+        {
+            let node = if let Some((_, node)) = iter.next() {
+                iterations += 1;
+                node
+            } else {
+                // Reached the end of the ring, wrap around
+                iter = self.ring.range(..);
+                continue;
+            };
+
+            // Fast exit
+            if node == node_name {
+                return true;
+            }
+
+            // Linear scan over a tiny array is much faster than HashSet lookups
+            let node_str = node.as_str();
+            let already_seen = seen_nodes[..seen_count].contains(&node_str);
+
+            if !already_seen && seen_count < NUM_OWNERS {
+                seen_nodes[seen_count] = node_str;
+                seen_count += 1;
+            }
+        }
+
+        false
     }
 
     /// Get all nodes in the ring
