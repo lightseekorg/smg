@@ -95,7 +95,7 @@ impl PipelineStage for ScoreNativeStage {
         for res in grpc_response.data {
             results.push(openai_protocol::rerank::ScoreData {
                 index: res.index as usize,
-                score: res.score,
+                score: res.score as f64,
                 object: "score".to_string(),
             });
         }
