@@ -230,10 +230,11 @@ async fn test_rate_limit_node_failure() {
 
 #[tokio::test]
 async fn test_cache_aware_tree_synchronization() {
-    let manager1 = create_test_sync_manager("node1".to_string());
+    let stores1 = create_test_stores("node1".to_string());
+    let manager1 = Arc::new(MeshSyncManager::new(stores1.clone(), "node1".to_string()));
     let manager2 = create_test_sync_manager("node2".to_string());
 
-    // Node1 syncs tree operations
+    // Node1 syncs tree operations — buffers tenant deltas
     let op1 = TreeOperation::Insert(TreeInsertOp {
         key: TreeKey::Text("request1".to_string()),
         tenant: "http://worker1:8000".to_string(),
@@ -250,8 +251,26 @@ async fn test_cache_aware_tree_synchronization() {
         .sync_tree_operation("model1".to_string(), op2)
         .unwrap();
 
-    // Node2 receives tree state (simulated)
-    let tree_state = manager1.get_tree_state("model1").unwrap();
+    // Verify tenant deltas were buffered (sync_tree_operation no longer
+    // populates tree_configs — it buffers tenant deltas instead)
+    let inserts = stores1
+        .tenant_delta_inserts
+        .get("model1")
+        .map(|v| v.len())
+        .unwrap_or(0);
+    assert_eq!(inserts, 2, "expected 2 tenant delta inserts buffered");
+
+    // Simulate Node2 receiving a full tree state by writing directly
+    // to tree_configs (as if received from a remote apply)
+    let mut tree_state = smg_mesh::TreeState::new("model1".to_string());
+    tree_state.add_operation(TreeOperation::Insert(TreeInsertOp {
+        key: TreeKey::Text("request1".to_string()),
+        tenant: "http://worker1:8000".to_string(),
+    }));
+    tree_state.add_operation(TreeOperation::Insert(TreeInsertOp {
+        key: TreeKey::Text("request2".to_string()),
+        tenant: "http://worker2:8000".to_string(),
+    }));
     manager2.apply_remote_tree_operation(
         "model1".to_string(),
         tree_state,

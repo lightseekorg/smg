@@ -460,6 +460,56 @@ class TestWorkerLauncherGpuEnv:
         assert env["TEST_VAR"] == "123"
         assert env["CUDA_VISIBLE_DEVICES"] == "0"
 
+    # -- Unit: gpu_env respects existing CUDA_VISIBLE_DEVICES ----------------
+
+    @pytest.mark.parametrize(
+        "visible, tp, dp_rank, expected",
+        [
+            ("4", 1, 0, "4"),
+            ("4,5,6,7", 2, 0, "4,5"),
+            ("4,5,6,7", 2, 1, "6,7"),
+            ("4,5,6,7", 1, 3, "7"),
+        ],
+    )
+    def test_gpu_env_indexes_into_visible_pool(self, visible, tp, dp_rank, expected):
+        launcher = SglangWorkerLauncher()
+        args = argparse.Namespace(tensor_parallel_size=tp)
+        env = launcher.gpu_env(args, dp_rank=dp_rank, env={"CUDA_VISIBLE_DEVICES": visible})
+        assert env["CUDA_VISIBLE_DEVICES"] == expected
+
+    def test_gpu_env_visible_pool_vllm(self):
+        launcher = VllmWorkerLauncher()
+        args = argparse.Namespace(tensor_parallel_size=2)
+        env = launcher.gpu_env(args, dp_rank=1, env={"CUDA_VISIBLE_DEVICES": "4,5,6,7"})
+        assert env["CUDA_VISIBLE_DEVICES"] == "6,7"
+
+    # -- Unit: gpu_env bounds check on visible pool --------------------------
+
+    @pytest.mark.parametrize(
+        "visible, tp, dp_rank",
+        [
+            ("4,5", 2, 1),  # 2 GPUs, need index 2..3
+            ("4", 1, 1),  # 1 GPU, need index 1
+        ],
+    )
+    def test_gpu_env_raises_on_insufficient_visible_gpus(self, visible, tp, dp_rank):
+        launcher = SglangWorkerLauncher()
+        args = argparse.Namespace(tensor_parallel_size=tp)
+        with pytest.raises(ValueError, match="CUDA_VISIBLE_DEVICES has"):
+            launcher.gpu_env(args, dp_rank=dp_rank, env={"CUDA_VISIBLE_DEVICES": visible})
+
+    def test_gpu_env_raises_on_invalid_tp_size(self):
+        launcher = SglangWorkerLauncher()
+        args = argparse.Namespace(tensor_parallel_size=0)
+        with pytest.raises(ValueError, match="tp_size must be positive"):
+            launcher.gpu_env(args, dp_rank=0, env={})
+
+    def test_gpu_env_empty_visible_falls_back(self):
+        launcher = SglangWorkerLauncher()
+        args = argparse.Namespace(tensor_parallel_size=2)
+        env = launcher.gpu_env(args, dp_rank=0, env={"CUDA_VISIBLE_DEVICES": ""})
+        assert env["CUDA_VISIBLE_DEVICES"] == "0,1"
+
 
 class TestFilterBackendArgs:
     """Test _filter_backend_args handles both --key value and --key=value."""

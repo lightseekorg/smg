@@ -660,10 +660,6 @@ pub(crate) enum ExecutionResult {
 
 /// Final processed response
 #[derive(Debug)]
-#[expect(
-    dead_code,
-    reason = "Completion responses are typed in the pipeline before a later stage constructs them"
-)]
 pub(crate) enum FinalResponse {
     Chat(ChatCompletionResponse),
     /// Generate response is a Vec of GenerateResponse (n=1 returns single item, n>1 returns multiple)

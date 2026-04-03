@@ -5,7 +5,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    types::{FieldLayout, ImageSize, Modality, PromptReplacement, TokenId},
+    types::{FieldLayout, Modality, PromptReplacement, TokenId},
     vision::image_processor::PreprocessedImages,
 };
 
@@ -92,16 +92,4 @@ pub trait ModelProcessorSpec: Send + Sync {
     fn keep_on_cpu_keys(&self) -> Vec<String> {
         vec![]
     }
-}
-
-/// Convert preprocessor `(height, width)` tuples to `ImageSize` values.
-pub fn image_sizes_hw(preprocessed: &PreprocessedImages) -> Vec<ImageSize> {
-    preprocessed
-        .image_sizes
-        .iter()
-        .map(|&(h, w)| ImageSize {
-            width: w,
-            height: h,
-        })
-        .collect()
 }

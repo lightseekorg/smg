@@ -11,7 +11,6 @@ import json
 import logging
 
 import pytest
-from infra import is_sglang, is_trtllm
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +45,12 @@ class TestChatCompletion:
                 {"role": "system", "content": "You are a helpful AI assistant"},
                 {
                     "role": "user",
-                    "content": "What is the capital of France? Answer in a few words.",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "What is the capital of France? Answer in a few words.",
+                        }
+                    ],
                 },
             ],
             temperature=temperature,
@@ -78,7 +82,10 @@ class TestChatCompletion:
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "What is the capital of France?"},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "What is the capital of France?"}],
+                },
             ],
             temperature=temperature,
             logprobs=logprobs is not None and logprobs > 0,
@@ -174,6 +181,28 @@ class TestChatCompletion:
         assert isinstance(response.choices[0].message.content, str)
         assert response.usage.completion_tokens > 0
 
+    def test_multi_content_parts(self, model, api_client):
+        """Test that multiple content parts in a single message are all processed."""
+
+        response = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is the capital of France?"},
+                        {"type": "text", "text": "What is the capital of China?"},
+                    ],
+                },
+            ],
+            temperature=0,
+            max_tokens=200,
+        )
+        content = response.choices[0].message.content
+        assert isinstance(content, str)
+        assert "paris" in content.lower(), f"Expected 'Paris' in response: {content}"
+        assert "beijing" in content.lower(), f"Expected 'Beijing' in response: {content}"
+
     def test_response_prefill(self, model, api_client):
         """Test assistant message prefill with continue_final_message."""
 
@@ -212,7 +241,10 @@ convenient hands-free control to your smart devices.
             model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "What is the capital of France?"},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "What is the capital of France?"}],
+                },
             ],
             temperature=0,
             max_tokens=50,
@@ -327,7 +359,7 @@ convenient hands-free control to your smart devices.
         return delta.content or getattr(delta, "reasoning_content", "") or ""
 
 
-@pytest.mark.engine("sglang")
+@pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(2)
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
@@ -341,7 +373,6 @@ class TestChatCompletionGptOss(TestChatCompletion):
     # Harmony channel markers add ~10 special tokens
     STREAMING_TOKEN_TOLERANCE = 10
 
-    # Harmony doesn't trim stop sequences (detokenization is not channel-aware)
     STOP_SEQUENCE_TRIMMED = False
 
     @pytest.mark.parametrize("logprobs", [None, 5])
@@ -352,20 +383,14 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
+    @pytest.mark.skip_for_runtime(
+        "trtllm", reason="trtllm may return more top_logprobs than requested in streaming"
+    )
     def test_chat_completion_stream(self, model, api_client, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
         super().test_chat_completion_stream(model, api_client, logprobs, parallel_sample_num)
 
-    def test_stop_sequences(self, model, api_client):
-        if is_trtllm():
-            pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
-        super().test_stop_sequences(model, api_client)
-
     def test_stop_sequences_stream(self, model, api_client):
-        if is_trtllm():
-            pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
-        if is_sglang():
-            self.STOP_SEQUENCE_TRIMMED = True
         super().test_stop_sequences_stream(model, api_client)
 
     @pytest.mark.skip(reason="gpt-oss models don't support regex constraints")
@@ -375,3 +400,11 @@ class TestChatCompletionGptOss(TestChatCompletion):
     @pytest.mark.skip(reason="gpt-oss Harmony pipeline doesn't implement continue_final_message")
     def test_response_prefill(self, model, api_client):
         pass
+
+
+@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.gpu(4)
+@pytest.mark.model("openai/gpt-oss-120b")
+@pytest.mark.gateway(extra_args=["--history-backend", "memory"])
+class TestChatCompletionGptOss120B(TestChatCompletionGptOss):
+    """Tests for chat completions API with Harmony model (GPT-OSS 120B, 4 GPU)."""

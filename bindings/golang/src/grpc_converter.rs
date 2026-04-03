@@ -616,10 +616,6 @@ pub(crate) async fn convert_proto_chunk_to_openai(
 
             Ok(Some(finish_response))
         }
-        Some(Error(error)) => Err(format!(
-            "Server error: {} (status: {})",
-            error.message, error.http_status_code
-        )),
         None => Ok(None),
     }
 }

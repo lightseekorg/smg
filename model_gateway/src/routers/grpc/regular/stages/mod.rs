@@ -12,7 +12,7 @@ pub(crate) mod preparation;
 pub(crate) mod request_building;
 pub(crate) mod response_processing;
 
-// Re-export main stages used by pipeline
-pub(crate) use preparation::PreparationStage;
-pub(crate) use request_building::RequestBuildingStage;
-pub(crate) use response_processing::ResponseProcessingStage;
+// Re-export chat+generate dispatcher stages used by new_regular() / new_pd()
+pub(crate) use preparation::ChatGeneratePreparationStage;
+pub(crate) use request_building::ChatGenerateRequestBuildingStage;
+pub(crate) use response_processing::ChatGenerateResponseProcessingStage;

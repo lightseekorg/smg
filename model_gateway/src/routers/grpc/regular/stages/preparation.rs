@@ -1,16 +1,13 @@
-//! Preparation stage that delegates to endpoint-specific implementations
+//! Preparation stage for the chat + generate pipeline
 //!
-//! This stage checks RequestType at runtime and delegates to the appropriate
-//! endpoint-specific stage. (ChatPreparationStage, CompletionPreparationStage or GeneratePreparationStage).
+//! Dispatches to ChatPreparationStage or GeneratePreparationStage based on
+//! request type. Only used by new_regular() and new_pd() pipelines.
 
 use async_trait::async_trait;
 use axum::response::Response;
 use tracing::error;
 
-use super::{
-    chat::ChatPreparationStage, completion::CompletionPreparationStage,
-    generate::GeneratePreparationStage,
-};
+use super::{chat::ChatPreparationStage, generate::GeneratePreparationStage};
 use crate::routers::{
     error as grpc_error,
     grpc::{
@@ -19,41 +16,38 @@ use crate::routers::{
     },
 };
 
-/// Preparation stage (delegates to endpoint-specific implementations)
-pub(crate) struct PreparationStage {
+/// Preparation stage for chat + generate pipelines
+pub(crate) struct ChatGeneratePreparationStage {
     chat_stage: ChatPreparationStage,
     generate_stage: GeneratePreparationStage,
-    completion_stage: CompletionPreparationStage,
 }
 
-impl PreparationStage {
+impl ChatGeneratePreparationStage {
     pub fn new() -> Self {
         Self {
             chat_stage: ChatPreparationStage,
             generate_stage: GeneratePreparationStage,
-            completion_stage: CompletionPreparationStage,
         }
     }
 }
 
-impl Default for PreparationStage {
+impl Default for ChatGeneratePreparationStage {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl PipelineStage for PreparationStage {
+impl PipelineStage for ChatGeneratePreparationStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
         match &ctx.input.request_type {
             RequestType::Chat(_) => self.chat_stage.execute(ctx).await,
             RequestType::Generate(_) => self.generate_stage.execute(ctx).await,
-            RequestType::Completion(_) => self.completion_stage.execute(ctx).await,
             request_type => {
                 error!(
-                    function = "PreparationStage::execute",
+                    function = "ChatGeneratePreparationStage::execute",
                     request_type = %request_type,
-                    "{request_type} request type reached regular preparation stage"
+                    "{request_type} should not reach this stage"
                 );
                 Err(grpc_error::internal_error(
                     "wrong_pipeline",
@@ -64,6 +58,6 @@ impl PipelineStage for PreparationStage {
     }
 
     fn name(&self) -> &'static str {
-        "Preparation"
+        "ChatGeneratePreparation"
     }
 }

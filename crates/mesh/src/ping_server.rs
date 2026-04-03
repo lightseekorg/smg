@@ -113,18 +113,32 @@ impl GossipService {
                     (k, serialized)
                 })
                 .collect(),
-            LocalStoreType::Policy => stores
-                .policy
-                .all()
-                .into_iter()
-                .map(|(k, v)| {
-                    let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
-                        log::error!("Failed to serialize policy state: {}", e);
-                        vec![]
-                    });
-                    (k, serialized)
-                })
-                .collect(),
+            LocalStoreType::Policy => {
+                let entries: Vec<(String, Vec<u8>)> = stores
+                    .policy
+                    .all()
+                    .into_iter()
+                    .filter(|(k, _)| {
+                        // Tree configs are handled separately below via
+                        // stores.tree_configs — skip stale CRDT policy
+                        // entries with "tree:" keys.
+                        !k.starts_with("tree:")
+                    })
+                    .map(|(k, v)| {
+                        let serialized = bincode::serialize(&v).unwrap_or_else(|e| {
+                            log::error!("Failed to serialize policy state: {}", e);
+                            vec![]
+                        });
+                        (k, serialized)
+                    })
+                    .collect();
+
+                // Tree data is synced via Layer 1 (tenant deltas) and Layer 2
+                // (periodic compressed snapshots). No longer include tree_configs
+                // in the snapshot exchange — cloning large TreeState bytes on
+                // every ping round caused multi-GB memory growth.
+                entries
+            }
             LocalStoreType::RateLimit => {
                 // For rate limit, serialize all counters from owners
                 stores
@@ -174,7 +188,21 @@ impl GossipService {
                             stores.worker.get(key).map(|s| s.version).unwrap_or(1)
                         }
                         LocalStoreType::Policy => {
-                            stores.policy.get(key).map(|s| s.version).unwrap_or(1)
+                            // For tree keys, version comes from tree_configs
+                            // (not the CRDT policy store).
+                            if key.starts_with("tree:") {
+                                stores
+                                    .tree_configs
+                                    .get(key)
+                                    .and_then(|bytes| {
+                                        super::tree_ops::TreeState::from_bytes(&bytes)
+                                            .ok()
+                                            .map(|ts| ts.version)
+                                    })
+                                    .unwrap_or(1)
+                            } else {
+                                stores.policy.get(key).map(|s| s.version).unwrap_or(1)
+                            }
                         }
                         LocalStoreType::RateLimit => {
                             // For rate limit, use timestamp as version
@@ -406,15 +434,15 @@ impl Gossip for GossipService {
         });
 
         // Spawn task to periodically send incremental updates
-        if let Some(collector) = collector {
+        let incremental_sender_handle = if let Some(collector) = collector {
             let tx_incremental = tx.clone();
             let self_name_incremental = self_name.clone();
             let size_validator_clone = size_validator.clone();
             #[expect(
                 clippy::disallowed_methods,
-                reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes"
+                reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes or handle is aborted"
             )]
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 // Use 1 second interval for rate limit counter sync (faster than other stores)
                 let mut interval = tokio::time::interval(Duration::from_secs(1)); // Send every 1 second
                 let mut sequence_counter: u64 = 0;
@@ -493,8 +521,10 @@ impl Gossip for GossipService {
                         }
                     }
                 }
-            });
-        }
+            }))
+        } else {
+            None
+        };
 
         // Spawn task to handle incoming messages
         let mut sequence: u64 = 0;
@@ -562,9 +592,10 @@ impl Gossip for GossipService {
                 }
             }
 
-            while let Some(msg_result) = incoming.next().await {
-                match msg_result {
-                    Ok(msg) => {
+            const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+            loop {
+                match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming.next()).await {
+                    Ok(Some(Ok(msg))) => {
                         sequence += 1;
                         peer_id.clone_from(&msg.peer_id);
 
@@ -639,23 +670,109 @@ impl Gossip for GossipService {
                                                             Some(state_update.actor.clone());
 
                                                         if policy_state.policy_type
-                                                            == "tree_state_delta"
+                                                            == "tenant_delta"
                                                         {
-                                                            // Delta: apply only the new operations
-                                                            if let Ok(delta) =
-                                                                super::tree_ops::TreeStateDelta::from_bytes(
+                                                            // Lightweight tenant delta — no tree structure, no prompt text
+                                                            match super::tree_ops::TenantDelta::from_bytes(
                                                                     &policy_state.config,
                                                                 )
                                                             {
-                                                                sync_manager
-                                                                    .apply_remote_tree_delta(
-                                                                        delta, actor,
+                                                                Ok(delta) => {
+                                                                    sync_manager
+                                                                        .apply_remote_tenant_delta(
+                                                                            delta, actor,
+                                                                        );
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to deserialize tenant delta for model {}: {e}",
+                                                                        policy_state.model_id
                                                                     );
+                                                                }
+                                                            }
+                                                        } else if policy_state.policy_type
+                                                            == "tree_state_delta"
+                                                        {
+                                                            // Operation-level delta: apply only the new operations
+                                                            match super::tree_ops::TreeStateDelta::from_bytes(
+                                                                    &policy_state.config,
+                                                                )
+                                                            {
+                                                                Ok(delta) => {
+                                                                    sync_manager
+                                                                        .apply_remote_tree_delta(
+                                                                            delta, actor,
+                                                                        );
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to deserialize tree state delta for model {}: {e}",
+                                                                        policy_state.model_id
+                                                                    );
+                                                                }
+                                                            }
+                                                        } else if policy_state.policy_type
+                                                            == "tree_state_lz4"
+                                                        {
+                                                            // LZ4-compressed snapshot (TreeState or TreeSnapshot bytes)
+                                                            match super::tree_ops::lz4_decompress(
+                                                                &policy_state.config,
+                                                            ) {
+                                                                Ok(decompressed) => {
+                                                                    // Try TreeState first (backward compat)
+                                                                    if let Ok(tree_state) =
+                                                                        super::tree_ops::TreeState::from_bytes(
+                                                                            &decompressed,
+                                                                        )
+                                                                    {
+                                                                        sync_manager
+                                                                            .apply_remote_tree_operation(
+                                                                                policy_state
+                                                                                    .model_id
+                                                                                    .clone(),
+                                                                                tree_state,
+                                                                                actor.clone(),
+                                                                            );
+                                                                    } else if let Ok(snap) =
+                                                                        kv_index::snapshot::TreeSnapshot::from_bytes(
+                                                                            &decompressed,
+                                                                        )
+                                                                    {
+                                                                        // Compact TreeSnapshot — convert to TreeState
+                                                                        let tree_state =
+                                                                            super::tree_ops::TreeState::from_snapshot(
+                                                                                policy_state
+                                                                                    .model_id
+                                                                                    .clone(),
+                                                                                &snap,
+                                                                                policy_state.version,
+                                                                            );
+                                                                        sync_manager
+                                                                            .apply_remote_tree_operation(
+                                                                                policy_state
+                                                                                    .model_id
+                                                                                    .clone(),
+                                                                                tree_state,
+                                                                                actor.clone(),
+                                                                            );
+                                                                    } else {
+                                                                        log::warn!(
+                                                                            "Failed to deserialize tree_state_lz4 payload for model {}",
+                                                                            policy_state.model_id
+                                                                        );
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to LZ4-decompress tree state for model {}: {e}",
+                                                                        policy_state.model_id
+                                                                    );
+                                                                }
                                                             }
                                                         } else if policy_state.policy_type
                                                             == "tree_state"
                                                         {
-                                                            // Full state: replace (backward compatible)
+                                                            // Uncompressed full state (backward compatible)
                                                             if let Ok(tree_state) =
                                                                 super::tree_ops::TreeState::from_bytes(
                                                                     &policy_state.config,
@@ -998,11 +1115,10 @@ impl Gossip for GossipService {
                                                             }
                                                             LocalStoreType::Policy => {
                                                                 if let Ok(policy_state) = bincode::deserialize::<super::stores::PolicyState>(&entry.value) {
-                                                                    if let Some(ref sync_manager) = sync_manager {
-                                                                        if policy_state.policy_type == "tree_state" {
-                                                                            // Let apply_remote_tree_operation handle the store
-                                                                            // update + subscriber notification (avoids version-
-                                                                            // check skip from a prior direct store insert)
+                                                                    if policy_state.policy_type == "tree_state" {
+                                                                        // Tree state entries go to tree_configs
+                                                                        // (plain DashMap, no CRDT operation log).
+                                                                        if let Some(ref sync_manager) = sync_manager {
                                                                             if let Ok(tree_state) = super::tree_ops::TreeState::from_bytes(
                                                                                 &policy_state.config
                                                                             ) {
@@ -1013,11 +1129,14 @@ impl Gossip for GossipService {
                                                                                 );
                                                                             }
                                                                         } else {
-                                                                            let _ = stores.policy.insert(key, policy_state.clone());
-                                                                            sync_manager.apply_remote_policy_state(policy_state, Some(entry.actor.clone()));
+                                                                            // No sync manager — write directly to tree_configs.
+                                                                            stores.tree_configs.insert(key, policy_state.config.clone());
                                                                         }
                                                                     } else {
                                                                         let _ = stores.policy.insert(key, policy_state.clone());
+                                                                        if let Some(ref sync_manager) = sync_manager {
+                                                                            sync_manager.apply_remote_policy_state(policy_state, Some(entry.actor.clone()));
+                                                                        }
                                                                     }
                                                                 }
                                                             }
@@ -1122,14 +1241,27 @@ impl Gossip for GossipService {
                             }
                         }
                     }
-                    Err(e) => {
+                    Ok(Some(Err(e))) => {
                         log::error!("Error receiving stream message: {}", e);
                         record_nack(&peer_id);
                         update_peer_connections(&peer_id, false);
                         record_peer_reconnect(&peer_id);
                         break;
                     }
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            "sync_stream idle timeout ({STREAM_IDLE_TIMEOUT:?}) — closing"
+                        );
+                        break;
+                    }
                 }
+            }
+            // Abort the incremental sender task to release the tx
+            // channel and allow the stream to close cleanly.
+            if let Some(handle) = incremental_sender_handle {
+                handle.abort();
+                let _ = handle.await;
             }
             log::info!("Stream from {} closed", peer_id);
             update_peer_connections(&peer_id, false);

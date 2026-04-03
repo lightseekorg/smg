@@ -5,17 +5,17 @@ Implements grpc.health.v1.Health protocol, delegating health status
 to AsyncLLM.check_health() from the vLLM EngineClient protocol.
 """
 
-import logging
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.v1.engine.async_llm import AsyncLLM
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 class VllmHealthServicer(health_pb2_grpc.HealthServicer):

@@ -11,7 +11,8 @@ use llm_tokenizer::{
 };
 use openai_protocol::{
     chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-    common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue},
+    common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage},
+    completion::{CompletionChoice, CompletionRequest, CompletionResponse},
     generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
     messages::{self, CreateMessageRequest, Message},
 };
@@ -703,6 +704,115 @@ impl ResponseProcessor {
             stop_reason,
             stop_sequence,
             usage,
+        })
+    }
+
+    /// Process non-streaming completion response
+    ///
+    /// Collects all responses (supports n>1), decodes tokens through stop decoder,
+    /// applies `echo` and `suffix`, and builds `CompletionResponse` with legacy
+    /// `LogProbs` format.
+    pub async fn process_non_streaming_completion_response(
+        &self,
+        execution_result: ExecutionResult,
+        completion_req: Arc<CompletionRequest>,
+        dispatch: DispatchMetadata,
+        _tokenizer: Arc<dyn Tokenizer>,
+        stop_decoder: &mut StopSequenceDecoder,
+        prompt_text: &str,
+    ) -> Result<CompletionResponse, axum::response::Response> {
+        let request_logprobs = completion_req.logprobs.is_some();
+        let all_responses =
+            response_collection::collect_responses(execution_result, request_logprobs).await?;
+
+        let mut total_prompt = 0u32;
+        let mut total_completion = 0u32;
+        let mut choices = Vec::new();
+
+        for (i, complete) in all_responses.into_iter().enumerate() {
+            stop_decoder.reset();
+
+            let outputs = match stop_decoder.process_tokens(complete.output_ids()) {
+                Ok(outputs) => outputs,
+                Err(e) => {
+                    return Err(error::internal_error(
+                        "process_tokens_failed",
+                        format!("Failed to process tokens: {e}"),
+                    ))
+                }
+            };
+
+            let mut decoded_text = String::new();
+            for output in outputs {
+                match output {
+                    SequenceDecoderOutput::Text(t) => decoded_text.push_str(&t),
+                    SequenceDecoderOutput::StoppedWithText(t) => {
+                        decoded_text.push_str(&t);
+                        break;
+                    }
+                    SequenceDecoderOutput::Stopped => break,
+                    SequenceDecoderOutput::Held => {}
+                }
+            }
+
+            if let SequenceDecoderOutput::Text(t) = stop_decoder.flush() {
+                decoded_text.push_str(&t);
+            }
+
+            total_prompt = total_prompt.max(complete.prompt_tokens());
+            total_completion += complete.completion_tokens();
+
+            let finish_reason = {
+                let reason = complete.finish_reason();
+                if reason.is_empty() {
+                    None
+                } else if reason == "stop" || reason == "length" {
+                    Some(reason.to_string())
+                } else if let Ok(json) = serde_json::from_str::<serde_json::Value>(reason) {
+                    json.get("type").and_then(|v| v.as_str()).map(|s| match s {
+                        "length" => "length".to_string(),
+                        "stop" => "stop".to_string(),
+                        other => other.to_string(),
+                    })
+                } else {
+                    Some(reason.to_string())
+                }
+            };
+
+            let matched_stop = complete.matched_stop_json();
+
+            let suffix_len = completion_req.suffix.as_ref().map_or(0, |s| s.len());
+            let echo_len = if completion_req.echo {
+                prompt_text.len()
+            } else {
+                0
+            };
+            let mut text = String::with_capacity(echo_len + decoded_text.len() + suffix_len);
+            if completion_req.echo {
+                text.push_str(prompt_text);
+            }
+            text.push_str(&decoded_text);
+            if let Some(ref sfx) = completion_req.suffix {
+                text.push_str(sfx);
+            }
+
+            choices.push(CompletionChoice {
+                text,
+                index: i as u32,
+                logprobs: None, // TODO: wire legacy LogProbs from backend token_logprobs
+                finish_reason: finish_reason.or_else(|| Some("stop".to_string())),
+                matched_stop,
+            });
+        }
+
+        Ok(CompletionResponse {
+            id: dispatch.request_id.clone(),
+            object: "text_completion".to_string(),
+            created: dispatch.created,
+            model: dispatch.model.clone(),
+            choices,
+            usage: Some(Usage::from_counts(total_prompt, total_completion)),
+            system_fingerprint: dispatch.weight_version.clone(),
         })
     }
 }

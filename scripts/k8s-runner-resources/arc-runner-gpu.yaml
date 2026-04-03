@@ -99,6 +99,10 @@ spec:
                 secretKeyRef:
                   key: XAI_API_KEY
                   name: xai-api-key
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
         - name: docker
           image: fra.ocir.io/idqj093njucb/docker:dind
           securityContext:
@@ -219,6 +223,10 @@ spec:
                 secretKeyRef:
                   key: XAI_API_KEY
                   name: xai-api-key
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
         - name: docker
           image: fra.ocir.io/idqj093njucb/docker:dind
           securityContext:
@@ -333,6 +341,10 @@ spec:
                 secretKeyRef:
                   key: XAI_API_KEY
                   name: xai-api-key
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
         - name: docker
           image: fra.ocir.io/idqj093njucb/docker:dind
           securityContext:
@@ -454,6 +466,10 @@ spec:
                 secretKeyRef:
                   key: XAI_API_KEY
                   name: xai-api-key
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
         - name: docker
           image: fra.ocir.io/idqj093njucb/docker:dind
           securityContext:
@@ -576,6 +592,10 @@ spec:
                 secretKeyRef:
                   key: XAI_API_KEY
                   name: xai-api-key
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
         - name: docker
           image: fra.ocir.io/idqj093njucb/docker:dind
           securityContext:

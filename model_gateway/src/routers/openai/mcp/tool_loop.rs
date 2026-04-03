@@ -27,7 +27,7 @@ use tracing::{debug, info, warn};
 use super::tool_handler::FunctionCallInProgress;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::{error, header_utils::apply_request_headers, mcp_utils::DEFAULT_MAX_ITERATIONS},
+    routers::{error, header_utils::ApiProvider, mcp_utils::DEFAULT_MAX_ITERATIONS},
 };
 
 /// State for tracking multi-turn tool calling loop
@@ -498,6 +498,7 @@ pub(crate) async fn execute_tool_loop(
     client: &reqwest::Client,
     url: &str,
     headers: Option<&HeaderMap>,
+    worker_api_key: Option<&String>,
     initial_payload: Value,
     original_body: &ResponsesRequest,
     session: &McpToolSession<'_>,
@@ -512,14 +513,12 @@ pub(crate) async fn execute_tool_loop(
         "Starting tool loop: max_tool_calls={:?}, max_iterations={}",
         max_tool_calls, DEFAULT_MAX_ITERATIONS
     );
+    let provider = ApiProvider::from_url(url);
+    let auth_header = provider.extract_auth_header(headers, worker_api_key);
 
     loop {
         let request_builder = client.post(url).json(&current_payload);
-        let request_builder = if let Some(headers) = headers {
-            apply_request_headers(headers, request_builder, true)
-        } else {
-            request_builder
-        };
+        let request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
 
         let response = request_builder
             .send()
