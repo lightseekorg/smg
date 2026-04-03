@@ -1,0 +1,330 @@
+"""BFCL (Berkeley Function Calling Leaderboard) E2E Tests.
+
+Runs open-source BFCL v3 test cases against the SMG gateway with
+per-test JSON logging for full observability.
+
+Logs are written to e2e_test/bfcl_logs/<timestamp>/<category>/<id>_PASS|FAIL.json
+with a summary.json at the run root.
+
+Test categories:
+  - simple: single function call (400 cases)
+  - multiple: pick correct function from several (200 cases)
+  - parallel: make parallel function calls (200 cases)
+  - parallel_multiple: parallel + multiple (200 cases)
+  - irrelevance: model should NOT call any function (240 cases)
+
+Usage:
+    # Run all BFCL tests (requires GPU worker + gateway via setup_backend fixture)
+    pytest e2e_test/chat_completions/test_bfcl.py -v
+
+    # Run only simple category
+    pytest e2e_test/chat_completions/test_bfcl.py -k "simple_" -v
+
+    # Run with a subset (first 20 per category)
+    BFCL_LIMIT=20 pytest e2e_test/chat_completions/test_bfcl.py -v
+
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import time
+from pathlib import Path
+from typing import Any
+
+import openai
+import pytest
+from bfcl import (
+    BFCLCase,
+    MissingBFCLAnswerFileError,
+    bfcl_to_openai_tools,
+    extract_tool_calls,
+    load_bfcl_category,
+    log_file_for_summary,
+)
+from bfcl.session_state import append_result, get_evaluator, get_or_create_run_dir
+
+logger = logging.getLogger(__name__)
+
+BFCL_LIMIT = int(os.environ.get("BFCL_LIMIT", "0")) or None
+BFCL_CATEGORIES = ("simple", "multiple", "parallel", "parallel_multiple", "irrelevance")
+
+
+# ---------------------------------------------------------------------------
+# Data loading helpers (pytest-specific, stay in the test module)
+# ---------------------------------------------------------------------------
+
+
+def _load(category: str) -> list[BFCLCase]:
+    try:
+        return load_bfcl_category(category, limit=BFCL_LIMIT)
+    except MissingBFCLAnswerFileError:
+        raise
+    except FileNotFoundError:
+        logger.warning("BFCL data not found for category %r — run download_data.py", category)
+        return []
+
+
+# Safe without a lock: pytest_generate_tests runs during collection,
+# which is single-threaded even under pytest-parallel (--tests-per-worker N).
+_cases_cache: dict[str, list[BFCLCase]] = {}
+
+
+def _selected_categories(keyword: str | None) -> list[str]:
+    """Infer which BFCL categories need loading from the pytest -k filter."""
+    if not keyword:
+        return list(BFCL_CATEGORIES)
+
+    matched = []
+    for category in BFCL_CATEGORIES:
+        patterns = {
+            category,
+            f"{category}_",
+            category.replace("_", "-"),
+            category.replace("_", " "),
+        }
+        if any(re.search(rf"(?<!\w){re.escape(pattern)}", keyword) for pattern in patterns):
+            matched.append(category)
+
+    return matched or list(BFCL_CATEGORIES)
+
+
+def _get_cases_for_category(category: str) -> list[BFCLCase]:
+    """Load and cache BFCL cases only for categories needed by this run."""
+    if category not in _cases_cache:
+        _cases_cache[category] = _load(category)
+    return _cases_cache[category]
+
+
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """Parametrize 'case' lazily — data is loaded only when BFCL tests are collected."""
+    if "case" not in metafunc.fixturenames:
+        return
+    categories = _selected_categories(getattr(metafunc.config.option, "keyword", None))
+    cases = [case for category in categories for case in _get_cases_for_category(category)]
+    if not cases:
+        metafunc.parametrize("case", [], ids=[])
+        return
+    metafunc.parametrize("case", cases, ids=[c.id for c in cases])
+
+
+# ---------------------------------------------------------------------------
+# Session-scoped fixture for the log directory
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def bfcl_run_dir() -> Path:
+    """Single timestamped directory for all BFCL logs in this test session.
+
+    Safe under pytest-parallel: get_or_create_run_dir() creates the directory
+    exactly once under a lock; subsequent calls return the same path.
+    """
+    return get_or_create_run_dir()
+
+
+# ---------------------------------------------------------------------------
+# Core runner shared by all test classes
+# ---------------------------------------------------------------------------
+
+
+def _run_bfcl_case(
+    *,
+    case: BFCLCase,
+    model: str,
+    parser: str,
+    backend: str,
+    client: openai.OpenAI,
+    run_dir: Path,
+) -> None:
+    """Execute a single BFCL test case, log the result, assert on failure."""
+    evaluator = get_evaluator()
+    category = case.category
+    test_id = case.id
+    messages = case.question
+    tools = bfcl_to_openai_tools(case.function)
+
+    request_payload = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": "auto",
+        "temperature": 0.01,
+        "max_tokens": 1024,
+    }
+
+    start = time.monotonic()
+    response_payload = None
+    actual: list[dict[str, Any]] = []
+
+    try:
+        response = client.chat.completions.create(**request_payload)
+        response_payload = response.model_dump()
+        actual = extract_tool_calls(response)
+    except Exception as exc:
+        latency = (time.monotonic() - start) * 1000
+        log_path = evaluator.save_test_log(
+            run_dir,
+            test_id=test_id,
+            category=category,
+            model=model,
+            parser=parser,
+            backend=backend,
+            request_payload=request_payload,
+            response_payload=None,
+            ground_truth=case.ground_truth,
+            actual_tool_calls=[],
+            passed=False,
+            errors=[f"API error: {exc}"],
+            latency_ms=latency,
+        )
+        append_result(
+            {
+                "test_id": test_id,
+                "category": category,
+                "passed": False,
+                "errors": [f"API error: {exc}"],
+                "latency_ms": latency,
+                "finish_reason": None,
+                "completion_tokens": None,
+                "had_reasoning": False,
+                "log_file": log_file_for_summary(run_dir, log_path),
+                "model": model,
+                "backend": backend,
+            }
+        )
+        pytest.fail(f"BFCL {test_id}: API call failed — {exc}")
+
+    latency = (time.monotonic() - start) * 1000
+    passed, errors = evaluator.evaluate_tool_calls(
+        actual,
+        case.ground_truth,
+        category=category,
+    )
+
+    log_path = evaluator.save_test_log(
+        run_dir,
+        test_id=test_id,
+        category=category,
+        model=model,
+        parser=parser,
+        backend=backend,
+        request_payload=request_payload,
+        response_payload=response_payload,
+        ground_truth=case.ground_truth,
+        actual_tool_calls=actual,
+        passed=passed,
+        errors=errors,
+        latency_ms=latency,
+    )
+
+    finish_reason = None
+    completion_tokens = None
+    had_reasoning = False
+    if response_payload:
+        choices = response_payload.get("choices") or []
+        if choices:
+            finish_reason = choices[0].get("finish_reason")
+            msg = choices[0].get("message") or {}
+            had_reasoning = bool(msg.get("reasoning_content"))
+        usage = response_payload.get("usage") or {}
+        completion_tokens = usage.get("completion_tokens")
+
+    append_result(
+        {
+            "test_id": test_id,
+            "category": category,
+            "passed": passed,
+            "errors": errors,
+            "latency_ms": latency,
+            "finish_reason": finish_reason,
+            "completion_tokens": completion_tokens,
+            "had_reasoning": had_reasoning,
+            "log_file": log_file_for_summary(run_dir, log_path),
+            "model": model,
+            "backend": backend,
+        }
+    )
+
+    status = "PASS" if passed else "FAIL"
+    logger.info(
+        "BFCL %s [%s] %.0fms → %s",
+        test_id,
+        status,
+        latency,
+        log_file_for_summary(run_dir, log_path),
+    )
+
+    if not passed:
+        pytest.fail(f"BFCL {test_id}: {'; '.join(errors)}")
+
+
+# ============================================================================
+# Fixture-based tests (use setup_backend → launches GPU worker + gateway)
+# ============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.skip_for_runtime(
+    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
+)
+@pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
+@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+class TestBFCLQwen:
+    """BFCL v3 accuracy — Qwen 2.5 7B with qwen parser (all categories)."""
+
+    def test_case(self, setup_backend, bfcl_run_dir, case):
+        backend_name, model, client, _ = setup_backend
+        _run_bfcl_case(
+            case=case,
+            model=model,
+            parser="qwen",
+            backend=backend_name,
+            client=client,
+            run_dir=bfcl_run_dir,
+        )
+
+
+# ============================================================================
+# Standalone mode: run against an already-running gateway
+# ============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.skipif(
+    not os.environ.get("BFCL_BASE_URL"),
+    reason="Set BFCL_BASE_URL to run standalone BFCL tests",
+)
+class TestBFCLStandalone:
+    """Run BFCL tests against an externally managed gateway.
+
+    Set environment variables:
+        BFCL_BASE_URL=http://localhost:30000
+        BFCL_MODEL=Qwen/Qwen2.5-7B-Instruct
+        BFCL_PARSER=qwen  (for logging only)
+        BFCL_LIMIT=20     (optional: limit cases per category)
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup_client(self, bfcl_run_dir):
+        base_url = os.environ["BFCL_BASE_URL"]
+        self.model = os.environ.get("BFCL_MODEL", "default")
+        self.parser = os.environ.get("BFCL_PARSER", "unknown")
+        self.client = openai.OpenAI(
+            base_url=f"{base_url.rstrip('/')}/v1",
+            api_key=os.environ.get("BFCL_API_KEY", "not-used"),
+        )
+        self.run_dir = bfcl_run_dir
+
+    def test_case(self, case):
+        _run_bfcl_case(
+            case=case,
+            model=self.model,
+            parser=self.parser,
+            backend="standalone",
+            client=self.client,
+            run_dir=self.run_dir,
+        )
