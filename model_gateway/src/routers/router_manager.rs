@@ -706,10 +706,7 @@ impl RouterTrait for RouterManager {
         } else {
             (
                 StatusCode::NOT_FOUND,
-                format!(
-                    "Model '{}' not found or no router available for score request",
-                    model_id
-                ),
+                format!("Model '{model_id}' not found or no router available for score request"),
             )
                 .into_response()
         }
