@@ -272,8 +272,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         logger.info("Score request %s", request_id)
 
         try:
-            # task='score' is implicitly used by cross-encoders in vLLM when text_1 & text_2 are provided, but can be forced if supported.
-            pooling_params = PoolingParams()
+            pooling_params = PoolingParams(task="score")
 
             results = []
             total_prompt_tokens = 0
