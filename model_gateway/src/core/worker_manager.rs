@@ -22,7 +22,7 @@ use tracing::{debug, info};
 use crate::{
     core::{
         metrics_aggregator::{self, MetricPack},
-        ConnectionMode, Worker, WorkerRegistry, WorkerType,
+        ConnectionMode, Worker, WorkerLoadManager, WorkerRegistry, WorkerType,
     },
     policies::PolicyRegistry,
 };
@@ -307,6 +307,7 @@ impl WorkerManager {
 pub struct LoadMonitor {
     worker_registry: Arc<WorkerRegistry>,
     policy_registry: Arc<PolicyRegistry>,
+    pub worker_load_manager: Arc<WorkerLoadManager>,
     client: reqwest::Client,
     default_interval: Duration,
     tx: watch::Sender<HashMap<String, WorkerLoadResponse>>,
@@ -327,6 +328,7 @@ impl LoadMonitor {
         Self {
             worker_registry,
             policy_registry,
+            worker_load_manager: Arc::new(WorkerLoadManager::new()),
             client,
             default_interval: Duration::from_secs(default_interval_secs),
             tx,
@@ -356,6 +358,7 @@ impl LoadMonitor {
 
         let worker_registry = Arc::clone(&self.worker_registry);
         let policy_registry = Arc::clone(&self.policy_registry);
+        let worker_load_manager = Arc::clone(&self.worker_load_manager);
         let client = self.client.clone();
         let tx = self.tx.clone();
         let group_key = key.clone();
@@ -369,6 +372,7 @@ impl LoadMonitor {
                 group_key,
                 worker_registry,
                 policy_registry,
+                worker_load_manager,
                 client,
                 interval,
                 tx,
@@ -433,6 +437,7 @@ impl LoadMonitor {
         group_key: WorkerGroupKey,
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
+        worker_load_manager: Arc<WorkerLoadManager>,
         client: reqwest::Client,
         interval: Duration,
         tx: watch::Sender<HashMap<String, WorkerLoadResponse>>,
@@ -443,7 +448,7 @@ impl LoadMonitor {
             interval_timer.tick().await;
 
             let power_of_two_policies = policy_registry.get_all_power_of_two_policies();
-            if power_of_two_policies.is_empty() {
+            if power_of_two_policies.is_empty() && policy_registry.get_dp_rank_policy().is_none() {
                 debug!("No PowerOfTwo policies found, skipping load fetch for group {group_key}");
                 continue;
             }
@@ -486,9 +491,12 @@ impl LoadMonitor {
 
             // Collect successful loads
             let mut group_loads: HashMap<String, WorkerLoadResponse> = HashMap::new();
+            let mut group_dp_loads: HashMap<String, HashMap<isize, isize>> = HashMap::new();
             for (url, response) in results {
                 if let Some(load) = response {
-                    group_loads.insert(url, load);
+                    group_loads.insert(url.clone(), load.clone());
+                    let dp_rank_loads = load.dp_rank_loads();
+                    group_dp_loads.insert(url, dp_rank_loads);
                 }
             }
 
@@ -507,6 +515,7 @@ impl LoadMonitor {
             for policy in &power_of_two_policies {
                 policy.update_loads(&group_loads);
             }
+            worker_load_manager.update_dp_loads(&group_dp_loads);
 
             // Atomically merge into the shared watch channel.
             // Remove all group URLs first to clear stale entries from workers
