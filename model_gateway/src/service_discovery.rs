@@ -10,7 +10,7 @@ use std::{
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
-    api::Api,
+    api::{Api, ListParams},
     runtime::{
         watcher::{watcher, Config},
         WatchStreamExt,
@@ -409,7 +409,7 @@ pub async fn start_service_discovery(
             let app_context_clone = Arc::clone(&app_context);
             let config_clone2 = Arc::clone(&config_arc);
 
-            match filtered_stream
+            let watcher_ok = filtered_stream
                 .try_for_each(move |pod| {
                     let tracked_pods_inner = Arc::clone(&tracked_pods_clone2);
                     let app_context_inner = Arc::clone(&app_context_clone);
@@ -441,15 +441,28 @@ pub async fn start_service_discovery(
                         Ok(())
                     }
                 })
-                .await
-            {
+                .await;
+
+            match watcher_ok {
                 Ok(()) => {
                     retry_delay = Duration::from_secs(1);
+
+                    // Reconcile tracked state with actual K8s state after a
+                    // clean watcher exit. This catches pods that were added or
+                    // removed while the watcher was down.
+                    reconcile_pods(
+                        &pods,
+                        Arc::clone(&config_arc),
+                        Arc::clone(&tracked_pods),
+                        Arc::clone(&app_context),
+                        port,
+                    )
+                    .await;
                 }
                 Err(err) => {
                     error!("Error in Kubernetes watcher: {}", err);
                     warn!(
-                        "Retrying in {} seconds with exponential backoff",
+                        "Retrying in {} seconds with exponential backoff (skipping reconciliation)",
                         retry_delay.as_secs()
                     );
                     time::sleep(retry_delay).await;
@@ -661,6 +674,145 @@ async fn handle_pod_deletion(
             "Pod deletion event for untracked/already removed pod: {} (type: {:?}). Worker URL: {}",
             pod_info.name, pod_info.pod_type, worker_url
         );
+    }
+}
+
+/// Reconcile the tracked pod set with actual Kubernetes state.
+///
+/// Performs a full pod list via the K8s API and compares with `tracked_pods`:
+/// - Pods in `tracked_pods` but no longer in K8s → submit `RemoveWorker` job
+/// - Healthy pods in K8s but missing from `tracked_pods` → submit `AddWorker` job
+///
+/// This closes two gaps in the event-driven watcher:
+/// 1. Missed deletion events (pod force-deleted, watcher down during delete)
+/// 2. Missed creation events (pod created while watcher was restarting)
+async fn reconcile_pods(
+    pods: &Api<Pod>,
+    config: Arc<ServiceDiscoveryConfig>,
+    tracked_pods: Arc<Mutex<HashSet<PodInfo>>>,
+    app_context: Arc<AppContext>,
+    port: u16,
+) {
+    let pod_list = match pods.list(&ListParams::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            warn!("Reconciliation: failed to list pods: {}", e);
+            return;
+        }
+    };
+
+    // Build the set of live pods that match our selectors.
+    // Include all non-deleted pods regardless of health: the router's own health
+    // checker handles unhealthy workers. Only pods completely gone from K8s are stale.
+    let mut live_pods = HashSet::new();
+    for pod in &pod_list.items {
+        if !PodInfo::should_include(pod, &config) {
+            continue;
+        }
+        if pod.metadata.deletion_timestamp.is_some() {
+            continue;
+        }
+        if let Some(info) = PodInfo::from_pod(pod, Some(&config)) {
+            live_pods.insert(info);
+        }
+    }
+
+    // Diff: stale = tracked but not live, missing = live-and-healthy but not tracked
+    let (stale, missing) = {
+        let tracked = match tracked_pods.lock() {
+            Ok(t) => t,
+            Err(e) => {
+                error!("Reconciliation: failed to acquire lock: {}", e);
+                return;
+            }
+        };
+        let stale: Vec<PodInfo> = tracked.difference(&live_pods).cloned().collect();
+        let missing: Vec<PodInfo> = live_pods
+            .difference(&tracked)
+            .filter(|p| p.is_healthy())
+            .cloned()
+            .collect();
+        (stale, missing)
+    };
+
+    if stale.is_empty() && missing.is_empty() {
+        debug!("Reconciliation: tracked state is consistent with K8s");
+        return;
+    }
+
+    info!(
+        "Reconciliation: removing {} stale, adding {} missing pods",
+        stale.len(),
+        missing.len()
+    );
+
+    // Remove stale workers (only update tracked_pods after successful job submission)
+    for pod_info in &stale {
+        let worker_url = pod_info.worker_url(port);
+        info!(
+            "Reconciliation: removing stale pod {} | url: {}",
+            pod_info.name, worker_url
+        );
+        let job = Job::RemoveWorker {
+            url: worker_url.clone(),
+        };
+        if let Some(job_queue) = app_context.worker_job_queue.get() {
+            match job_queue.submit(job).await {
+                Ok(()) => {
+                    match tracked_pods.lock() {
+                        Ok(mut tracker) => {
+                            tracker.remove(pod_info);
+                        }
+                        Err(e) => {
+                            error!(
+                                "Reconciliation: lock poisoned while removing {}: {}",
+                                pod_info.name, e
+                            );
+                        }
+                    }
+                    Metrics::record_discovery_deregistration(
+                        metrics_labels::DISCOVERY_KUBERNETES,
+                        metrics_labels::DEREGISTRATION_RECONCILED,
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "Reconciliation: failed to submit removal for {}: {}",
+                        worker_url, e
+                    );
+                }
+            }
+        } else {
+            debug!(
+                "Reconciliation: JobQueue not initialized, skipping removal for: {}",
+                worker_url
+            );
+        }
+    }
+
+    // Add missing workers
+    for pod_info in &missing {
+        handle_pod_event(
+            pod_info,
+            Arc::clone(&tracked_pods),
+            Arc::clone(&app_context),
+            port,
+            config.pd_mode,
+        )
+        .await;
+    }
+
+    // Update gauge to final post-reconciliation count
+    match tracked_pods.lock() {
+        Ok(tracker) => {
+            Metrics::set_discovery_workers_discovered(
+                metrics_labels::DISCOVERY_KUBERNETES,
+                tracker.len(),
+            );
+        }
+        Err(e) => {
+            error!("Reconciliation: lock poisoned during gauge update: {}", e);
+        }
     }
 }
 
