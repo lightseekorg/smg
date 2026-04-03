@@ -23,7 +23,7 @@ impl DeepSeekR1Parser {
             think_end_token: "</think>".to_string(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            always_in_reasoning: true, // Always starts with reasoning
+            always_in_reasoning: true,
         };
 
         Self {

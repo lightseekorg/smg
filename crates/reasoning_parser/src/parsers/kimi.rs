@@ -22,7 +22,7 @@ impl KimiParser {
             think_end_token: "◁/think▷".to_string(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            always_in_reasoning: false, // Requires explicit start token
+            always_in_reasoning: false,
         };
 
         Self {

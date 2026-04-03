@@ -79,11 +79,10 @@ pub fn detect_thinking_toggle(template: &str) -> (ThinkingToggle, Option<Thinkin
         return (ThinkingToggle::None, None);
     }
 
-    // Both false already returned None above
+    // At least one must be true — both false returned ThinkingToggle::None above.
     let key_name = if has_enable_thinking {
         ThinkingKeyName::EnableThinking
     } else {
-        // has_thinking_var must be true here
         ThinkingKeyName::Thinking
     };
 
