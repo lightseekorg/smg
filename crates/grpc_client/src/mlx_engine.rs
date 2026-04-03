@@ -14,6 +14,7 @@ use openai_protocol::{
     completion::CompletionRequest,
     generate::GenerateRequest,
     messages::CreateMessageRequest,
+    responses::ResponsesRequest,
     sampling_params::SamplingParams as GenerateSamplingParams,
 };
 use tonic::{transport::Channel, Request, Streaming};
@@ -342,6 +343,33 @@ impl MlxEngineClient {
         })
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "method receiver kept for consistent public API across gRPC backends"
+    )]
+    pub fn build_generate_request_from_responses(
+        &self,
+        request_id: String,
+        body: &ResponsesRequest,
+        processed_text: String,
+        token_ids: Vec<u32>,
+        _constraint: Option<(String, String)>,
+    ) -> Result<proto::GenerateRequest, String> {
+        let sampling_params = Self::build_sampling_params_from_responses(body)?;
+
+        Ok(proto::GenerateRequest {
+            request_id,
+            input: Some(proto::generate_request::Input::Tokenized(
+                proto::TokenizedInput {
+                    original_text: processed_text,
+                    input_ids: token_ids,
+                },
+            )),
+            sampling_params: Some(sampling_params),
+            stream: body.stream.unwrap_or(false),
+        })
+    }
+
     // ── Private sampling param builders ─────────────────────────────────
 
     #[expect(deprecated, reason = "seed is legacy but still forwarded to backends")]
@@ -453,6 +481,26 @@ impl MlxEngineClient {
         }
 
         Ok(sampling)
+    }
+
+    fn build_sampling_params_from_responses(
+        request: &ResponsesRequest,
+    ) -> Result<proto::SamplingParams, String> {
+        Ok(proto::SamplingParams {
+            temperature: request.temperature,
+            top_p: request.top_p.unwrap_or(1.0),
+            top_k: 0,
+            min_p: 0.0,
+            repetition_penalty: 0.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            logit_bias: Default::default(),
+            max_tokens: request.max_output_tokens,
+            stop_token_ids: vec![],
+            ignore_eos: false,
+            logprobs: request.top_logprobs.map(|v| v as i32),
+            seed: None,
+        })
     }
 }
 
