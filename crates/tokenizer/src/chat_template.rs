@@ -209,6 +209,19 @@ impl<'a> Detector<'a> {
         }
     }
 
+    /// Check if an expression references a variable by name (walks through BinOp/UnaryOp).
+    fn expr_references_var(expr: &Expr, name: &str) -> bool {
+        match expr {
+            Expr::Var(v) => v.id == name,
+            Expr::BinOp(b) => {
+                Self::expr_references_var(&b.left, name)
+                    || Self::expr_references_var(&b.right, name)
+            }
+            Expr::UnaryOp(u) => Self::expr_references_var(&u.expr, name),
+            _ => false,
+        }
+    }
+
     /// Check if a list of statements contains `<think>` in EmitRaw or string constants.
     fn body_has_think_tag(stmts: &[Stmt]) -> bool {
         for stmt in stmts {
@@ -276,9 +289,9 @@ impl<'a> Detector<'a> {
             Stmt::IfCond(ic) => {
                 self.inspect_expr_for_structure(&ic.expr);
 
-                // Detect <think> inside {% if add_generation_prompt %} body
+                // Detect <think> inside {% if add_generation_prompt [and ...] %} body
                 if !self.think_in_prefill
-                    && matches!(&ic.expr, Expr::Var(v) if v.id == "add_generation_prompt")
+                    && Self::expr_references_var(&ic.expr, "add_generation_prompt")
                 {
                     self.think_in_prefill = Self::body_has_think_tag(&ic.true_body);
                 }
