@@ -261,7 +261,7 @@ impl ScoreRequest {
     }
 }
 
-impl super::common::GenerationRequest for ScoreRequest {
+impl GenerationRequest for ScoreRequest {
     fn get_model(&self) -> Option<&str> {
         Some(&self.model)
     }
@@ -335,7 +335,7 @@ pub struct ScoreResponse {
     pub model: String,
     /// Usage information (if provided by backend)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<super::common::UsageInfo>,
+    pub usage: Option<UsageInfo>,
 }
 
 #[cfg(test)]
