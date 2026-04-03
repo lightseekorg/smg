@@ -26,6 +26,7 @@ use openai_protocol::{
 };
 
 pub mod anthropic;
+pub mod common;
 pub mod conversations;
 pub mod error;
 pub mod factory;
