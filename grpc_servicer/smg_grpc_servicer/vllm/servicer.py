@@ -365,7 +365,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         tokenized: vllm_engine_pb2.TokenizedInput,
         mm_proto: vllm_engine_pb2.MultimodalInputs,
     ) -> VllmMultiModalInput:
-        """Build vLLM MultiModalInputs from preprocessed proto data.
+        """Build vLLM MultiModalInput from preprocessed proto data.
 
         Bypasses HF processor entirely — pixel values and model-specific
         tensors were already computed by the Rust router.  Field layouts
