@@ -409,6 +409,7 @@ async fn process_multimodal_parts(
 
     debug!(
         image_count = images.len(),
+        image_sizes = ?images.iter().map(|f| (f.image.width(), f.image.height())).collect::<Vec<_>>(),
         "Fetched images for multimodal processing"
     );
 
@@ -679,14 +680,23 @@ fn assemble_trtllm(intermediate: MultimodalIntermediate) -> TrtllmMultimodalData
 
 /// Serialize pixel values ndarray to raw little-endian f32 bytes + shape.
 fn serialize_pixel_values(preprocessed: &PreprocessedImages) -> (Vec<u8>, Vec<u32>) {
-    let pixel_bytes: Vec<u8> = if let Some(pixel_slice) = preprocessed
-        .pixel_values
-        .as_slice()
-        .or_else(|| preprocessed.pixel_values.as_slice_memory_order())
-    {
-        pixel_slice.iter().flat_map(|v| v.to_le_bytes()).collect()
+    let pixel_bytes: Vec<u8> = if let Some(pixel_slice) = preprocessed.pixel_values.as_slice() {
+        // Zero-copy reinterpret: &[f32] → &[u8] on little-endian (x86).
+        // This replaces the per-element flat_map(to_le_bytes) which was the
+        // #1 CPU hotspot (13% of SMG CPU in profiling).
+        #[cfg(target_endian = "little")]
+        {
+            let byte_slice: &[u8] = bytemuck::cast_slice(pixel_slice);
+            byte_slice.to_vec()
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            pixel_slice.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
     } else {
-        // Fallback for non-contiguous arrays
+        // Non-C-contiguous array: .iter() walks in logical (row-major) order,
+        // which matches the shape — unlike as_slice_memory_order() which would
+        // silently serialize in wrong dimension order for Fortran-contiguous arrays.
         preprocessed
             .pixel_values
             .iter()

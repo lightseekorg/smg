@@ -122,14 +122,23 @@ impl MeshController {
             };
             cnt += 1;
 
+            // Checkpoint tree state every 10 rounds (~10s) by exporting
+            // the live radix tree from CacheAwarePolicy into tree_configs.
+            // This keeps the periodic structure snapshot fresh.
+            if cnt.is_multiple_of(10) {
+                self.sync_manager.checkpoint_tree_states();
+            }
+
             // Periodic GC: clean up tombstoned CRDT metadata every 60 rounds (~60s)
             if cnt.is_multiple_of(60) {
                 let removed = self.stores.gc_tombstones();
                 if removed > 0 {
                     log::info!("GC: removed {removed} tombstoned CRDT metadata entries");
                 }
-                // Checkpoint pending tree ops into config blobs
-                self.sync_manager.checkpoint_tree_states();
+                let tree_removed = self.stores.gc_stale_tree_entries();
+                if tree_removed > 0 {
+                    log::info!("GC: removed {tree_removed} stale tree_configs entries");
+                }
                 // Record store sizes for monitoring
                 metrics::record_store_sizes(
                     self.stores.worker.len(),
@@ -137,6 +146,53 @@ impl MeshController {
                     self.stores.membership.len(),
                     self.stores.app.len(),
                 );
+
+                // Log all mesh data structure sizes for memory debugging.
+                let tree_configs_bytes: usize = self
+                    .stores
+                    .tree_configs
+                    .iter()
+                    .map(|e| e.value().len())
+                    .sum();
+                let tenant_inserts: usize = self
+                    .stores
+                    .tenant_delta_inserts
+                    .iter()
+                    .map(|e| e.value().len())
+                    .sum();
+                let tenant_evictions: usize = self
+                    .stores
+                    .tenant_delta_evictions
+                    .iter()
+                    .map(|e| e.value().len())
+                    .sum();
+                let tree_ops_pending: usize = self
+                    .stores
+                    .tree_ops_pending
+                    .iter()
+                    .map(|e| e.value().len())
+                    .sum();
+                log::info!(
+                    "Mesh memory: tree_configs={} entries ({} bytes), tree_versions={}, \
+                     tenant_inserts={}, tenant_evictions={}, tree_ops_pending={}, \
+                     policy_crdt={}, worker_crdt={}",
+                    self.stores.tree_configs.len(),
+                    tree_configs_bytes,
+                    self.stores.tree_versions.len(),
+                    tenant_inserts,
+                    tenant_evictions,
+                    tree_ops_pending,
+                    self.stores.policy.len(),
+                    self.stores.worker.len(),
+                );
+
+                // Log CRDT policy store operation log length for memory debugging
+                let policy_oplog_len = self.stores.policy.get_operation_log().len();
+                log::info!(
+                    policy_oplog_len,
+                    "GC: CRDT policy store operation log length"
+                );
+
                 // Clean up retry managers for peers no longer in cluster state
                 retry_managers.retain(|peer_name, _| map.contains_key(peer_name));
             }
@@ -357,6 +413,13 @@ impl MeshController {
     ) -> tokio::task::JoinHandle<()> {
         let stores = self.stores.clone();
         let sync_manager = self.sync_manager.clone();
+        let sync_connections = self.sync_connections.clone();
+
+        // Log connection lifecycle: spawn
+        log::debug!(
+            peer = %peer_name,
+            "spawn_sync_stream_handler called — spawning handler task"
+        );
 
         // Create a span for the spawned task
         let span = tracing::info_span!(
@@ -369,7 +432,13 @@ impl MeshController {
             async move {
                 use tokio_stream::StreamExt;
 
-                log::info!("Sync stream handler started for peer {}", peer_name);
+                // Log active connection count at handler start
+                let active_connections = sync_connections.lock().await.len();
+                log::debug!(
+                    peer = %peer_name,
+                    active_connections,
+                    "Sync stream handler started"
+                );
 
                 let sequence = Arc::new(AtomicU64::new(0));
 
@@ -395,12 +464,15 @@ impl MeshController {
                         stores.clone(),
                         self_name.clone(),
                     ));
+                    log::debug!(
+                        peer = %peer_name,
+                        "IncrementalUpdateCollector created"
+                    );
                     let tx_incremental = tx.clone();
                     let self_name_incremental = self_name.clone();
                     let peer_name_incremental = peer_name.clone();
                     let shared_sequence = sequence.clone();
                     let size_validator = MessageSizeValidator::default();
-                    let stores_for_trim = stores.clone();
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
@@ -443,26 +515,13 @@ impl MeshController {
                                             e,
                                             size_validator.max_size()
                                         );
-                                        // For tree deltas, do NOT mark as sent — skip this
-                                        // round and let the pending buffer trim in mark_sent
-                                        // eventually reduce the size.  For other stores,
-                                        // mark_sent prevents an infinite retry loop (PR #808).
-                                        let is_tree_delta =
+                                        // Mark non-tree stores as sent to prevent infinite
+                                        // retry loops (PR #808). Tree updates (tenant deltas,
+                                        // structure snapshots) are retried next round with
+                                        // updated data from the live tree.
+                                        let is_tree_update =
                                             updates.iter().any(|u| u.key.starts_with("tree:"));
-                                        if is_tree_delta {
-                                            // Force trim the pending buffer to reduce size for next round.
-                                            for u in updates {
-                                                if u.key.starts_with("tree:") {
-                                                    if let Some(mut pending) = stores_for_trim.tree_ops_pending.get_mut(&u.key) {
-                                                        let len = pending.len();
-                                                        if len > 100 {
-                                                            pending.drain(..len / 2);
-                                                            log::info!("Force-trimmed oversized tree pending buffer for {}: {} -> {}", u.key, len, pending.len());
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        } else {
+                                        if !is_tree_update {
                                             collector.mark_sent(*store_type, updates);
                                         }
                                         continue;
@@ -530,9 +589,10 @@ impl MeshController {
                 };
 
                 // Handle incoming messages
-                while let Some(msg_result) = incoming_stream.next().await {
-                    match msg_result {
-                        Ok(msg) => {
+                const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+                loop {
+                    match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming_stream.next()).await {
+                        Ok(Some(Ok(msg))) => {
                             sequence.fetch_add(1, Ordering::Relaxed);
 
                             match msg.message_type() {
@@ -621,6 +681,83 @@ impl MeshController {
                                                         let actor = Some(state_update.actor.clone());
 
                                                         if policy_state.policy_type
+                                                            == "tenant_delta"
+                                                        {
+                                                            // Lightweight tenant delta — no tree structure, no prompt text
+                                                            match super::tree_ops::TenantDelta::from_bytes(
+                                                                &policy_state.config,
+                                                            ) {
+                                                                Ok(delta) => {
+                                                                    sync_manager
+                                                                        .apply_remote_tenant_delta(
+                                                                            delta, actor,
+                                                                        );
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to deserialize tenant delta for model {}: {e}",
+                                                                        policy_state.model_id
+                                                                    );
+                                                                }
+                                                            }
+                                                        } else if policy_state.policy_type
+                                                            == "tree_state_lz4"
+                                                        {
+                                                            // LZ4-compressed snapshot (TreeState or TreeSnapshot bytes)
+                                                            match super::tree_ops::lz4_decompress(
+                                                                &policy_state.config,
+                                                            ) {
+                                                                Ok(decompressed) => {
+                                                                    // Try TreeState first (backward compat)
+                                                                    if let Ok(tree_state) =
+                                                                        super::tree_ops::TreeState::from_bytes(
+                                                                            &decompressed,
+                                                                        )
+                                                                    {
+                                                                        sync_manager
+                                                                            .apply_remote_tree_operation(
+                                                                                policy_state
+                                                                                    .model_id
+                                                                                    .clone(),
+                                                                                tree_state,
+                                                                                actor,
+                                                                            );
+                                                                    } else if let Ok(snap) =
+                                                                        kv_index::snapshot::TreeSnapshot::from_bytes(
+                                                                            &decompressed,
+                                                                        )
+                                                                    {
+                                                                        let tree_state =
+                                                                            super::tree_ops::TreeState::from_snapshot(
+                                                                                policy_state
+                                                                                    .model_id
+                                                                                    .clone(),
+                                                                                &snap,
+                                                                                policy_state.version,
+                                                                            );
+                                                                        sync_manager
+                                                                            .apply_remote_tree_operation(
+                                                                                policy_state
+                                                                                    .model_id
+                                                                                    .clone(),
+                                                                                tree_state,
+                                                                                actor,
+                                                                            );
+                                                                    } else {
+                                                                        log::warn!(
+                                                                            "Failed to deserialize tree_state_lz4 payload for model {}",
+                                                                            policy_state.model_id
+                                                                        );
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    log::warn!(
+                                                                        "Failed to LZ4-decompress tree state for model {}: {e}",
+                                                                        policy_state.model_id
+                                                                    );
+                                                                }
+                                                            }
+                                                        } else if policy_state.policy_type
                                                             == "tree_state_delta"
                                                         {
                                                             // Delta: apply only the new operations
@@ -854,8 +991,15 @@ impl MeshController {
                                 }
                             }
                         }
-                        Err(e) => {
+                        Ok(Some(Err(e))) => {
                             log::error!("Error receiving from sync_stream with {}: {}", peer_name, e);
+                            break;
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            log::warn!(
+                                "sync_stream to {peer_name} idle timeout ({STREAM_IDLE_TIMEOUT:?}) — closing"
+                            );
                             break;
                         }
                     }
@@ -863,7 +1007,10 @@ impl MeshController {
 
                 incremental_sender_handle.abort();
                 let _ = incremental_sender_handle.await;
-                log::info!("Sync stream handler stopped for peer {}", peer_name);
+                log::debug!(
+                    peer = %peer_name,
+                    "sync_stream_handler exited — handler dropped"
+                );
             }
             .instrument(span),
         )

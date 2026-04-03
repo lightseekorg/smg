@@ -109,6 +109,27 @@ _NIGHTLY_MODELS: list[tuple[str, str, int, list[str], dict]] = [
         ["http", "grpc"],
         {},
     ),
+    (
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        "Llama4Scout",
+        1,
+        ["http", "grpc"],
+        {},
+    ),
+    (
+        "meta-llama/Llama-3.3-70B-Instruct",
+        "Llama70b",
+        1,
+        ["http", "grpc"],
+        {},
+    ),
+    (
+        "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic",
+        "Llama70bFp8",
+        1,
+        ["http", "grpc"],
+        {},
+    ),
 ]
 
 

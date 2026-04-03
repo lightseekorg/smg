@@ -262,9 +262,10 @@ fn convert_assistant_message(
             let mut obj = serde_json::Map::new();
             obj.insert("role".into(), Value::String("assistant".into()));
 
-            if !text_parts.is_empty() {
-                obj.insert("content".into(), Value::String(text_parts.join("")));
-            }
+            // Always insert content — empty string when tool-calls-only.
+            // Certain models' chat template requires content to be a string,
+            // not null, even when only tool_calls are present.
+            obj.insert("content".into(), Value::String(text_parts.join("")));
             if !tool_calls.is_empty() {
                 obj.insert("tool_calls".into(), Value::Array(tool_calls));
             }

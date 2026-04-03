@@ -14,7 +14,7 @@ use tracing::warn;
 use super::utils::{patch_response_with_request_metadata, restore_original_tools};
 use crate::routers::{
     error,
-    header_utils::{apply_provider_headers, extract_auth_header},
+    header_utils::ApiProvider,
     mcp_utils::ensure_request_mcp_client,
     openai::{
         context::{PayloadState, RequestContext},
@@ -78,6 +78,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             ctx.components.client(),
             &url,
             ctx.headers(),
+            worker.api_key(),
             payload,
             original_body,
             &session,
@@ -95,8 +96,9 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         }
     } else {
         let mut request_builder = ctx.components.client().post(&url).json(&payload);
-        let auth_header = extract_auth_header(ctx.headers(), worker.api_key());
-        request_builder = apply_provider_headers(request_builder, &url, auth_header.as_ref());
+        let provider = ApiProvider::from_url(&url);
+        let auth_header = provider.extract_auth_header(ctx.headers(), worker.api_key());
+        request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
 
         let response = match request_builder.send().await {
             Ok(r) => r,

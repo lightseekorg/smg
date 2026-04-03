@@ -36,9 +36,6 @@ pub struct ClassifyRequest {
 
     /// SGLang extension: request priority
     pub priority: Option<i32>,
-
-    /// SGLang extension: enable/disable logging of metrics
-    pub log_metrics: Option<bool>,
 }
 
 impl GenerationRequest for ClassifyRequest {

@@ -18,7 +18,7 @@ use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::{debug, error};
 
-// Import embedding-specific, classify-specific, and messages-specific stages
+// Import embedding-specific, classify-specific, messages-specific, and completion-specific stages
 use super::regular::stages::classify::ClassifyResponseProcessingStage;
 use super::{
     common::{responses::ResponsesContext, stages::*},
@@ -27,6 +27,10 @@ use super::{
     regular::{
         processor,
         stages::{
+            completion::{
+                CompletionPreparationStage, CompletionRequestBuildingStage,
+                CompletionResponseProcessingStage,
+            },
             embedding::{
                 preparation::EmbeddingPreparationStage,
                 request_building::EmbeddingRequestBuildingStage,
@@ -36,7 +40,8 @@ use super::{
                 MessagePreparationStage, MessageRequestBuildingStage,
                 MessageResponseProcessingStage,
             },
-            *,
+            ChatGeneratePreparationStage, ChatGenerateRequestBuildingStage,
+            ChatGenerateResponseProcessingStage,
         },
         streaming,
     },
@@ -128,17 +133,20 @@ impl RequestPipeline {
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(PreparationStage::new()),
+            Box::new(ChatGeneratePreparationStage::new()),
             Box::new(WorkerSelectionStage::new(
                 worker_registry,
                 policy_registry,
                 WorkerSelectionMode::Regular,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(RequestBuildingStage::new(false)), // No PD metadata
+            Box::new(ChatGenerateRequestBuildingStage::new(false)), // No PD metadata
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
-            Box::new(ResponseProcessingStage::new(processor, streaming_processor)),
+            Box::new(ChatGenerateResponseProcessingStage::new(
+                processor,
+                streaming_processor,
+            )),
         ];
 
         Self {
@@ -231,17 +239,20 @@ impl RequestPipeline {
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(PreparationStage::new()),
+            Box::new(ChatGeneratePreparationStage::new()),
             Box::new(WorkerSelectionStage::new(
                 worker_registry,
                 policy_registry,
                 WorkerSelectionMode::PrefillDecode,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(RequestBuildingStage::new(true)), // Inject PD metadata
+            Box::new(ChatGenerateRequestBuildingStage::new(true)), // Inject PD metadata
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
-            Box::new(ResponseProcessingStage::new(processor, streaming_processor)),
+            Box::new(ChatGenerateResponseProcessingStage::new(
+                processor,
+                streaming_processor,
+            )),
         ];
 
         Self {
@@ -390,6 +401,96 @@ impl RequestPipeline {
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
             Box::new(MessageResponseProcessingStage::new(
+                processor,
+                streaming_processor,
+            )),
+        ];
+
+        Self {
+            stages: Arc::new(stages),
+            backend_type: metrics_labels::BACKEND_PD,
+        }
+    }
+
+    /// Create a Completion API pipeline (single-worker)
+    ///
+    /// Uses Completion-specific stages for preparation, request building, and response
+    /// processing. Shares worker selection, client acquisition, dispatch metadata,
+    /// and request execution stages with other pipelines.
+    pub fn new_completion(
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+    ) -> Self {
+        let processor = processor::ResponseProcessor::new(
+            ToolParserFactory::default(),
+            ReasoningParserFactory::default(),
+            None,
+            None,
+        );
+
+        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
+            ToolParserFactory::default(),
+            ReasoningParserFactory::default(),
+            None,
+            None,
+            metrics_labels::BACKEND_REGULAR,
+        ));
+
+        let stages: Vec<Box<dyn PipelineStage>> = vec![
+            Box::new(CompletionPreparationStage),
+            Box::new(WorkerSelectionStage::new(
+                worker_registry,
+                policy_registry,
+                WorkerSelectionMode::Regular,
+            )),
+            Box::new(ClientAcquisitionStage),
+            Box::new(CompletionRequestBuildingStage::new(false)), // No PD metadata
+            Box::new(DispatchMetadataStage),
+            Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
+            Box::new(CompletionResponseProcessingStage::new(
+                processor,
+                streaming_processor,
+            )),
+        ];
+
+        Self {
+            stages: Arc::new(stages),
+            backend_type: metrics_labels::BACKEND_REGULAR,
+        }
+    }
+
+    /// Create a Completion API PD (prefill-decode) pipeline
+    pub fn new_completion_pd(
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+    ) -> Self {
+        let processor = processor::ResponseProcessor::new(
+            ToolParserFactory::default(),
+            ReasoningParserFactory::default(),
+            None,
+            None,
+        );
+
+        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
+            ToolParserFactory::default(),
+            ReasoningParserFactory::default(),
+            None,
+            None,
+            metrics_labels::BACKEND_PD,
+        ));
+
+        let stages: Vec<Box<dyn PipelineStage>> = vec![
+            Box::new(CompletionPreparationStage),
+            Box::new(WorkerSelectionStage::new(
+                worker_registry,
+                policy_registry,
+                WorkerSelectionMode::PrefillDecode,
+            )),
+            Box::new(ClientAcquisitionStage),
+            Box::new(CompletionRequestBuildingStage::new(true)), // Inject PD metadata
+            Box::new(DispatchMetadataStage),
+            Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
+            Box::new(CompletionResponseProcessingStage::new(
                 processor,
                 streaming_processor,
             )),
@@ -583,15 +684,11 @@ impl RequestPipeline {
     }
 
     /// Execute the complete pipeline for a completion request
-    #[expect(
-        dead_code,
-        reason = "Completion pipeline entrypoint is introduced before later stacked PRs wire the router to call it"
-    )]
     pub async fn execute_completion(
         &self,
         request: Arc<CompletionRequest>,
         headers: Option<http::HeaderMap>,
-        _model_id: Option<String>,
+        model_id: String,
         components: Arc<SharedComponents>,
     ) -> Response {
         let start = Instant::now();
@@ -607,7 +704,7 @@ impl RequestPipeline {
             bool_to_static_str(streaming),
         );
 
-        let mut ctx = RequestContext::for_completion(request, headers, model.clone(), components);
+        let mut ctx = RequestContext::for_completion(request, headers, model_id, components);
 
         for stage in self.stages.iter() {
             match stage.execute(&mut ctx).await {

@@ -19,6 +19,17 @@ pub fn default_true() -> bool {
     true
 }
 
+/// Deserialize a bool that also accepts JSON `null` (mapped to `false`).
+///
+/// Use with `#[serde(default, deserialize_with = "deserialize_null_as_false")]`
+/// on fields that the OpenAI spec defines as `Optional[bool]` defaulting to `false`.
+pub fn deserialize_null_as_false<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<bool>::deserialize(deserializer).map(|opt| opt.unwrap_or(false))
+}
+
 // ============================================================================
 // GenerationRequest Trait
 // ============================================================================
@@ -704,4 +715,38 @@ pub enum Detail {
     High,
     #[default]
     Auto,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+    use serde_json::json;
+
+    use super::*;
+
+    #[derive(Deserialize)]
+    struct NullableBoolTest {
+        #[serde(default, deserialize_with = "deserialize_null_as_false")]
+        field: bool,
+    }
+
+    #[test]
+    fn test_deserialize_null_as_false() {
+        let cases = [
+            (json!({"field": true}), true),
+            (json!({"field": false}), false),
+            (json!({"field": null}), false),
+            (json!({}), false),
+        ];
+        for (input, expected) in cases {
+            let t: NullableBoolTest = serde_json::from_value(input).unwrap();
+            assert_eq!(t.field, expected);
+        }
+    }
+
+    #[test]
+    fn test_deserialize_null_as_false_rejects_non_bool() {
+        let result = serde_json::from_value::<NullableBoolTest>(json!({"field": "yes"}));
+        assert!(result.is_err());
+    }
 }

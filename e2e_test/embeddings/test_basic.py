@@ -18,7 +18,7 @@ import pytest
 logger = logging.getLogger(__name__)
 
 
-@pytest.mark.engine("sglang")
+@pytest.mark.engine("sglang", "vllm")
 @pytest.mark.gpu(1)
 @pytest.mark.model("intfloat/e5-mistral-7b-instruct")
 @pytest.mark.e2e

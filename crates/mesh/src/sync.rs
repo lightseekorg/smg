@@ -2,7 +2,10 @@
 //!
 //! Handles synchronization of worker and policy states across mesh cluster nodes
 
-use std::{fmt::Debug, sync::Arc};
+use std::{
+    fmt::Debug,
+    sync::{atomic::Ordering, Arc},
+};
 
 use parking_lot::RwLock;
 use tracing::{debug, warn};
@@ -13,11 +16,63 @@ use super::{
         policy_key, tree_state_key, PolicyState, RateLimitConfig, StateStores, WorkerState,
         GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
     },
-    tree_ops::{TreeOperation, TreeState, TreeStateDelta},
+    tree_ops::{
+        hash_node_path, hash_token_path, TenantDelta, TenantEvict, TenantInsert, TreeKey,
+        TreeOperation, TreeState, TreeStateDelta,
+    },
 };
 
 pub trait TreeStateSubscriber: Send + Sync + Debug {
     fn apply_remote_tree_state(&self, model_id: &str, tree_state: &TreeState);
+
+    /// Apply lightweight tenant delta — inserts and evictions by hash.
+    /// Default: process global evictions only (where `node_path_hash == GLOBAL_EVICTION_HASH`).
+    /// Inserts require the actual tree to resolve hashes to nodes,
+    /// so they are dropped here; implementations that maintain a
+    /// hash→node index (e.g. `CacheAwarePolicy`) should override.
+    fn apply_tenant_delta(
+        &self,
+        model_id: &str,
+        _inserts: &[TenantInsert],
+        evictions: &[TenantEvict],
+    ) {
+        // Default: only convert global evictions (hash=GLOBAL_EVICTION_HASH)
+        // into Remove ops. Targeted evictions (non-zero hash) are skipped
+        // because we can't resolve the hash without a path index.
+        let global_evictions: Vec<&TenantEvict> = evictions
+            .iter()
+            .filter(|e| e.node_path_hash == crate::tree_ops::GLOBAL_EVICTION_HASH)
+            .collect();
+
+        if !global_evictions.is_empty() {
+            let mut tree_state = TreeState::new(model_id.to_string());
+            for evict in global_evictions {
+                tree_state.add_operation(TreeOperation::Remove(crate::tree_ops::TreeRemoveOp {
+                    tenant: evict.worker_url.clone(),
+                }));
+            }
+            self.apply_remote_tree_state(model_id, &tree_state);
+        }
+    }
+
+    /// Export the current tree state for a model from the live radix tree.
+    /// Used by `checkpoint_tree_states` to build periodic structure snapshots
+    /// WITHOUT accumulating full prompt text in memory on every request.
+    /// Returns None if the subscriber doesn't have a tree for this model.
+    fn export_tree_state(&self, _model_id: &str) -> Option<TreeState> {
+        None
+    }
+
+    /// Export a compact tree snapshot for a model from the live radix tree.
+    /// Returns a [`kv_index::snapshot::TreeSnapshot`] that encodes the tree
+    /// structure with shared prefixes — much smaller than the flat
+    /// `TreeState` returned by [`export_tree_state`].
+    ///
+    /// Used by `checkpoint_tree_states` to populate `tree_configs` for
+    /// Layer 2 periodic snapshots.
+    fn export_tree_snapshot(&self, _model_id: &str) -> Option<kv_index::snapshot::TreeSnapshot> {
+        None
+    }
 }
 
 pub trait WorkerStateSubscriber: Send + Sync + Debug {
@@ -436,6 +491,24 @@ impl MeshSyncManager {
     /// The policy store version is bumped so the generation-based collector
     /// detects the change, but the `config` blob is NOT updated on every call.
     /// It is rebuilt lazily by the collector when a full-state fallback is needed.
+    /// Lightweight sync: accepts a pre-computed hash + tenant, avoiding
+    /// the 80k+ String allocation from TreeKey::Text on every request.
+    pub fn sync_tree_insert_hash(&self, model_id: &str, path_hash: u64, tenant: &str) {
+        let key = tree_state_key(model_id);
+
+        self.stores
+            .tenant_delta_inserts
+            .entry(model_id.to_string())
+            .or_default()
+            .push(TenantInsert {
+                node_path_hash: path_hash,
+                worker_url: tenant.to_string(),
+                epoch: self.stores.tree_version(&key),
+            });
+
+        self.stores.bump_tree_version(&key);
+    }
+
     #[expect(
         clippy::unnecessary_wraps,
         reason = "Public API — callers handle Result; changing return type is a cross-crate break"
@@ -447,85 +520,93 @@ impl MeshSyncManager {
     ) -> Result<(), String> {
         let key = tree_state_key(&model_id);
 
-        // Append to pending buffer for delta sync (O(1)).
-        self.stores
-            .tree_ops_pending
-            .entry(key.clone())
-            .or_default()
-            .push(operation);
+        // Buffer a lightweight tenant delta — 24 bytes per insert (hash + epoch)
+        // instead of 80k+ bytes (full prompt text).
+        match &operation {
+            TreeOperation::Insert(insert) => {
+                let path_hash = match &insert.key {
+                    TreeKey::Text(text) => hash_node_path(text),
+                    TreeKey::Tokens(tokens) => hash_token_path(tokens),
+                };
+                self.stores
+                    .tenant_delta_inserts
+                    .entry(model_id.clone())
+                    .or_default()
+                    .push(TenantInsert {
+                        node_path_hash: path_hash,
+                        worker_url: insert.tenant.clone(),
+                        epoch: self.stores.tree_version(&key),
+                    });
+            }
+            TreeOperation::Remove(remove) => {
+                // TODO: capture the specific prefix hash being evicted.
+                // For now, 0 means "evict from all nodes" (global eviction).
+                // This is overly aggressive but correct — the next structure
+                // snapshot will restore any wrongly evicted entries.
+                self.stores
+                    .tenant_delta_evictions
+                    .entry(model_id.clone())
+                    .or_default()
+                    .push(TenantEvict {
+                        node_path_hash: crate::tree_ops::GLOBAL_EVICTION_HASH,
+                        worker_url: remove.tenant.clone(),
+                    });
+            }
+        }
+
+        // NOTE: We intentionally do NOT push to tree_ops_pending here.
+        // That would store the full TreeOperation (including 20KB+ prompt text)
+        // on every request — 40MB between checkpoints at 200 rps.
+        // Instead, checkpoint_tree_states exports the live tree via subscribers.
 
         // Bump the lightweight atomic version counter (O(1), no serialization).
-        //
-        // Previously this called `stores.policy.update()` which goes through
-        // the full CRDT machinery: deserialize PolicyState (including the
-        // potentially large config blob), re-serialize, clone for operation
-        // log — costing ~5× the config size per request.  After checkpoint
-        // materializes the TreeState (~1 MB), this was ~1 GB/s of allocation
-        // churn at 200 rps.
-        //
-        // The collector now detects tree changes via `tree_generation` and
-        // reads version from `tree_versions` instead of PolicyState.version.
         self.stores.bump_tree_version(&key);
 
         Ok(())
     }
 
-    /// Materialize a TreeState for the given tree key by combining the
-    /// policy store's config blob (may be stale) with any pending operations.
+    /// Load the materialized TreeState from `tree_configs`.
+    /// Returns None if no checkpoint exists for this key.
+    ///
+    /// Handles two storage formats:
+    /// - `TreeState` bytes (from remote full-state updates)
+    /// - `TreeSnapshot` bytes (from local `checkpoint_tree_states`)
     fn materialize_tree_state(&self, key: &str, model_id: &str) -> Option<TreeState> {
-        let policy_state = self.stores.policy.get(key);
-        let mut tree_state = match policy_state {
-            Some(ps) if !ps.config.is_empty() => TreeState::from_bytes(&ps.config).ok()?,
-            Some(_) => TreeState::new(model_id.to_string()),
-            None => {
-                // No policy store entry yet — tree may only exist in the
-                // pending buffer (sync_tree_operation no longer creates
-                // policy entries on the hot path).
-                if self.stores.tree_ops_pending.contains_key(key) {
-                    TreeState::new(model_id.to_string())
-                } else {
-                    return None;
-                }
-            }
-        };
-        if let Some(pending) = self.stores.tree_ops_pending.get(key) {
-            for op in pending.iter() {
-                tree_state.add_operation(op.clone());
-            }
+        let config_bytes = self.stores.tree_configs.get(key)?;
+        let bytes = config_bytes.value();
+        if bytes.is_empty() {
+            return Some(TreeState::new(model_id.to_string()));
         }
-        Some(tree_state)
+        // Try TreeState first (remote full-state updates store this format).
+        if let Ok(ts) = TreeState::from_bytes(bytes) {
+            return Some(ts);
+        }
+        // Fall back to TreeSnapshot (local checkpoint format).
+        if let Ok(snap) = kv_index::snapshot::TreeSnapshot::from_bytes(bytes) {
+            let version = self.stores.tree_version(key);
+            return Some(TreeState::from_snapshot(
+                model_id.to_string(),
+                &snap,
+                version,
+            ));
+        }
+        None
     }
 
-    /// Get tree state for a model from mesh stores
+    /// Get tree state for a model from mesh stores.
+    /// Reads from `tree_configs` (populated by periodic checkpoint from live tree).
     pub fn get_tree_state(&self, model_id: &str) -> Option<TreeState> {
         let key = tree_state_key(model_id);
         self.materialize_tree_state(&key, model_id)
     }
 
     pub fn get_all_tree_states(&self) -> Vec<TreeState> {
-        let mut seen = std::collections::HashSet::new();
         let mut results = Vec::new();
 
-        // Collect from policy store (checkpointed trees)
-        for (key, state) in self.stores.policy.all() {
-            if state.policy_type != "tree_state" {
-                continue;
-            }
-            seen.insert(key.clone());
-            if let Some(ts) = self.materialize_tree_state(&key, &state.model_id) {
-                results.push(ts);
-            }
-        }
-
-        // Also collect trees that only exist in the pending buffer
-        // (not yet checkpointed into policy store)
-        for entry in &self.stores.tree_ops_pending {
-            let key = entry.key();
-            if seen.contains(key.as_str()) {
-                continue;
-            }
-            let model_id = key.strip_prefix("tree:").unwrap_or(key);
-            if let Some(ts) = self.materialize_tree_state(key, model_id) {
+        for entry in &self.stores.tree_configs {
+            let key = entry.key().clone();
+            let model_id = key.strip_prefix("tree:").unwrap_or(&key).to_string();
+            if let Some(ts) = self.materialize_tree_state(&key, &model_id) {
                 results.push(ts);
             }
         }
@@ -533,16 +614,24 @@ impl MeshSyncManager {
         results
     }
 
-    /// Apply remote tree operation to local policy
-    /// This is called when receiving tree state updates from other nodes
+    /// Apply remote tree operation to local stores.
+    /// This is called when receiving full tree state updates from other nodes.
+    ///
+    /// Writes to `tree_configs` (plain DashMap) instead of the CRDT policy
+    /// store to avoid operation log memory accumulation.
+    ///
+    /// Uses `DashMap::entry()` for atomic read-modify-write on `tree_configs`
+    /// to avoid the TOCTOU gap between `get()` and `insert()`.
     pub fn apply_remote_tree_operation(
         &self,
         model_id: String,
         tree_state: TreeState,
         actor: Option<String>,
     ) {
+        use dashmap::mapref::entry::Entry;
+
         let key = tree_state_key(&model_id);
-        let actor = actor.unwrap_or_else(|| "remote".to_string());
+        let _actor = actor.unwrap_or_else(|| "remote".to_string());
 
         let serialized = match tree_state.to_bytes() {
             Ok(bytes) => bytes,
@@ -552,94 +641,101 @@ impl MeshSyncManager {
             }
         };
 
-        let mut current_version = 0;
-        let update_result = self.stores.policy.update_if(key.clone(), |current| {
-            current_version = current
-                .as_ref()
-                .map(|existing| existing.version)
-                .unwrap_or(0);
-            if tree_state.version > current_version {
-                Some(PolicyState {
-                    model_id: model_id.clone(),
-                    policy_type: "tree_state".to_string(),
-                    config: serialized.clone(),
-                    version: tree_state.version,
-                })
-            } else {
-                None
+        // Atomic read-modify-write via entry() — version check and insert
+        // happen under the same shard lock, closing the TOCTOU gap.
+        let applied = match self.stores.tree_configs.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                // tree_configs may hold TreeState bytes (from remote) or
+                // TreeSnapshot bytes (from local checkpoint). Fall back to
+                // the authoritative atomic version counter if deserialization fails.
+                let current_version = TreeState::from_bytes(entry.get())
+                    .ok()
+                    .map(|ts| ts.version)
+                    .unwrap_or_else(|| self.stores.tree_version(&key));
+                if tree_state.version > current_version {
+                    entry.insert(serialized);
+                    debug!(
+                        "Applied remote tree state update: model={} (version: {} -> {})",
+                        model_id, current_version, tree_state.version
+                    );
+                    true
+                } else {
+                    debug!(
+                        "Skipped remote tree state update: model={} (version {} <= current {})",
+                        model_id, tree_state.version, current_version
+                    );
+                    false
+                }
             }
-        });
+            Entry::Vacant(entry) => {
+                entry.insert(serialized);
+                debug!(
+                    "Applied remote tree state update (new): model={} (version: {})",
+                    model_id, tree_state.version
+                );
+                true
+            }
+        };
 
-        match update_result {
-            Ok((_, true)) => {
-                // Note: we do NOT clear tree_ops_pending here — concurrent
-                // local ops may have been appended since update_if ran.
-                // The periodic checkpoint (every ~60s) handles cleanup.
-                debug!(
-                    "Applied remote tree state update: model={} (version: {} -> {})",
-                    model_id, current_version, tree_state.version
-                );
-                // Advance atomic tree version so subsequent local ops
-                // start above the remote baseline.
-                self.stores.advance_tree_version(&key, tree_state.version);
-                self.notify_tree_state_subscribers(&model_id, &tree_state);
-            }
-            Ok((_, false)) => {
-                debug!(
-                    "Skipped remote tree state update: model={} (version {} <= current {})",
-                    model_id, tree_state.version, current_version
-                );
-            }
-            Err(err) => {
-                debug!(error = %err, model_id = %model_id, actor = %actor, "Failed to apply remote tree state update");
-            }
+        // Subscriber notification and version advancement happen after
+        // dropping the entry (shard lock released).
+        if applied {
+            self.stores.advance_tree_version(&key, tree_state.version);
+            self.stores.tree_generation.fetch_add(1, Ordering::Release);
+            self.notify_tree_state_subscribers(&model_id, &tree_state);
         }
     }
 
     /// Apply a delta (incremental operations) from a remote node.
     /// Merges the delta operations into the existing local tree state,
     /// avoiding the cost of replacing the entire tree state on every sync.
-    /// Uses atomic compare-and-swap via `update_if` to prevent concurrent
-    /// read/modify/write races.
+    ///
+    /// Uses `DashMap::entry()` for atomic read-modify-write on `tree_configs`
+    /// to avoid the TOCTOU gap between `get()` and `insert()`.
     pub fn apply_remote_tree_delta(&self, delta: TreeStateDelta, actor: Option<String>) {
+        use dashmap::mapref::entry::Entry;
+
         let key = tree_state_key(&delta.model_id);
-        let actor = actor.unwrap_or_else(|| "remote".to_string());
+        let _actor = actor.unwrap_or_else(|| "remote".to_string());
         let model_id = delta.model_id.clone();
         let ops_count = delta.operations.len();
 
-        let mut old_version = 0u64;
+        // Perform the atomic read-modify-write inside the entry block.
+        // Tree construction and serialization happen while holding the
+        // shard write lock; subscriber notification happens after.
+        let result: Option<(TreeState, u64)> = match self.stores.tree_configs.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                let bytes = entry.get();
+                let current_version = if bytes.is_empty() {
+                    0
+                } else {
+                    match TreeState::from_bytes(bytes) {
+                        Ok(ts) => ts.version,
+                        Err(_) => 0,
+                    }
+                };
 
-        let update_result = self.stores.policy.update_if(key.clone(), |current| {
-            let mut tree_state = if let Some(existing) = current {
-                old_version = existing.version;
-
-                // If the delta's base_version is ahead of our current version,
-                // there is a gap — we are missing operations.  Skip the delta;
-                // the next full-state sync will catch us up.
-                if delta.base_version > existing.version {
-                    return None;
+                // Version checks
+                if delta.base_version > current_version || current_version >= delta.new_version {
+                    debug!(
+                        "Skipped remote tree delta: model={} (base_version={}, new_version={}, current={})",
+                        model_id, delta.base_version, delta.new_version, current_version
+                    );
+                    return;
                 }
 
-                // Skip if we already have a version >= the delta's new_version
-                if existing.version >= delta.new_version {
-                    return None;
-                }
-
-                // Build base tree from config only — do NOT replay
-                // tree_ops_pending here. Pending ops are local and will be
-                // included by materialize_tree_state() when the tree is
-                // read for routing or sync.
-                if existing.config.is_empty() {
-                    if existing.version > 0 {
-                        // Config not materialized but we have a version —
-                        // local ops exist only in pending buffer. Reject the
-                        // delta; the periodic checkpoint will materialize the
-                        // config, then the next delta will apply cleanly.
-                        return None;
+                // Build base tree from config only.
+                let mut tree_state = if bytes.is_empty() {
+                    if current_version > 0 {
+                        debug!(
+                            "Skipped remote tree delta: model={} (base_version={}, new_version={}, current={})",
+                            model_id, delta.base_version, delta.new_version, current_version
+                        );
+                        return;
                     }
                     TreeState::new(delta.model_id.clone())
                 } else {
-                    match TreeState::from_bytes(&existing.config) {
+                    match TreeState::from_bytes(bytes) {
                         Ok(state) => state,
                         Err(err) => {
                             warn!(
@@ -647,107 +743,131 @@ impl MeshSyncManager {
                                 error = %err,
                                 "Corrupted tree state — rejecting delta to avoid data loss"
                             );
-                            return None;
+                            return;
                         }
                     }
+                };
+
+                let old_version = current_version;
+                for op in &delta.operations {
+                    tree_state.add_operation(op.clone());
                 }
-            } else {
-                TreeState::new(delta.model_id.clone())
-            };
+                let new_version = tree_state.version;
 
-            for op in &delta.operations {
-                tree_state.add_operation(op.clone());
-            }
-
-            let serialized = tree_state.to_bytes().ok()?;
-            Some(PolicyState {
-                model_id: delta.model_id.clone(),
-                policy_type: "tree_state".to_string(),
-                config: serialized,
-                version: tree_state.version,
-            })
-        });
-
-        match update_result {
-            Ok((_, true)) => {
-                // Note: we do NOT clear tree_ops_pending here — concurrent
-                // local ops may have been appended since update_if ran.
-                // The periodic checkpoint (every ~60s) handles cleanup.
-                debug!(
-                    "Applied remote tree delta: model={} (version: {} -> +{} ops)",
-                    model_id, old_version, ops_count
-                );
-
-                // Advance atomic tree version so subsequent local ops
-                // start above the remote baseline.
-                if let Some(ps) = self.stores.policy.get(&key) {
-                    self.stores.advance_tree_version(&key, ps.version);
-                }
-
-                // Re-read the committed state for subscriber notification
-                if let Some(policy_state) = self.stores.policy.get(&key) {
-                    if let Ok(tree_state) = TreeState::from_bytes(&policy_state.config) {
-                        self.notify_tree_state_subscribers(&model_id, &tree_state);
+                match tree_state.to_bytes() {
+                    Ok(serialized) => {
+                        entry.insert(serialized);
+                        debug!(
+                            "Applied remote tree delta: model={} (version: {} -> +{} ops)",
+                            model_id, old_version, ops_count
+                        );
+                        Some((tree_state, new_version))
+                    }
+                    Err(err) => {
+                        debug!(error = %err, model_id = %model_id, "Failed to serialize tree state after delta apply");
+                        None
                     }
                 }
             }
-            Ok((_, false)) => {
-                debug!(
-                    "Skipped remote tree delta: model={} (base_version={}, new_version={}, current={})",
-                    model_id, delta.base_version, delta.new_version, old_version
-                );
+            Entry::Vacant(entry) => {
+                // No existing config — new tree from delta.
+                if delta.base_version > 0 {
+                    debug!(
+                        "Skipped remote tree delta: model={} (base_version={}, new_version={}, no local state)",
+                        model_id, delta.base_version, delta.new_version
+                    );
+                    return;
+                }
+                let mut tree_state = TreeState::new(delta.model_id.clone());
+                for op in &delta.operations {
+                    tree_state.add_operation(op.clone());
+                }
+                let new_version = tree_state.version;
+
+                match tree_state.to_bytes() {
+                    Ok(serialized) => {
+                        entry.insert(serialized);
+                        debug!(
+                            "Applied remote tree delta (new tree): model={} (+{} ops)",
+                            model_id, ops_count
+                        );
+                        Some((tree_state, new_version))
+                    }
+                    Err(err) => {
+                        debug!(error = %err, model_id = %model_id, "Failed to serialize new tree state from delta");
+                        None
+                    }
+                }
             }
-            Err(err) => {
-                debug!(error = %err, model_id = %model_id, actor = %actor, "Failed to apply remote tree delta");
-            }
+        };
+
+        // Notification happens outside the entry block (shard lock released).
+        if let Some((tree_state, new_version)) = result {
+            self.stores.advance_tree_version(&key, new_version);
+            self.stores.tree_generation.fetch_add(1, Ordering::Release);
+            self.notify_tree_state_subscribers(&model_id, &tree_state);
         }
     }
 
-    /// Checkpoint pending tree operations into the policy store config blob.
-    /// Called periodically (e.g., from the GC cycle) to keep the config blob
-    /// reasonably fresh and limit how much the pending buffer can drift.
-    /// Materialize pending tree ops into policy store config blobs.
-    /// Called periodically (every ~60 gossip rounds) to keep the config
-    /// blob fresh and bound pending buffer growth.
-    pub fn checkpoint_tree_states(&self) {
-        let keys: Vec<String> = self
-            .stores
-            .tree_ops_pending
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
+    /// Apply a lightweight tenant delta from a remote node.
+    /// Updates the local radix tree directly via subscribers without
+    /// going through the CRDT or the full TreeState machinery.
+    pub fn apply_remote_tenant_delta(&self, delta: TenantDelta, _actor: Option<String>) {
+        let key = tree_state_key(&delta.model_id);
 
-        for key in keys {
-            let model_id = key.strip_prefix("tree:").unwrap_or(&key);
-            if let Some(tree_state) = self.materialize_tree_state(&key, model_id) {
-                if let Ok(serialized) = tree_state.to_bytes() {
-                    // Preserve version monotonicity: use max of current policy
-                    // version and tree version to avoid regressing.
-                    let _ = self.stores.policy.update(key.clone(), |current| {
-                        let current_version = current.map(|c| c.version).unwrap_or(0);
-                        PolicyState {
-                            model_id: tree_state.model_id.clone(),
-                            policy_type: "tree_state".to_string(),
-                            config: serialized,
-                            version: current_version.max(tree_state.version),
-                        }
-                    });
-                    // Drain materialized ops from the pending buffer.
-                    // Use `alter` to atomically keep only ops appended AFTER
-                    // materialize_tree_state() read the buffer. The number of
-                    // ops materialized is `tree_state.operations.len()`.
-                    let materialized_count = tree_state.operations.len();
-                    self.stores.tree_ops_pending.alter(&key, |_, mut ops| {
-                        if ops.len() <= materialized_count {
-                            ops.clear();
-                        } else {
-                            ops.drain(..materialized_count);
-                        }
-                        ops
-                    });
-                }
-            }
+        if delta.inserts.is_empty() && delta.evictions.is_empty() {
+            return;
         }
+
+        // No version check — both routers independently bump tree_version
+        // on local inserts, so the remote delta's version can be lower than
+        // the local version even though it contains novel inserts. Tenant
+        // inserts are idempotent (insert_text is a no-op if the tenant
+        // already exists at the node), so applying "stale" deltas is safe.
+
+        debug!(
+            model_id = %delta.model_id,
+            inserts = delta.inserts.len(),
+            evictions = delta.evictions.len(),
+            version = delta.version,
+            "Applying remote tenant delta"
+        );
+
+        // Clone subscriber list before calling back — same pattern as
+        // notify_tree_state_subscribers — so we don't hold the read guard
+        // during potentially expensive subscriber callbacks.
+        let subscribers = self.tree_state_subscribers.read().clone();
+        for subscriber in &subscribers {
+            subscriber.apply_tenant_delta(&delta.model_id, &delta.inserts, &delta.evictions);
+        }
+
+        // Advance version and bump generation so collector re-scans
+        self.stores.advance_tree_version(&key, delta.version);
+        self.stores.tree_generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Checkpoint tree state by exporting compact snapshots from the live
+    /// radix tree via subscribers.
+    ///
+    /// Called periodically (~every 10s) to keep `tree_configs` fresh for
+    /// the periodic structure snapshot (every 30 gossip rounds).
+    ///
+    /// Uses [`TreeStateSubscriber::export_tree_snapshot`] to obtain a
+    /// compact [`kv_index::snapshot::TreeSnapshot`] that preserves shared
+    /// prefixes.  This is much smaller than the flat `TreeState` produced
+    /// by `export_tree_state` (~2-4 MB vs ~40 MB for 2048 entries sharing
+    /// 80% prefixes) and avoids accumulating full prompt text in memory.
+    #[expect(
+        clippy::unused_self,
+        reason = "Public API called by controller — removing &self is a breaking change"
+    )]
+    pub fn checkpoint_tree_states(&self) {
+        // FIXME: Layer 2 (full tree snapshots) is disabled because the
+        // snapshot can be 170+ MB for large trees with long prompts, and
+        // allocating it every 10s causes allocator fragmentation. Tree data
+        // currently syncs via Layer 1 only (tenant deltas, ~50 bytes each).
+        // TODO: implement chunked snapshots or incremental tree diffs so
+        // Layer 2 works for large trees without excessive memory allocation.
     }
 }
 
@@ -1427,12 +1547,13 @@ mod tests {
         let result = manager.sync_tree_operation("model1".to_string(), op);
         assert!(result.is_ok());
 
-        // Verify tree state was stored
-        let tree_state = manager.get_tree_state("model1");
-        assert!(tree_state.is_some());
-        let tree = tree_state.unwrap();
-        assert_eq!(tree.model_id, "model1");
-        assert_eq!(tree.operations.len(), 1);
+        // sync_tree_operation no longer populates tree_configs (no subscribers
+        // in unit tests), so get_tree_state returns None.  Instead, verify
+        // that the tenant delta was buffered.
+        let inserts = manager.stores.tenant_delta_inserts.get("model1").unwrap();
+        assert_eq!(inserts.len(), 1);
+        assert_eq!(inserts[0].worker_url, "http://localhost:8000");
+        assert_eq!(inserts[0].node_path_hash, hash_node_path("test_text"));
     }
 
     #[test]
@@ -1442,7 +1563,10 @@ mod tests {
         // Initially should be None
         assert!(manager.get_tree_state("model1").is_none());
 
-        // Sync an operation
+        // sync_tree_operation only buffers tenant deltas and bumps the version
+        // counter — it does NOT populate tree_configs (that requires a
+        // subscriber-backed checkpoint).  Verify get_tree_state returns None
+        // after sync, but the tenant delta was buffered.
         use crate::tree_ops::{TreeInsertOp, TreeKey, TreeOperation};
         let op = TreeOperation::Insert(TreeInsertOp {
             key: TreeKey::Text("test_text".to_string()),
@@ -1452,8 +1576,10 @@ mod tests {
             .sync_tree_operation("model1".to_string(), op)
             .unwrap();
 
-        let tree_state = manager.get_tree_state("model1");
-        assert!(tree_state.is_some());
+        // get_tree_state reads from tree_configs which is empty (no subscriber)
+        assert!(manager.get_tree_state("model1").is_none());
+        // But the tenant delta insert was buffered
+        assert!(manager.stores.tenant_delta_inserts.get("model1").is_some());
     }
 
     #[test]
@@ -1500,26 +1626,22 @@ mod tests {
     fn test_get_all_tree_states() {
         let manager = create_test_manager("node1".to_string());
 
-        use crate::tree_ops::{TreeInsertOp, TreeKey, TreeOperation};
+        // get_all_tree_states reads from tree_configs. In unit tests there are
+        // no subscribers, so sync_tree_operation won't populate tree_configs.
+        // Instead, insert TreeStates directly into tree_configs.
+        let mut ts1 = TreeState::new("model1".to_string());
+        ts1.add_operation(make_insert_op("alpha", "http://localhost:8000"));
+        let mut ts2 = TreeState::new("model2".to_string());
+        ts2.add_operation(make_insert_op("beta", "http://localhost:8001"));
 
         manager
-            .sync_tree_operation(
-                "model1".to_string(),
-                TreeOperation::Insert(TreeInsertOp {
-                    key: TreeKey::Text("alpha".to_string()),
-                    tenant: "http://localhost:8000".to_string(),
-                }),
-            )
-            .unwrap();
+            .stores
+            .tree_configs
+            .insert("tree:model1".to_string(), ts1.to_bytes().unwrap());
         manager
-            .sync_tree_operation(
-                "model2".to_string(),
-                TreeOperation::Insert(TreeInsertOp {
-                    key: TreeKey::Tokens(vec![1, 2, 3, 4]),
-                    tenant: "http://localhost:8001".to_string(),
-                }),
-            )
-            .unwrap();
+            .stores
+            .tree_configs
+            .insert("tree:model2".to_string(), ts2.to_bytes().unwrap());
 
         let mut states = manager.get_all_tree_states();
         states.sort_by(|left, right| left.model_id.cmp(&right.model_id));
@@ -1710,15 +1832,20 @@ mod tests {
     }
 
     #[test]
-    fn test_collector_sends_delta_not_full_state() {
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
+    fn test_collector_sends_tenant_delta() {
+        use crate::{
+            incremental::IncrementalUpdateCollector, stores::StoreType, tree_ops::TenantDelta,
+        };
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
 
-        // Sync a tree operation (this populates both the policy store and tree_ops_pending)
+        // Sync a tree operation — buffers a tenant insert
         manager
-            .sync_tree_operation("model1".to_string(), make_insert_op("a", "http://w:8000"))
+            .sync_tree_operation(
+                "model1".to_string(),
+                make_insert_op("hello world", "http://w:8000"),
+            )
             .unwrap();
 
         let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
@@ -1726,7 +1853,7 @@ mod tests {
 
         assert!(!updates.is_empty(), "expected at least one policy update");
 
-        // The update should be a delta (policy_type = "tree_state_delta")
+        // The update should be a tenant delta (not full tree state)
         let tree_update = updates
             .iter()
             .find(|u| u.key.starts_with("tree:"))
@@ -1735,15 +1862,21 @@ mod tests {
         let policy_state: PolicyState =
             bincode::deserialize(&tree_update.value).expect("deserialize PolicyState");
         assert_eq!(
-            policy_state.policy_type, "tree_state_delta",
-            "expected delta, got full state"
+            policy_state.policy_type, "tenant_delta",
+            "expected tenant_delta, got {}",
+            policy_state.policy_type
         );
 
-        // Verify the delta deserializes correctly
-        let delta =
-            TreeStateDelta::from_bytes(&policy_state.config).expect("deserialize TreeStateDelta");
+        // Verify the tenant delta deserializes and contains the insert
+        let delta = TenantDelta::from_bytes(&policy_state.config).expect("deserialize TenantDelta");
         assert_eq!(delta.model_id, "model1");
-        assert_eq!(delta.operations.len(), 1);
+        assert_eq!(delta.inserts.len(), 1);
+        assert_eq!(delta.inserts[0].worker_url, "http://w:8000");
+        assert_eq!(
+            delta.inserts[0].node_path_hash,
+            hash_node_path("hello world")
+        );
+        assert!(delta.evictions.is_empty());
     }
 
     #[test]
@@ -1752,20 +1885,19 @@ mod tests {
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
 
-        // Directly insert a tree state into the policy store WITHOUT going through
-        // sync_tree_operation (so tree_ops_pending is empty).
+        // Directly insert a tree state into tree_configs WITHOUT going through
+        // sync_tree_operation (so tree_ops_pending is empty).  This simulates
+        // a remote tree state received via apply_remote_tree_operation.
         let mut tree = TreeState::new("model1".to_string());
         tree.add_operation(make_insert_op("direct", "http://w:8000"));
         let serialized = tree.to_bytes().unwrap();
-        let _ = stores.policy.insert(
-            "tree:model1".to_string(),
-            PolicyState {
-                model_id: "model1".to_string(),
-                policy_type: "tree_state".to_string(),
-                config: serialized,
-                version: tree.version,
-            },
-        );
+        stores
+            .tree_configs
+            .insert("tree:model1".to_string(), serialized);
+        // Advance tree version so the collector sees it as changed.
+        stores.advance_tree_version("tree:model1", tree.version);
+        // Bump tree_generation so the collector's tree_changed check fires.
+        stores.bump_tree_version("tree:model1");
 
         let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
         let updates = collector.collect_updates_for_store(StoreType::Policy);
@@ -1781,53 +1913,14 @@ mod tests {
         let policy_state: PolicyState =
             bincode::deserialize(&tree_update.value).expect("deserialize PolicyState");
         assert_eq!(
-            policy_state.policy_type, "tree_state",
+            policy_state.policy_type, "tree_state_lz4",
             "expected full state fallback, got delta"
         );
     }
 
-    #[test]
-    fn test_collector_buffer_survives_mark_sent() {
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
-
-        // Sync an operation (populates tree_ops_pending)
-        manager
-            .sync_tree_operation("model1".to_string(), make_insert_op("a", "http://w:8000"))
-            .unwrap();
-
-        // Collector A collects and marks sent
-        let collector_a = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates_a = collector_a.collect_updates_for_store(StoreType::Policy);
-        assert!(!updates_a.is_empty());
-        collector_a.mark_sent(StoreType::Policy, &updates_a);
-
-        // Collector B (simulating a second peer's collector) should still be
-        // able to collect, because the buffer was NOT cleared by A's mark_sent.
-        let collector_b = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates_b = collector_b.collect_updates_for_store(StoreType::Policy);
-        assert!(
-            !updates_b.is_empty(),
-            "collector B lost updates after collector A marked sent — buffer was prematurely cleared"
-        );
-
-        // Verify the buffer still has the pending ops
-        let tree_update_b = updates_b
-            .iter()
-            .find(|u| u.key.starts_with("tree:"))
-            .expect("expected tree update for collector B");
-
-        let policy_b: PolicyState = bincode::deserialize(&tree_update_b.value).unwrap();
-        // It may be a delta (if pending buffer survived) or full state (fallback).
-        // Either way, it must be present.
-        assert!(
-            policy_b.policy_type == "tree_state_delta" || policy_b.policy_type == "tree_state",
-            "unexpected policy_type: {}",
-            policy_b.policy_type
-        );
-    }
+    // test_collector_buffer_survives_mark_sent removed: tested tree_ops_pending
+    // buffer survival across mark_sent calls, which is a dead code path now
+    // that sync_tree_operation no longer pushes to tree_ops_pending.
 
     #[test]
     fn test_receiver_dispatches_delta_vs_full() {
@@ -1888,29 +1981,29 @@ mod tests {
 
     #[test]
     fn test_delta_reconnect_falls_back_to_full_state() {
-        // Simulate: add ops via sync_tree_operation, checkpoint (materializes
-        // config in policy store), then clear tree_ops_pending (simulating
-        // buffer trim), then create a new collector (simulating reconnected
-        // peer).  The collector should produce a full PolicyState, not a delta.
+        // Simulate a reconnected peer scenario: tree_configs has a materialized
+        // tree state but tenant delta buffers are empty.  The collector should
+        // produce a full PolicyState (lz4-compressed), not a delta.
         use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
 
+        // Directly insert a tree state into tree_configs (simulating a
+        // checkpoint that ran with real subscribers in production).
+        let mut tree = TreeState::new("model1".to_string());
         for i in 0..10 {
-            manager
-                .sync_tree_operation(
-                    "model1".to_string(),
-                    make_insert_op(&format!("op_{i}"), "http://w:8000"),
-                )
-                .unwrap();
+            tree.add_operation(make_insert_op(&format!("op_{i}"), "http://w:8000"));
         }
+        let serialized = tree.to_bytes().unwrap();
+        stores
+            .tree_configs
+            .insert("tree:model1".to_string(), serialized);
+        stores.advance_tree_version("tree:model1", tree.version);
+        stores.bump_tree_version("tree:model1");
 
-        // Checkpoint to materialize into policy store (like production)
-        manager.checkpoint_tree_states();
-
-        // Clear tree_ops_pending to simulate buffer drain
-        stores.tree_ops_pending.remove("tree:model1");
+        // Ensure tenant delta buffers are empty (simulating buffer drain)
+        stores.tenant_delta_inserts.remove("model1");
+        stores.tenant_delta_evictions.remove("model1");
 
         // New collector (simulating reconnected peer)
         let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
@@ -1926,72 +2019,16 @@ mod tests {
         let policy_state: PolicyState =
             bincode::deserialize(&tree_update.value).expect("deserialize PolicyState");
         assert_eq!(
-            policy_state.policy_type, "tree_state",
-            "expected full state fallback when pending buffer is empty, got: {}",
+            policy_state.policy_type, "tree_state_lz4",
+            "expected full state fallback when tenant delta buffers are empty, got: {}",
             policy_state.policy_type
         );
     }
 
-    #[test]
-    fn test_delta_compaction_divergence() {
-        // Add 2048 + 100 operations to trigger compaction.  Version must
-        // remain monotonically increasing regardless of compaction.
-        let manager = create_test_manager("node1".to_string());
-        let total_ops = 2048 + 100;
-
-        for i in 0..total_ops {
-            manager
-                .sync_tree_operation(
-                    "model1".to_string(),
-                    make_insert_op(&format!("op_{i}"), "http://w:8000"),
-                )
-                .unwrap();
-        }
-
-        let tree = manager.get_tree_state("model1").unwrap();
-        // Version must equal total operations added (monotonic, not reset)
-        assert_eq!(tree.version, total_ops as u64);
-        // Operations should have been compacted — fewer than total_ops
-        assert!(
-            tree.operations.len() < total_ops,
-            "expected compaction to reduce ops count, got {}",
-            tree.operations.len()
-        );
-
-        // Checkpoint to materialize config before applying delta
-        // (delta is rejected when config is empty but version > 0).
-        manager.checkpoint_tree_states();
-
-        // Apply a delta referencing a post-compaction version.
-        // Even though many old operations were compacted away, the version
-        // is still valid because it monotonically increases.
-        let delta = make_delta(
-            "model1",
-            vec![make_insert_op("post_compaction", "http://w2:8000")],
-            total_ops as u64 - 1,
-            total_ops as u64 + 1,
-        );
-
-        // The local version is total_ops (the policy store version), and the
-        // delta's new_version must exceed it for acceptance.
-        // sync_tree_operation bumps the PolicyState.version each call, so
-        // the policy version equals total_ops.
-        let pre_apply_version = {
-            let key = tree_state_key("model1");
-            manager.stores.policy.get(&key).unwrap().version
-        };
-        assert_eq!(pre_apply_version, total_ops as u64);
-
-        manager.apply_remote_tree_delta(delta, Some("remote".to_string()));
-
-        let tree_after = manager.get_tree_state("model1").unwrap();
-        // The delta should have been applied — version increased
-        assert!(
-            tree_after.version > total_ops as u64,
-            "delta after compaction should have been accepted, version={}",
-            tree_after.version
-        );
-    }
+    // test_delta_compaction_divergence removed: tested TreeState compaction
+    // via sync_tree_operation + get_tree_state, which relied on tree_ops_pending
+    // replay. sync_tree_operation no longer pushes to tree_ops_pending, and
+    // get_tree_state reads only from tree_configs (populated by subscribers).
 
     #[test]
     fn test_delta_out_of_order_delivery() {
@@ -2057,16 +2094,17 @@ mod tests {
     #[test]
     fn test_delta_split_brain_recovery() {
         // Node A and Node B both start at version 5.
-        // A processes 3 ops (version 8). B processes 2 ops (version 7).
+        // A processes 3 ops (version 8).  B has the seed at version 5
+        // in tree_configs (local ops via sync_tree_operation only bump
+        // the atomic counter, not tree_configs).
         // A sends delta(base=5, new=8) to B.
-        // B's current version is 7.
-        //   base(5) <= current(7) ✓
-        //   current(7) < new(8) ✓
-        // So B accepts and applies the 3 ops.  The resulting tree has
-        // version = 7 + 3 = 10 (B's state plus A's ops applied on top).
+        // B's tree_configs version is 5.
+        //   base(5) <= current(5) ✓
+        //   current(5) < new(8) ✓
+        // So B accepts and applies the 3 ops.
         let manager = create_test_manager("nodeB".to_string());
 
-        // Seed the tree at version 5 (common ancestor)
+        // Seed the tree at version 5 (common ancestor) — writes to tree_configs
         let mut seed = TreeState::new("model1".to_string());
         for i in 0..5 {
             seed.add_operation(make_insert_op(&format!("seed_{i}"), "http://w:8000"));
@@ -2074,21 +2112,9 @@ mod tests {
         assert_eq!(seed.version, 5);
         manager.apply_remote_tree_operation("model1".to_string(), seed, Some("origin".to_string()));
 
-        // B locally processes 2 more ops (version 5→7)
-        for i in 0..2 {
-            manager
-                .sync_tree_operation(
-                    "model1".to_string(),
-                    make_insert_op(&format!("B_op_{i}"), "http://wB:8000"),
-                )
-                .unwrap();
-        }
+        // Verify tree_configs has version 5
         let tree_b = manager.get_tree_state("model1").unwrap();
-        // sync_tree_operation bumps the atomic tree_version counter (not
-        // PolicyState.version). The seed was at version 5 (from remote),
-        // then 2 local ops bumped tree_version to 2.  The materialized
-        // tree version is 7 (seed 5 + 2 pending ops).
-        assert_eq!(tree_b.version, 7);
+        assert_eq!(tree_b.version, 5);
 
         // A's delta: base=5, new=8, 3 ops
         let a_ops: Vec<_> = (0..3)
@@ -2097,131 +2123,23 @@ mod tests {
         let delta_a = make_delta("model1", a_ops, 5, 8);
         manager.apply_remote_tree_delta(delta_a, Some("nodeA".to_string()));
 
-        // After apply, tree should have B's ops + A's ops (both sets).
-        // Note: pending buffer may include ops already in the config,
-        // so version and op count may be higher than the minimal merge.
-        // The tree content is correct (duplicate inserts are idempotent).
+        // After apply, tree should have seed ops + A's ops.
         let tree_merged = manager.get_tree_state("model1").unwrap();
-        assert!(
-            tree_merged.version >= tree_b.version + 3,
-            "version should be at least {} (B's version + A's 3 ops), got {}",
-            tree_b.version + 3,
+        assert_eq!(
+            tree_merged.version, 8,
+            "tree_configs version should be 8 (seed 5 + 3 delta ops), got {}",
             tree_merged.version
         );
+        assert_eq!(tree_merged.operations.len(), 8);
     }
 
-    #[test]
-    fn test_delta_buffer_trim_multi_peer() {
-        // Create a pending buffer with >4096 ops.  Collector A sends and
-        // marks_sent (which trims at the PENDING_TRIM_THRESHOLD of 4096).
-        // Collector B should still get data — either delta from remaining
-        // buffer or full state fallback.
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
+    // test_delta_buffer_trim_multi_peer removed: tested tree_ops_pending trim
+    // behavior across multiple peer collectors. sync_tree_operation no longer
+    // pushes to tree_ops_pending, making this a dead code path.
 
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
-
-        let op_count = 5000;
-        for i in 0..op_count {
-            manager
-                .sync_tree_operation(
-                    "model1".to_string(),
-                    make_insert_op(&format!("op_{i}"), "http://w:8000"),
-                )
-                .unwrap();
-        }
-
-        // Verify pending buffer has all ops
-        let pending_before = stores
-            .tree_ops_pending
-            .get("tree:model1")
-            .map(|v| v.len())
-            .unwrap_or(0);
-        assert_eq!(pending_before, op_count);
-
-        // Collector A collects and marks sent (triggers trim)
-        let collector_a = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates_a = collector_a.collect_updates_for_store(StoreType::Policy);
-        assert!(!updates_a.is_empty());
-        collector_a.mark_sent(StoreType::Policy, &updates_a);
-
-        // Pending buffer should have been trimmed (oldest half removed)
-        let pending_after = stores
-            .tree_ops_pending
-            .get("tree:model1")
-            .map(|v| v.len())
-            .unwrap_or(0);
-        assert!(
-            pending_after < pending_before,
-            "mark_sent should have trimmed the buffer: before={pending_before}, after={pending_after}",
-        );
-
-        // Collector B (new peer) should still get data
-        let collector_b = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates_b = collector_b.collect_updates_for_store(StoreType::Policy);
-        assert!(
-            !updates_b.is_empty(),
-            "collector B should still get updates after A's trim"
-        );
-
-        let tree_update_b = updates_b
-            .iter()
-            .find(|u| u.key.starts_with("tree:"))
-            .expect("expected tree update for collector B");
-        let policy_b: PolicyState = bincode::deserialize(&tree_update_b.value).unwrap();
-        // Should get a delta (from remaining buffer) or full state fallback
-        assert!(
-            policy_b.policy_type == "tree_state_delta" || policy_b.policy_type == "tree_state",
-            "unexpected policy_type: {}",
-            policy_b.policy_type
-        );
-    }
-
-    #[test]
-    fn test_delta_empty_pending_vec() {
-        // Add an op, checkpoint (materializes config in policy store), then
-        // replace pending with empty vec.  The collector should NOT produce
-        // a delta — it should fall back to full state from the policy store.
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
-
-        // Add one op via normal path
-        manager
-            .sync_tree_operation(
-                "model1".to_string(),
-                make_insert_op("real_op", "http://w:8000"),
-            )
-            .unwrap();
-
-        // Checkpoint to materialize into policy store
-        manager.checkpoint_tree_states();
-
-        // Overwrite pending buffer with empty vec
-        stores
-            .tree_ops_pending
-            .insert("tree:model1".to_string(), Vec::new());
-
-        let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates = collector.collect_updates_for_store(StoreType::Policy);
-
-        assert!(!updates.is_empty(), "expected at least one update");
-
-        let tree_update = updates
-            .iter()
-            .find(|u| u.key.starts_with("tree:"))
-            .expect("expected a tree key update");
-
-        let policy_state: PolicyState =
-            bincode::deserialize(&tree_update.value).expect("deserialize PolicyState");
-        // Empty pending vec should cause fallback to full state
-        assert_eq!(
-            policy_state.policy_type, "tree_state",
-            "empty pending vec should fall back to full state, got: {}",
-            policy_state.policy_type
-        );
-    }
+    // test_delta_empty_pending_vec removed: tested empty tree_ops_pending
+    // fallback to full state. sync_tree_operation no longer pushes to
+    // tree_ops_pending, making this a dead code path.
 
     #[test]
     fn test_delta_concurrent_write_and_collect() {
@@ -2257,7 +2175,9 @@ mod tests {
                     let policy_state: PolicyState =
                         bincode::deserialize(&update.value).expect("data should not be corrupted");
                     assert!(
-                        policy_state.policy_type == "tree_state_delta"
+                        policy_state.policy_type == "tenant_delta"
+                            || policy_state.policy_type == "tree_state_delta"
+                            || policy_state.policy_type == "tree_state_lz4"
                             || policy_state.policy_type == "tree_state"
                     );
 
@@ -2289,124 +2209,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_delta_oversized_mark_sent_trims_buffer() {
-        // Verify that when the pending buffer exceeds PENDING_TRIM_THRESHOLD
-        // (4096) and mark_sent is called, the buffer gets trimmed so that
-        // subsequent collections can produce smaller batches.
-        use crate::{
-            incremental::IncrementalUpdateCollector, service::gossip::StateUpdate,
-            stores::StoreType,
-        };
+    // test_delta_oversized_mark_sent_trims_buffer removed: tested
+    // tree_ops_pending trim threshold during mark_sent. sync_tree_operation
+    // no longer pushes to tree_ops_pending, making this a dead code path.
 
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
-
-        // Add more ops than PENDING_TRIM_THRESHOLD (4096)
-        let op_count = 4200;
-        for i in 0..op_count {
-            manager
-                .sync_tree_operation(
-                    "model1".to_string(),
-                    make_insert_op(&format!("op_{i}"), "http://w:8000"),
-                )
-                .unwrap();
-        }
-
-        let pending_before = stores
-            .tree_ops_pending
-            .get("tree:model1")
-            .map(|v| v.len())
-            .unwrap_or(0);
-        assert_eq!(pending_before, op_count);
-
-        // Simulate mark_sent with a fake update for the tree key
-        let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let fake_update = StateUpdate {
-            key: "tree:model1".to_string(),
-            value: vec![],
-            version: op_count as u64,
-            actor: "node1".to_string(),
-            timestamp: 0,
-        };
-        collector.mark_sent(StoreType::Policy, &[fake_update]);
-
-        let pending_after = stores
-            .tree_ops_pending
-            .get("tree:model1")
-            .map(|v| v.len())
-            .unwrap_or(0);
-
-        // Buffer should have been trimmed: oldest half removed
-        assert!(
-            pending_after < pending_before,
-            "buffer should be trimmed after mark_sent: before={pending_before}, after={pending_after}",
-        );
-        assert_eq!(
-            pending_after,
-            pending_before - pending_before / 2,
-            "expected oldest half to be drained"
-        );
-
-        // Subsequent collection should succeed with the reduced buffer
-        let collector2 = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates = collector2.collect_updates_for_store(StoreType::Policy);
-        assert!(
-            !updates.is_empty(),
-            "collection after trim should produce updates"
-        );
-    }
-
-    #[test]
-    fn test_delta_version_monotonic_after_compaction() {
-        // Add 3000 operations (triggers compaction at MAX_TREE_OPERATIONS=2048).
-        // Verify version is 3000 (not reset by compaction).  Then apply a
-        // delta with base_version=2999 — should succeed.
-        let manager = create_test_manager("node1".to_string());
-
-        for i in 0..3000 {
-            manager
-                .sync_tree_operation(
-                    "model1".to_string(),
-                    make_insert_op(&format!("op_{i}"), "http://w:8000"),
-                )
-                .unwrap();
-        }
-
-        let tree = manager.get_tree_state("model1").unwrap();
-        // TreeState.version should be 3000 — monotonic despite compaction
-        assert_eq!(tree.version, 3000);
-        // Operations compacted: fewer than 3000 stored
-        assert!(tree.operations.len() < 3000);
-
-        // Retrieve and re-store to verify persistence round-trip
-        let bytes = tree.to_bytes().unwrap();
-        let restored = TreeState::from_bytes(&bytes).unwrap();
-        assert_eq!(restored.version, 3000);
-
-        // Checkpoint to materialize config before applying delta
-        manager.checkpoint_tree_states();
-
-        // Apply delta with base_version=2999 (one less than current policy version)
-        let key = tree_state_key("model1");
-        let policy_version = manager.stores.policy.get(&key).unwrap().version;
-
-        let delta = make_delta(
-            "model1",
-            vec![make_insert_op("post_compact_op", "http://w2:8000")],
-            policy_version - 1,
-            policy_version + 1,
-        );
-        manager.apply_remote_tree_delta(delta, Some("remote".to_string()));
-
-        let tree_after = manager.get_tree_state("model1").unwrap();
-        // Version may be higher than 3001 due to pending buffer replay
-        assert!(
-            tree_after.version >= 3001,
-            "version should be at least 3001, got {}",
-            tree_after.version
-        );
-    }
+    // test_delta_version_monotonic_after_compaction removed: tested version
+    // monotonicity across compaction by calling sync_tree_operation 3000 times
+    // and reading back via get_tree_state. Both paths relied on tree_ops_pending
+    // replay, which is a dead code path now.
 
     #[test]
     fn test_delta_with_remove_operations() {

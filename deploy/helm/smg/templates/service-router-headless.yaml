@@ -1,0 +1,20 @@
+{{- if .Values.router.mesh.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "smg.fullname" . }}-router-headless
+  labels:
+    {{- include "smg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: {{ .Values.router.mesh.port }}
+      targetPort: mesh
+      protocol: TCP
+      name: mesh
+  selector:
+    {{- include "smg.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+{{- end }}

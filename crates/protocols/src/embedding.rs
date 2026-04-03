@@ -27,9 +27,6 @@ pub struct EmbeddingRequest {
 
     /// SGLang extension: request id for tracking
     pub rid: Option<String>,
-
-    /// SGLang extension: enable/disable logging of metrics for this request
-    pub log_metrics: Option<bool>,
 }
 
 impl GenerationRequest for EmbeddingRequest {

@@ -19,6 +19,56 @@ pub trait Encoder: Send + Sync {
 /// Core decoding trait - can be implemented independently
 pub trait Decoder: Send + Sync {
     fn decode(&self, token_ids: &[TokenIdType], skip_special_tokens: bool) -> Result<String>;
+
+    /// Incremental decode step — called once per generated token.
+    ///
+    /// Maintains mutable state (`ids`, `prefix`, `prefix_index`) across calls to
+    /// produce incremental text output. The default implementation uses the
+    /// double-decode algorithm (decode prefix, decode prefix+new, diff).
+    ///
+    /// HuggingFace overrides this with the native `step_decode_stream` from the
+    /// `tokenizers` crate, which uses the same algorithm internally but avoids
+    /// trait-method overhead for the two `decode()` calls.
+    fn decode_step(
+        &self,
+        token_id: TokenIdType,
+        ids: &mut Vec<TokenIdType>,
+        prefix: &mut String,
+        prefix_index: &mut usize,
+        skip_special_tokens: bool,
+    ) -> Result<Option<String>> {
+        // Recompute prefix if empty (first call or after incomplete UTF-8)
+        if prefix.is_empty() && !ids.is_empty() {
+            let new_prefix = self.decode(ids, skip_special_tokens)?;
+            if !new_prefix.ends_with('�') {
+                *prefix = new_prefix;
+                *prefix_index = ids.len();
+            }
+        }
+
+        ids.push(token_id);
+        let string = self.decode(ids, skip_special_tokens)?;
+
+        if string.len() > prefix.len() && !string.ends_with('�') {
+            // Find char-safe split point
+            let mut split_at = prefix.len();
+            while !string.is_char_boundary(split_at) && split_at > 0 {
+                split_at -= 1;
+            }
+
+            let new_text = string[split_at..].to_string();
+
+            // Drain consumed tokens and cache new prefix for next call
+            let new_prefix_len = ids.len() - *prefix_index;
+            ids.drain(..*prefix_index);
+            *prefix_index = new_prefix_len;
+            *prefix = self.decode(ids, skip_special_tokens)?;
+
+            Ok(Some(new_text))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 /// Combined tokenizer trait

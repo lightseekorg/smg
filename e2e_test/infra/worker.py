@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass, field
 from typing import IO, Any
 
+import yaml
+
 from .constants import (
     DEFAULT_HOST,
     DEFAULT_STARTUP_TIMEOUT,
@@ -218,10 +220,10 @@ class Worker:
             if self.ib_device:
                 cmd.extend(["--disaggregation-ib-device", self.ib_device])
 
-        # Additional worker args from model spec (e.g., --context-length)
-        worker_args = spec.get("worker_args", [])
-        if worker_args:
-            cmd.extend(worker_args)
+        # Additional SGLang args from model spec (e.g., --context-length)
+        sglang_args = spec.get("sglang_args", [])
+        if sglang_args:
+            cmd.extend(sglang_args)
 
         return cmd
 
@@ -251,8 +253,6 @@ class Worker:
             str(self.port),
             "--tensor-parallel-size",
             str(tp_size),
-            "--max-model-len",
-            "16384",
             "--gpu-memory-utilization",
             "0.9",
         ]
@@ -267,7 +267,9 @@ class Worker:
         config_path = tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False, prefix="trtllm_"
         )
-        config_path.write("guided_decoding_backend: xgrammar\n")
+        config = {"guided_decoding_backend": "xgrammar"}
+        config.update(spec.get("trtllm_extra_config", {}))
+        yaml.dump(config, config_path, default_flow_style=False)
         config_path.close()
 
         cmd = [
@@ -296,6 +298,7 @@ class Worker:
     def _build_env(self) -> dict[str, str]:
         """Build environment variables for the worker process."""
         env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.gpu_ids))
 
         # TRT-LLM multi-GPU needs NCCL tuning for CI compatibility
@@ -315,18 +318,17 @@ class Worker:
         stderr_target: int | IO[Any] | None = None
 
         if not show_output:
+            safe_name = f"{self.model_id}_{self.engine}_{self.mode.value}_{self.port}".replace(
+                "/", "__"
+            ).replace(":", "_")
             if self.log_dir:
                 os.makedirs(self.log_dir, exist_ok=True)
-                safe_name = f"{self.model_id}_{self.engine}_{self.mode.value}_{self.port}".replace(
-                    "/", "__"
-                ).replace(":", "_")
                 log_path = os.path.join(self.log_dir, f"worker-{safe_name}.log")
-                self._log_file = open(log_path, "w", encoding="utf-8")
-                stdout_target = self._log_file
-                stderr_target = subprocess.STDOUT
             else:
-                stdout_target = subprocess.DEVNULL
-                stderr_target = subprocess.DEVNULL
+                log_path = os.path.join(tempfile.gettempdir(), f"smg-worker-{safe_name}.log")
+            self._log_file = open(log_path, "w", encoding="utf-8")
+            stdout_target = self._log_file
+            stderr_target = subprocess.STDOUT
 
         try:
             return subprocess.Popen(
@@ -416,6 +418,9 @@ def start_workers(
     Returns:
         List of started Worker instances.
     """
+    if log_dir is None:
+        log_dir = os.environ.get("E2E_LOG_DIR")
+
     if engine is None:
         engine = get_runtime()
 
@@ -453,8 +458,8 @@ def start_workers(
                 logger.info("Staggering launch by %ds", LAUNCH_STAGGER_DELAY)
                 time.sleep(LAUNCH_STAGGER_DELAY)
 
-            worker.start(timeout=timeout, wait_ready=wait_ready)
             workers.append(worker)
+            worker.start(timeout=timeout, wait_ready=wait_ready)
     except Exception:
         stop_workers(workers)
         raise

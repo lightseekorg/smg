@@ -11,6 +11,8 @@ max-line-length = 120
 [lint.per-file-ignores]
 "e2e_test/**" = ["F841", "E402"]
 "bindings/python/tests/**" = ["F841", "E402"]
+# grpc_servicer supports Python 3.10+ — don't upgrade to 3.11+ syntax (e.g. datetime.UTC)
+"grpc_servicer/**" = ["UP017"]
 
 [format]
 # Black-compatible defaults

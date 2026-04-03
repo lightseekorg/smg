@@ -3,28 +3,13 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::{
-    registry::{image_sizes_hw, ModelMetadata, ModelProcessorSpec, RegistryResult},
-    types::{FieldLayout, ImageSize, Modality, PromptReplacement, TokenId},
+    registry::{ModelMetadata, ModelProcessorSpec, RegistryResult},
+    types::{FieldLayout, Modality, PromptReplacement, TokenId},
     vision::image_processor::PreprocessedImages,
 };
 
 pub(super) struct LlavaSpec;
 pub(super) struct LlavaNextSpec;
-
-impl LlavaSpec {
-    fn patch_size(metadata: &ModelMetadata) -> u32 {
-        metadata
-            .config_u32(&["vision_config", "patch_size"])
-            .unwrap_or(14)
-    }
-
-    fn tokens_per_image(metadata: &ModelMetadata, size: ImageSize) -> usize {
-        let patch = Self::patch_size(metadata);
-        let cols = size.width.div_ceil(patch) as usize;
-        let rows = size.height.div_ceil(patch) as usize;
-        cols * rows
-    }
-}
 
 impl ModelProcessorSpec for LlavaSpec {
     fn name(&self) -> &'static str {
@@ -73,14 +58,17 @@ impl ModelProcessorSpec for LlavaSpec {
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let token_id = self.placeholder_token_id(metadata)?;
         let token = self.placeholder_token(metadata)?;
-        let image_sizes = image_sizes_hw(preprocessed);
-        Ok(image_sizes
-            .iter()
-            .map(|size| {
-                let count = Self::tokens_per_image(metadata, *size);
-                PromptReplacement::repeated(Modality::Image, &token, token_id, count)
-            })
-            .collect())
+        if let Some(&count) = preprocessed.num_img_tokens.first() {
+            // For LLaVA 1.5, all images produce the same number of tokens.
+            let replacement = PromptReplacement::repeated(Modality::Image, &token, token_id, count);
+            debug_assert!(
+                preprocessed.num_img_tokens.iter().all(|&c| c == count),
+                "LlavaSpec assumes all images produce the same number of tokens"
+            );
+            Ok(vec![replacement; preprocessed.num_img_tokens.len()])
+        } else {
+            Ok(vec![])
+        }
     }
 }
 
@@ -152,7 +140,7 @@ mod tests {
     };
 
     #[test]
-    fn llava_prompt_replacement_uses_config_ids() {
+    fn llava_prompt_replacement_uses_preprocessed_tokens() {
         let tokenizer = TestTokenizer::new(&[("<image>", 32000)]);
         let config = json!({
             "model_type": "llava",
@@ -166,9 +154,10 @@ mod tests {
         };
         let registry = ModelRegistry::new();
         let spec = registry.lookup(&metadata).expect("llava spec");
-        let replacements = spec
-            .prompt_replacements(&metadata, &test_preprocessed(&[ImageSize::new(336, 336)]))
-            .unwrap();
+        // Token count comes from preprocessed.num_img_tokens (set by
+        // LlavaProcessor::calculate_num_tokens), not from image dimensions.
+        let preprocessed = test_preprocessed_with_tokens(&[ImageSize::new(336, 336)], &[576]);
+        let replacements = spec.prompt_replacements(&metadata, &preprocessed).unwrap();
         assert_eq!(replacements[0].tokens.len(), 576);
     }
 

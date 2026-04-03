@@ -112,6 +112,10 @@ from fixtures import (
 )
 from smg_client import SmgClient
 
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def model(setup_backend):

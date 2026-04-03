@@ -5,7 +5,7 @@
 # so we build from source (main branch) which compiles the C++
 # extensions properly and includes the gRPC serve command.
 #
-# Cache version: 4 — rebuild for torch 2.10+cu130 / cuda-bindings 13.x
+# Cache version: 5 — rebuild from latest TRT-LLM main for Harmony tool calling fixes
 #
 # Prerequisites (expected on k8s-runner-gpu nodes):
 #   - NVIDIA driver 580+ (CUDA 13)

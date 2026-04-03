@@ -531,6 +531,96 @@ pub trait ResponseStorage: Send + Sync {
     async fn delete_identifier_responses(&self, identifier: &str) -> ResponseResult<usize>;
 }
 
+// ============================================================================
+// PART 4: ConversationMemory Insert Seam
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+pub struct ConversationMemoryId(pub String);
+
+impl From<String> for ConversationMemoryId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for ConversationMemoryId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl Display for ConversationMemoryId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConversationMemoryType {
+    #[serde(rename = "ONDEMAND")]
+    OnDemand,
+    #[serde(rename = "LTM")]
+    Ltm,
+    #[serde(rename = "STMO")]
+    Stmo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConversationMemoryStatus {
+    #[serde(rename = "READY")]
+    Ready,
+    #[serde(rename = "RUNNING")]
+    Running,
+    #[serde(rename = "SUCCESS")]
+    Success,
+    #[serde(rename = "FAILED")]
+    Failed,
+}
+
+/// Insert-only payload for creating a new conversation memory row.
+///
+/// `NewConversationMemory` intentionally omits database-managed fields such as
+/// `memory_id`, `created_at`, and `updated_at`. Callers should not set those
+/// values directly; they are created or maintained by the database/write path.
+/// When changing an existing record, use the appropriate update path rather
+/// than reusing this struct.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NewConversationMemory {
+    pub conversation_id: ConversationId,
+    pub conversation_version: Option<i64>,
+    pub response_id: Option<ResponseId>,
+    pub memory_type: ConversationMemoryType,
+    pub status: ConversationMemoryStatus,
+    pub attempt: i64,
+    pub owner_id: Option<String>,
+    pub next_run_at: DateTime<Utc>,
+    pub lease_until: Option<DateTime<Utc>>,
+    pub content: Option<String>,
+    pub memory_config: Option<String>,
+    pub scope_id: Option<String>,
+    pub error_msg: Option<String>,
+}
+
+pub type ConversationMemoryResult<T> = Result<T, ConversationMemoryStorageError>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConversationMemoryStorageError {
+    #[error("Storage error: {0}")]
+    StorageError(String),
+
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
+}
+
+#[async_trait]
+pub trait ConversationMemoryWriter: Send + Sync + 'static {
+    async fn create_memory(
+        &self,
+        input: NewConversationMemory,
+    ) -> ConversationMemoryResult<ConversationMemoryId>;
+}
+
 impl Default for StoredResponse {
     fn default() -> Self {
         Self::new(None)
@@ -970,5 +1060,69 @@ mod tests {
         assert_eq!(context[0].1, Value::String("output3".to_string()));
         assert_eq!(context[1].0, Value::String("input4".to_string()));
         assert_eq!(context[1].1, Value::String("output4".to_string()));
+    }
+
+    // ========================================================================
+    // ConversationMemory seam tests
+    // ========================================================================
+
+    #[test]
+    fn conversation_memory_status_serializes_to_expected_uppercase_values() {
+        assert_eq!(
+            serde_json::to_string(&ConversationMemoryStatus::Ready).unwrap(),
+            "\"READY\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConversationMemoryStatus::Running).unwrap(),
+            "\"RUNNING\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConversationMemoryStatus::Success).unwrap(),
+            "\"SUCCESS\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConversationMemoryStatus::Failed).unwrap(),
+            "\"FAILED\""
+        );
+    }
+
+    #[test]
+    fn conversation_memory_type_serializes_to_expected_uppercase_values() {
+        assert_eq!(
+            serde_json::to_string(&ConversationMemoryType::OnDemand).unwrap(),
+            "\"ONDEMAND\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConversationMemoryType::Ltm).unwrap(),
+            "\"LTM\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConversationMemoryType::Stmo).unwrap(),
+            "\"STMO\""
+        );
+    }
+
+    #[test]
+    fn new_conversation_memory_keeps_insert_only_fields() {
+        let input = NewConversationMemory {
+            conversation_id: ConversationId::from("conv_123"),
+            conversation_version: Some(7),
+            response_id: Some(ResponseId::from("resp_123")),
+            memory_type: ConversationMemoryType::Ltm,
+            status: ConversationMemoryStatus::Ready,
+            attempt: 0,
+            owner_id: None,
+            next_run_at: Utc::now(),
+            lease_until: None,
+            content: None,
+            memory_config: None,
+            scope_id: None,
+            error_msg: None,
+        };
+
+        assert_eq!(input.attempt, 0);
+        assert_eq!(input.conversation_id, ConversationId::from("conv_123"));
+        assert_eq!(input.response_id, Some(ResponseId::from("resp_123")));
+        assert!(input.lease_until.is_none());
     }
 }
