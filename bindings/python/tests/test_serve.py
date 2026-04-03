@@ -286,6 +286,73 @@ class TestParseServeArgs:
             parse_serve_args(["--backend", "vllm"])
         assert exc_info.value.code == 2
 
+    def test_vllm_http_accepts_frontend_args(self):
+        def _mock_vllm_args(backend, parser):
+            if backend == "vllm":
+                parser.add_argument("--model", type=str)
+            else:
+                _import_backend_args(backend, parser)
+
+        def _mock_vllm_frontend_args(parser):
+            parser.add_argument("--enable-auto-tool-choice", action="store_true")
+            parser.add_argument("--tool-call-parser", type=str)
+
+        with (
+            patch("smg.serve._import_backend_args", side_effect=_mock_vllm_args),
+            patch("smg.serve._add_vllm_frontend_args", side_effect=_mock_vllm_frontend_args),
+        ):
+            backend, args, backend_args = parse_serve_args(
+                [
+                    "--backend",
+                    "vllm",
+                    "--connection-mode",
+                    "http",
+                    "--model",
+                    "/tmp/model",
+                    "--enable-auto-tool-choice",
+                    "--tool-call-parser",
+                    "minimax_m2",
+                ]
+            )
+
+        assert backend == "vllm"
+        assert args.connection_mode == "http"
+        assert args.model == "/tmp/model"
+        assert args.enable_auto_tool_choice is True
+        assert args.tool_call_parser == "minimax_m2"
+        assert "--enable-auto-tool-choice" in backend_args
+        assert "--tool-call-parser" in backend_args
+        assert "minimax_m2" in backend_args
+
+    def test_vllm_grpc_rejects_frontend_args(self):
+        def _mock_vllm_args(backend, parser):
+            if backend == "vllm":
+                parser.add_argument("--model", type=str)
+            else:
+                _import_backend_args(backend, parser)
+
+        with (
+            patch("smg.serve._import_backend_args", side_effect=_mock_vllm_args),
+            patch("smg.serve._add_vllm_frontend_args") as mock_frontend_args,
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                parse_serve_args(
+                    [
+                        "--backend",
+                        "vllm",
+                        "--connection-mode",
+                        "grpc",
+                        "--model",
+                        "/tmp/model",
+                        "--enable-auto-tool-choice",
+                        "--tool-call-parser",
+                        "minimax_m2",
+                    ]
+                )
+
+        assert exc_info.value.code == 2
+        mock_frontend_args.assert_not_called()
+
     def test_invalid_backend_exits(self):
         with pytest.raises(SystemExit):
             parse_serve_args(["--backend", "nonexistent"])
