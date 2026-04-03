@@ -330,6 +330,7 @@ impl RequestPipeline {
         policy_registry: Arc<PolicyRegistry>,
     ) -> Self {
         let stages: Vec<Box<dyn PipelineStage>> = vec![
+            Box::new(super::regular::stages::score::ScorePreparationStage),
             Box::new(WorkerSelectionStage::new(
                 worker_registry,
                 policy_registry,

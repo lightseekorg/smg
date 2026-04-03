@@ -13,10 +13,39 @@ use crate::routers::{
     error,
     grpc::{
         common::stages::PipelineStage,
-        context::{ClientSelection, RequestContext},
+        context::{ClientSelection, PreparationOutput, RequestContext},
         utils::tonic_ext::TonicStatusExt,
     },
 };
+
+/// Stage to prepare context for WorkerSelection
+pub(crate) struct ScorePreparationStage;
+
+#[async_trait::async_trait]
+impl PipelineStage for ScorePreparationStage {
+    fn name(&self) -> &'static str {
+        "ScorePreparationStage"
+    }
+
+    async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
+        let req = ctx.score_request_arc();
+        let original_text = req.text_1.clone();
+
+        ctx.state.preparation = Some(PreparationOutput {
+            original_text: Some(original_text),
+            token_ids: Vec::new(), // Scoring worker routing doesn't strictly need accurate token lengths
+            processed_messages: None,
+            tool_constraints: None,
+            filtered_request: None,
+            harmony_mode: false,
+            selection_text: None,
+            harmony_messages: None,
+            harmony_stop_ids: None,
+        });
+
+        Ok(None)
+    }
+}
 
 /// Pipeline stage that executes `/v1/score` requests via gRPC
 ///

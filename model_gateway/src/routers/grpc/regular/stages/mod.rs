@@ -17,3 +17,4 @@ pub(crate) mod score;
 pub(crate) use preparation::ChatGeneratePreparationStage;
 pub(crate) use request_building::ChatGenerateRequestBuildingStage;
 pub(crate) use response_processing::ChatGenerateResponseProcessingStage;
+pub(crate) use score::{ScoreNativeStage, ScorePreparationStage};
