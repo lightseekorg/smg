@@ -15,6 +15,7 @@ use openai_protocol::{
     embedding::{EmbeddingRequest, EmbeddingResponse},
     generate::{GenerateRequest, GenerateResponse},
     messages::{CreateMessageRequest, Message},
+    rerank::ScoreRequest,
     responses::ResponsesRequest,
 };
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
@@ -56,6 +57,8 @@ pub(crate) enum RequestType {
     Embedding(Arc<EmbeddingRequest>),
     Classify(Arc<ClassifyRequest>),
     Messages(Arc<CreateMessageRequest>),
+    /// vLLM /v1/score — HTTP forward only (no gRPC proto)
+    Score(Arc<ScoreRequest>),
 }
 
 impl std::fmt::Display for RequestType {
@@ -68,6 +71,7 @@ impl std::fmt::Display for RequestType {
             Self::Embedding(_) => write!(f, "Embedding"),
             Self::Classify(_) => write!(f, "Classify"),
             Self::Messages(_) => write!(f, "Messages"),
+            Self::Score(_) => write!(f, "Score"),
         }
     }
 }
@@ -357,6 +361,36 @@ impl RequestContext {
             },
             components,
             state: ProcessingState::default(),
+        }
+    }
+
+    /// Create context for score request (vLLM /v1/score HTTP-forwarded endpoint)
+    pub fn for_score(
+        request: Arc<ScoreRequest>,
+        headers: Option<HeaderMap>,
+        model_id: String,
+        components: Arc<SharedComponents>,
+    ) -> Self {
+        Self {
+            input: RequestInput {
+                request_type: RequestType::Score(request),
+                headers,
+                model_id,
+            },
+            components,
+            state: ProcessingState::default(),
+        }
+    }
+
+    /// Get Arc clone of score request (panics if not score)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via RequestType construction"
+    )]
+    pub fn score_request_arc(&self) -> Arc<ScoreRequest> {
+        match &self.input.request_type {
+            RequestType::Score(req) => Arc::clone(req),
+            _ => panic!("Expected score request"),
         }
     }
 

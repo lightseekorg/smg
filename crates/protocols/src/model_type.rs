@@ -34,6 +34,8 @@ bitflags! {
         const AUDIO       = 1 << 10;
         /// Content moderation models
         const MODERATION  = 1 << 11;
+        /// Score/cross-encoder reranker models (vLLM /v1/score)
+        const SCORE       = 1 << 12;
 
         /// Standard LLM: chat + completions + responses + tools
         const LLM = Self::CHAT.bits() | Self::COMPLETIONS.bits()
@@ -62,6 +64,9 @@ bitflags! {
 
         /// Content moderation model only
         const MODERATION_MODEL = Self::MODERATION.bits();
+
+        /// Score / cross-encoder reranker model only (vLLM /v1/score)
+        const SCORE_MODEL = Self::SCORE.bits();
     }
 }
 
@@ -79,6 +84,7 @@ const CAPABILITY_NAMES: &[(ModelType, &str)] = &[
     (ModelType::IMAGE_GEN, "image_gen"),
     (ModelType::AUDIO, "audio"),
     (ModelType::MODERATION, "moderation"),
+    (ModelType::SCORE, "score"),
 ];
 
 impl ModelType {
@@ -154,6 +160,12 @@ impl ModelType {
         self.contains(Self::MODERATION)
     }
 
+    /// Check if this model type supports the score endpoint (vLLM /v1/score)
+    #[inline]
+    pub fn supports_score(self) -> bool {
+        self.contains(Self::SCORE)
+    }
+
     /// Check if this model type supports a given endpoint
     pub fn supports_endpoint(self, endpoint: Endpoint) -> bool {
         match endpoint {
@@ -162,6 +174,7 @@ impl ModelType {
             Endpoint::Responses => self.supports_responses(),
             Endpoint::Embeddings => self.supports_embeddings(),
             Endpoint::Rerank => self.supports_rerank(),
+            Endpoint::Score => self.supports_score(),
             Endpoint::Generate => self.supports_generate(),
             Endpoint::Models => true,
         }
@@ -194,6 +207,12 @@ impl ModelType {
     #[inline]
     pub fn is_reranker(self) -> bool {
         self.supports_rerank() && !self.supports_chat()
+    }
+
+    /// Check if this is a score/cross-encoder model (supports /v1/score)
+    #[inline]
+    pub fn is_score_model(self) -> bool {
+        self.supports_score() && !self.supports_chat()
     }
 
     /// Check if this is an image generation model
@@ -344,6 +363,8 @@ pub enum Endpoint {
     Embeddings,
     /// Rerank endpoint (/v1/rerank)
     Rerank,
+    /// Score / cross-encoder endpoint (/v1/score)
+    Score,
     /// SGLang generate endpoint (/generate)
     Generate,
     /// Models listing endpoint (/v1/models)
@@ -359,6 +380,7 @@ impl Endpoint {
             Endpoint::Responses => "/v1/responses",
             Endpoint::Embeddings => "/v1/embeddings",
             Endpoint::Rerank => "/v1/rerank",
+            Endpoint::Score => "/v1/score",
             Endpoint::Generate => "/generate",
             Endpoint::Models => "/v1/models",
         }
@@ -373,6 +395,7 @@ impl Endpoint {
             "/v1/responses" => Some(Endpoint::Responses),
             "/v1/embeddings" => Some(Endpoint::Embeddings),
             "/v1/rerank" => Some(Endpoint::Rerank),
+            "/v1/score" => Some(Endpoint::Score),
             "/generate" => Some(Endpoint::Generate),
             "/v1/models" => Some(Endpoint::Models),
             _ => None,
@@ -387,6 +410,7 @@ impl Endpoint {
             Endpoint::Responses => Some(ModelType::RESPONSES),
             Endpoint::Embeddings => Some(ModelType::EMBEDDINGS),
             Endpoint::Rerank => Some(ModelType::RERANK),
+            Endpoint::Score => Some(ModelType::SCORE),
             Endpoint::Generate => Some(ModelType::GENERATE),
             Endpoint::Models => None,
         }
@@ -401,6 +425,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Responses => write!(f, "responses"),
             Endpoint::Embeddings => write!(f, "embeddings"),
             Endpoint::Rerank => write!(f, "rerank"),
+            Endpoint::Score => write!(f, "score"),
             Endpoint::Generate => write!(f, "generate"),
             Endpoint::Models => write!(f, "models"),
         }
