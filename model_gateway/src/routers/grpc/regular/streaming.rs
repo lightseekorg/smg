@@ -237,6 +237,14 @@ impl StreamingProcessor {
                 model,
             );
 
+        // If the template supports a thinking toggle and the user enabled it,
+        // the template injected `<think>` in the prefill — parsers should start
+        // in reasoning mode.
+        let thinking_override = utils::should_mark_reasoning_started(
+            utils::extract_thinking_from_kwargs(original_request.chat_template_kwargs.as_ref()),
+            tokenizer.as_ref(),
+        );
+
         // Check if JSON schema constraint was used (specific function or required mode)
         let used_json_schema = match tool_choice {
             Some(ToolChoice::Function { .. }) => true,
@@ -337,6 +345,7 @@ impl StreamingProcessor {
                                 &delta,
                                 index,
                                 &mut reasoning_parsers,
+                                thinking_override,
                                 request_id,
                                 model,
                                 created,
@@ -1069,6 +1078,7 @@ impl StreamingProcessor {
         delta: &str,
         index: u32,
         reasoning_parsers: &mut HashMap<u32, Arc<tokio::sync::Mutex<Box<dyn ReasoningParser>>>>,
+        thinking_override: bool,
         request_id: &str,
         model: &str,
         created: u64,
@@ -1080,12 +1090,15 @@ impl StreamingProcessor {
             reason = "parser availability is checked upfront before streaming begins"
         )]
         reasoning_parsers.entry(index).or_insert_with(|| {
-            let parser = utils::create_reasoning_parser(
+            let mut parser = utils::create_reasoning_parser(
                 &self.reasoning_parser_factory,
                 self.configured_reasoning_parser.as_deref(),
                 model,
             )
             .expect("Parser should be available - checked upfront");
+            if thinking_override {
+                parser.mark_reasoning_started();
+            }
             Arc::new(tokio::sync::Mutex::new(parser))
         });
 
@@ -1357,15 +1370,19 @@ impl StreamingProcessor {
         &self,
         delta: &str,
         reasoning_parser: &mut Option<Arc<tokio::sync::Mutex<Box<dyn ReasoningParser>>>>,
+        thinking_override: bool,
         model: &str,
     ) -> (String, String, bool) {
         // Lazily create parser
         if reasoning_parser.is_none() {
-            if let Some(parser) = utils::create_reasoning_parser(
+            if let Some(mut parser) = utils::create_reasoning_parser(
                 &self.reasoning_parser_factory,
                 self.configured_reasoning_parser.as_deref(),
                 model,
             ) {
+                if thinking_override {
+                    parser.mark_reasoning_started();
+                }
                 *reasoning_parser = Some(Arc::new(tokio::sync::Mutex::new(parser)));
             }
         }
@@ -1564,6 +1581,16 @@ impl StreamingProcessor {
                 model,
             );
 
+        // Determine if the template injected `<think>` in the prefill.
+        let thinking_override = {
+            let user_thinking = match &original_request.thinking {
+                Some(messages::ThinkingConfig::Enabled { .. }) => Some(true),
+                Some(messages::ThinkingConfig::Disabled) => Some(false),
+                None => None,
+            };
+            utils::should_mark_reasoning_started(user_thinking, tokenizer.as_ref())
+        };
+
         let tool_choice_enabled = !matches!(
             &original_request.tool_choice,
             Some(messages::ToolChoice::None)
@@ -1663,6 +1690,7 @@ impl StreamingProcessor {
                             self.process_messages_reasoning(
                                 &chunk_text,
                                 &mut reasoning_parser,
+                                thinking_override,
                                 model,
                             )
                             .await

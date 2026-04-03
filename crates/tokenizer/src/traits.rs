@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::Result;
 
-use crate::chat_template::{ChatTemplateContentFormat, ChatTemplateParams};
+use crate::chat_template::{ChatTemplateContentFormat, ChatTemplateParams, ThinkingToggle};
 
 /// Type alias for token IDs
 pub type TokenIdType = u32;
@@ -95,6 +95,11 @@ pub trait Tokenizer: Encoder + Decoder {
     /// Get the content format expected by the chat template.
     fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
         ChatTemplateContentFormat::default()
+    }
+
+    /// Get the thinking toggle support for this template.
+    fn thinking_toggle(&self) -> ThinkingToggle {
+        ThinkingToggle::None
     }
 
     /// Set or override the chat template.

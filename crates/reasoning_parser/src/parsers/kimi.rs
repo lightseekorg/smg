@@ -22,7 +22,7 @@ impl KimiParser {
             think_end_token: "◁/think▷".to_string(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            initial_in_reasoning: false, // Requires explicit start token
+            always_in_reasoning: false, // Requires explicit start token
         };
 
         Self {
@@ -59,6 +59,10 @@ impl ReasoningParser for KimiParser {
 
     fn is_in_reasoning(&self) -> bool {
         self.base.is_in_reasoning()
+    }
+
+    fn mark_reasoning_started(&mut self) {
+        self.base.mark_reasoning_started();
     }
 }
 

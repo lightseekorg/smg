@@ -203,15 +203,55 @@ impl ParserFactory {
         // Register NanoV3 parser (same format as DeepSeek-R1)
         registry.register_parser("nano_v3", || Box::new(NanoV3Parser::new()));
 
+        // Register DeepSeek V3.1 parser (standard think tokens, always_in_reasoning=false)
+        registry.register_parser("deepseek_v31", || {
+            let config = ParserConfig {
+                think_start_token: "<think>".to_string(),
+                think_end_token: "</think>".to_string(),
+                stream_reasoning: true,
+                max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
+                always_in_reasoning: false,
+            };
+            Box::new(BaseReasoningParser::new(config).with_model_type("deepseek_v31".to_string()))
+        });
+
+        // Register Kimi-K2.5 parser (standard think tokens, always_in_reasoning=false)
+        registry.register_parser("kimi_k25", || {
+            let config = ParserConfig {
+                think_start_token: "<think>".to_string(),
+                think_end_token: "</think>".to_string(),
+                stream_reasoning: true,
+                max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
+                always_in_reasoning: false,
+            };
+            Box::new(BaseReasoningParser::new(config).with_model_type("kimi_k25".to_string()))
+        });
+
+        // Register Kimi-K2-Thinking parser (standard think tokens, always_in_reasoning=true)
+        registry.register_parser("kimi_thinking", || {
+            let config = ParserConfig {
+                think_start_token: "<think>".to_string(),
+                think_end_token: "</think>".to_string(),
+                stream_reasoning: true,
+                max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
+                always_in_reasoning: true,
+            };
+            Box::new(BaseReasoningParser::new(config).with_model_type("kimi_thinking".to_string()))
+        });
+
         // Register model patterns
         registry.register_pattern("deepseek-r1", "deepseek_r1");
+        registry.register_pattern("deepseek-v3.1", "deepseek_v31");
+        registry.register_pattern("deepseek-v3-1", "deepseek_v31");
         registry.register_pattern("qwen3-thinking", "qwen3_thinking");
         registry.register_pattern("qwen-thinking", "qwen3_thinking");
         registry.register_pattern("qwen3", "qwen3");
         registry.register_pattern("qwen", "qwen3");
         registry.register_pattern("glm45", "glm45");
         registry.register_pattern("glm47", "glm45"); // glm47 uses same reasoning format as glm45
-        registry.register_pattern("kimi", "kimi");
+        registry.register_pattern("kimi-k2-thinking", "kimi_thinking");
+        registry.register_pattern("kimi-k2.5", "kimi_k25");
+        registry.register_pattern("kimi", "kimi"); // legacy: Kimi-K2-Instruct with unicode tokens
         registry.register_pattern("step3", "step3");
         registry.register_pattern("minimax", "minimax");
         registry.register_pattern("minimax-m2", "minimax");
@@ -223,7 +263,7 @@ impl ParserFactory {
         registry.register_pattern("c4ai-command", "cohere_cmd");
         registry.register_pattern("cohere", "cohere_cmd");
 
-        // Nano V3 / Nemotron uses same format as DeepSeek-R1 (initial_in_reasoning=true)
+        // Nano V3 / Nemotron uses same format as DeepSeek-R1 (always_in_reasoning=true)
         registry.register_pattern("nemotron-nano", "nano_v3");
         registry.register_pattern("nemotron-super", "nano_v3");
         registry.register_pattern("nano-v3", "nano_v3");
@@ -255,7 +295,7 @@ impl ParserFactory {
                         think_end_token: String::new(),
                         stream_reasoning: true,
                         max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-                        initial_in_reasoning: false,
+                        always_in_reasoning: false,
                     };
                     Box::new(
                         BaseReasoningParser::new(config).with_model_type("passthrough".to_string()),
@@ -282,7 +322,7 @@ impl ParserFactory {
             think_end_token: String::new(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            initial_in_reasoning: false,
+            always_in_reasoning: false,
         };
         Box::new(BaseReasoningParser::new(config).with_model_type("passthrough".to_string()))
     }

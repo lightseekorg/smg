@@ -1,12 +1,48 @@
 //! Reasoning and tool parser helpers.
 
+use llm_tokenizer::{chat_template::ThinkingToggle, traits::Tokenizer};
 use reasoning_parser::{
     ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser, ReasoningParser,
 };
+use serde_json::Value;
 use tool_parser::{
     ParserFactory as ToolParserFactory, PooledParser as ToolPooledParser, ToolParser,
 };
 use tracing::warn;
+
+/// Determine if the reasoning parser should start in reasoning mode based on
+/// the template's thinking toggle and the user's request.
+///
+/// `user_thinking`: `Some(true)` = user enabled thinking, `Some(false)` = user
+/// disabled it, `None` = not specified (use template default).
+///
+/// Returns true when the template supports a thinking toggle AND thinking is
+/// effectively ON. When true, the template has injected `<think>` in the
+/// prefill and the parser should call `mark_reasoning_started()`.
+pub(crate) fn should_mark_reasoning_started(
+    user_thinking: Option<bool>,
+    tokenizer: &dyn Tokenizer,
+) -> bool {
+    match tokenizer.thinking_toggle() {
+        ThinkingToggle::None => false,
+        ThinkingToggle::DefaultOn => user_thinking != Some(false),
+        ThinkingToggle::DefaultOff => user_thinking == Some(true),
+    }
+}
+
+/// Extract the user's thinking preference from chat_template_kwargs.
+///
+/// Checks both `enable_thinking` and `thinking` keys (different models use
+/// different names). Returns `None` if neither is set.
+pub(crate) fn extract_thinking_from_kwargs(
+    kwargs: Option<&std::collections::HashMap<String, Value>>,
+) -> Option<bool> {
+    let kwargs = kwargs?;
+    kwargs
+        .get("enable_thinking")
+        .or_else(|| kwargs.get("thinking"))
+        .and_then(|v| v.as_bool())
+}
 
 /// Check if a reasoning parser is available for the given model
 pub(crate) fn check_reasoning_parser_availability(

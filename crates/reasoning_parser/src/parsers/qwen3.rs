@@ -23,7 +23,7 @@ impl Qwen3Parser {
             think_end_token: "</think>".to_string(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            initial_in_reasoning: false, // Requires explicit start token
+            always_in_reasoning: false, // Requires explicit start token
         };
 
         Self {
@@ -61,6 +61,10 @@ impl ReasoningParser for Qwen3Parser {
     fn is_in_reasoning(&self) -> bool {
         self.base.is_in_reasoning()
     }
+
+    fn mark_reasoning_started(&mut self) {
+        self.base.mark_reasoning_started();
+    }
 }
 
 /// QwenThinking parser - variant that assumes reasoning from start.
@@ -78,7 +82,7 @@ impl QwenThinkingParser {
             think_end_token: "</think>".to_string(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            initial_in_reasoning: true, // Assumes reasoning from start
+            always_in_reasoning: true, // Assumes reasoning from start
         };
 
         Self {
@@ -115,6 +119,10 @@ impl ReasoningParser for QwenThinkingParser {
 
     fn is_in_reasoning(&self) -> bool {
         self.base.is_in_reasoning()
+    }
+
+    fn mark_reasoning_started(&mut self) {
+        self.base.mark_reasoning_started();
     }
 }
 

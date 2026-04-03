@@ -38,6 +38,54 @@ impl std::fmt::Display for ChatTemplateContentFormat {
     }
 }
 
+/// Result of detecting the thinking/reasoning toggle in a chat template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingToggle {
+    /// Template has no thinking toggle. The model either always reasons
+    /// (e.g. DeepSeek R1) or never does — controlled by the parser's
+    /// `initial_in_reasoning` config.
+    None,
+    /// Template supports a thinking toggle that defaults to ON.
+    /// If the user doesn't pass anything, thinking is enabled.
+    /// (Qwen3, Qwen3.5, Nemotron, GLM-4.6, GLM-5, Kimi-K2.5)
+    DefaultOn,
+    /// Template supports a thinking toggle that defaults to OFF.
+    /// Thinking only activates when the user explicitly passes `thinking=true`.
+    /// (DeepSeek V3.1)
+    DefaultOff,
+}
+
+/// Detect whether the chat template supports a thinking/reasoning toggle
+/// and what its default value is.
+pub fn detect_thinking_toggle(template: &str) -> ThinkingToggle {
+    let has_enable_thinking = template.contains("enable_thinking");
+    let has_thinking_var = template.contains("if thinking")
+        || template.contains("thinking is")
+        || template.contains("thinking ==")
+        || template.contains("set thinking");
+
+    if !has_enable_thinking && !has_thinking_var {
+        return ThinkingToggle::None;
+    }
+
+    // Check if the template explicitly defaults thinking to false/off.
+    // DeepSeek V3.1 pattern: {% if not thinking is defined %}{% set thinking = false %}
+    if template.contains("set thinking = false") || template.contains("set thinking=false") {
+        return ThinkingToggle::DefaultOff;
+    }
+    if template.contains("set enable_thinking = false")
+        || template.contains("set enable_thinking=false")
+    {
+        return ThinkingToggle::DefaultOff;
+    }
+
+    // All other models default to thinking ON:
+    // - "enable_thinking is defined and enable_thinking is false" → only disable when explicit
+    // - "set enable_thinking = enable_thinking if ... else True" → explicit default True
+    // - "enable_thinking is defined and not enable_thinking" → only disable when explicit
+    ThinkingToggle::DefaultOn
+}
+
 /// Detect the content format expected by a Jinja2 chat template
 ///
 /// This implements the same detection logic as SGLang's detect_jinja_template_content_format
@@ -630,6 +678,8 @@ pub struct ChatTemplateState {
     /// Cached, fully-configured environment. `None` when no template is set.
     env: Option<Environment<'static>>,
     content_format: ChatTemplateContentFormat,
+    /// Thinking toggle support detected from the template.
+    thinking_toggle: ThinkingToggle,
 }
 
 impl std::fmt::Debug for ChatTemplateState {
@@ -637,6 +687,7 @@ impl std::fmt::Debug for ChatTemplateState {
         f.debug_struct("ChatTemplateState")
             .field("has_template", &self.env.is_some())
             .field("content_format", &self.content_format)
+            .field("thinking_toggle", &self.thinking_toggle)
             .finish()
     }
 }
@@ -647,10 +698,15 @@ impl ChatTemplateState {
             .as_ref()
             .map(|t| detect_chat_template_content_format(t))
             .unwrap_or_default();
+        let thinking_toggle = template
+            .as_ref()
+            .map(|t| detect_thinking_toggle(t))
+            .unwrap_or(ThinkingToggle::None);
         let env = template.map(build_environment).transpose()?;
         Ok(Self {
             env,
             content_format,
+            thinking_toggle,
         })
     }
 
@@ -662,6 +718,7 @@ impl ChatTemplateState {
         Self {
             env: None,
             content_format: ChatTemplateContentFormat::default(),
+            thinking_toggle: ThinkingToggle::None,
         }
     }
 
@@ -683,14 +740,20 @@ impl ChatTemplateState {
 
     pub fn set(&mut self, template: String) -> Result<()> {
         let content_format = detect_chat_template_content_format(&template);
+        let thinking_toggle = detect_thinking_toggle(&template);
         let env = build_environment(template)?;
         self.content_format = content_format;
+        self.thinking_toggle = thinking_toggle;
         self.env = Some(env);
         Ok(())
     }
 
     pub fn content_format(&self) -> ChatTemplateContentFormat {
         self.content_format
+    }
+
+    pub fn thinking_toggle(&self) -> ThinkingToggle {
+        self.thinking_toggle
     }
 }
 
