@@ -19,6 +19,7 @@ use std::{
 use dashmap::{mapref::entry::Entry, DashMap};
 use parking_lot::RwLock;
 use smg_mesh::OptionalMeshSyncManager;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
@@ -26,6 +27,7 @@ use crate::{
     core::{
         circuit_breaker::CircuitState,
         worker::{HealthChecker, RuntimeType, WorkerType},
+        worker_event::WorkerEvent,
         ConnectionMode, Job, JobQueue, Worker,
     },
     observability::metrics::Metrics,
@@ -219,6 +221,9 @@ pub struct WorkerRegistry {
     /// Cleaned up when the last worker for a model is removed.
     /// When retries are disabled, max_retries is set to 1.
     model_retry_configs: Arc<DashMap<String, RetryConfig>>,
+
+    /// Broadcast channel for worker state change events.
+    event_tx: broadcast::Sender<WorkerEvent>,
 }
 
 impl WorkerRegistry {
@@ -234,7 +239,13 @@ impl WorkerRegistry {
             worker_mutation_locks: Arc::new(DashMap::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
             model_retry_configs: Arc::new(DashMap::new()),
+            event_tx: broadcast::Sender::new(64),
         }
+    }
+
+    /// Subscribe to worker state change events.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<WorkerEvent> {
+        self.event_tx.subscribe()
     }
 
     /// Rebuild the hash ring for a model based on current workers in the model index
@@ -358,6 +369,10 @@ impl WorkerRegistry {
                 );
             }
         }
+
+        let _ = self.event_tx.send(WorkerEvent::Registered {
+            url: worker.url().to_string(),
+        });
 
         Some(worker_id)
     }
@@ -504,6 +519,10 @@ impl WorkerRegistry {
             }
         }
 
+        let _ = self.event_tx.send(WorkerEvent::Registered {
+            url: new_worker.url().to_string(),
+        });
+
         true
     }
 
@@ -615,6 +634,10 @@ impl WorkerRegistry {
                 }
             }
 
+            let _ = self.event_tx.send(WorkerEvent::Removed {
+                url: worker.url().to_string(),
+            });
+
             Some(worker)
         } else {
             None
@@ -681,6 +704,11 @@ impl WorkerRegistry {
                     );
                 }
             }
+
+            let _ = self.event_tx.send(WorkerEvent::HealthChanged {
+                url: worker.url().to_string(),
+                healthy: is_healthy,
+            });
         }
     }
 
@@ -1561,5 +1589,47 @@ mod tests {
             w.metadata().spec.labels.get("source"),
             Some(&"k8s".to_string())
         );
+    }
+
+    #[test]
+    fn test_worker_event_broadcast() {
+        let registry = WorkerRegistry::new();
+        let mut rx = registry.subscribe_events();
+
+        // Create and register a worker
+        let mut labels = HashMap::new();
+        labels.insert("model_id".to_string(), "test-model".to_string());
+
+        let worker: Box<dyn Worker> = Box::new(
+            BasicWorkerBuilder::new("http://event-worker:8080")
+                .worker_type(WorkerType::Regular)
+                .labels(labels)
+                .circuit_breaker_config(CircuitBreakerConfig::default())
+                .api_key("test_api_key")
+                .build(),
+        );
+
+        let worker_id = registry.register(Arc::from(worker)).unwrap();
+
+        // Should receive Registered event
+        let event = rx.try_recv().unwrap();
+        match event {
+            WorkerEvent::Registered { url } => {
+                assert_eq!(url, "http://event-worker:8080");
+            }
+            other => panic!("Expected Registered event, got: {other:?}"),
+        }
+
+        // Remove the worker
+        registry.remove(&worker_id);
+
+        // Should receive Removed event
+        let event = rx.try_recv().unwrap();
+        match event {
+            WorkerEvent::Removed { url } => {
+                assert_eq!(url, "http://event-worker:8080");
+            }
+            other => panic!("Expected Removed event, got: {other:?}"),
+        }
     }
 }
