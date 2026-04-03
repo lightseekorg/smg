@@ -246,6 +246,12 @@ impl MlxEngineClient {
         processed_text: String,
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
+        // MLX doesn't support backend-side structured outputs (json_schema, etc.)
+        // Tool calling works via router-side ToolParser (no backend support needed)
+        if body.response_format.is_some() {
+            return Err("MLX backend does not support response_format (structured outputs)".to_string());
+        }
+
         let sampling_params = Self::build_sampling_params_from_chat(body)?;
 
         Ok(proto::GenerateRequest {
@@ -353,8 +359,17 @@ impl MlxEngineClient {
         body: &ResponsesRequest,
         processed_text: String,
         token_ids: Vec<u32>,
-        _constraint: Option<(String, String)>,
+        constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
+        // MLX doesn't support backend-side structured output constraints
+        // (structural_tag, json_schema, etc.) — reject if constraint requested.
+        // Tool calling works via router-side parsing (no backend support needed).
+        if let Some((constraint_type, _)) = &constraint {
+            return Err(format!(
+                "MLX backend does not support structured output constraint: {constraint_type}"
+            ));
+        }
+
         let sampling_params = Self::build_sampling_params_from_responses(body)?;
 
         Ok(proto::GenerateRequest {
