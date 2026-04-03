@@ -276,18 +276,38 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             # rerankers are now handled under "classify".
             pooling_params = PoolingParams(task="classify")
 
+            # Cross-encoder models require text-pair tokenization (with [SEP])
+            # to produce meaningful scores. We tokenize with text_pair here,
+            # mirroring vLLM's CrossEncoderIOProcessor.get_score_prompt().
+            tokenizer = self.engine.renderer.get_tokenizer()
+
             results = []
             total_prompt_tokens = 0
 
             for i, text_2_item in enumerate(request.text_2):
-                # Using the dict {"prompt": text_1, "text_2": text_2} format standard for vLLM cross-encoder entrypoints
-                prompt = {"prompt": request.text_1, "text_2": text_2_item}
+                # Tokenize as a text pair so the model sees both texts
+                # with proper separator tokens (e.g. [CLS] text_1 [SEP] text_2 [SEP]).
+                encoded = tokenizer(
+                    text=request.text_1,
+                    text_pair=text_2_item,
+                )
+                prompt: TokensPrompt = {
+                    "prompt_token_ids": encoded["input_ids"],
+                }
+
+                # Pass token_type_ids via pooling_params if present
+                pair_pooling_params = pooling_params
+                if "token_type_ids" in encoded:
+                    pair_pooling_params = pooling_params.clone()
+                    pair_pooling_params.extra_kwargs = {
+                        "token_type_ids": encoded["token_type_ids"],
+                    }
 
                 final_output = None
                 # encode() covers both embedding and scoring models
                 async for output in self.engine.encode(
                     prompt=prompt,
-                    pooling_params=pooling_params,
+                    pooling_params=pair_pooling_params,
                     request_id=f"{request_id}_{i}",
                 ):
                     final_output = output
