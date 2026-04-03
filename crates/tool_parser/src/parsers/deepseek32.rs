@@ -299,11 +299,21 @@ impl ToolParser for DeepSeek32Parser {
             if !func_name.is_empty() && !tool_indices.contains_key(func_name.as_str()) {
                 tracing::debug!("Invalid tool name '{}' - skipping", func_name);
                 if is_complete {
+                    // Complete invalid invoke — advance buffer past it and try next
                     if let Some(end) = match_end {
                         self.buffer = self.buffer[end..].to_string();
                     }
+                    continue;
+                } else {
+                    // Incomplete invalid invoke — reset state and wait for more data
+                    helpers::reset_current_tool_state(
+                        &mut self.buffer,
+                        &mut self.current_tool_name_sent,
+                        &mut self.streamed_args_for_tool,
+                        &self.prev_tool_call_arr,
+                    );
+                    return Ok(StreamingParseResult::default());
                 }
-                break;
             }
 
             // Initialize state on first tool
