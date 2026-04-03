@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
 use openai_protocol::{
@@ -8,6 +8,7 @@ use openai_protocol::{
 
 use super::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
+    lora::WorkerLoraState,
     resilience::ResolvedResilience,
     worker::{
         BasicWorker, ConnectionMode, RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad, WorkerType,
@@ -32,6 +33,7 @@ pub struct BasicWorkerBuilder {
     http_client: Option<reqwest::Client>,
     /// Resolved resilience config (if not set, defaults are used).
     resilience: Option<ResolvedResilience>,
+    lora_state: Option<Arc<WorkerLoraState>>,
 }
 
 impl BasicWorkerBuilder {
@@ -45,6 +47,7 @@ impl BasicWorkerBuilder {
             grpc_client: None,
             http_client: None,
             resilience: None,
+            lora_state: None,
         }
     }
 
@@ -58,6 +61,7 @@ impl BasicWorkerBuilder {
             grpc_client: None,
             http_client: None,
             resilience: None,
+            lora_state: None,
         }
     }
 
@@ -73,7 +77,14 @@ impl BasicWorkerBuilder {
             grpc_client: None,
             http_client: None,
             resilience: None,
+            lora_state: None,
         }
+    }
+
+    /// Attach a per-worker LoRA state (built from `RuntimeType` and a shared HTTP client).
+    pub fn lora_state(mut self, state: Option<Arc<WorkerLoraState>>) -> Self {
+        self.lora_state = state;
+        self
     }
 
     /// Set the bootstrap port (for prefill workers in PD disaggregation)
@@ -206,10 +217,7 @@ impl BasicWorkerBuilder {
 
     /// Build the BasicWorker instance
     pub fn build(mut self) -> BasicWorker {
-        use std::sync::{
-            atomic::{AtomicBool, AtomicUsize},
-            Arc,
-        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
 
         use tokio::sync::OnceCell;
 
@@ -270,6 +278,7 @@ impl BasicWorkerBuilder {
             models_override: Arc::new(ArcSwap::from_pointee(WorkerModels::Wildcard)),
             http_client,
             resilience,
+            lora_state: self.lora_state,
         }
     }
 }

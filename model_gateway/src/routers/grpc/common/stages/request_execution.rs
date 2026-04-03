@@ -179,7 +179,7 @@ impl RequestExecutionStage {
             error!(function = "execute_single", error = %e, "Failed to start generation");
             e.to_http_error(
                 "start_generation_failed",
-                format!("Failed to start generation: {}", e.message()),
+                format!("Failed to start generation: {e}"),
             )
         })?;
 
@@ -210,7 +210,7 @@ impl RequestExecutionStage {
             error!(function = "execute_single_embed", error = %e, "Failed to start embedding");
             e.to_http_error(
                 "start_embedding_failed",
-                format!("Failed to start embedding: {}", e.message()),
+                format!("Failed to start embedding: {e}"),
             )
         })?;
 
@@ -251,7 +251,7 @@ impl RequestExecutionStage {
         // Handle prefill result
         let prefill_stream = prefill_result.map_err(|e| {
             error!(function = "execute_dual_dispatch", error = %e, "Prefill worker failed to start");
-            e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {}", e.message()))
+            e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {e}"))
         })?;
 
         // Handle decode result
@@ -259,7 +259,7 @@ impl RequestExecutionStage {
             error!(function = "execute_dual_dispatch", error = %e, "Decode worker failed to start");
             e.to_http_error(
                 "decode_worker_failed_to_start",
-                format!("Decode worker failed to start: {}", e.message()),
+                format!("Decode worker failed to start: {e}"),
             )
         })?;
 
@@ -345,7 +345,7 @@ impl RequestExecutionStage {
             .map_err(|e| {
                 workers.record_outcome_prefill(e.http_status().as_u16());
                 error!(function = "execute_sequential_pd", error = %e, "Prefill worker failed to start");
-                e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {}", e.message()))
+                e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {e}"))
             })?;
 
         // Drain prefill response (we just need to wait for completion)
@@ -359,7 +359,7 @@ impl RequestExecutionStage {
                     error!(function = "execute_sequential_pd", error = %e, "Prefill stream error");
                     return Err(e.to_http_error(
                         "prefill_stream_error",
-                        format!("Prefill stream error: {}", e.message()),
+                        format!("Prefill stream error: {e}"),
                     ));
                 }
             }
@@ -386,7 +386,7 @@ impl RequestExecutionStage {
             error!(function = "execute_sequential_pd", error = %e, "Decode worker failed to start");
             e.to_http_error(
                 "decode_worker_failed_to_start",
-                format!("Decode worker failed to start: {}", e.message()),
+                format!("Decode worker failed to start: {e}"),
             )
         })?;
 
