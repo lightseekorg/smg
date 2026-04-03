@@ -1577,8 +1577,19 @@ impl StreamingProcessor {
         let mut matched_stop: Option<Value> = None;
 
         // Check parser availability once upfront.
-        // Run reasoning parser when thinking is effectively ON — either the user
-        // explicitly enabled it, or the template defaults to ON.
+        // Only run reasoning parser when the user explicitly enabled thinking.
+        let separate_reasoning = matches!(
+            &original_request.thinking,
+            Some(messages::ThinkingConfig::Enabled { .. })
+        );
+        let reasoning_parser_available = separate_reasoning
+            && utils::check_reasoning_parser_availability(
+                &self.reasoning_parser_factory,
+                self.configured_reasoning_parser.as_deref(),
+                model,
+            );
+
+        // Determine if thinking is effectively ON (for mark_reasoning_started).
         let user_thinking = match &original_request.thinking {
             Some(messages::ThinkingConfig::Enabled { .. }) => Some(true),
             Some(messages::ThinkingConfig::Disabled) => Some(false),
@@ -1586,12 +1597,6 @@ impl StreamingProcessor {
         };
         let thinking_override =
             utils::should_mark_reasoning_started(user_thinking, tokenizer.as_ref());
-        let reasoning_parser_available = thinking_override
-            && utils::check_reasoning_parser_availability(
-                &self.reasoning_parser_factory,
-                self.configured_reasoning_parser.as_deref(),
-                model,
-            );
         let think_in_prefill = tokenizer.think_in_prefill();
 
         let tool_choice_enabled = !matches!(

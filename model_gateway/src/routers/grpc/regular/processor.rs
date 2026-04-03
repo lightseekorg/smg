@@ -500,16 +500,13 @@ impl ResponseProcessor {
         let complete = all_responses.into_iter().next().unwrap();
 
         // Check parser availability
-        // Run reasoning parser when thinking is effectively ON — either the user
-        // explicitly enabled it, or the template defaults to ON and the user didn't
-        // disable it. Without this, <think> tags leak into content.
-        let user_thinking = match &messages_request.thinking {
-            Some(messages::ThinkingConfig::Enabled { .. }) => Some(true),
-            Some(messages::ThinkingConfig::Disabled) => Some(false),
-            None => None,
-        };
-        let separate_reasoning =
-            utils::should_mark_reasoning_started(user_thinking, tokenizer.as_ref());
+        // Only run reasoning parser when the user explicitly enabled thinking in the request.
+        // Without this gate, the reasoning parser misclassifies normal text and tool call JSON
+        // as thinking content, breaking tool use and producing incorrect content blocks.
+        let separate_reasoning = matches!(
+            &messages_request.thinking,
+            Some(messages::ThinkingConfig::Enabled { .. })
+        );
         let reasoning_parser_available = separate_reasoning
             && utils::check_reasoning_parser_availability(
                 &self.reasoning_parser_factory,
@@ -586,9 +583,16 @@ impl ResponseProcessor {
             // Reset pooled parser to clean state before each request
             parser.reset();
 
-            // If thinking is effectively ON, start in reasoning mode.
-            if separate_reasoning {
-                parser.mark_reasoning_started();
+            // If thinking is effectively ON and template has a toggle, start in reasoning mode.
+            {
+                let user_thinking = match &messages_request.thinking {
+                    Some(messages::ThinkingConfig::Enabled { .. }) => Some(true),
+                    Some(messages::ThinkingConfig::Disabled) => Some(false),
+                    None => None,
+                };
+                if utils::should_mark_reasoning_started(user_thinking, tokenizer.as_ref()) {
+                    parser.mark_reasoning_started();
+                }
             }
 
             match parser.detect_and_parse_reasoning(&processed_text) {
