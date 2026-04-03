@@ -242,7 +242,7 @@ pub struct ScoreRequest {
     /// Can be a single string or a list of strings.
     pub text_2: StringOrVec,
 
-    /// Optional request ID for tracking
+    /// Optional encoding format for the response
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding_format: Option<String>,
 

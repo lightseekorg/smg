@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use tracing::{debug, error};
+use uuid::Uuid;
 
 use crate::routers::{
     error,
@@ -82,7 +83,7 @@ impl PipelineStage for ScoreNativeStage {
         };
 
         // Convert request into vLLM ScoreRequest proto
-        let request_id = "score_id".to_string(); // or capture from elsewhere
+        let request_id = format!("score-{}", Uuid::now_v7());
 
         // `score_req.text_2` is a `StringOrVec`. `into_vec()` will give us the vector of contents.
         let text_2 = score_req.text_2.clone().into_vec();

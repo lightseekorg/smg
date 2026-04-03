@@ -1096,10 +1096,10 @@ impl RequestPipeline {
 
     /// Execute the complete pipeline for a Score API request.
     ///
-    /// Score requests are forwarded via HTTP to the worker's REST endpoint
-    /// (`/v1/score`). The `ScoreHttpForwardStage` always returns
-    /// `Ok(Some(response))`, so the loop below will return the proxied response
-    /// before reaching the `final_response` check at the bottom.
+    /// Score requests are dispatched via native gRPC to the worker's `Score` RPC.
+    /// The `ScoreNativeStage` always returns `Ok(Some(response))`, so the loop
+    /// below will return the response before reaching the `final_response` check
+    /// at the bottom.
     pub async fn execute_score(
         &self,
         request: Arc<ScoreRequest>,

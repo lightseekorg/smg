@@ -57,7 +57,7 @@ pub(crate) enum RequestType {
     Embedding(Arc<EmbeddingRequest>),
     Classify(Arc<ClassifyRequest>),
     Messages(Arc<CreateMessageRequest>),
-    /// vLLM /v1/score — HTTP forward only (no gRPC proto)
+    /// vLLM /v1/score — cross-encoder reranker via native gRPC
     Score(Arc<ScoreRequest>),
 }
 
