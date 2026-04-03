@@ -1,0 +1,116 @@
+syntax = "proto3";
+package mlx.grpc.engine;
+
+import "common.proto";
+
+service MlxEngine {
+  rpc Generate(GenerateRequest) returns (stream GenerateResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc Abort(AbortRequest) returns (AbortResponse);
+  rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+  rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest)
+      returns (stream smg.grpc.common.GetTokenizerChunk);
+}
+
+message GenerateRequest {
+  string request_id = 1;
+  oneof input {
+    TokenizedInput tokenized = 2;
+    string text = 3;
+  }
+  SamplingParams sampling_params = 4;
+  bool stream = 5;
+}
+
+message TokenizedInput {
+  string original_text = 1;
+  repeated uint32 input_ids = 2;
+}
+
+message SamplingParams {
+  optional float temperature = 1;
+  float top_p = 2;
+  uint32 top_k = 3;
+  float min_p = 4;
+  float repetition_penalty = 5;
+  float frequency_penalty = 6;
+  float presence_penalty = 7;
+  map<int32, float> logit_bias = 8;
+  optional uint32 max_tokens = 9;
+  repeated uint32 stop_token_ids = 10;
+  bool ignore_eos = 11;
+  optional int32 logprobs = 12;
+  optional int32 seed = 13;
+}
+
+message GenerateResponse {
+  oneof response {
+    GenerateStreamChunk chunk = 1;
+    GenerateComplete complete = 2;
+  }
+}
+
+message GenerateStreamChunk {
+  repeated uint32 token_ids = 1;
+  uint32 prompt_tokens = 2;
+  uint32 completion_tokens = 3;
+  uint32 cached_tokens = 4;
+  OutputLogProbs output_logprobs = 5;
+  uint32 index = 6;
+}
+
+message GenerateComplete {
+  repeated uint32 output_ids = 1;
+  string finish_reason = 2;
+  uint32 prompt_tokens = 3;
+  uint32 completion_tokens = 4;
+  uint32 cached_tokens = 5;
+  OutputLogProbs output_logprobs = 6;
+  uint32 index = 7;
+  optional uint32 matched_stop_token_id = 8;
+}
+
+message OutputLogProbs {
+  repeated float token_logprobs = 1;
+  repeated uint32 token_ids = 2;
+  repeated TopLogProbs top_logprobs = 3;
+}
+
+message TopLogProbs {
+  repeated float values = 1;
+  repeated uint32 token_ids = 2;
+}
+
+message HealthCheckRequest {}
+message HealthCheckResponse {
+  bool healthy = 1;
+  string message = 2;
+}
+
+message AbortRequest {
+  repeated string request_ids = 1;
+}
+message AbortResponse {}
+
+message GetModelInfoRequest {}
+message GetModelInfoResponse {
+  string model_path = 1;
+  bool is_generation = 2;
+  uint32 max_context_length = 3;
+  uint32 vocab_size = 4;
+  string served_model_name = 5;
+  string model_type = 6;
+  repeated string architectures = 7;
+  repeated uint32 eos_token_ids = 8;
+  uint32 pad_token_id = 9;
+  uint32 bos_token_id = 10;
+  uint32 max_req_input_len = 11;
+}
+
+message GetServerInfoRequest {}
+message GetServerInfoResponse {
+  string server_type = 1;
+  uint32 active_requests = 2;
+  double uptime_seconds = 3;
+}

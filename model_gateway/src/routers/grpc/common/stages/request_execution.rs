@@ -113,6 +113,7 @@ impl PipelineStage for RequestExecutionStage {
                                 self.execute_dual_dispatch(req, clients, workers).await
                             }
                             Some(RuntimeType::Trtllm)
+                            | Some(RuntimeType::Mlx)
                             | Some(RuntimeType::External)
                             | Some(RuntimeType::Unspecified) => {
                                 error!(
