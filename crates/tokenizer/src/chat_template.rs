@@ -60,10 +60,11 @@ pub enum ThinkingToggle {
 /// and what its default value is.
 pub fn detect_thinking_toggle(template: &str) -> ThinkingToggle {
     let has_enable_thinking = template.contains("enable_thinking");
-    let has_thinking_var = template.contains("if thinking")
-        || template.contains("thinking is")
+    // Trailing space prevents matching "thinking_mode", "thinking_budget", etc.
+    let has_thinking_var = template.contains("if thinking ")
+        || template.contains("thinking is ")
         || template.contains("thinking ==")
-        || template.contains("set thinking");
+        || template.contains("set thinking ");
 
     if !has_enable_thinking && !has_thinking_var {
         return ThinkingToggle::None;
