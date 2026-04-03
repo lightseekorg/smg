@@ -114,7 +114,8 @@ impl PipelineStage for RequestExecutionStage {
                             }
                             Some(RuntimeType::Trtllm)
                             | Some(RuntimeType::External)
-                            | Some(RuntimeType::Unspecified) => {
+                            | Some(RuntimeType::Unspecified)
+                            | Some(RuntimeType::Mlx) => {
                                 error!(
                                     function = "RequestExecutionStage::execute",
                                     runtime_type = ?runtime_type,
