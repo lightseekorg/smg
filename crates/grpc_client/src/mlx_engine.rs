@@ -254,6 +254,15 @@ impl MlxEngineClient {
                 "MLX backend does not support response_format (structured outputs)".to_string(),
             );
         }
+        // MLX proto only supports stop_token_ids, not string stop sequences
+        if let Some(ref stop) = body.stop {
+            if !stop.is_empty() {
+                return Err(
+                    "MLX backend does not support string stop sequences (only stop_token_ids)"
+                        .to_string(),
+                );
+            }
+        }
 
         let sampling_params = Self::build_sampling_params_from_chat(body)?;
 
@@ -282,6 +291,14 @@ impl MlxEngineClient {
         original_text: String,
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
+        if let Some(ref stop) = body.stop {
+            if !stop.is_empty() {
+                return Err(
+                    "MLX backend does not support string stop sequences (only stop_token_ids)"
+                        .to_string(),
+                );
+            }
+        }
         let sampling_params = Self::build_sampling_params_from_completion(body)?;
 
         Ok(proto::GenerateRequest {
@@ -336,6 +353,16 @@ impl MlxEngineClient {
         original_text: Option<String>,
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
+        if let Some(ref sp) = body.sampling_params {
+            if let Some(ref stop) = sp.stop {
+                if !stop.is_empty() {
+                    return Err(
+                        "MLX backend does not support string stop sequences (only stop_token_ids)"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         let sampling_params =
             Self::build_sampling_params_from_plain(body.sampling_params.as_ref())?;
 
@@ -458,6 +485,7 @@ impl MlxEngineClient {
         let mut sampling = proto::SamplingParams {
             temperature: Some(1.0),
             top_p: 1.0,
+            repetition_penalty: 1.0, // 1.0 = no penalty
             ..Default::default()
         };
 
