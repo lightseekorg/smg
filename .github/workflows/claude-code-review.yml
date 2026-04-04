@@ -111,14 +111,7 @@ jobs:
                  --paginate --jq '[.[] | {path, line, body, user: .user.login, in_reply_to_id}] | last(50)'
             4. Read changed files for context.
             5. Post inline comments for issues found.
-            6. Dismiss any previous claude[bot] review on this PR to avoid stale blocks:
-               First get the review id:
-                 gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews \
-                   --jq '[.[] | select(.user.login == "claude[bot]" and .state != "DISMISSED")] | last | .id'
-               Then dismiss it (if found):
-                 gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews/{id}/dismissals \
-                   -f message="Superseded by new review."
-            7. Submit a single review verdict via gh api. The review body IS
+            6. Submit a single review verdict via gh api. The review body IS
                the summary — do not post a separate summary comment.
                - If any 🔴 Important issues: submit REQUEST_CHANGES with body:
                  "Found N critical issue(s):\n- file:line — brief description\n- ..."
