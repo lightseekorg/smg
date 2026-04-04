@@ -55,6 +55,7 @@ jobs:
           fi
 
       - uses: anthropics/claude-code-action@v1
+        id: claude-review
         continue-on-error: true
         with:
           anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
@@ -66,28 +67,30 @@ jobs:
 
             Review this pull request.
 
-            IMPORTANT — Incremental review:
+            IMPORTANT — Incremental vs full review:
             If EVENT is "synchronize" (new push to existing PR), this is a
             follow-up review. Previous review comments are your memory.
-            1. Use `git diff $BEFORE_SHA...HEAD` to see only what this push changed.
-            2. Use the bot comments from step 3 to see what was already flagged.
+            1. Run `git diff $BEFORE_SHA...HEAD` to see only what this push changed.
+               If this fails (e.g., force-push rewrote history), fall back to
+               `git diff origin/main...HEAD` for a full review instead.
+            2. Use the comments from step 3 to see what was already flagged.
             3. Focus on NEW or CHANGED code in this push. Skip re-reviewing
                unchanged code that was already covered.
             4. If a previous comment is now resolved by the new push, do not
                re-post it.
-            If EVENT is "opened" or "reopened", do a full review using
-            `git diff origin/main...HEAD`.
+            If EVENT is "opened" or "reopened", BEFORE_SHA is not valid —
+            do a full review using `git diff origin/main...HEAD`.
 
             IMPORTANT — Output early:
-            Always post inline comments and summary BEFORE doing further
-            exploration. An incomplete review is better than no review
-            because you ran out of turns.
+            Always post inline comments BEFORE doing further exploration.
+            An incomplete review is better than no review because you ran
+            out of turns.
 
             For every issue found, call mcp__github_inline_comment__create_inline_comment
             with path, line, and a severity-prefixed body per REVIEW.md format.
 
             IMPORTANT — Deduplication:
-            Use the bot comments fetched in step 3 to deduplicate.
+            Use the comments fetched in step 3 to deduplicate.
 
             Self-dedup (strict): If claude[bot] already commented on the same
             file and line (±3 lines), SKIP — do not post regardless of wording.
@@ -105,17 +108,23 @@ jobs:
             2. Read REVIEW.md for severity format, focus areas, and domain knowledge.
             3. Fetch existing review comments (bot + human replies) for dedup and memory:
                gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
-                 --paginate --jq '[.[] | {path, line, body, user: .user.login, in_reply_to_id}]'
+                 --paginate --jq '[.[] | {path, line, body, user: .user.login, in_reply_to_id}] | last(50)'
             4. Read changed files for context.
             5. Post inline comments for issues found.
-            6. Write a brief summary with count per severity level.
-            7. Submit a review verdict via gh api:
-               - If any 🔴 Important issues were found, submit REQUEST_CHANGES
-                 with a body listing each critical issue as a one-line summary:
+            6. Dismiss any previous claude[bot] review on this PR to avoid stale blocks:
+               First get the review id:
+                 gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews \
+                   --jq '[.[] | select(.user.login == "claude[bot]" and .state != "DISMISSED")] | last | .id'
+               Then dismiss it (if found):
+                 gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews/{id}/dismissals \
+                   -f message="Superseded by new review."
+            7. Submit a single review verdict via gh api. The review body IS
+               the summary — do not post a separate summary comment.
+               - If any 🔴 Important issues: submit REQUEST_CHANGES with body:
                  "Found N critical issue(s):\n- file:line — brief description\n- ..."
-               - Otherwise, submit APPROVE with body "LGTM — no critical issues found."
-               Use: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews \
-                 -f event=REQUEST_CHANGES|APPROVE -f body="..."
+               - If no critical issues: submit APPROVE with body summarizing
+                 what was reviewed: "Reviewed N files (list them). Checked for
+                 [focus areas from REVIEW.md]. No critical issues found."
           claude_args: |
             --model claude-opus-4-6
             --max-turns 50
@@ -125,6 +134,10 @@ jobs:
           plugin_marketplaces: |
             https://github.com/anthropics/claude-plugins-official.git
             https://github.com/lightseekorg/smg-dev-guide.git
+
+      - name: Annotate on failure
+        if: steps.claude-review.outcome == 'failure'
+        run: echo "::warning::Claude review did not complete — may have hit turn limit or encountered an error."
 
   # Respond to @claude mentions in PR/issue comments
   respond:
