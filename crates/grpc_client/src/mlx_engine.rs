@@ -276,8 +276,12 @@ impl MlxEngineClient {
         Ok(())
     }
 
-    fn reject_structured_outputs(params: &GenerateSamplingParams) -> Result<(), String> {
-        if params.json_schema.is_some() || params.regex.is_some() || params.ebnf.is_some() {
+    fn reject_if_any_constraint(
+        json_schema: Option<&String>,
+        regex: Option<&String>,
+        ebnf: Option<&String>,
+    ) -> Result<(), String> {
+        if json_schema.is_some() || regex.is_some() || ebnf.is_some() {
             return Err("MLX backend does not support structured output constraints".to_string());
         }
         Ok(())
@@ -331,6 +335,11 @@ impl MlxEngineClient {
     ) -> Result<proto::GenerateRequest, String> {
         Self::reject_n(body.n)?;
         Self::reject_stop_strings(body.stop.as_ref())?;
+        Self::reject_if_any_constraint(
+            body.json_schema.as_ref(),
+            body.regex.as_ref(),
+            body.ebnf.as_ref(),
+        )?;
 
         let sampling_params = Self::build_sampling_params_from_completion(body);
         Ok(Self::make_generate_request(
@@ -383,7 +392,11 @@ impl MlxEngineClient {
         if let Some(ref sp) = body.sampling_params {
             Self::reject_n(sp.n)?;
             Self::reject_stop_strings(sp.stop.as_ref())?;
-            Self::reject_structured_outputs(sp)?;
+            Self::reject_if_any_constraint(
+                sp.json_schema.as_ref(),
+                sp.regex.as_ref(),
+                sp.ebnf.as_ref(),
+            )?;
         }
 
         let sampling_params = Self::build_sampling_params_from_plain(body.sampling_params.as_ref());
@@ -410,6 +423,7 @@ impl MlxEngineClient {
         constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
         Self::reject_constraint(constraint.as_ref())?;
+        Self::reject_stop_strings(body.stop.as_ref())?;
 
         let sampling_params = Self::build_sampling_params_from_responses(body);
         Ok(Self::make_generate_request(
