@@ -242,9 +242,14 @@ impl MlxEngineClient {
         body: &ChatCompletionRequest,
         processed_text: String,
         token_ids: Vec<u32>,
+        constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
-        // MLX doesn't support backend-side structured outputs (json_schema, etc.)
-        // Tool calling works via router-side ToolParser (no backend support needed)
+        // MLX doesn't support backend-side constrained decoding
+        if let Some((constraint_type, _)) = &constraint {
+            return Err(format!(
+                "MLX backend does not support structured output constraint: {constraint_type}"
+            ));
+        }
         if body.response_format.is_some() {
             return Err(
                 "MLX backend does not support response_format (structured outputs)".to_string(),

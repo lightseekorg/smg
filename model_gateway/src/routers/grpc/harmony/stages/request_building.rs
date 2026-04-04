@@ -220,15 +220,6 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 ProtoGenerateRequest::Trtllm(Box::new(req))
             }
             GrpcClient::Mlx(mlx_client) => {
-                // MLX doesn't support backend-side constraints (structural_tag, json_schema)
-                // needed by Harmony for tool calling and structured outputs
-                if prep.tool_constraints.is_some() {
-                    return Err(error::bad_request(
-                        "mlx_constraints_not_supported",
-                        "MLX backend does not support Harmony structured output constraints (structural_tag). Tool calling and structured outputs in Harmony mode require a backend with constrained decoding support.".to_string(),
-                    ));
-                }
-
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
                         let body = prep.filtered_request.as_ref().unwrap_or_else(|| request.as_ref());
@@ -238,6 +229,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 body,
                                 placeholder_processed_text,
                                 prep.token_ids.clone(),
+                                prep.tool_constraints.clone(),
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build MLX generate request");
