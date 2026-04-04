@@ -69,8 +69,12 @@ impl KimiK25Processor {
         Self {
             patch_size: config.get_patch_size(DEFAULT_PATCH_SIZE),
             merge_size: config.merge_size.unwrap_or(DEFAULT_MERGE_SIZE),
-            in_patch_limit: DEFAULT_IN_PATCH_LIMIT,
-            patch_limit_on_one_side: DEFAULT_PATCH_LIMIT_ON_ONE_SIDE,
+            in_patch_limit: config
+                .get_extra::<usize>("in_patch_limit")
+                .unwrap_or(DEFAULT_IN_PATCH_LIMIT),
+            patch_limit_on_one_side: config
+                .get_extra::<usize>("patch_limit_on_one_side")
+                .unwrap_or(DEFAULT_PATCH_LIMIT_ON_ONE_SIDE),
         }
     }
 
@@ -504,5 +508,53 @@ mod tests {
             has_ones,
             "Expected normalized-white image values (1.0) in output"
         );
+    }
+
+    #[test]
+    fn test_preprocess_tiny_image() {
+        // 1x1 image should not panic — padded to 28x28
+        let p = KimiK25Processor::new();
+        let config = PreProcessorConfig {
+            image_mean: Some(KIMI_K25_MEAN.to_vec()),
+            image_std: Some(KIMI_K25_STD.to_vec()),
+            ..Default::default()
+        };
+        let image = create_test_image(1, 1, Rgb([128, 128, 128]));
+        let result = p.preprocess(&[image], &config).unwrap();
+        assert_eq!(result.pixel_values.ndim(), 4);
+        assert!(result.pixel_values.shape()[0] > 0);
+        assert!(result.num_img_tokens[0] > 0);
+    }
+
+    #[test]
+    fn test_preprocess_empty_batch_returns_error() {
+        let p = KimiK25Processor::new();
+        let config = PreProcessorConfig::default();
+        let result = p.preprocess(&[], &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_preprocessor_config_reads_limits() {
+        let config = PreProcessorConfig {
+            patch_size: Some(PatchSize {
+                height: Some(14),
+                width: Some(14),
+            }),
+            merge_size: Some(2),
+            extra: [
+                ("in_patch_limit".to_string(), serde_json::json!(8192)),
+                (
+                    "patch_limit_on_one_side".to_string(),
+                    serde_json::json!(256),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let p = KimiK25Processor::from_preprocessor_config(&config);
+        assert_eq!(p.in_patch_limit, 8192);
+        assert_eq!(p.patch_limit_on_one_side, 256);
     }
 }

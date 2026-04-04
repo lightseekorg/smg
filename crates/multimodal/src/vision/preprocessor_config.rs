@@ -235,8 +235,9 @@ impl PreProcessorConfig {
     /// nested format where values are under `media_proc_cfg`.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         let mut config: Self = serde_json::from_str(json)?;
-        // If top-level image_mean/std are missing, try to extract from media_proc_cfg
-        if config.image_mean.is_none() || config.image_std.is_none() {
+        // Extract values from nested media_proc_cfg (used by Kimi-K2.5 and similar models)
+        // when top-level fields are missing.
+        {
             if let Ok(raw) = serde_json::from_str::<serde_json::Value>(json) {
                 if let Some(media_cfg) = raw.get("media_proc_cfg") {
                     if config.image_mean.is_none() {
@@ -262,6 +263,15 @@ impl PreProcessorConfig {
                             .get("merge_kernel_size")
                             .and_then(|v| v.as_u64())
                             .map(|v| v as usize);
+                    }
+                    // Also extract Kimi-specific limits into the extra map
+                    // so processors can read them via get_extra()
+                    for key in ["in_patch_limit", "patch_limit_on_one_side"] {
+                        if !config.extra.contains_key(key) {
+                            if let Some(v) = media_cfg.get(key) {
+                                config.extra.insert(key.to_string(), v.clone());
+                            }
+                        }
                     }
                 }
             }

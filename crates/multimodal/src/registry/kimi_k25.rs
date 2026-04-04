@@ -30,6 +30,9 @@ impl ModelProcessorSpec for KimiK25VisionSpec {
     fn matches(&self, metadata: &ModelMetadata) -> bool {
         let id = metadata.model_id.to_ascii_lowercase();
         id.contains("kimi") && id.contains("k2")
+            || metadata
+                .config_model_type()
+                .is_some_and(|mt| mt == "kimi_k25")
     }
 
     fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {

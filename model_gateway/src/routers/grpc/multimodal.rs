@@ -470,11 +470,17 @@ async fn process_multimodal_parts(
         .placeholder_token(&metadata)
         .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?;
     let search_token_id = tokenizer.token_to_id(&placeholder_token);
-    let im_token_id: Option<u32> = spec
-        .placeholder_token_id(&metadata)
-        .ok()
-        .map(|id| id as u32)
-        .or(search_token_id);
+    let im_token_id: Option<u32> = match spec.placeholder_token_id(&metadata) {
+        Ok(id) => Some(id as u32),
+        Err(e) => {
+            warn!(
+                error = %e,
+                ?search_token_id,
+                "Failed to resolve placeholder_token_id from config, falling back to tokenizer lookup"
+            );
+            search_token_id
+        }
+    };
 
     let expanded = expand_tokens(
         &token_ids,

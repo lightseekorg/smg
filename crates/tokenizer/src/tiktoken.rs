@@ -446,8 +446,12 @@ impl Encoder for TiktokenTokenizer {
         // Always use encode_with_special_tokens so that special token strings
         // in the input (e.g., <|media_pad|> from chat templates) are recognized
         // as single tokens rather than split into BPE sub-tokens.
-        // This matches HuggingFace tokenizer behavior where added special tokens
-        // are always recognized in input text regardless of add_special_tokens.
+        //
+        // In the gateway, tiktoken tokenizers are only created via
+        // from_dir_with_chat_template (hub-loaded models like Kimi, DeepSeek).
+        // The input to encode() is always chat-template-rendered text containing
+        // special tokens that must be recognized. Raw user text is never encoded
+        // directly — it goes through the chat template first.
         let tokens = self.tokenizer.encode_with_special_tokens(input);
         Ok(Encoding::Tiktoken(tokens))
     }

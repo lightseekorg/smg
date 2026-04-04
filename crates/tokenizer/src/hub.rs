@@ -63,35 +63,6 @@ fn is_chat_template_file(filename: &str) -> bool {
         || filename == "chat_template.json" // JSON file containing Jinja template
 }
 
-/// Download model config files (config.json, preprocessor_config.json) from HuggingFace.
-///
-/// Returns the cache directory containing the downloaded files.
-/// Uses the same HF Hub cache as tokenizer downloads.
-pub async fn download_model_configs_from_hf(model_id: &str) -> anyhow::Result<PathBuf> {
-    let api = build_api()?;
-    let repo = api.model(model_id.to_string());
-
-    let config_files = ["config.json", "preprocessor_config.json"];
-    let mut cache_dir = None;
-
-    for filename in &config_files {
-        match repo.get(filename).await {
-            Ok(path) => {
-                if cache_dir.is_none() {
-                    cache_dir = path.parent().map(|p| p.to_path_buf());
-                }
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "Failed to download '{filename}' from model '{model_id}': {e}"
-                ));
-            }
-        }
-    }
-
-    cache_dir.ok_or_else(|| anyhow::anyhow!("No config files downloaded for model '{model_id}'"))
-}
-
 /// Attempt to download tokenizer files from Hugging Face
 /// Returns the directory containing the downloaded tokenizer files
 pub async fn download_tokenizer_from_hf(model_id: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
