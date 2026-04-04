@@ -131,7 +131,7 @@ pub enum PodType {
     Regular,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct PodInfo {
     pub name: String,
     pub ip: String,
@@ -142,6 +142,24 @@ pub struct PodInfo {
     pub is_router: bool,
     pub mesh_port: Option<u16>,
     pub model_id_override: Option<String>,
+}
+
+// Identity is (name, ip) — mutable fields like status and is_ready must not
+// affect set membership, otherwise reconciliation produces false diffs when a
+// pod's readiness changes between watcher events and a full list.
+impl PartialEq for PodInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.ip == other.ip
+    }
+}
+
+impl Eq for PodInfo {}
+
+impl std::hash::Hash for PodInfo {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.ip.hash(state);
+    }
 }
 
 impl PodInfo {
@@ -378,6 +396,55 @@ pub async fn start_service_discovery(
             }
         }
 
+        // Spawn a background task that periodically reconciles tracked state
+        // with actual K8s state. This is a safety net independent of the watcher:
+        // it catches missed events regardless of whether the watcher is healthy,
+        // restarting, or erroring out.
+        {
+            let reconcile_pods_api = pods.clone();
+            let reconcile_config = Arc::clone(&config_arc);
+            let reconcile_tracked = Arc::clone(&tracked_pods);
+            let reconcile_ctx = Arc::clone(&app_context);
+            let reconcile_interval = config.check_interval;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "periodic reconciliation runs for the lifetime of the server alongside the watcher"
+            )]
+            let reconcile_handle = tokio::spawn(async move {
+                // Delay the first tick so the watcher has time to populate initial state.
+                let start = time::Instant::now() + reconcile_interval;
+                let mut interval = time::interval_at(start, reconcile_interval);
+                loop {
+                    interval.tick().await;
+                    reconcile_pods(
+                        &reconcile_pods_api,
+                        Arc::clone(&reconcile_config),
+                        Arc::clone(&reconcile_tracked),
+                        Arc::clone(&reconcile_ctx),
+                        port,
+                    )
+                    .await;
+                }
+            });
+            // Monitor the reconciliation task so a panic is visible to operators.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "monitor task runs for the lifetime of the server"
+            )]
+            tokio::spawn(async move {
+                if let Err(e) = reconcile_handle.await {
+                    error!(
+                        "Periodic reconciliation task panicked and is no longer running: {}",
+                        e
+                    );
+                }
+            });
+            info!(
+                "Periodic reconciliation enabled | interval: {}s",
+                config.check_interval.as_secs()
+            );
+        }
+
         let mut retry_delay = Duration::from_secs(1);
         const MAX_RETRY_DELAY: Duration = Duration::from_secs(300);
 
@@ -446,23 +513,11 @@ pub async fn start_service_discovery(
             match watcher_ok {
                 Ok(()) => {
                     retry_delay = Duration::from_secs(1);
-
-                    // Reconcile tracked state with actual K8s state after a
-                    // clean watcher exit. This catches pods that were added or
-                    // removed while the watcher was down.
-                    reconcile_pods(
-                        &pods,
-                        Arc::clone(&config_arc),
-                        Arc::clone(&tracked_pods),
-                        Arc::clone(&app_context),
-                        port,
-                    )
-                    .await;
                 }
                 Err(err) => {
                     error!("Error in Kubernetes watcher: {}", err);
                     warn!(
-                        "Retrying in {} seconds with exponential backoff (skipping reconciliation)",
+                        "Retrying in {} seconds with exponential backoff",
                         retry_delay.as_secs()
                     );
                     time::sleep(retry_delay).await;
@@ -732,7 +787,7 @@ async fn reconcile_pods(
     let pod_list = match pods.list(&ListParams::default()).await {
         Ok(list) => list,
         Err(e) => {
-            warn!("Reconciliation: failed to list pods: {}", e);
+            error!("Reconciliation: failed to list pods: {}", e);
             return;
         }
     };
@@ -784,9 +839,10 @@ async fn reconcile_pods(
                         }
                         Err(e) => {
                             error!(
-                                "Reconciliation: lock poisoned while removing {}: {}",
+                                "Reconciliation: lock poisoned while removing {}: {} -- aborting reconciliation",
                                 pod_info.name, e
                             );
+                            return;
                         }
                     }
                     Metrics::record_discovery_deregistration(
@@ -802,8 +858,8 @@ async fn reconcile_pods(
                 }
             }
         } else {
-            debug!(
-                "Reconciliation: JobQueue not initialized, skipping removal for: {}",
+            warn!(
+                "Reconciliation: JobQueue not initialized, cannot remove stale worker: {}",
                 worker_url
             );
         }
@@ -1364,7 +1420,9 @@ mod tests {
     }
 
     #[test]
-    fn test_pod_info_equality_with_pod_type() {
+    fn test_pod_info_identity_based_equality() {
+        // PodInfo equality is based on (name, ip) only — mutable fields like
+        // status, is_ready, and pod_type do not affect identity.
         let pod1 = PodInfo {
             name: "pod1".into(),
             ip: "1.2.3.4".into(),
@@ -1377,9 +1435,21 @@ mod tests {
             model_id_override: None,
         };
 
-        let pod2 = PodInfo {
+        let pod2_same_identity = PodInfo {
             name: "pod1".into(),
             ip: "1.2.3.4".into(),
+            status: "Pending".into(),
+            is_ready: false,
+            pod_type: Some(PodType::Decode),
+            bootstrap_port: None,
+            is_router: false,
+            mesh_port: None,
+            model_id_override: None,
+        };
+
+        let pod3_different_identity = PodInfo {
+            name: "pod2".into(),
+            ip: "1.2.3.5".into(),
             status: "Running".into(),
             is_ready: true,
             pod_type: Some(PodType::Prefill),
@@ -1389,20 +1459,10 @@ mod tests {
             model_id_override: None,
         };
 
-        let pod3 = PodInfo {
-            name: "pod1".into(),
-            ip: "1.2.3.4".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Decode),
-            bootstrap_port: None,
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-
-        assert_eq!(pod1, pod2);
-        assert_ne!(pod1, pod3);
+        // Same (name, ip) → equal, even with different status/type/readiness
+        assert_eq!(pod1, pod2_same_identity);
+        // Different (name, ip) → not equal
+        assert_ne!(pod1, pod3_different_identity);
     }
 
     #[tokio::test]
@@ -2101,9 +2161,9 @@ mod tests {
     }
 
     #[test]
-    fn test_reconciliation_stale_pod_not_removed_if_unhealthy_in_live_set() {
-        // A tracked pod that exists in K8s but is now unhealthy should NOT be
-        // considered stale (it's still in the live set).
+    fn test_reconciliation_readiness_change_not_considered_stale() {
+        // A tracked pod that exists in K8s but changed readiness should NOT be
+        // considered stale — PodInfo identity is (name, ip), not full state.
         let tracked_pod = make_pod_info("pod-a", "10.0.0.1", "Running", true);
         let live_pod = make_pod_info("pod-a", "10.0.0.1", "Running", false);
 
@@ -2111,16 +2171,9 @@ mod tests {
         let live: HashSet<PodInfo> = [live_pod].into_iter().collect();
 
         let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
-        // PodInfo uses all fields for Hash/Eq, so is_ready difference makes them different
-        // pods in the set. This means the tracked pod IS stale (not in live) and the
-        // live pod IS missing but filtered out (unhealthy). This is actually the correct
-        // behavior because the live pod has a different state from the tracked one.
-        // In practice, the watcher would have already updated the tracked set on
-        // status changes, so this edge case only arises if events were missed.
-        //
-        // Verify it detects both a stale entry and does NOT add the unhealthy one:
-        assert_eq!(stale.len(), 1);
-        assert_eq!(stale[0].name, "pod-a");
+        // Same (name, ip) means the pod is recognized as the same entity.
+        // Not stale (still in K8s), not missing (already tracked).
+        assert!(stale.is_empty());
         assert!(missing.is_empty());
     }
 
