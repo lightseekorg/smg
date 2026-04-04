@@ -455,6 +455,7 @@ impl GrpcClient {
                     body,
                     processed_text,
                     token_ids,
+                    tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }

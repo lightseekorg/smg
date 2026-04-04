@@ -231,6 +231,60 @@ impl MlxEngineClient {
 
     // ── Request builders ────────────────────────────────────────────────
 
+    // ── Unsupported feature validation ────────────────────────────────
+    //
+    // MLX is a lightweight backend without constrained decoding, parallel
+    // samples, or string stop sequences.  All rejections live here so each
+    // public builder stays concise.
+
+    fn reject_constraint(constraint: Option<&(String, String)>) -> Result<(), String> {
+        if let Some((kind, _)) = constraint {
+            return Err(format!(
+                "MLX backend does not support structured output constraint: {kind}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn reject_n(n: Option<u32>) -> Result<(), String> {
+        if n.is_some_and(|n| n > 1) {
+            return Err("MLX backend does not support n > 1 (parallel samples)".to_string());
+        }
+        Ok(())
+    }
+
+    fn reject_stop_strings(
+        stop: Option<&openai_protocol::common::StringOrArray>,
+    ) -> Result<(), String> {
+        if let Some(s) = stop {
+            if !s.is_empty() {
+                return Err(
+                    "MLX backend does not support string stop sequences (only stop_token_ids)"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_stop_string_list(stop: Option<&[String]>) -> Result<(), String> {
+        if let Some(s) = stop {
+            if !s.is_empty() {
+                return Err("MLX backend does not support string stop sequences".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_structured_outputs(params: &GenerateSamplingParams) -> Result<(), String> {
+        if params.json_schema.is_some() || params.regex.is_some() || params.ebnf.is_some() {
+            return Err("MLX backend does not support structured output constraints".to_string());
+        }
+        Ok(())
+    }
+
+    // ── Public request builders ────────────────────────────────────────
+
     /// Build a GenerateRequest from OpenAI ChatCompletionRequest
     #[expect(
         clippy::unused_self,
@@ -244,43 +298,23 @@ impl MlxEngineClient {
         token_ids: Vec<u32>,
         constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
-        // MLX doesn't support backend-side constrained decoding
-        if let Some((constraint_type, _)) = &constraint {
-            return Err(format!(
-                "MLX backend does not support structured output constraint: {constraint_type}"
-            ));
-        }
+        Self::reject_constraint(constraint.as_ref())?;
+        Self::reject_n(body.n)?;
+        Self::reject_stop_strings(body.stop.as_ref())?;
         if body.response_format.is_some() {
             return Err(
                 "MLX backend does not support response_format (structured outputs)".to_string(),
             );
         }
-        if body.n.is_some_and(|n| n > 1) {
-            return Err("MLX backend does not support n > 1 (parallel samples)".to_string());
-        }
-        // MLX proto only supports stop_token_ids, not string stop sequences
-        if let Some(ref stop) = body.stop {
-            if !stop.is_empty() {
-                return Err(
-                    "MLX backend does not support string stop sequences (only stop_token_ids)"
-                        .to_string(),
-                );
-            }
-        }
 
         let sampling_params = Self::build_sampling_params_from_chat(body);
-
-        Ok(proto::GenerateRequest {
+        Ok(Self::make_generate_request(
             request_id,
-            input: Some(proto::generate_request::Input::Tokenized(
-                proto::TokenizedInput {
-                    original_text: processed_text,
-                    input_ids: token_ids,
-                },
-            )),
-            sampling_params: Some(sampling_params),
-            stream: body.stream,
-        })
+            processed_text,
+            token_ids,
+            sampling_params,
+            body.stream,
+        ))
     }
 
     /// Build a GenerateRequest from CompletionRequest (`/v1/completions`)
@@ -295,30 +329,17 @@ impl MlxEngineClient {
         original_text: String,
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
-        if body.n.is_some_and(|n| n > 1) {
-            return Err("MLX backend does not support n > 1 (parallel samples)".to_string());
-        }
-        if let Some(ref stop) = body.stop {
-            if !stop.is_empty() {
-                return Err(
-                    "MLX backend does not support string stop sequences (only stop_token_ids)"
-                        .to_string(),
-                );
-            }
-        }
-        let sampling_params = Self::build_sampling_params_from_completion(body);
+        Self::reject_n(body.n)?;
+        Self::reject_stop_strings(body.stop.as_ref())?;
 
-        Ok(proto::GenerateRequest {
+        let sampling_params = Self::build_sampling_params_from_completion(body);
+        Ok(Self::make_generate_request(
             request_id,
-            input: Some(proto::generate_request::Input::Tokenized(
-                proto::TokenizedInput {
-                    original_text,
-                    input_ids: token_ids,
-                },
-            )),
-            sampling_params: Some(sampling_params),
-            stream: body.stream,
-        })
+            original_text,
+            token_ids,
+            sampling_params,
+            body.stream,
+        ))
     }
 
     /// Build a GenerateRequest from CreateMessageRequest (Anthropic Messages API)
@@ -332,26 +353,19 @@ impl MlxEngineClient {
         body: &CreateMessageRequest,
         processed_text: String,
         token_ids: Vec<u32>,
+        constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
-        if let Some(ref stop) = body.stop_sequences {
-            if !stop.is_empty() {
-                return Err("MLX backend does not support string stop sequences".to_string());
-            }
-        }
+        Self::reject_constraint(constraint.as_ref())?;
+        Self::reject_stop_string_list(body.stop_sequences.as_deref())?;
 
         let sampling_params = Self::build_sampling_params_from_messages(body);
-
-        Ok(proto::GenerateRequest {
+        Ok(Self::make_generate_request(
             request_id,
-            input: Some(proto::generate_request::Input::Tokenized(
-                proto::TokenizedInput {
-                    original_text: processed_text,
-                    input_ids: token_ids,
-                },
-            )),
-            sampling_params: Some(sampling_params),
-            stream: body.stream.unwrap_or(false),
-        })
+            processed_text,
+            token_ids,
+            sampling_params,
+            body.stream.unwrap_or(false),
+        ))
     }
 
     /// Build a basic GenerateRequest from the native GenerateRequest
@@ -367,38 +381,22 @@ impl MlxEngineClient {
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
         if let Some(ref sp) = body.sampling_params {
-            if sp.n.is_some_and(|n| n > 1) {
-                return Err("MLX backend does not support n > 1 (parallel samples)".to_string());
-            }
-            if sp.json_schema.is_some() || sp.regex.is_some() || sp.ebnf.is_some() {
-                return Err(
-                    "MLX backend does not support structured output constraints".to_string()
-                );
-            }
-            if let Some(ref stop) = sp.stop {
-                if !stop.is_empty() {
-                    return Err(
-                        "MLX backend does not support string stop sequences (only stop_token_ids)"
-                            .to_string(),
-                    );
-                }
-            }
+            Self::reject_n(sp.n)?;
+            Self::reject_stop_strings(sp.stop.as_ref())?;
+            Self::reject_structured_outputs(sp)?;
         }
-        let sampling_params = Self::build_sampling_params_from_plain(body.sampling_params.as_ref());
 
-        Ok(proto::GenerateRequest {
+        let sampling_params = Self::build_sampling_params_from_plain(body.sampling_params.as_ref());
+        Ok(Self::make_generate_request(
             request_id,
-            input: Some(proto::generate_request::Input::Tokenized(
-                proto::TokenizedInput {
-                    original_text: original_text.unwrap_or_default(),
-                    input_ids: token_ids,
-                },
-            )),
-            sampling_params: Some(sampling_params),
-            stream: body.stream,
-        })
+            original_text.unwrap_or_default(),
+            token_ids,
+            sampling_params,
+            body.stream,
+        ))
     }
 
+    /// Build a GenerateRequest from ResponsesRequest (OpenAI Responses API)
     #[expect(
         clippy::unused_self,
         reason = "method receiver kept for consistent public API across gRPC backends"
@@ -411,28 +409,37 @@ impl MlxEngineClient {
         token_ids: Vec<u32>,
         constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
-        // MLX doesn't support backend-side structured output constraints
-        // (structural_tag, json_schema, etc.) — reject if constraint requested.
-        // Tool calling works via router-side parsing (no backend support needed).
-        if let Some((constraint_type, _)) = &constraint {
-            return Err(format!(
-                "MLX backend does not support structured output constraint: {constraint_type}"
-            ));
-        }
+        Self::reject_constraint(constraint.as_ref())?;
 
         let sampling_params = Self::build_sampling_params_from_responses(body);
+        Ok(Self::make_generate_request(
+            request_id,
+            processed_text,
+            token_ids,
+            sampling_params,
+            body.stream.unwrap_or(false),
+        ))
+    }
 
-        Ok(proto::GenerateRequest {
+    /// Shared helper to construct the proto GenerateRequest.
+    fn make_generate_request(
+        request_id: String,
+        text: String,
+        token_ids: Vec<u32>,
+        sampling_params: proto::SamplingParams,
+        stream: bool,
+    ) -> proto::GenerateRequest {
+        proto::GenerateRequest {
             request_id,
             input: Some(proto::generate_request::Input::Tokenized(
                 proto::TokenizedInput {
-                    original_text: processed_text,
+                    original_text: text,
                     input_ids: token_ids,
                 },
             )),
             sampling_params: Some(sampling_params),
-            stream: body.stream.unwrap_or(false),
-        })
+            stream,
+        }
     }
 
     // ── Private sampling param builders ─────────────────────────────────
