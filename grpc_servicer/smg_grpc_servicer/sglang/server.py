@@ -33,11 +33,52 @@ from smg_grpc_servicer.sglang.servicer import SGLangSchedulerServicer
 logger = logging.getLogger(__name__)
 
 
+def _derive_metrics_port(grpc_port: int) -> int:
+    """Derive metrics port from gRPC port using offset + wrap.
+
+    Preferred mapping is `grpc_port + METRICS_PORT_OFFSET`. If that exceeds the
+    valid TCP range, wrap to `grpc_port - METRICS_PORT_OFFSET`.
+    """
+
+    MAX_TCP_PORT = 65535
+    METRICS_PORT_OFFSET = 10000
+
+    if grpc_port < 0 or grpc_port > MAX_TCP_PORT:
+        raise ValueError(f"Invalid gRPC port {grpc_port}; expected in [0, {MAX_TCP_PORT}]")
+
+    if grpc_port + METRICS_PORT_OFFSET <= MAX_TCP_PORT:
+        return grpc_port + METRICS_PORT_OFFSET
+
+    wrapped_port = grpc_port - METRICS_PORT_OFFSET
+    if wrapped_port < 0:
+        raise ValueError(
+            f"Failed to derive metrics port from gRPC port {grpc_port} with offset "
+            f"{METRICS_PORT_OFFSET}"
+        )
+    return wrapped_port
+
+
+def _format_host_port(host: str, port: int) -> str:
+    """Format host:port and bracket IPv6 literals for gRPC address parsing."""
+    if host.startswith("[") and host.endswith("]"):
+        return f"{host}:{port}"
+    if ":" in host:
+        return f"[{host}]:{port}"
+    return f"{host}:{port}"
+
+
 async def serve_grpc(
     server_args: ServerArgs,
     model_info: dict | None = None,
 ):
     """Start the standalone gRPC server with integrated scheduler."""
+
+    # Set up Prometheus multiprocess directory before launching schedulers so that
+    # child scheduler processes inherit the env var and write metrics to shared files.
+    if server_args.enable_metrics:
+        from sglang.srt.utils import set_prometheus_multiproc_dir
+
+        set_prometheus_multiproc_dir()
 
     # Start bootstrap server BEFORE launching scheduler processes (only in PREFILL mode)
     # This ensures the bootstrap server is ready when prefill schedulers try to register
@@ -145,7 +186,7 @@ async def serve_grpc(
     reflection.enable_server_reflection(SERVICE_NAMES, server)
 
     # Start server
-    listen_addr = f"{server_args.host}:{server_args.port}"
+    listen_addr = _format_host_port(server_args.host, server_args.port)
     if server_args.ssl_certfile and server_args.ssl_keyfile:
         if server_args.ssl_keyfile_password:
             raise ValueError(
@@ -261,27 +302,39 @@ async def serve_grpc(
         server.add_insecure_port(listen_addr)
         logger.info(f"gRPC server listening on {listen_addr}")
 
-    await server.start()
-
-    # Start warmup in a separate thread
-    warmup_thread = threading.Thread(
-        target=_wait_and_warmup_grpc,
-        args=(server_args, health_servicer),
-    )
-    warmup_thread.start()
-
-    # Handle shutdown signals
-    loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
-
-    def signal_handler():
-        logger.info("Received shutdown signal")
-        stop_event.set()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
+    metrics_httpd = None
+    metrics_thread = None
+    warmup_thread = None
     try:
+        await server.start()
+
+        # Start a lightweight HTTP server to serve /metrics for Prometheus scraping.
+        # The gRPC port can't serve HTTP, so this sidecar runs on a dedicated HTTP port.
+        # Use a deterministic large offset with wrap to avoid adjacent-port collisions.
+        if server_args.enable_metrics:
+            metrics_port = _derive_metrics_port(server_args.port)
+            metrics_httpd, metrics_thread = _start_metrics_http_server(
+                server_args.host, metrics_port
+            )
+
+        # Start warmup in a separate thread
+        warmup_thread = threading.Thread(
+            target=_wait_and_warmup_grpc,
+            args=(server_args, health_servicer),
+        )
+        warmup_thread.start()
+
+        # Handle shutdown signals
+        loop = asyncio.get_running_loop()
+        stop_event = asyncio.Event()
+
+        def signal_handler():
+            logger.info("Received shutdown signal")
+            stop_event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, signal_handler)
+
         await stop_event.wait()
     finally:
         logger.info("Shutting down gRPC server")
@@ -292,8 +345,16 @@ async def serve_grpc(
         # Stop the gRPC server
         await server.stop(5.0)
 
+        # Gracefully shut down the metrics HTTP server so metrics are flushed
+        if metrics_httpd is not None:
+            logger.info("Shutting down HTTP metrics server")
+            metrics_httpd.shutdown()
+            metrics_httpd.server_close()
+            if metrics_thread is not None and metrics_thread.is_alive():
+                metrics_thread.join(timeout=5.0)
+
         # Wait for warmup thread to finish
-        if warmup_thread.is_alive():
+        if warmup_thread is not None and warmup_thread.is_alive():
             logger.info("Waiting for warmup thread to finish...")
             warmup_thread.join(timeout=5.0)
 
@@ -312,11 +373,71 @@ async def serve_grpc(
         logger.info("All scheduler processes terminated")
 
 
+def _start_metrics_http_server(host: str, port: int):
+    """Start a background HTTP server that serves Prometheus metrics from PROMETHEUS_MULTIPROC_DIR.
+
+    Uses the same multiprocess collector pattern as TGL's HTTP mode
+    (see sglang.srt.utils.common.add_prometheus_middleware).
+
+    Returns the HTTPServer and worker thread so the caller can stop and join cleanly.
+    """
+    import ipaddress
+    import socket
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from prometheus_client import CollectorRegistry, generate_latest, multiprocess
+
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry)
+
+    class MetricsHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/metrics" or self.path.startswith("/metrics?"):
+                output = generate_latest(registry)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(output)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    class IPv6HTTPServer(HTTPServer):
+        address_family = socket.AF_INET6
+
+    bind_host = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    prefer_ipv6 = False
+    try:
+        prefer_ipv6 = ipaddress.ip_address(bind_host).version == 6
+    except ValueError:
+        pass
+
+    if prefer_ipv6:
+        httpd = IPv6HTTPServer((bind_host, port), MetricsHandler)
+    else:
+        try:
+            httpd = HTTPServer((bind_host, port), MetricsHandler)
+        except socket.gaierror:
+            # Hostname may resolve only to IPv6 on this system.
+            httpd = IPv6HTTPServer((bind_host, port), MetricsHandler)
+
+    bound_host, bound_port = httpd.server_address[0], httpd.server_address[1]
+    logger.info("Metrics HTTP server listening on %s:%s", bound_host, bound_port)
+
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True, name="metrics-http-server")
+    thread.start()
+
+    return httpd, thread
+
+
 def _execute_grpc_server_warmup(server_args: ServerArgs):
     """Execute warmup for gRPC server by checking health and sending test request."""
     try:
         # Connect to the gRPC server
-        grpc_url = f"{server_args.host}:{server_args.port}"
+        grpc_url = _format_host_port(server_args.host, server_args.port)
         channel = grpc.insecure_channel(
             grpc_url,
             options=[
