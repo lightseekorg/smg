@@ -25,12 +25,6 @@ def _ensure_local_proto_stubs() -> None:
     """Generate local proto stubs for source-tree test runs when possible."""
     global _PROTO_SYMBOL_SKIP_REASON
 
-    try:
-        importlib.import_module("smg_grpc_proto.generated.common_pb2")
-        return
-    except Exception:
-        pass
-
     helper_path = _PROTO_SRC / "smg_grpc_proto" / "_proto_build.py"
     if not helper_path.exists():
         _PROTO_SYMBOL_SKIP_REASON = "local smg-grpc-proto build helper not found"
@@ -44,7 +38,7 @@ def _ensure_local_proto_stubs() -> None:
     module = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(module)
-        module.compile_grpc_protos(_PROTO_SRC)
+        module.ensure_generated_stubs(_PROTO_SRC)
         importlib.import_module("smg_grpc_proto.generated.common_pb2")
     except Exception as exc:
         _PROTO_SYMBOL_SKIP_REASON = f"smg-grpc-proto stubs unavailable: {exc}"

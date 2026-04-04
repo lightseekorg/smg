@@ -23,7 +23,7 @@ def _load_proto_build_helper():
 
 def compile_grpc_protos() -> None:
     helper = _load_proto_build_helper()
-    helper.compile_grpc_protos(Path(__file__).parent)
+    helper.ensure_generated_stubs(Path(__file__).parent, force=True)
 
 
 class BuildPyWithProto(build_py):
