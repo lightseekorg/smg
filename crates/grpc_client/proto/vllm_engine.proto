@@ -14,6 +14,9 @@ service VllmEngine {
   // Submit an embedding request
   rpc Embed(EmbedRequest) returns (EmbedResponse);
 
+  // Submit a scoring/reranking request
+  rpc Score(ScoreRequest) returns (ScoreResponse);
+
   // Health check
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 
@@ -263,6 +266,29 @@ message EmbedResponse {
   repeated float embedding = 1;
   uint32 prompt_tokens = 2;
   uint32 embedding_dim = 3;
+}
+
+// =====================
+// Score/Rerank Request
+// =====================
+
+message ScoreRequest {
+  string request_id = 1;
+  string text_1 = 2;
+  repeated string text_2 = 3;
+}
+
+message ScoreResult {
+  uint32 index = 1;
+  float score = 2;
+}
+
+message ScoreResponse {
+  repeated ScoreResult data = 1;
+  uint32 prompt_tokens = 2;
+  uint32 total_tokens = 3;
+  string request_id = 4;
+  int64 created = 5;
 }
 
 // =====================

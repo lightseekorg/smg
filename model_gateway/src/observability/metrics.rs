@@ -382,6 +382,7 @@ pub mod metrics_labels {
     pub const ENDPOINT_RESPONSES: &str = "responses";
     pub const ENDPOINT_COMPLETIONS: &str = "completions";
     pub const ENDPOINT_RERANK: &str = "rerank";
+    pub const ENDPOINT_SCORE: &str = "score";
     pub const ENDPOINT_EMBEDDINGS: &str = "embeddings";
     pub const ENDPOINT_CLASSIFY: &str = "classify";
     pub const ENDPOINT_MESSAGES: &str = "messages";

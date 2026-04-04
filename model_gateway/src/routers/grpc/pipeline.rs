@@ -13,6 +13,7 @@ use openai_protocol::{
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
     messages::CreateMessageRequest,
+    rerank::ScoreRequest,
 };
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use tool_parser::ParserFactory as ToolParserFactory;
@@ -306,6 +307,37 @@ impl RequestPipeline {
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
             Box::new(ClassifyResponseProcessingStage::new()),
+        ];
+
+        Self {
+            stages: Arc::new(stages),
+            backend_type: metrics_labels::BACKEND_REGULAR,
+        }
+    }
+
+    /// Create a Score API pipeline for vLLM `/v1/score` endpoint.
+    ///
+    /// The `/v1/score` endpoint was added to the vLLM gRPC specs. This pipeline uses
+    /// three stages:
+    ///
+    /// 1. `WorkerSelectionStage` — picks the target worker from the registry
+    /// 2. `ClientAcquisitionStage` - obtains the gRPC client wrapper
+    /// 3. `ScoreNativeStage` — executes the Native Score RPC via the client,
+    ///    builds the Protocol response, and returns `Ok(Some(response))` to
+    ///    short-circuit the pipeline.
+    pub fn new_score(
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+    ) -> Self {
+        let stages: Vec<Box<dyn PipelineStage>> = vec![
+            Box::new(super::regular::stages::score::ScorePreparationStage),
+            Box::new(WorkerSelectionStage::new(
+                worker_registry,
+                policy_registry,
+                WorkerSelectionMode::Regular, // Score is always single-worker
+            )),
+            Box::new(ClientAcquisitionStage),
+            Box::new(super::regular::stages::score::ScoreNativeStage::new()),
         ];
 
         Self {
@@ -1060,6 +1092,83 @@ impl RequestPipeline {
                 metrics_labels::ENDPOINT_MESSAGES,
             ),
         }
+    }
+
+    /// Execute the complete pipeline for a Score API request.
+    ///
+    /// Score requests are dispatched via native gRPC to the worker's `Score` RPC.
+    /// The `ScoreNativeStage` always returns `Ok(Some(response))`, so the loop
+    /// below will return the response before reaching the `final_response` check
+    /// at the bottom.
+    pub async fn execute_score(
+        &self,
+        request: Arc<ScoreRequest>,
+        headers: Option<http::HeaderMap>,
+        model_id: String,
+        components: Arc<SharedComponents>,
+    ) -> Response {
+        debug!("execute_score: Starting execution for model: {}", &model_id);
+        let start = Instant::now();
+
+        // Record request start
+        Metrics::record_router_request(
+            metrics_labels::ROUTER_GRPC,
+            self.backend_type,
+            metrics_labels::CONNECTION_GRPC,
+            &model_id,
+            metrics_labels::ENDPOINT_SCORE,
+            bool_to_static_str(false), // Score never streams
+        );
+
+        let mut ctx = RequestContext::for_score(request, headers, model_id.clone(), components);
+
+        for stage in self.stages.iter() {
+            debug!("execute_score: Executing stage: {}", stage.name());
+            match stage.execute(&mut ctx).await {
+                Ok(Some(response)) => {
+                    // ScoreHttpForwardStage returns Ok(Some) to short-circuit — record success
+                    Metrics::record_router_duration(
+                        metrics_labels::ROUTER_GRPC,
+                        self.backend_type,
+                        metrics_labels::CONNECTION_GRPC,
+                        &model_id,
+                        metrics_labels::ENDPOINT_SCORE,
+                        start.elapsed(),
+                    );
+                    return response;
+                }
+                Ok(None) => {
+                    debug!(
+                        "execute_score: Stage {} completed, continuing.",
+                        stage.name()
+                    );
+                    continue;
+                }
+                Err(response) => {
+                    error!(
+                        "execute_score: Stage {} failed with status {:?}",
+                        stage.name(),
+                        response.status()
+                    );
+                    Metrics::record_router_error(
+                        metrics_labels::ROUTER_GRPC,
+                        self.backend_type,
+                        metrics_labels::CONNECTION_GRPC,
+                        &model_id,
+                        metrics_labels::ENDPOINT_SCORE,
+                        error_type_from_status(response.status()),
+                    );
+                    return response;
+                }
+            }
+        }
+
+        // Should not reach here since ScoreHttpForwardStage always short-circuits
+        error!(
+            function = "execute_score",
+            "Score pipeline completed without producing a response — this is a bug"
+        );
+        error::internal_error("score_no_response", "Score pipeline produced no response")
     }
 
     /// Execute chat pipeline for responses endpoint

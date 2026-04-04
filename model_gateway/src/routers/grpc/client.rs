@@ -264,6 +264,30 @@ impl GrpcClient {
         }
     }
 
+    pub async fn score(
+        &mut self,
+        req: smg_grpc_client::vllm_proto::ScoreRequest,
+    ) -> Result<smg_grpc_client::vllm_proto::ScoreResponse, tonic::Status> {
+        match self {
+            Self::Vllm(client) => client.score(req).await,
+            _ => Err(tonic::Status::unimplemented(
+                "Score is only supported on vLLM backend",
+            )),
+        }
+    }
+
+    pub fn build_score_request(
+        &self,
+        request_id: String,
+        text_1: String,
+        text_2: Vec<String>,
+    ) -> Result<smg_grpc_client::vllm_proto::ScoreRequest, String> {
+        match self {
+            Self::Vllm(client) => Ok(client.build_score_request(request_id, text_1, text_2)),
+            _ => Err("Score is only supported on vLLM backend".to_string()),
+        }
+    }
+
     #[expect(
         clippy::unreachable,
         reason = "assembly stage guarantees matching MultimodalData variant for each backend"
