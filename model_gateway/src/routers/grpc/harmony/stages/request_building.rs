@@ -219,6 +219,50 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::Trtllm(Box::new(req))
             }
+            GrpcClient::Mlx(mlx_client) => {
+                let req = match &ctx.input.request_type {
+                    RequestType::Chat(request) => {
+                        let body = prep.filtered_request.as_ref().unwrap_or_else(|| request.as_ref());
+                        mlx_client
+                            .build_generate_request_from_chat(
+                                request_id,
+                                body,
+                                placeholder_processed_text,
+                                prep.token_ids.clone(),
+                                prep.tool_constraints.clone(),
+                            )
+                            .map_err(|e| {
+                                error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build MLX generate request");
+                                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
+                            })?
+                    }
+                    RequestType::Responses(request) => mlx_client
+                        .build_generate_request_from_responses(
+                            request_id,
+                            request.as_ref(),
+                            placeholder_processed_text,
+                            prep.token_ids.clone(),
+                            prep.tool_constraints.clone(),
+                        )
+                        .map_err(|e| {
+                            error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build MLX generate request from responses");
+                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
+                        })?,
+                    RequestType::Embedding(_) => {
+                        return Err(error::bad_request(
+                            "harmony_embedding_not_supported",
+                            "Embedding requests are not supported with Harmony models".to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(error::bad_request(
+                            "unsupported_request_type",
+                            "Unsupported request type for Harmony models".to_string(),
+                        ));
+                    }
+                };
+                ProtoGenerateRequest::Mlx(Box::new(req))
+            }
         };
 
         // Inject Harmony stop token IDs into sampling params for ALL Harmony requests
@@ -254,6 +298,15 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                         stop_token_count = harmony_stops.len(),
                         "Injected Harmony stop tokens into TensorRT-LLM stop_token_ids"
                     );
+                }
+                ProtoGenerateRequest::Mlx(req) => {
+                    if let Some(ref mut params) = req.sampling_params {
+                        params.stop_token_ids.extend_from_slice(harmony_stops);
+                        debug!(
+                            stop_token_count = harmony_stops.len(),
+                            "Injected Harmony stop tokens into MLX sampling params"
+                        );
+                    }
                 }
             }
         }

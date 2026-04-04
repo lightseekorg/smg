@@ -1,12 +1,13 @@
-//! gRPC clients for SGLang, vLLM, and TensorRT-LLM backends
+//! gRPC clients for SGLang, vLLM, TensorRT-LLM, and MLX backends
 //!
 //! This crate provides gRPC client implementations for communicating with
-//! SGLang scheduler, vLLM engine, and TensorRT-LLM engine backends.
+//! SGLang scheduler, vLLM engine, TensorRT-LLM engine, and MLX engine backends.
 
 pub mod common_proto {
     #![allow(clippy::all, clippy::absolute_paths, unused_qualifications)]
     tonic::include_proto!("smg.grpc.common");
 }
+pub mod mlx_engine;
 pub mod sglang_scheduler;
 pub mod tokenizer_bundle;
 pub mod trtllm_service;
@@ -15,6 +16,7 @@ pub mod vllm_engine;
 // Re-export clients
 use std::sync::Arc;
 
+pub use mlx_engine::{proto as mlx_proto, MlxEngineClient};
 pub use sglang_scheduler::{proto as sglang_proto, SglangSchedulerClient};
 use tonic::metadata::MetadataMap;
 pub use trtllm_service::{proto as trtllm_proto, TrtllmServiceClient};

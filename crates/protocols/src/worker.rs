@@ -125,6 +125,8 @@ pub enum RuntimeType {
     Vllm,
     /// TensorRT-LLM runtime.
     Trtllm,
+    /// MLX runtime (Apple Silicon).
+    Mlx,
     /// External OpenAI-compatible API (not local inference).
     External,
 }
@@ -143,6 +145,7 @@ impl std::fmt::Display for RuntimeType {
             RuntimeType::Sglang => write!(f, "sglang"),
             RuntimeType::Vllm => write!(f, "vllm"),
             RuntimeType::Trtllm => write!(f, "trtllm"),
+            RuntimeType::Mlx => write!(f, "mlx"),
             RuntimeType::External => write!(f, "external"),
         }
     }
@@ -160,6 +163,8 @@ impl std::str::FromStr for RuntimeType {
             Ok(RuntimeType::Vllm)
         } else if s.eq_ignore_ascii_case("trtllm") || s.eq_ignore_ascii_case("tensorrt-llm") {
             Ok(RuntimeType::Trtllm)
+        } else if s.eq_ignore_ascii_case("mlx") {
+            Ok(RuntimeType::Mlx)
         } else if s.eq_ignore_ascii_case("external") {
             Ok(RuntimeType::External)
         } else {

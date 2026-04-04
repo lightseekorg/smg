@@ -602,11 +602,12 @@ fn expand_tokens(
 pub(crate) fn assemble_multimodal_data(
     intermediate: MultimodalIntermediate,
     client: &GrpcClient,
-) -> MultimodalData {
+) -> Result<MultimodalData, String> {
     match client {
-        GrpcClient::Sglang(_) => MultimodalData::Sglang(assemble_sglang(intermediate)),
-        GrpcClient::Vllm(_) => MultimodalData::Vllm(assemble_vllm(intermediate)),
-        GrpcClient::Trtllm(_) => MultimodalData::Trtllm(assemble_trtllm(intermediate)),
+        GrpcClient::Sglang(_) => Ok(MultimodalData::Sglang(assemble_sglang(intermediate))),
+        GrpcClient::Vllm(_) => Ok(MultimodalData::Vllm(assemble_vllm(intermediate))),
+        GrpcClient::Trtllm(_) => Ok(MultimodalData::Trtllm(assemble_trtllm(intermediate))),
+        GrpcClient::Mlx(_) => Err("MLX backend does not support multimodal inputs".to_string()),
     }
 }
 
