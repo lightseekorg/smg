@@ -31,6 +31,20 @@ def sync_proto_sources(package_dir: Path) -> list[Path]:
     return synced_proto_files
 
 
+def _clear_generated_stubs(output_dir: Path) -> None:
+    """Remove generated stub artifacts while preserving unrelated files."""
+    if not output_dir.exists():
+        return
+
+    for pattern in ("*_pb2*.py", "*_pb2*.pyi", "*.pyc"):
+        for path in output_dir.glob(pattern):
+            path.unlink()
+
+    for cache_dir in output_dir.rglob("__pycache__"):
+        if cache_dir.is_dir():
+            shutil.rmtree(cache_dir)
+
+
 def compile_grpc_protos(package_dir: Path | None = None) -> None:
     """Generate Python gRPC stubs from the checked-in .proto files."""
     package_dir = package_dir or Path(__file__).resolve().parents[1]
@@ -38,6 +52,7 @@ def compile_grpc_protos(package_dir: Path | None = None) -> None:
     proto_dir = package_dir / "smg_grpc_proto" / "proto"
     output_dir = package_dir / "smg_grpc_proto" / "generated"
 
+    _clear_generated_stubs(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "__init__.py").write_text('"""Auto-generated protobuf stubs. Do not edit."""\n')
 

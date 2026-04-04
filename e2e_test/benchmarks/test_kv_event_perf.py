@@ -114,7 +114,8 @@ def _run_policy_benchmark(
         pytest.skip("KV event benchmark requires E2E_RUNTIME=vllm")
 
     with _running_gateway(model_id, policy, enable_kv_events) as (model_path, gateway):
-        experiment_folder = f"benchmark_{policy}_kv_events_{profile.name}_grpc"
+        kv_events_mode = "kv_events_on" if enable_kv_events else "kv_events_off"
+        experiment_folder = f"benchmark_{policy}_{kv_events_mode}_{profile.name}_grpc"
         logger.info(
             "Running %s benchmark for %s: policy=%s kv_events=%s",
             profile.name,

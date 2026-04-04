@@ -25,8 +25,8 @@ from smg_grpc_servicer.vllm.kv_events import (
 from smg_grpc_servicer.vllm.servicer import VllmEngineServicer
 
 
-def _make_config() -> KVEventsConfig:
-    ports = get_open_ports_list(2)
+def _make_config(*, num_ranks: int = 1) -> KVEventsConfig:
+    ports = get_open_ports_list(max(2, num_ranks * 2))
     ports.sort()
     return KVEventsConfig(
         enable_kv_cache_events=True,
@@ -69,7 +69,7 @@ def test_kv_event_bridge_replays_and_streams_live_events():
             await asyncio.sleep(0.3)
 
             stream = bridge.subscribe(0)
-            first = await anext(stream)
+            first = await asyncio.wait_for(anext(stream), timeout=2)
             assert first.sequence_number == 1
             assert first.dp_rank == 0
             assert len(first.events) == 1
@@ -110,7 +110,7 @@ def test_kv_event_bridge_replays_and_streams_live_events():
 
 def test_kv_event_bridge_assigns_global_sequence_numbers_across_dp_ranks():
     async def run() -> None:
-        config = _make_config()
+        config = _make_config(num_ranks=2)
         publisher_rank0 = EventPublisherFactory.create(config, 0)
         publisher_rank1 = EventPublisherFactory.create(config, 1)
         bridge = VllmKvEventBridge(config, data_parallel_size=2)
@@ -420,7 +420,7 @@ def test_subscribe_kv_events_sends_initial_metadata_before_first_event():
             async def subscribe(self, start_sequence_number: int):
                 assert start_sequence_number == 11
                 self.started.set()
-                await self.release.wait()
+                await asyncio.wait_for(self.release.wait(), timeout=2)
                 yield "batch"
 
         bridge = FakeBridge()
@@ -432,7 +432,7 @@ def test_subscribe_kv_events_sends_initial_metadata_before_first_event():
         stream = VllmEngineServicer.SubscribeKvEvents(servicer, request, context)
         next_batch_task = asyncio.create_task(anext(stream))
 
-        await bridge.started.wait()
+        await asyncio.wait_for(bridge.started.wait(), timeout=2)
         assert context.initial_metadata == [()]
         assert not next_batch_task.done()
 

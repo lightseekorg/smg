@@ -158,18 +158,45 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python - <<'PY'
+SERVER_PID="${SERVER_PID}" SERVER_LOG="${SERVER_LOG}" python - <<'PY'
 import os
 import socket
 import sys
 import time
+from pathlib import Path
 
 host = os.environ["SMOKE_HOST"]
 port = int(os.environ["SMOKE_PORT"])
 timeout_secs = int(os.environ["SMOKE_SERVER_TIMEOUT_SECS"])
+server_pid = int(os.environ["SERVER_PID"])
+server_log = Path(os.environ["SERVER_LOG"])
 deadline = time.time() + timeout_secs
 
+
+def process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def tail_log(path: Path, lines: int = 20) -> str:
+    if not path.exists():
+        return "<server log not found>"
+    text = path.read_text(errors="replace")
+    tail = "\n".join(text.splitlines()[-lines:])
+    return tail or "<server log is empty>"
+
+
 while time.time() < deadline:
+    if not process_alive(server_pid):
+        print(f"server process {server_pid} exited before opening {host}:{port}", file=sys.stderr)
+        print("last server log lines:", file=sys.stderr)
+        print(tail_log(server_log), file=sys.stderr)
+        sys.exit(1)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(1.0)
         if sock.connect_ex((host, port)) == 0:

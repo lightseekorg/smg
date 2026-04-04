@@ -131,6 +131,26 @@ fi
 
 PROXY_VARS=(HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy)
 
+sanitize_cmd_for_logging() {
+    local sanitized=()
+    local token
+    for token in "$@"; do
+        local redacted=0
+        local var_name
+        for var_name in "${PROXY_VARS[@]}"; do
+            if [[ "${token}" == "${var_name}="* ]]; then
+                sanitized+=("${var_name}=<redacted>")
+                redacted=1
+                break
+            fi
+        done
+        if [[ "${redacted}" -eq 0 ]]; then
+            sanitized+=("${token}")
+        fi
+    done
+    printf ' %q' "${sanitized[@]}"
+}
+
 if [[ "${NO_BUILD}" -eq 0 ]]; then
     BUILD_CMD=(
         docker build
@@ -154,7 +174,7 @@ if [[ "${NO_BUILD}" -eq 0 ]]; then
 
     echo "==> Building smoke image ${IMAGE_TAG}"
     printf 'command:'
-    printf ' %q' "${BUILD_CMD[@]}"
+    sanitize_cmd_for_logging "${BUILD_CMD[@]}"
     printf '\n'
     "${BUILD_CMD[@]}"
 fi
@@ -199,6 +219,6 @@ RUN_CMD+=("${IMAGE_TAG}" "${MODE}")
 
 echo "==> Running ${MODE} smoke test"
 printf 'command:'
-printf ' %q' "${RUN_CMD[@]}"
+sanitize_cmd_for_logging "${RUN_CMD[@]}"
 printf '\n'
 "${RUN_CMD[@]}"
