@@ -437,7 +437,16 @@ pub fn is_tiktoken_file(path: &Path) -> bool {
 
 impl Encoder for TiktokenTokenizer {
     fn encode(&self, input: &str, _add_special_tokens: bool) -> Result<Encoding> {
-        let tokens = self.tokenizer.encode_ordinary(input);
+        // Always use encode_with_special_tokens so that special token strings
+        // in the input (e.g., <|media_pad|> from chat templates) are recognized
+        // as single tokens rather than split into BPE sub-tokens.
+        //
+        // In the gateway, tiktoken tokenizers are only created via
+        // from_dir_with_chat_template (hub-loaded models like Kimi, DeepSeek).
+        // The input to encode() is always chat-template-rendered text containing
+        // special tokens that must be recognized. Raw user text is never encoded
+        // directly — it goes through the chat template first.
+        let tokens = self.tokenizer.encode_with_special_tokens(input);
         Ok(Encoding::Tiktoken(tokens))
     }
 
@@ -809,5 +818,20 @@ mod tests {
         let encoding = tokenizer.encode(text, false).unwrap();
         let decoded = tokenizer.decode(encoding.token_ids(), false).unwrap();
         assert_eq!(decoded, text);
+    }
+
+    #[test]
+    fn test_encode_recognizes_special_tokens_in_input() {
+        // encode_with_special_tokens must recognize special token strings
+        // so that chat-template-rendered text (containing e.g. <|endoftext|>)
+        // produces single token IDs, not BPE sub-tokens.
+        let tokenizer = TiktokenTokenizer::new(TiktokenModel::Cl100kBase).unwrap();
+        // <|endoftext|> is token 100257 in cl100k_base
+        let encoding = tokenizer.encode("hello<|endoftext|>world", false).unwrap();
+        let ids = encoding.token_ids();
+        assert!(
+            ids.contains(&100257),
+            "Special token <|endoftext|> should be recognized as single token, got: {ids:?}"
+        );
     }
 }

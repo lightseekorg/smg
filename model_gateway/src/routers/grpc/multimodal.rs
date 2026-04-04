@@ -431,18 +431,26 @@ async fn process_multimodal_parts(
         .lookup(&metadata)
         .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {model_id}"))?;
 
-    let image_processor = components
-        .image_processor_registry
-        .find(model_id, model_type)
-        .ok_or_else(|| anyhow::anyhow!("No image processor found for model: {model_id}"))?;
+    // Run CPU-intensive image preprocessing on a blocking thread pool so it
+    // doesn't block the tokio async runtime under concurrent load.
+    let pp_config = model_config.preprocessor_config.clone();
+    let registry = components.image_processor_registry.clone();
+    let model_id_owned = model_id.to_string();
+    let model_type_owned = model_type.map(String::from);
+    let image_clones: Vec<image::DynamicImage> = images.iter().map(|f| f.image.clone()).collect();
 
-    // ImagePreProcessor::preprocess takes &[DynamicImage]; images are behind Arc<ImageFrame>.
-    // Clone cost is negligible vs. the preprocessing work itself.
-    let dynamic_images: Vec<image::DynamicImage> = images.iter().map(|f| f.image.clone()).collect();
-
-    let preprocessed: PreprocessedImages = image_processor
-        .preprocess(&dynamic_images, &model_config.preprocessor_config)
-        .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))?;
+    let preprocessed: PreprocessedImages = tokio::task::spawn_blocking(move || {
+        let processor = registry
+            .find(&model_id_owned, model_type_owned.as_deref())
+            .ok_or_else(|| {
+                anyhow::anyhow!("No image processor found for model: {model_id_owned}")
+            })?;
+        processor
+            .preprocess(&image_clones, &pp_config)
+            .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))??;
 
     debug!(
         num_images = preprocessed.num_img_tokens.len(),
@@ -462,11 +470,17 @@ async fn process_multimodal_parts(
         .placeholder_token(&metadata)
         .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?;
     let search_token_id = tokenizer.token_to_id(&placeholder_token);
-    let im_token_id: Option<u32> = spec
-        .placeholder_token_id(&metadata)
-        .ok()
-        .map(|id| id as u32)
-        .or(search_token_id);
+    let im_token_id: Option<u32> = match spec.placeholder_token_id(&metadata) {
+        Ok(id) => Some(id as u32),
+        Err(e) => {
+            warn!(
+                error = %e,
+                ?search_token_id,
+                "Failed to resolve placeholder_token_id from config, falling back to tokenizer lookup"
+            );
+            search_token_id
+        }
+    };
 
     let expanded = expand_tokens(
         &token_ids,

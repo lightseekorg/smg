@@ -15,6 +15,7 @@
 //! - **LLaMA 4 Vision** (`llama4_vision`): Tile-based processing with 336x336 tiles and global tile
 //! - **Pixtral/Mistral3** (`pixtral`): CLIP-based preprocessing with dynamic resolution
 
+pub mod kimi_k25;
 pub mod llama4_vision;
 pub mod llava;
 pub mod phi3_vision;
@@ -24,6 +25,7 @@ pub mod qwen2_vl;
 pub mod qwen3_vl;
 pub mod qwen_vl_base;
 
+pub use kimi_k25::KimiK25Processor;
 pub use llama4_vision::Llama4VisionProcessor;
 pub use llava::{ImageAspectRatio, LlavaNextProcessor, LlavaProcessor};
 pub use phi3_vision::Phi3VisionProcessor;
