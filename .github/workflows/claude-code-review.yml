@@ -109,6 +109,14 @@ jobs:
             4. Read changed files for context.
             5. Post inline comments for issues found.
             6. Write a brief summary with count per severity level.
+            7. Submit a review verdict:
+               - If any 🔴 Important issues were found, submit REQUEST_CHANGES.
+               - Otherwise, submit APPROVE.
+               gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews \
+                 -f event=APPROVE -f body="LGTM — no critical issues found."
+               or:
+               gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews \
+                 -f event=REQUEST_CHANGES -f body="Found critical issues — see inline comments."
           claude_args: |
             --model claude-opus-4-6
             --max-turns 50
