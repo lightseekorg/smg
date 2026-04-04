@@ -295,6 +295,9 @@ impl MlxEngineClient {
         original_text: String,
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
+        if body.n.is_some_and(|n| n > 1) {
+            return Err("MLX backend does not support n > 1 (parallel samples)".to_string());
+        }
         if let Some(ref stop) = body.stop {
             if !stop.is_empty() {
                 return Err(
@@ -323,10 +326,6 @@ impl MlxEngineClient {
         clippy::unused_self,
         reason = "method receiver kept for consistent public API across gRPC backends"
     )]
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "Result kept for consistent public API across gRPC backends"
-    )]
     pub fn build_generate_request_from_messages(
         &self,
         request_id: String,
@@ -334,6 +333,12 @@ impl MlxEngineClient {
         processed_text: String,
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
+        if let Some(ref stop) = body.stop_sequences {
+            if !stop.is_empty() {
+                return Err("MLX backend does not support string stop sequences".to_string());
+            }
+        }
+
         let sampling_params = Self::build_sampling_params_from_messages(body);
 
         Ok(proto::GenerateRequest {
@@ -362,6 +367,14 @@ impl MlxEngineClient {
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
         if let Some(ref sp) = body.sampling_params {
+            if sp.n.is_some_and(|n| n > 1) {
+                return Err("MLX backend does not support n > 1 (parallel samples)".to_string());
+            }
+            if sp.json_schema.is_some() || sp.regex.is_some() || sp.ebnf.is_some() {
+                return Err(
+                    "MLX backend does not support structured output constraints".to_string()
+                );
+            }
             if let Some(ref stop) = sp.stop {
                 if !stop.is_empty() {
                     return Err(
