@@ -250,6 +250,9 @@ impl MlxEngineClient {
                 "MLX backend does not support response_format (structured outputs)".to_string(),
             );
         }
+        if body.n.is_some_and(|n| n > 1) {
+            return Err("MLX backend does not support n > 1 (parallel samples)".to_string());
+        }
         // MLX proto only supports stop_token_ids, not string stop sequences
         if let Some(ref stop) = body.stop {
             if !stop.is_empty() {
