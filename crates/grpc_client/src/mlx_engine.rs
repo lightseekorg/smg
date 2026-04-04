@@ -109,10 +109,6 @@ pub struct MlxEngineClient {
     trace_injector: BoxedTraceInjector,
 }
 
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "Result return kept for API consistency with other backends"
-)]
 impl MlxEngineClient {
     /// Create a new client and connect to the MLX server
     pub async fn connect(endpoint: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -264,7 +260,7 @@ impl MlxEngineClient {
             }
         }
 
-        let sampling_params = Self::build_sampling_params_from_chat(body)?;
+        let sampling_params = Self::build_sampling_params_from_chat(body);
 
         Ok(proto::GenerateRequest {
             request_id,
@@ -299,7 +295,7 @@ impl MlxEngineClient {
                 );
             }
         }
-        let sampling_params = Self::build_sampling_params_from_completion(body)?;
+        let sampling_params = Self::build_sampling_params_from_completion(body);
 
         Ok(proto::GenerateRequest {
             request_id,
@@ -319,6 +315,10 @@ impl MlxEngineClient {
         clippy::unused_self,
         reason = "method receiver kept for consistent public API across gRPC backends"
     )]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Result kept for consistent public API across gRPC backends"
+    )]
     pub fn build_generate_request_from_messages(
         &self,
         request_id: String,
@@ -326,7 +326,7 @@ impl MlxEngineClient {
         processed_text: String,
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
-        let sampling_params = Self::build_sampling_params_from_messages(body)?;
+        let sampling_params = Self::build_sampling_params_from_messages(body);
 
         Ok(proto::GenerateRequest {
             request_id,
@@ -363,8 +363,7 @@ impl MlxEngineClient {
                 }
             }
         }
-        let sampling_params =
-            Self::build_sampling_params_from_plain(body.sampling_params.as_ref())?;
+        let sampling_params = Self::build_sampling_params_from_plain(body.sampling_params.as_ref());
 
         Ok(proto::GenerateRequest {
             request_id,
@@ -400,7 +399,7 @@ impl MlxEngineClient {
             ));
         }
 
-        let sampling_params = Self::build_sampling_params_from_responses(body)?;
+        let sampling_params = Self::build_sampling_params_from_responses(body);
 
         Ok(proto::GenerateRequest {
             request_id,
@@ -418,16 +417,14 @@ impl MlxEngineClient {
     // ── Private sampling param builders ─────────────────────────────────
 
     #[expect(deprecated, reason = "seed is legacy but still forwarded to backends")]
-    fn build_sampling_params_from_chat(
-        request: &ChatCompletionRequest,
-    ) -> Result<proto::SamplingParams, String> {
+    fn build_sampling_params_from_chat(request: &ChatCompletionRequest) -> proto::SamplingParams {
         let logprobs = if request.logprobs {
             Some(request.top_logprobs.unwrap_or(1).min(20) as i32)
         } else {
             None
         };
 
-        Ok(proto::SamplingParams {
+        proto::SamplingParams {
             temperature: request.temperature,
             top_p: request.top_p.unwrap_or(1.0),
             top_k: request.top_k.map(|v| v.max(0) as u32).unwrap_or(0),
@@ -441,15 +438,13 @@ impl MlxEngineClient {
             logprobs,
             logit_bias: convert_logit_bias(request.logit_bias.as_ref()),
             seed: request.seed.and_then(|s| i32::try_from(s).ok()),
-        })
+        }
     }
 
-    fn build_sampling_params_from_completion(
-        request: &CompletionRequest,
-    ) -> Result<proto::SamplingParams, String> {
+    fn build_sampling_params_from_completion(request: &CompletionRequest) -> proto::SamplingParams {
         let logprobs = request.logprobs.map(|v| v.min(5) as i32);
 
-        Ok(proto::SamplingParams {
+        proto::SamplingParams {
             temperature: request.temperature,
             top_p: request.top_p.unwrap_or(1.0),
             top_k: request.top_k.map(|v| v.max(0) as u32).unwrap_or(0),
@@ -463,25 +458,25 @@ impl MlxEngineClient {
             logprobs,
             logit_bias: convert_logit_bias(request.logit_bias.as_ref()),
             seed: request.seed.and_then(|s| i32::try_from(s).ok()),
-        })
+        }
     }
 
     fn build_sampling_params_from_messages(
         request: &CreateMessageRequest,
-    ) -> Result<proto::SamplingParams, String> {
-        Ok(proto::SamplingParams {
+    ) -> proto::SamplingParams {
+        proto::SamplingParams {
             temperature: Some(request.temperature.unwrap_or(1.0) as f32),
             top_p: request.top_p.unwrap_or(1.0) as f32,
             top_k: request.top_k.unwrap_or(0),
             max_tokens: Some(request.max_tokens),
             repetition_penalty: 1.0, // 1.0 = no penalty (0.0 would penalize everything)
             ..Default::default()
-        })
+        }
     }
 
     fn build_sampling_params_from_plain(
         params: Option<&GenerateSamplingParams>,
-    ) -> Result<proto::SamplingParams, String> {
+    ) -> proto::SamplingParams {
         let mut sampling = proto::SamplingParams {
             temperature: Some(1.0),
             top_p: 1.0,
@@ -490,7 +485,7 @@ impl MlxEngineClient {
         };
 
         let Some(p) = params else {
-            return Ok(sampling);
+            return sampling;
         };
 
         if let Some(val) = p.temperature {
@@ -527,13 +522,11 @@ impl MlxEngineClient {
             sampling.seed = i32::try_from(seed).ok();
         }
 
-        Ok(sampling)
+        sampling
     }
 
-    fn build_sampling_params_from_responses(
-        request: &ResponsesRequest,
-    ) -> Result<proto::SamplingParams, String> {
-        Ok(proto::SamplingParams {
+    fn build_sampling_params_from_responses(request: &ResponsesRequest) -> proto::SamplingParams {
+        proto::SamplingParams {
             temperature: request.temperature,
             top_p: request.top_p.unwrap_or(1.0),
             top_k: 0,
@@ -547,7 +540,7 @@ impl MlxEngineClient {
             ignore_eos: false,
             logprobs: request.top_logprobs.map(|v| v as i32),
             seed: None,
-        })
+        }
     }
 }
 
