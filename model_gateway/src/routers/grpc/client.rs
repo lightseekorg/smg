@@ -380,6 +380,7 @@ impl GrpcClient {
                     body,
                     processed_text,
                     token_ids,
+                    tool_constraints, // MLX rejects constraints inside the builder
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
