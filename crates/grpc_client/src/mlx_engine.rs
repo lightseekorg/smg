@@ -410,7 +410,7 @@ impl MlxEngineClient {
             ignore_eos: request.ignore_eos,
             logprobs,
             logit_bias: convert_logit_bias(&request.logit_bias),
-            seed: request.seed.map(|s| s as i32),
+            seed: request.seed.and_then(|s| i32::try_from(s).ok()),
         })
     }
 
@@ -432,7 +432,7 @@ impl MlxEngineClient {
             ignore_eos: request.ignore_eos,
             logprobs,
             logit_bias: convert_logit_bias(&request.logit_bias),
-            seed: request.seed.map(|s| s as i32),
+            seed: request.seed.and_then(|s| i32::try_from(s).ok()),
         })
     }
 
@@ -444,6 +444,7 @@ impl MlxEngineClient {
             top_p: request.top_p.unwrap_or(1.0) as f32,
             top_k: request.top_k.unwrap_or(0),
             max_tokens: Some(request.max_tokens),
+            repetition_penalty: 1.0, // 1.0 = no penalty (0.0 would penalize everything)
             ..Default::default()
         })
     }
@@ -492,7 +493,7 @@ impl MlxEngineClient {
             sampling.max_tokens = Some(max_new_tokens);
         }
         if let Some(seed) = p.sampling_seed {
-            sampling.seed = Some(seed as i32);
+            sampling.seed = i32::try_from(seed).ok();
         }
 
         Ok(sampling)
@@ -506,7 +507,7 @@ impl MlxEngineClient {
             top_p: request.top_p.unwrap_or(1.0),
             top_k: 0,
             min_p: 0.0,
-            repetition_penalty: 0.0,
+            repetition_penalty: 1.0, // 1.0 = no penalty
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             logit_bias: Default::default(),

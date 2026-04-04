@@ -78,7 +78,9 @@ impl PipelineStage for ChatRequestBuildingStage {
         // Assemble backend-specific multimodal data now that the backend is known
         let multimodal_data = processed_messages
             .multimodal_intermediate
-            .map(|intermediate| assemble_multimodal_data(intermediate, builder_client));
+            .map(|intermediate| assemble_multimodal_data(intermediate, builder_client))
+            .transpose()
+            .map_err(|e| error::bad_request("multimodal_not_supported", e))?;
 
         let mut proto_request = builder_client
             .build_chat_request(
