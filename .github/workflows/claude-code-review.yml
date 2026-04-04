@@ -63,14 +63,12 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
             EVENT: ${{ github.event.action }}
-            BEFORE_SHA: ${{ github.event.before }}
-
             Review this pull request.
 
             IMPORTANT — Incremental vs full review:
             If EVENT is "synchronize" (new push to existing PR), this is a
             follow-up review. Previous review comments are your memory.
-            1. Run `git diff $BEFORE_SHA...HEAD` to see only what this push changed.
+            1. Run `git diff ${{ github.event.before }}...HEAD` to see only what this push changed.
                If this fails (e.g., force-push rewrote history), fall back to
                `git diff origin/main...HEAD` for a full review instead.
             2. Use the comments from step 3 to see what was already flagged.
@@ -78,8 +76,8 @@ jobs:
                unchanged code that was already covered.
             4. If a previous comment is now resolved by the new push, do not
                re-post it.
-            If EVENT is "opened" or "reopened", BEFORE_SHA is not valid —
-            do a full review using `git diff origin/main...HEAD`.
+            If EVENT is "opened" or "reopened", do a full review using
+            `git diff origin/main...HEAD`.
 
             IMPORTANT — Output early:
             Always post inline comments BEFORE doing further exploration.
