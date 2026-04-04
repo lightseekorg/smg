@@ -108,8 +108,7 @@ jobs:
                gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
                  --paginate --jq '[.[] | {path, line, body, user: .user.login, in_reply_to_id}] | last(50)'
             4. Read changed files for context.
-            5. Post inline comments for issues found. Do not post a summary
-               comment — the inline comments are sufficient.
+            5. Post inline comments for issues found.
           claude_args: |
             --model claude-opus-4-6
             --max-turns 50
