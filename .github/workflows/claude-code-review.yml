@@ -109,13 +109,10 @@ jobs:
                  --paginate --jq '[.[] | {path, line, body, user: .user.login, in_reply_to_id}] | last(50)'
             4. Read changed files for context.
             5. Post inline comments for issues found.
-            6. Submit a single review verdict via gh api. The review body IS
-               the summary — do not post a separate summary comment.
-               - If any 🔴 Important issues: submit REQUEST_CHANGES with body:
-                 "Found N critical issue(s):\n- file:line — brief description\n- ..."
-               - If no critical issues: submit APPROVE with body summarizing
-                 what was reviewed: "Reviewed N files (list them). Checked for
-                 [focus areas from REVIEW.md]. No critical issues found."
+            6. Submit a review via gh api with event=COMMENT. The review body
+               IS the summary — do not post a separate summary comment.
+               Include: files reviewed, count per severity level, and a
+               one-line summary for each 🔴 Important issue found.
           claude_args: |
             --model claude-opus-4-6
             --max-turns 50
