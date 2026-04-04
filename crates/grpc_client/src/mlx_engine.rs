@@ -10,11 +10,8 @@ use std::{
 };
 
 use openai_protocol::{
-    chat::ChatCompletionRequest,
-    completion::CompletionRequest,
-    generate::GenerateRequest,
-    messages::CreateMessageRequest,
-    responses::ResponsesRequest,
+    chat::ChatCompletionRequest, completion::CompletionRequest, generate::GenerateRequest,
+    messages::CreateMessageRequest, responses::ResponsesRequest,
     sampling_params::SamplingParams as GenerateSamplingParams,
 };
 use tonic::{transport::Channel, Request, Streaming};
@@ -112,6 +109,10 @@ pub struct MlxEngineClient {
     trace_injector: BoxedTraceInjector,
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Result return kept for API consistency with other backends"
+)]
 impl MlxEngineClient {
     /// Create a new client and connect to the MLX server
     pub async fn connect(endpoint: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -249,7 +250,9 @@ impl MlxEngineClient {
         // MLX doesn't support backend-side structured outputs (json_schema, etc.)
         // Tool calling works via router-side ToolParser (no backend support needed)
         if body.response_format.is_some() {
-            return Err("MLX backend does not support response_format (structured outputs)".to_string());
+            return Err(
+                "MLX backend does not support response_format (structured outputs)".to_string(),
+            );
         }
 
         let sampling_params = Self::build_sampling_params_from_chat(body)?;
@@ -409,7 +412,7 @@ impl MlxEngineClient {
             stop_token_ids: request.stop_token_ids.clone().unwrap_or_default(),
             ignore_eos: request.ignore_eos,
             logprobs,
-            logit_bias: convert_logit_bias(&request.logit_bias),
+            logit_bias: convert_logit_bias(request.logit_bias.as_ref()),
             seed: request.seed.and_then(|s| i32::try_from(s).ok()),
         })
     }
@@ -431,7 +434,7 @@ impl MlxEngineClient {
             stop_token_ids: request.stop_token_ids.clone().unwrap_or_default(),
             ignore_eos: request.ignore_eos,
             logprobs,
-            logit_bias: convert_logit_bias(&request.logit_bias),
+            logit_bias: convert_logit_bias(request.logit_bias.as_ref()),
             seed: request.seed.and_then(|s| i32::try_from(s).ok()),
         })
     }
@@ -521,7 +524,7 @@ impl MlxEngineClient {
 }
 
 /// Convert OpenAI-style logit_bias (String keys) to proto logit_bias (i32 keys).
-fn convert_logit_bias(bias: &Option<HashMap<String, f32>>) -> HashMap<i32, f32> {
+fn convert_logit_bias(bias: Option<&HashMap<String, f32>>) -> HashMap<i32, f32> {
     match bias {
         Some(map) => map
             .iter()
