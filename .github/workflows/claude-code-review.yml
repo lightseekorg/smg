@@ -96,12 +96,16 @@ jobs:
             same file and line (±3 lines), READ their comment. Only post if you
             have a genuinely different concern not covered by the existing comment.
 
+            Human replies: If a human replied to a bot comment (e.g., "fixed",
+            "won't fix", "disagree"), respect their response. Do not re-flag
+            issues that the author has acknowledged or intentionally declined.
+
             Steps (do steps 1-3 in parallel):
             1. Run the appropriate git diff (see incremental review rules above).
             2. Read REVIEW.md for severity format, focus areas, and domain knowledge.
-            3. Fetch existing bot comments for dedup and memory:
+            3. Fetch existing review comments (bot + human replies) for dedup and memory:
                gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
-                 --paginate --jq '[.[] | select(.user.type == "Bot") | {path, line, body, user: .user.login}]'
+                 --paginate --jq '[.[] | {path, line, body, user: .user.login, in_reply_to_id}]'
             4. Read changed files for context.
             5. Post inline comments for issues found.
             6. Write a brief summary with count per severity level.
