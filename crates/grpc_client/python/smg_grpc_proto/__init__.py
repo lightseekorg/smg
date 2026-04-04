@@ -1,8 +1,11 @@
 """SMG gRPC Proto - Protocol definitions for SGLang, vLLM, and TRT-LLM."""
 
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
-__version__ = version("smg-grpc-proto")
+try:
+    __version__ = version("smg-grpc-proto")
+except PackageNotFoundError:
+    __version__ = "0+local"
 
 # Re-export generated modules for convenient access
 # These imports will work after the package is built (stubs generated at build time)
