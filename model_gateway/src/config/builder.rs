@@ -62,6 +62,9 @@ impl RouterConfigBuilder {
             decode_urls,
             prefill_policy: None,
             decode_policy: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
+            pre_prefill_config: super::types::PrePrefillConfig::default(),
         };
         self
     }
@@ -79,6 +82,9 @@ impl RouterConfigBuilder {
             decode_urls,
             prefill_policy,
             decode_policy,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
+            pre_prefill_config: super::types::PrePrefillConfig::default(),
         };
         self
     }

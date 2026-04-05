@@ -30,7 +30,7 @@ pub const DEFAULT_WORKER_COST: f32 = 1.0;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, schemars::JsonSchema,
 )]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum WorkerType {
     /// Regular worker for standard routing.
     #[default]
@@ -39,6 +39,10 @@ pub enum WorkerType {
     Prefill,
     /// Decode worker for PD disaggregated mode.
     Decode,
+    /// Pre-prefill worker: a subtype of Prefill used for cold-request warming.
+    PrePrefill,
+    /// Pre-prefill decode worker: a subtype of Decode paired with a pre-prefill worker.
+    PrePrefillDecode,
 }
 
 impl std::fmt::Display for WorkerType {
@@ -47,6 +51,8 @@ impl std::fmt::Display for WorkerType {
             WorkerType::Regular => write!(f, "regular"),
             WorkerType::Prefill => write!(f, "prefill"),
             WorkerType::Decode => write!(f, "decode"),
+            WorkerType::PrePrefill => write!(f, "pre_prefill"),
+            WorkerType::PrePrefillDecode => write!(f, "pre_prefill_decode"),
         }
     }
 }
@@ -61,6 +67,10 @@ impl std::str::FromStr for WorkerType {
             Ok(WorkerType::Prefill)
         } else if s.eq_ignore_ascii_case("decode") {
             Ok(WorkerType::Decode)
+        } else if s.eq_ignore_ascii_case("pre_prefill") {
+            Ok(WorkerType::PrePrefill)
+        } else if s.eq_ignore_ascii_case("pre_prefill_decode") {
+            Ok(WorkerType::PrePrefillDecode)
         } else {
             Err(format!("Unknown worker type: {s}"))
         }

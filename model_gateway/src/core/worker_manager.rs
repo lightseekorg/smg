@@ -175,6 +175,8 @@ impl WorkerManager {
                     WorkerType::Regular => None,
                     WorkerType::Prefill => Some("prefill".to_string()),
                     WorkerType::Decode => Some("decode".to_string()),
+                    WorkerType::PrePrefill => Some("pre_prefill".to_string()),
+                    WorkerType::PrePrefillDecode => Some("pre_prefill_decode".to_string()),
                 };
                 let connection_mode = worker.connection_mode();
                 let client = client.clone();

@@ -4,7 +4,7 @@ mod pd_routing_unit_tests {
     use serde_json::json;
     use smg::{
         app_context::AppContext,
-        config::{PolicyConfig, RouterConfig, RoutingMode},
+        config::{PolicyConfig, PrePrefillConfig, RouterConfig, RoutingMode},
         core::{BasicWorkerBuilder, Worker, WorkerType},
         routers::{http::pd_types::PDSelectionPolicy, RouterFactory},
     };
@@ -134,6 +134,9 @@ mod pd_routing_unit_tests {
                     ],
                     prefill_policy: None,
                     decode_policy: None,
+                    pre_prefill_urls: vec![],
+                    pre_prefill_decode_urls: vec![],
+                    pre_prefill_config: PrePrefillConfig::default(),
                 },
                 PolicyConfig::Random,
             ),
@@ -143,6 +146,9 @@ mod pd_routing_unit_tests {
                     decode_urls: vec!["http://decode:8080".to_string()],
                     prefill_policy: None,
                     decode_policy: None,
+                    pre_prefill_urls: vec![],
+                    pre_prefill_decode_urls: vec![],
+                    pre_prefill_config: PrePrefillConfig::default(),
                 },
                 PolicyConfig::PowerOfTwo {
                     load_check_interval_secs: 5,
@@ -158,6 +164,9 @@ mod pd_routing_unit_tests {
                     decode_urls: vec!["http://d1:8080".to_string(), "http://d2:8080".to_string()],
                     prefill_policy: None,
                     decode_policy: None,
+                    pre_prefill_urls: vec![],
+                    pre_prefill_decode_urls: vec![],
+                    pre_prefill_config: PrePrefillConfig::default(),
                 },
                 PolicyConfig::CacheAware {
                     cache_threshold: 0.7,
@@ -178,6 +187,9 @@ mod pd_routing_unit_tests {
                     decode_urls: vec!["http://d1:8080".to_string(), "http://d2:8080".to_string()],
                     prefill_policy: None,
                     decode_policy: None,
+                    pre_prefill_urls: vec![],
+                    pre_prefill_decode_urls: vec![],
+                    pre_prefill_config: PrePrefillConfig::default(),
                 },
                 PolicyConfig::Bucket {
                     balance_abs_threshold: 20,

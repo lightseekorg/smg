@@ -476,6 +476,8 @@ impl JobQueue {
                     RoutingMode::PrefillDecode {
                         prefill_urls,
                         decode_urls,
+                        pre_prefill_urls,
+                        pre_prefill_decode_urls,
                         ..
                     } => {
                         let prefill_workers = prefill_urls
@@ -485,7 +487,19 @@ impl JobQueue {
                         let decode_workers =
                             decode_urls.iter().map(|url| (url.clone(), "decode", None));
 
-                        prefill_workers.chain(decode_workers).collect()
+                        let pre_prefill_workers = pre_prefill_urls
+                            .iter()
+                            .map(|(url, port)| (url.clone(), "pre_prefill", *port));
+
+                        let pre_prefill_decode_workers = pre_prefill_decode_urls
+                            .iter()
+                            .map(|url| (url.clone(), "pre_prefill_decode", None));
+
+                        prefill_workers
+                            .chain(decode_workers)
+                            .chain(pre_prefill_workers)
+                            .chain(pre_prefill_decode_workers)
+                            .collect()
                     }
                     RoutingMode::OpenAI { worker_urls }
                     | RoutingMode::Anthropic { worker_urls }
@@ -512,6 +526,8 @@ impl JobQueue {
                     let proto_worker_type = match worker_type {
                         "prefill" => WorkerType::Prefill,
                         "decode" => WorkerType::Decode,
+                        "pre_prefill" => WorkerType::PrePrefill,
+                        "pre_prefill_decode" => WorkerType::PrePrefillDecode,
                         _ => WorkerType::Regular,
                     };
                     let mut spec = WorkerSpec::new(url);
