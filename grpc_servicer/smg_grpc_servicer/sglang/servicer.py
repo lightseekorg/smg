@@ -39,11 +39,7 @@ from sglang.srt.managers.io_struct import (
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
 )
-from sglang.srt.managers.schedule_batch import (
-    Modality,
-    MultimodalDataItem,
-    MultimodalInputs,
-)
+from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem, MultimodalInputs
 from sglang.srt.sampling.sampling_params import SamplingParams as SGLSamplingParams
 from sglang.srt.server_args import ServerArgs
 from sglang.utils import get_exception_traceback
@@ -825,7 +821,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         return torch.from_numpy(arr)
 
     def _parse_mm_inputs(self, mm_proto) -> MultimodalInputs:
-        """Parse proto MultimodalInputs into the mm_inputs expected by scheduler."""
+        """Parse proto MultimodalInputs into a MultimodalInputs object for the scheduler."""
         # Decode pixel_values from typed TensorData field
         pixel_values = self._decode_tensor_data(mm_proto.pixel_values)
 
@@ -851,12 +847,12 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             offsets=offsets,
         )
 
-        result = MultimodalInputs(mm_items=[mm_item])
+        im_token_id = mm_proto.im_token_id if mm_proto.HasField("im_token_id") else None
 
-        if mm_proto.HasField("im_token_id"):
-            result.im_token_id = mm_proto.im_token_id
-
-        return result
+        return MultimodalInputs(
+            mm_items=[mm_item],
+            im_token_id=im_token_id,
+        )
 
     def _convert_embed_request(
         self, grpc_req: sglang_scheduler_pb2.EmbedRequest
