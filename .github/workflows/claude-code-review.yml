@@ -142,15 +142,17 @@ jobs:
           LOG="${RUNNER_TEMP}/claude-execution-output.json"
 
           # Extract usage stats from execution output
+          # The file may be a JSON array of events — the result entry is last
           if [ -f "$LOG" ]; then
-            COST=$(jq -r '.total_cost_usd // 0' "$LOG")
-            TURNS=$(jq -r '.num_turns // 0' "$LOG")
-            DURATION=$(jq -r '(.duration_ms // 0) / 1000 | floor' "$LOG")
-            INPUT=$(jq -r '.usage.input_tokens // 0' "$LOG")
-            OUTPUT=$(jq -r '.usage.output_tokens // 0' "$LOG")
-            CACHE_READ=$(jq -r '.usage.cache_read_input_tokens // 0' "$LOG")
-            CACHE_CREATE=$(jq -r '.usage.cache_creation_input_tokens // 0' "$LOG")
-            STATUS=$(jq -r '.terminal_reason // "unknown"' "$LOG")
+            RESULT=$(jq 'if type == "array" then .[-1] else . end' "$LOG")
+            COST=$(echo "$RESULT" | jq -r '.total_cost_usd // 0')
+            TURNS=$(echo "$RESULT" | jq -r '.num_turns // 0')
+            DURATION=$(echo "$RESULT" | jq -r '(.duration_ms // 0) / 1000 | floor')
+            INPUT=$(echo "$RESULT" | jq -r '.usage.input_tokens // 0')
+            OUTPUT=$(echo "$RESULT" | jq -r '.usage.output_tokens // 0')
+            CACHE_READ=$(echo "$RESULT" | jq -r '.usage.cache_read_input_tokens // 0')
+            CACHE_CREATE=$(echo "$RESULT" | jq -r '.usage.cache_creation_input_tokens // 0')
+            STATUS=$(echo "$RESULT" | jq -r '.terminal_reason // "unknown"')
           else
             COST=0; TURNS=0; DURATION=0; INPUT=0; OUTPUT=0
             CACHE_READ=0; CACHE_CREATE=0; STATUS="no output"
