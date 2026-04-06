@@ -163,10 +163,11 @@ jobs:
             FETCH_OK=false
             COMMENTS="[]"
           else
-            COMMENTS=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
+            if COMMENTS=$(set -o pipefail; gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
               --paginate --jq ".[] | select((.user.login == \"claude[bot]\" or .user.login == \"github-actions[bot]\") and .created_at >= \"${RUN_START}\") | {path, line, body}" \
-              | jq -s '.' 2>/dev/null)
-            if [ $? -ne 0 ] || [ -z "$COMMENTS" ]; then
+              | jq -s '.' 2>/dev/null); then
+              : # fetch succeeded
+            else
               FETCH_OK=false
               COMMENTS="[]"
             fi
