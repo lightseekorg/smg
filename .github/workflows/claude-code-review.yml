@@ -116,10 +116,14 @@ jobs:
             5. Post inline comments for issues found.
             6. Decide whether to approve. Only submit APPROVE if BOTH:
                - This review found no new 🔴 Important issues, AND
-               - No unresolved 🔴 Important comments exist in prior reviews
-                 (check the comments from step 3 — if any 🔴 comment from
-                 claude[bot] has no human reply indicating "fixed"/"resolved",
-                 it is still unresolved; do NOT approve).
+               - No unresolved 🔴 Important comments exist in prior reviews.
+                 To check, run a SEPARATE untruncated fetch (do NOT rely on
+                 the truncated step 3 data for this):
+                 gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
+                   --paginate --jq '.[] | select(.body | test("🔴")) | {id, path, line, user: .user.login, in_reply_to_id}'
+                 If any 🔴 comment from claude[bot] has no human reply
+                 indicating "fixed"/"resolved", it is still unresolved —
+                 do NOT approve.
                If approved:
                gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews \
                  -f event=APPROVE
@@ -161,9 +165,19 @@ jobs:
 
           # Fetch inline comments posted by claude in THIS run only
           RUN_START="${{ steps.run-start.outputs.timestamp }}"
-          COMMENTS=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
-            --paginate --jq ".[] | select((.user.login == \"claude[bot]\" or .user.login == \"github-actions[bot]\") and .created_at >= \"${RUN_START}\") | {path, line, body}" \
-            | jq -s '.' 2>/dev/null || echo '[]')
+          FETCH_OK=true
+          if [ -z "$RUN_START" ]; then
+            FETCH_OK=false
+            COMMENTS="[]"
+          else
+            COMMENTS=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
+              --paginate --jq ".[] | select((.user.login == \"claude[bot]\" or .user.login == \"github-actions[bot]\") and .created_at >= \"${RUN_START}\") | {path, line, body}" \
+              | jq -s '.' 2>/dev/null)
+            if [ $? -ne 0 ] || [ -z "$COMMENTS" ]; then
+              FETCH_OK=false
+              COMMENTS="[]"
+            fi
+          fi
 
           IMPORTANT=$(echo "$COMMENTS" | jq '[.[] | select(.body | test("🔴"))] | length')
           NIT=$(echo "$COMMENTS" | jq '[.[] | select(.body | test("🟡"))] | length')
@@ -185,7 +199,9 @@ jobs:
             echo ""
             echo "### Findings"
             echo ""
-            if [ "$TOTAL" -eq 0 ]; then
+            if [ "$FETCH_OK" = "false" ]; then
+              echo "⚠️ Summary unavailable — comment fetch failed or run-start timestamp missing."
+            elif [ "$TOTAL" -eq 0 ]; then
               echo "No issues found."
             else
               echo "| Severity | Count |"
