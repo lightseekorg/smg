@@ -124,6 +124,79 @@ jobs:
         if: steps.claude-review.outcome == 'failure'
         run: echo "::warning::Claude review did not complete — may have hit turn limit or encountered an error."
 
+      - name: Review summary
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LOG="/runner/_work/_temp/claude-execution-output.json"
+
+          # Extract usage stats from execution output
+          if [ -f "$LOG" ]; then
+            COST=$(jq -r '.total_cost_usd // 0' "$LOG")
+            TURNS=$(jq -r '.num_turns // 0' "$LOG")
+            DURATION=$(jq -r '(.duration_ms // 0) / 1000 | floor' "$LOG")
+            INPUT=$(jq -r '.usage.input_tokens // 0' "$LOG")
+            OUTPUT=$(jq -r '.usage.output_tokens // 0' "$LOG")
+            CACHE_READ=$(jq -r '.usage.cache_read_input_tokens // 0' "$LOG")
+            CACHE_CREATE=$(jq -r '.usage.cache_creation_input_tokens // 0' "$LOG")
+            STATUS=$(jq -r '.terminal_reason // "unknown"' "$LOG")
+          else
+            COST=0; TURNS=0; DURATION=0; INPUT=0; OUTPUT=0
+            CACHE_READ=0; CACHE_CREATE=0; STATUS="no output"
+          fi
+
+          # Fetch inline comments posted by claude in this review
+          COMMENTS=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
+            --paginate --jq '.[] | select(.user.login == "claude[bot]" or .user.login == "github-actions[bot]") | {path, line, body}' \
+            | jq -s '.' 2>/dev/null || echo '[]')
+
+          IMPORTANT=$(echo "$COMMENTS" | jq '[.[] | select(.body | test("🔴"))] | length')
+          NIT=$(echo "$COMMENTS" | jq '[.[] | select(.body | test("🟡"))] | length')
+          PREEXISTING=$(echo "$COMMENTS" | jq '[.[] | select(.body | test("🟣"))] | length')
+          TOTAL=$(echo "$COMMENTS" | jq 'length')
+
+          # Build one-line summaries per finding
+          FINDINGS=$(echo "$COMMENTS" | jq -r '.[] | "| `\(.path):\(.line)` | \(.body | split("\n")[0] | gsub("\\|"; "∣")) |"')
+
+          # Write step summary
+          {
+            echo "## Claude PR Review Summary"
+            echo ""
+            if [ "$STATUS" = "completed" ]; then
+              echo "✅ **Status:** Completed in ${TURNS} turns (${DURATION}s)"
+            else
+              echo "⚠️ **Status:** ${STATUS} after ${TURNS} turns (${DURATION}s)"
+            fi
+            echo ""
+            echo "### Findings"
+            echo ""
+            if [ "$TOTAL" -eq 0 ]; then
+              echo "No issues found."
+            else
+              echo "| Severity | Count |"
+              echo "|----------|-------|"
+              echo "| 🔴 Important | ${IMPORTANT} |"
+              echo "| 🟡 Nit | ${NIT} |"
+              echo "| 🟣 Pre-existing | ${PREEXISTING} |"
+              echo "| **Total** | **${TOTAL}** |"
+              echo ""
+              echo "| Location | Finding |"
+              echo "|----------|---------|"
+              echo "$FINDINGS"
+            fi
+            echo ""
+            echo "### Usage"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Cost | \$${COST} |"
+            echo "| Input tokens | ${INPUT} |"
+            echo "| Output tokens | ${OUTPUT} |"
+            echo "| Cache read | ${CACHE_READ} |"
+            echo "| Cache creation | ${CACHE_CREATE} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Respond to @claude mentions in PR/issue comments
   respond:
     name: Claude Respond
