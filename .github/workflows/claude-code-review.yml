@@ -106,7 +106,8 @@ jobs:
             2. Read REVIEW.md for severity format, focus areas, and domain knowledge.
             3. Fetch existing review comments (bot + human replies) for dedup and memory:
                gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
-                 --paginate --slurp --jq '[.[][] | {id, path, line, body, user: .user.login, in_reply_to_id}] | .[-50:]'
+                 --paginate --jq '.[] | {id, path, line, body, user: .user.login, in_reply_to_id}' \
+                 | jq -s '.[-50:]'
             4. Read changed files for context.
             5. Post inline comments for issues found.
           claude_args: |
