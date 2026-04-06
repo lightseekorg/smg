@@ -76,9 +76,9 @@ impl ModelProcessorSpec for KimiK25VisionSpec {
     }
 
     fn field_layouts(&self) -> HashMap<String, FieldLayout> {
-        // Kimi-K2.5 uses NaViT-style patchification like Qwen-VL:
+        // Kimi-K2.5 uses NaViT-style patchification:
         // pixel_values is [total_patches, patch_features], split by patches_per_image.
-        // grid_thws is [num_images, 3] (Kimi uses "grid_thws" instead of Qwen's "image_grid_thw").
+        // grid_thws is [num_images, 3] with (temporal, height, width) grid dimensions.
         HashMap::from([
             (
                 "pixel_values".to_string(),
