@@ -85,9 +85,11 @@ impl ResponseTransformer {
                     return;
                 }
 
-                if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
-                    text_parts.push(text.to_string());
-                    return;
+                if obj.get("type").is_none() {
+                    if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+                        text_parts.push(text.to_string());
+                        return;
+                    }
                 }
 
                 if let Some(message) = obj.get("message").and_then(|v| v.as_str()) {
@@ -96,8 +98,9 @@ impl ResponseTransformer {
                 }
 
                 if let Some(error) = obj.get("error") {
+                    let before = text_parts.len();
                     Self::collect_text_parts(error, text_parts);
-                    if !text_parts.is_empty() {
+                    if text_parts.len() > before {
                         return;
                     }
                 }
@@ -392,6 +395,30 @@ mod tests {
     }
 
     #[test]
+    fn test_passthrough_transform_ignores_typed_non_text_blocks_with_text_fields() {
+        let result = json!([
+            {"type": "text", "text": "kept text"},
+            {"type": "image", "text": "caption that should be ignored"}
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::Passthrough,
+            "test-4b",
+            "server",
+            "tool",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::McpCall { output, .. } => {
+                assert_eq!(output, "kept text");
+            }
+            _ => panic!("Expected McpCall"),
+        }
+    }
+
+    #[test]
     fn test_passthrough_transform_uses_error_message_for_structured_errors() {
         let result = json!({
             "error": {
@@ -412,6 +439,35 @@ mod tests {
         match transformed {
             ResponseOutputItem::McpCall { output, .. } => {
                 assert_eq!(output, "tool execution failed");
+            }
+            _ => panic!("Expected McpCall"),
+        }
+    }
+
+    #[test]
+    fn test_passthrough_transform_keeps_content_when_error_has_no_text() {
+        let result = json!([
+            {"type": "text", "text": "hello"},
+            {
+                "error": {"code": "tool_failed"},
+                "content": [
+                    {"type": "text", "text": "important"}
+                ]
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::Passthrough,
+            "test-6",
+            "server",
+            "tool",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::McpCall { output, .. } => {
+                assert_eq!(output, "hello\nimportant");
             }
             _ => panic!("Expected McpCall"),
         }
