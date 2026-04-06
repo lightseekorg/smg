@@ -46,7 +46,6 @@ After posting all inline comments, write a brief summary with a count per severi
 
 ## Skip
 
-- Generated files under `crates/grpc_client/src/` (proto-generated)
 - Formatting-only changes
 - Documentation-only PRs (`docs/**`)
 - Dependency version bumps with no code changes
