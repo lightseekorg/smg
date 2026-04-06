@@ -158,7 +158,7 @@ def main():
     parser = argparse.ArgumentParser(description="Launch SGLang router and server processes")
 
     ServerArgs.add_cli_args(parser)
-    RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
+    RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=False)
     parser.add_argument(
         "--router-dp-worker-base-port",
         type=int,
