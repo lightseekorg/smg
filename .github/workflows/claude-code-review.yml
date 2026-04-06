@@ -68,7 +68,7 @@ jobs:
             IMPORTANT — Incremental vs full review:
             If EVENT is "synchronize" (new push to existing PR), this is a
             follow-up review. Previous review comments are your memory.
-            1. Run `git diff ${{ github.event.before }}...HEAD` to see only what this push changed.
+            1. Run `git diff ${{ github.event.before }}..HEAD` to see only what this push changed.
                If this fails (e.g., force-push rewrote history), fall back to
                `git diff origin/main...HEAD` for a full review instead.
             2. Use the comments from step 3 to see what was already flagged.
@@ -106,7 +106,7 @@ jobs:
             2. Read REVIEW.md for severity format, focus areas, and domain knowledge.
             3. Fetch existing review comments (bot + human replies) for dedup and memory:
                gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
-                 --paginate --slurp --jq '[.[][] | {path, line, body, user: .user.login, in_reply_to_id}] | .[-50:]'
+                 --paginate --slurp --jq '[.[][] | {id, path, line, body, user: .user.login, in_reply_to_id}] | .[-50:]'
             4. Read changed files for context.
             5. Post inline comments for issues found.
           claude_args: |
