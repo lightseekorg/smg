@@ -1466,6 +1466,9 @@ mod tests {
         .expect("request should deserialize");
 
         assert_eq!(request.top_p, None);
+
+        let serialized = serde_json::to_value(&request).expect("request should serialize");
+        assert!(serialized.get("top_p").is_none());
     }
 
     #[test]
@@ -1478,6 +1481,9 @@ mod tests {
         .expect("request should deserialize");
 
         assert_eq!(request.top_p, None);
+
+        let serialized = serde_json::to_value(&request).expect("request should serialize");
+        assert!(serialized.get("top_p").is_none());
     }
 
     #[test]
