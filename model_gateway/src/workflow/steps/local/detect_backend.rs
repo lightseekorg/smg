@@ -33,7 +33,7 @@ async fn detect_grpc_backend(
 ) -> Result<String, String> {
     let grpc_url = grpc_base_url(url);
 
-    // If we have a hint, try it first
+    // If we have a hint, try it first (fast path)
     if let Some(hint) = runtime_hint {
         if do_grpc_health_check(&grpc_url, timeout_secs, hint)
             .await
@@ -43,17 +43,25 @@ async fn detect_grpc_backend(
         }
     }
 
-    // Try each runtime sequentially (most common first), skipping the hint we already tried
-    for runtime in &["sglang", "vllm", "trtllm", "mlx"] {
-        if Some(*runtime) == runtime_hint {
-            continue;
-        }
-        if do_grpc_health_check(&grpc_url, timeout_secs, runtime)
-            .await
-            .is_ok()
-        {
-            return Ok((*runtime).to_string());
-        }
+    // Probe all runtimes in parallel (most common first in result preference)
+    let (sglang, vllm, trtllm, mlx) = tokio::join!(
+        do_grpc_health_check(&grpc_url, timeout_secs, "sglang"),
+        do_grpc_health_check(&grpc_url, timeout_secs, "vllm"),
+        do_grpc_health_check(&grpc_url, timeout_secs, "trtllm"),
+        do_grpc_health_check(&grpc_url, timeout_secs, "mlx"),
+    );
+
+    if sglang.is_ok() {
+        return Ok("sglang".to_string());
+    }
+    if vllm.is_ok() {
+        return Ok("vllm".to_string());
+    }
+    if trtllm.is_ok() {
+        return Ok("trtllm".to_string());
+    }
+    if mlx.is_ok() {
+        return Ok("mlx".to_string());
     }
 
     Err(format!(

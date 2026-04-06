@@ -253,25 +253,18 @@ impl MlxEngineClient {
         Ok(())
     }
 
-    fn reject_stop_strings(
-        stop: Option<&openai_protocol::common::StringOrArray>,
-    ) -> Result<(), String> {
-        if let Some(s) = stop {
-            if !s.is_empty() {
-                return Err(
-                    "MLX backend does not support string stop sequences (only stop_token_ids)"
-                        .to_string(),
-                );
-            }
+    fn reject_stop_strings(has_stop_strings: bool) -> Result<(), String> {
+        if has_stop_strings {
+            return Err("MLX backend does not support string stop sequences".to_string());
         }
         Ok(())
     }
 
-    fn reject_stop_string_list(stop: Option<&[String]>) -> Result<(), String> {
-        if let Some(s) = stop {
-            if !s.is_empty() {
-                return Err("MLX backend does not support string stop sequences".to_string());
-            }
+    fn reject_response_format(has_response_format: bool) -> Result<(), String> {
+        if has_response_format {
+            return Err(
+                "MLX backend does not support response_format (structured outputs)".to_string(),
+            );
         }
         Ok(())
     }
@@ -304,12 +297,8 @@ impl MlxEngineClient {
     ) -> Result<proto::GenerateRequest, String> {
         Self::reject_constraint(constraint.as_ref())?;
         Self::reject_n(body.n)?;
-        Self::reject_stop_strings(body.stop.as_ref())?;
-        if body.response_format.is_some() {
-            return Err(
-                "MLX backend does not support response_format (structured outputs)".to_string(),
-            );
-        }
+        Self::reject_stop_strings(body.stop.as_ref().is_some_and(|s| !s.is_empty()))?;
+        Self::reject_response_format(body.response_format.is_some())?;
 
         let sampling_params = Self::build_sampling_params_from_chat(body);
         Ok(Self::make_generate_request(
@@ -334,7 +323,7 @@ impl MlxEngineClient {
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
         Self::reject_n(body.n)?;
-        Self::reject_stop_strings(body.stop.as_ref())?;
+        Self::reject_stop_strings(body.stop.as_ref().is_some_and(|s| !s.is_empty()))?;
         Self::reject_if_any_constraint(
             body.json_schema.as_ref(),
             body.regex.as_ref(),
@@ -365,7 +354,7 @@ impl MlxEngineClient {
         constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
         Self::reject_constraint(constraint.as_ref())?;
-        Self::reject_stop_string_list(body.stop_sequences.as_deref())?;
+        Self::reject_stop_strings(body.stop_sequences.as_ref().is_some_and(|s| !s.is_empty()))?;
 
         let sampling_params = Self::build_sampling_params_from_messages(body);
         Ok(Self::make_generate_request(
@@ -391,7 +380,7 @@ impl MlxEngineClient {
     ) -> Result<proto::GenerateRequest, String> {
         if let Some(ref sp) = body.sampling_params {
             Self::reject_n(sp.n)?;
-            Self::reject_stop_strings(sp.stop.as_ref())?;
+            Self::reject_stop_strings(sp.stop.as_ref().is_some_and(|s| !s.is_empty()))?;
             Self::reject_if_any_constraint(
                 sp.json_schema.as_ref(),
                 sp.regex.as_ref(),
@@ -423,7 +412,7 @@ impl MlxEngineClient {
         constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
         Self::reject_constraint(constraint.as_ref())?;
-        Self::reject_stop_strings(body.stop.as_ref())?;
+        Self::reject_stop_strings(body.stop.as_ref().is_some_and(|s| !s.is_empty()))?;
 
         let sampling_params = Self::build_sampling_params_from_responses(body);
         Ok(Self::make_generate_request(
