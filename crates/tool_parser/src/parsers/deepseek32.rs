@@ -229,7 +229,7 @@ impl ToolParser for DeepSeek32Parser {
         }
 
         if tools.is_empty() {
-            return Ok((text.to_string(), vec![]));
+            return Ok((normal_text, vec![]));
         }
 
         Ok((normal_text, tools))
