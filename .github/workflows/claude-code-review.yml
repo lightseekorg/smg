@@ -112,7 +112,7 @@ jobs:
             5. Post inline comments for issues found.
             6. If no 🔴 Important issues were found, submit an APPROVE review:
                gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews \
-                 -f event=APPROVE -f body="No critical issues found."
+                 -f event=APPROVE
           claude_args: |
             --model claude-opus-4-6
             --max-turns 50
