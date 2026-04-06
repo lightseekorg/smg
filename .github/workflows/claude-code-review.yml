@@ -114,19 +114,12 @@ jobs:
                  | jq -s '.[-50:]'
             4. Read changed files for context.
             5. Post inline comments for issues found.
-            6. Decide whether to approve. Only submit APPROVE if BOTH:
-               - This review found no new 🔴 Important issues, AND
-               - No unresolved 🔴 Important comments exist in prior reviews.
-                 To check, run a SEPARATE untruncated fetch (do NOT rely on
-                 the truncated step 3 data for this):
-                 gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
-                   --paginate --jq '.[] | select(.body | test("🔴")) | {id, path, line, user: .user.login, in_reply_to_id}'
-                 If any 🔴 comment from claude[bot] has no human reply
-                 indicating "fixed"/"resolved", it is still unresolved —
-                 do NOT approve.
-               If approved:
+            6. If EVENT is "opened" or "reopened" (full review) AND no 🔴
+               Important issues were found, submit an APPROVE review:
                gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews \
                  -f event=APPROVE
+               Do NOT approve on "synchronize" (incremental) reviews — only
+               full reviews have enough context to approve.
           claude_args: |
             --model claude-opus-4-6
             --max-turns 50
