@@ -54,6 +54,10 @@ jobs:
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           fi
 
+      - name: Record run start time
+        id: run-start
+        run: echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - uses: anthropics/claude-code-action@v1
         id: claude-review
         continue-on-error: true
@@ -110,7 +114,13 @@ jobs:
                  | jq -s '.[-50:]'
             4. Read changed files for context.
             5. Post inline comments for issues found.
-            6. If no 🔴 Important issues were found, submit an APPROVE review:
+            6. Decide whether to approve. Only submit APPROVE if BOTH:
+               - This review found no new 🔴 Important issues, AND
+               - No unresolved 🔴 Important comments exist in prior reviews
+                 (check the comments from step 3 — if any 🔴 comment from
+                 claude[bot] has no human reply indicating "fixed"/"resolved",
+                 it is still unresolved; do NOT approve).
+               If approved:
                gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews \
                  -f event=APPROVE
           claude_args: |
@@ -149,9 +159,10 @@ jobs:
             CACHE_READ=0; CACHE_CREATE=0; STATUS="no output"
           fi
 
-          # Fetch inline comments posted by claude in this review
+          # Fetch inline comments posted by claude in THIS run only
+          RUN_START="${{ steps.run-start.outputs.timestamp }}"
           COMMENTS=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
-            --paginate --jq '.[] | select(.user.login == "claude[bot]" or .user.login == "github-actions[bot]") | {path, line, body}' \
+            --paginate --jq ".[] | select((.user.login == \"claude[bot]\" or .user.login == \"github-actions[bot]\") and .created_at >= \"${RUN_START}\") | {path, line, body}" \
             | jq -s '.' 2>/dev/null || echo '[]')
 
           IMPORTANT=$(echo "$COMMENTS" | jq '[.[] | select(.body | test("🔴"))] | length')
