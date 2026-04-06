@@ -240,22 +240,45 @@ class RouterArgs:
             "Control Plane Authentication", "API key and JWT/OIDC authentication"
         )
 
+        if use_router_prefix:
+            parser.add_argument(
+                "--router-disable-arg-fallback",
+                action="store_true",
+                default=False,
+                help=(
+                    "When set, only use explicitly provided --router-* arguments and do not"
+                    " fall back to backend arguments with the same name."
+                ),
+            )
+
         # Worker configuration
         if not exclude_host_port:
             worker_group.add_argument(
-                "--host",
+                f"--{prefix}host",
                 type=str,
-                default=RouterArgs.host,
+                default=None if use_router_prefix else RouterArgs.host,
                 help=(
                     "Host address to bind the router server. Supports IPv4, IPv6 (e.g., ::, ::1),"
                     " or 0.0.0.0 for all interfaces"
+                    + (
+                        ". Defaults to the main --host unless --router-disable-arg-fallback is set."
+                        if use_router_prefix
+                        else ""
+                    )
                 ),
             )
             worker_group.add_argument(
-                "--port",
+                f"--{prefix}port",
                 type=int,
-                default=RouterArgs.port,
-                help="Port number to bind the router server",
+                default=None if use_router_prefix else RouterArgs.port,
+                help=(
+                    "Port number to bind the router server"
+                    + (
+                        ". Defaults to the main --port unless --router-disable-arg-fallback is set."
+                        if use_router_prefix
+                        else ""
+                    )
+                ),
             )
 
         worker_group.add_argument(
@@ -1101,6 +1124,7 @@ class RouterArgs:
         prefix = "router_" if use_router_prefix else ""
         cli_args_dict = vars(args)
         args_dict = {}
+        disable_arg_fallback = bool(cli_args_dict.get(f"{prefix}disable_arg_fallback", False))
 
         for attr in dataclasses.fields(cls):
             # Auto strip prefix from args.
@@ -1111,7 +1135,11 @@ class RouterArgs:
             prefixed_key = f"{prefix}{attr.name}"
             if prefixed_key in cli_args_dict and cli_args_dict[prefixed_key] is not None:
                 args_dict[attr.name] = cli_args_dict[prefixed_key]
-            elif attr.name in cli_args_dict and cli_args_dict[attr.name] not in (None, ""):
+            elif (
+                not disable_arg_fallback
+                and attr.name in cli_args_dict
+                and cli_args_dict[attr.name] not in (None, "")
+            ):
                 args_dict[attr.name] = cli_args_dict[attr.name]
 
             # Special handling for CLI args with dashes vs dataclass fields with underscores

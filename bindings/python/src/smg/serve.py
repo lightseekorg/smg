@@ -513,7 +513,7 @@ def parse_serve_args(
     # Pass 1: serve + router args only; unknown tokens become backend_args
     pre_parser = argparse.ArgumentParser(add_help=False)
     add_serve_args(pre_parser)
-    RouterArgs.add_cli_args(pre_parser, use_router_prefix=True, exclude_host_port=True)
+    RouterArgs.add_cli_args(pre_parser, use_router_prefix=True, exclude_host_port=False)
     serve_router_args, backend_args = pre_parser.parse_known_args(argv)
     backend = serve_router_args.backend
 
@@ -524,7 +524,7 @@ def parse_serve_args(
     )
     add_serve_args(parser)
     _import_backend_args(backend, parser)
-    RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
+    RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=False)
 
     if backend == "trtllm":
         args, _ = parser.parse_known_args(argv)

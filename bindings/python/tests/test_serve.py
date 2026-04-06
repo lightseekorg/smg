@@ -11,6 +11,7 @@ import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
+from smg.router_args import RouterArgs
 from smg.serve import (
     BACKEND_ARG_ADDERS,
     BACKEND_CHOICES,
@@ -262,6 +263,81 @@ class TestParseServeArgs:
             ]
         )
         assert args.router_policy == "round_robin"
+
+    def test_trtllm_accepts_explicit_router_port_when_fallback_disabled(self):
+        """Explicit --router-port should work even when router arg fallback is disabled."""
+        _, args, _ = parse_serve_args(
+            [
+                "--backend",
+                "trtllm",
+                "--port",
+                "9000",
+                "--router-port",
+                "19000",
+                "--router-disable-arg-fallback",
+            ]
+        )
+        assert args.port == 9000
+        assert args.router_port == 19000
+        assert args.router_disable_arg_fallback is True
+
+    def test_trtllm_accepts_explicit_router_host_and_port(self):
+        """Prefixed router host/port should parse without conflicting with serve host/port."""
+        _, args, _ = parse_serve_args(
+            [
+                "--backend",
+                "trtllm",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "9000",
+                "--router-host",
+                "0.0.0.0",
+                "--router-port",
+                "19000",
+            ]
+        )
+        assert args.host == "127.0.0.1"
+        assert args.port == 9000
+        assert args.router_host == "0.0.0.0"
+        assert args.router_port == 19000
+
+    def test_trtllm_router_host_port_fall_back_to_serve_args_by_default(self):
+        """RouterArgs should inherit serve host/port unless router-specific values are provided."""
+        _, args, _ = parse_serve_args(
+            [
+                "--backend",
+                "trtllm",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "9000",
+            ]
+        )
+
+        router_args = RouterArgs.from_cli_args(args, use_router_prefix=True)
+
+        assert router_args.host == "127.0.0.1"
+        assert router_args.port == 9000
+
+    def test_trtllm_router_host_port_use_router_defaults_when_fallback_disabled(self):
+        """Disabling router fallback should restore standalone router host/port defaults."""
+        _, args, _ = parse_serve_args(
+            [
+                "--backend",
+                "trtllm",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "9000",
+                "--router-disable-arg-fallback",
+            ]
+        )
+
+        router_args = RouterArgs.from_cli_args(args, use_router_prefix=True)
+
+        assert router_args.host == RouterArgs.host
+        assert router_args.port == RouterArgs.port
 
     def test_trtllm_router_args_defaults(self):
         """Router args should have sensible defaults."""
