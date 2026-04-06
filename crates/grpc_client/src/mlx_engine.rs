@@ -560,11 +560,11 @@ impl MlxEngineClient {
         proto::SamplingParams {
             temperature: request.temperature,
             top_p: request.top_p.unwrap_or(1.0),
-            top_k: 0,
-            min_p: 0.0,
-            repetition_penalty: 1.0, // 1.0 = no penalty
-            frequency_penalty: 0.0,
-            presence_penalty: 0.0,
+            top_k: request.top_k.max(0) as u32,
+            min_p: request.min_p,
+            repetition_penalty: request.repetition_penalty,
+            frequency_penalty: request.frequency_penalty.unwrap_or(0.0),
+            presence_penalty: request.presence_penalty.unwrap_or(0.0),
             logit_bias: Default::default(),
             max_tokens: request.max_output_tokens,
             stop_token_ids: vec![],
