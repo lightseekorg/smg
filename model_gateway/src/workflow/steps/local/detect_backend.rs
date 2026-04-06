@@ -1,8 +1,8 @@
 //! Backend runtime detection step.
 //!
 //! Detects the runtime type (sglang, vllm, trtllm, mlx) for both HTTP and gRPC workers.
-//! - HTTP: probes `/v1/models` (owned_by field), falls back to unique endpoints.
-//! - gRPC: tries sglang → vllm → trtllm → mlx health checks sequentially.
+//! - HTTP: probes `/v1/models` (owned_by field), falls back to unique endpoints in parallel.
+//! - gRPC: probes all runtime health checks in parallel (`tokio::join!`).
 
 use std::time::Duration;
 
@@ -22,10 +22,11 @@ use crate::{
 
 // ─── gRPC backend detection ────────────────────────────────────────────────
 
-/// Detect gRPC backend by trying runtime-specific health checks sequentially.
+/// Detect gRPC backend by probing runtime-specific health checks in parallel.
 ///
 /// If `runtime_hint` is provided (from explicit config), tries that first.
-/// Otherwise tries sglang → vllm → trtllm → mlx.
+/// Otherwise probes all runtimes concurrently, returning the first match
+/// with priority: sglang > vllm > trtllm > mlx.
 async fn detect_grpc_backend(
     url: &str,
     timeout_secs: u64,
