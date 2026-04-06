@@ -308,13 +308,17 @@ impl ToolParser for DeepSeek32Parser {
                     continue;
                 } else {
                     // Incomplete invalid invoke — reset state and wait for more data
+                    // Return any calls already collected from previous complete invokes
                     helpers::reset_current_tool_state(
                         &mut self.buffer,
                         &mut self.current_tool_name_sent,
                         &mut self.streamed_args_for_tool,
                         &self.prev_tool_call_arr,
                     );
-                    return Ok(StreamingParseResult::default());
+                    return Ok(StreamingParseResult {
+                        normal_text: String::new(),
+                        calls: all_calls,
+                    });
                 }
             }
 
@@ -388,6 +392,9 @@ impl ToolParser for DeepSeek32Parser {
                         None
                     }
                 }
+            } else if sent_len < current_args.len() {
+                // First partial chunk — no prev_args yet, emit from sent_len
+                Some(current_args[sent_len..].to_string())
             } else {
                 None
             };
