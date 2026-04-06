@@ -142,7 +142,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          LOG="/runner/_work/_temp/claude-execution-output.json"
+          LOG="${RUNNER_TEMP}/claude-execution-output.json"
 
           # Extract usage stats from execution output
           if [ -f "$LOG" ]; then
