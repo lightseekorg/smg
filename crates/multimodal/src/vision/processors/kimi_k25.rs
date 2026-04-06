@@ -8,10 +8,9 @@
 //! 4. Normalize with [0.5, 0.5, 0.5] mean/std
 //! 5. Extract patches as [N, C, patch_size, patch_size]
 //!
-//! Key difference from Qwen-VL: Kimi resizes then zero-pads for alignment,
-//! while Qwen-VL resizes directly to factor-aligned dimensions. The model was
-//! trained with zero-padded images, so using the wrong resize strategy degrades
-//! image quality.
+//! Kimi resizes then zero-pads to make dimensions divisible by the alignment
+//! factor (patch_size * merge_size). The model was trained with zero-padded
+//! images, so using direct resize-to-aligned would degrade image quality.
 
 use image::{DynamicImage, GenericImageView};
 use ndarray::Array3;
