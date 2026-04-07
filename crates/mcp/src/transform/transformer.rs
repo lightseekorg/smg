@@ -59,7 +59,8 @@ impl ResponseTransformer {
                 let Some(obj) = item.as_object() else {
                     continue;
                 };
-                if obj.get("type").and_then(|v| v.as_str()) != Some("text") {
+                let item_type = obj.get("type").and_then(|v| v.as_str());
+                if item_type != Some("text") {
                     continue;
                 }
                 let Some(text) = obj.get("text").and_then(|v| v.as_str()) else {
@@ -246,19 +247,14 @@ impl ResponseTransformer {
         .unwrap_or_else(|| result.clone());
         let obj = payload.as_object();
 
-        let extracted = payload
+        let status = ImageGenerationCallStatus::Completed;
+        let output_result = payload
             .as_object()
             .and_then(|obj| obj.get("result"))
             .and_then(|v| v.as_str())
-            .map(String::from);
-        let fallback_text = payload
-            .as_str()
             .map(String::from)
-            .or_else(|| result.as_str().map(String::from))
-            .unwrap_or_else(|| payload.to_string());
-
-        let status = ImageGenerationCallStatus::Completed;
-        let output_result = extracted.or(Some(fallback_text));
+            .or_else(|| payload.as_str().map(String::from))
+            .or_else(|| result.as_str().map(String::from));
 
         ResponseOutputItem::ImageGenerationCall {
             id: format!("ig_{tool_call_id}"),
