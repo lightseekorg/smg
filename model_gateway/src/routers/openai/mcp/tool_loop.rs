@@ -854,18 +854,24 @@ fn build_mcp_call_item(
 fn sanitize_builtin_tool_arguments(response_format: &ResponseFormat, arguments: &mut Value) {
     match response_format {
         ResponseFormat::ImageGenerationCall => {
-            let Some(obj) = arguments.as_object_mut() else {
-                return;
-            };
-            obj.insert("model".to_string(), json!(IMAGE_MODEL));
-            let is_png = obj
-                .get("output_format")
-                .and_then(|v| v.as_str())
-                .map(|fmt| fmt.eq_ignore_ascii_case("png"))
-                .unwrap_or(true);
-            if is_png {
-                obj.insert("output_compression".to_string(), json!(100));
-            }
+            // Current fallback behavior: we intentionally narrow image arguments
+            // to `model` + `revised_prompt` for compatibility. This drops extra
+            // image options for now; we'll later pass either explicit user-provided
+            // values or safe defaults per option instead of truncating.
+            let revised_prompt = arguments
+                .as_object()
+                .and_then(|obj| {
+                    obj.get("revised_prompt")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| obj.get("prompt").and_then(|v| v.as_str()))
+                })
+                .unwrap_or("")
+                .to_string();
+
+            *arguments = json!({
+                "model": IMAGE_MODEL,
+                "revised_prompt": revised_prompt
+            });
         }
         ResponseFormat::WebSearchCall
         | ResponseFormat::CodeInterpreterCall
