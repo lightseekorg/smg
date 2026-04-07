@@ -68,11 +68,7 @@ impl ToolLoopState {
         output_item: ResponseOutputItem,
         _success: bool,
     ) {
-        let response_format = if matches!(&output_item, ResponseOutputItem::ImageGenerationCall { .. }) {
-            ResponseFormat::ImageGenerationCall
-        } else {
-            ResponseFormat::Passthrough
-        };
+        let response_format = response_format_for_output_item(&output_item);
         let output_value =
             serde_json::from_str::<Value>(&output_str).unwrap_or(Value::String(output_str));
         let model_context_output = compact_tool_output_for_model_context(
@@ -94,6 +90,17 @@ impl ToolLoopState {
 
         // Add transformed output item (respects tool's response_format)
         self.mcp_call_items.push(output_item);
+    }
+}
+
+fn response_format_for_output_item(output_item: &ResponseOutputItem) -> ResponseFormat {
+    match output_item {
+        ResponseOutputItem::WebSearchCall { .. } => ResponseFormat::WebSearchCall,
+        ResponseOutputItem::CodeInterpreterCall { .. } => ResponseFormat::CodeInterpreterCall,
+        ResponseOutputItem::FileSearchCall { .. } => ResponseFormat::FileSearchCall,
+        ResponseOutputItem::ImageGenerationCall { .. } => ResponseFormat::ImageGenerationCall,
+        ResponseOutputItem::McpCall { .. } => ResponseFormat::Passthrough,
+        _ => ResponseFormat::Passthrough,
     }
 }
 
