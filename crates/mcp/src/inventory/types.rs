@@ -99,6 +99,7 @@ impl AliasTarget {
 pub struct ArgMapping {
     pub renames: Vec<(String, String)>,
     pub defaults: Vec<(String, serde_json::Value)>,
+    pub overrides: Vec<(String, serde_json::Value)>,
 }
 
 impl ArgMapping {
@@ -117,6 +118,12 @@ impl ArgMapping {
         self.defaults.push((name.into(), value));
         self
     }
+
+    #[must_use]
+    pub fn with_override(mut self, name: impl Into<String>, value: serde_json::Value) -> Self {
+        self.overrides.push((name.into(), value));
+        self
+    }
 }
 
 /// Tool entry with metadata for approval, caching, and multi-tenancy.
@@ -128,6 +135,7 @@ pub struct ToolEntry {
     pub annotations: ToolAnnotations,
     pub tenant_id: Option<TenantId>,
     pub alias_target: Option<AliasTarget>,
+    pub arg_mapping: Option<ArgMapping>,
     pub cached_at: Instant,
     pub ttl: Option<Duration>,
     /// Response format for transforming MCP results to API-specific formats.
@@ -143,6 +151,7 @@ impl ToolEntry {
             annotations: ToolAnnotations::default(),
             tenant_id: None,
             alias_target: None,
+            arg_mapping: None,
             cached_at: Instant::now(),
             ttl: None,
             response_format: ResponseFormat::default(),
@@ -176,6 +185,12 @@ impl ToolEntry {
     pub fn with_alias(mut self, target: AliasTarget) -> Self {
         self.alias_target = Some(target);
         self.category = ToolCategory::Alias;
+        self
+    }
+
+    #[must_use]
+    pub fn with_arg_mapping(mut self, mapping: ArgMapping) -> Self {
+        self.arg_mapping = Some(mapping);
         self
     }
 
