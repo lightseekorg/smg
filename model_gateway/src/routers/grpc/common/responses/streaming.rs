@@ -143,14 +143,10 @@ impl ResponseStreamEventEmitter {
                         && item_data.get("call_id").and_then(|c| c.as_str())
                             == Some(&tool_result.call_id)
                     {
-                        // Add output/result field
+                        // Add output field
                         let output_str = serde_json::to_string(&tool_result.output)
                             .unwrap_or_else(|_| "{}".to_string());
-                        if item_type == Some("image_generation_call") {
-                            item_data["result"] = json!(output_str);
-                        } else {
-                            item_data["output"] = json!(output_str);
-                        }
+                        item_data["output"] = json!(output_str);
 
                         // Update status based on success
                         if tool_result.is_error {
