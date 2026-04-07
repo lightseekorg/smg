@@ -183,7 +183,58 @@ impl ResponseProcessor {
             utils::convert_proto_to_openai_logprobs(proto_logprobs, tokenizer)
         });
 
-        // Step 5: Build ChatCompletionMessage (proper response message type)
+        // Strip leaked chatml tokens only when a model-specific parser is configured
+        if self.configured_tool_parser.is_some() || self.configured_reasoning_parser.is_some() {
+            for token in [
+                "<|im_end|>",
+                "<|im_start|>",
+                "<|im_user|>",
+                "<|im_assistant|>",
+                "<|im_system|>",
+                "<|im_middle|>",
+            ] {
+                processed_text = processed_text.replace(token, "");
+            }
+            processed_text = processed_text.trim().to_string();
+        }
+
+        let is_json_response = matches!(
+            &original_request.response_format,
+            Some(openai_protocol::common::ResponseFormat::JsonObject)
+                | Some(openai_protocol::common::ResponseFormat::JsonSchema { .. })
+        );
+        if is_json_response {
+            if processed_text.starts_with("```json") || processed_text.starts_with("```JSON") {
+                if let Some(start) = processed_text.find('\n') {
+                    let inner = &processed_text[start + 1..];
+                    if let Some(end) = inner.rfind("```") {
+                        processed_text = inner[..end].trim().to_string();
+                    }
+                }
+            }
+
+            if processed_text.starts_with('{') {
+                let mut depth = 0i32;
+                let mut in_string = false;
+                let mut escape = false;
+                let mut json_end = None;
+                for (i, ch) in processed_text.char_indices() {
+                    if escape { escape = false; continue; }
+                    if ch == '\\' && in_string { escape = true; continue; }
+                    if ch == '"' { in_string = !in_string; continue; }
+                    if in_string { continue; }
+                    if ch == '{' { depth += 1; } else if ch == '}' {
+                        depth -= 1;
+                        if depth == 0 { json_end = Some(i + 1); break; }
+                    }
+                }
+                if let Some(end) = json_end {
+                    processed_text = processed_text[..end].to_string();
+                }
+            }
+        }
+
+        // Build ChatCompletionMessage (proper response message type)
         let chat_message = ChatCompletionMessage {
             role: "assistant".to_string(),
             content: if processed_text.is_empty() {
@@ -647,7 +698,22 @@ impl ResponseProcessor {
             }
         }
 
-        // Step 3: Build content blocks
+        // Strip leaked chatml tokens only when a model-specific parser is configured
+        if self.configured_tool_parser.is_some() || self.configured_reasoning_parser.is_some() {
+            for token in [
+                "<|im_end|>",
+                "<|im_start|>",
+                "<|im_user|>",
+                "<|im_assistant|>",
+                "<|im_system|>",
+                "<|im_middle|>",
+            ] {
+                processed_text = processed_text.replace(token, "");
+            }
+            processed_text = processed_text.trim().to_string();
+        }
+
+        // Build content blocks
         let mut content_blocks: Vec<messages::ContentBlock> = Vec::new();
 
         // Thinking block first (if present)

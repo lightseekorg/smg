@@ -420,7 +420,19 @@ impl StreamingProcessor {
                         }
                     }
 
-                    // Regular content emission
+                    // Strip leaked chatml/think tokens when a parser is configured
+                    let mut delta = delta;
+                    if self.configured_tool_parser.is_some()
+                        || self.configured_reasoning_parser.is_some()
+                    {
+                        for token in [
+                            "<|im_end|>", "<|im_start|>", "<|im_user|>",
+                            "<|im_assistant|>", "<|im_system|>", "<|im_middle|>",
+                            "</think>",
+                        ] {
+                            delta = delta.replace(token, "");
+                        }
+                    }
                     if !delta.is_empty() {
                         let content_chunk =
                             ChatCompletionStreamResponse::builder(request_id, model)
@@ -1242,7 +1254,17 @@ impl StreamingProcessor {
 
             match parser.parse_incremental(delta, tools).await {
                 Ok(StreamingParseResult { normal_text, calls }) => {
-                    // Emit normal text if present
+                    let mut normal_text = normal_text;
+                    if self.configured_tool_parser.is_some()
+                        || self.configured_reasoning_parser.is_some()
+                    {
+                        for token in [
+                            "<|im_end|>", "<|im_start|>", "<|im_user|>",
+                            "<|im_assistant|>", "<|im_system|>", "<|im_middle|>",
+                        ] {
+                            normal_text = normal_text.replace(token, "");
+                        }
+                    }
                     if !normal_text.is_empty() {
                         chunks.push(
                             ChatCompletionStreamResponse::builder(request_id, model)
