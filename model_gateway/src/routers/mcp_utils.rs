@@ -476,14 +476,14 @@ mod tests {
                     proxy: None,
                     required: false,
                     tools: Some(HashMap::from([(
-                        "generate_image".to_string(),
+                        "image_generation".to_string(),
                         ToolConfig {
                             response_format: ResponseFormatConfig::ImageGenerationCall,
                             ..Default::default()
                         },
                     )])),
                     builtin_type: Some(BuiltinToolType::ImageGeneration),
-                    builtin_tool_name: Some("generate_image".to_string()),
+                    builtin_tool_name: Some("image_generation".to_string()),
                 },
             ],
             pool: Default::default(),
@@ -532,7 +532,7 @@ mod tests {
             .find(|r| r.builtin_type == BuiltinToolType::ImageGeneration)
             .expect("Should have image generation routing");
         assert_eq!(image_routing.server_name, "image-server");
-        assert_eq!(image_routing.tool_name, "generate_image");
+        assert_eq!(image_routing.tool_name, "image_generation");
         assert_eq!(
             image_routing.response_format,
             ResponseFormat::ImageGenerationCall

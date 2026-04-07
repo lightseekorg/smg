@@ -14,7 +14,7 @@ pub fn compact_tool_output_for_model_context(
 ) -> String {
     match response_format {
         ResponseFormat::ImageGenerationCall => json!({
-            "tool": "generate_image",
+            "tool": "image_generation",
             "note": "binary image payload omitted from model context"
         })
         .to_string(),
