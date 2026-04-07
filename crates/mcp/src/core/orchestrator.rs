@@ -480,20 +480,22 @@ impl McpOrchestrator {
 
             // Get the existing entry to update or create alias
             let response_format: ResponseFormat = tool_config.response_format.clone().into();
+            let arg_mapping = tool_config.arg_mapping.as_ref().map(|cfg| {
+                let mut mapping = ArgMapping::new();
+                for (from, to) in &cfg.renames {
+                    mapping = mapping.with_rename(from, to);
+                }
+                for (key, value) in &cfg.defaults {
+                    mapping = mapping.with_default(key, value.clone());
+                }
+                for (key, value) in &cfg.overrides {
+                    mapping = mapping.with_override(key, value.clone());
+                }
+                mapping
+            });
 
             // If there's an alias, register it
             if let Some(alias_name) = &tool_config.alias {
-                let arg_mapping = tool_config.arg_mapping.as_ref().map(|cfg| {
-                    let mut mapping = ArgMapping::new();
-                    for (from, to) in &cfg.renames {
-                        mapping = mapping.with_rename(from, to);
-                    }
-                    for (key, value) in &cfg.defaults {
-                        mapping = mapping.with_default(key, value.clone());
-                    }
-                    mapping
-                });
-
                 if let Err(e) = self.register_alias(
                     alias_name,
                     &config.name,
@@ -515,6 +517,7 @@ impl McpOrchestrator {
                 // No alias, but has custom response format - update the entry directly
                 if let Some(mut entry) = self.tool_inventory.get_entry(&config.name, tool_name) {
                     entry.response_format = response_format.clone();
+                    entry.arg_mapping.clone_from(&arg_mapping);
                     self.tool_inventory.insert_entry(entry);
                     info!(
                         "Set response format {:?} for '{}:{}'",
@@ -1230,6 +1233,9 @@ impl McpOrchestrator {
                 alias.target.tool_name().to_string(),
             )
         } else {
+            if let Some(mapping) = &entry.arg_mapping {
+                arguments = Self::apply_arg_mapping(arguments, mapping);
+            }
             (
                 entry.server_key().to_string(),
                 entry.tool_name().to_string(),
@@ -1284,7 +1290,7 @@ impl McpOrchestrator {
         }
     }
 
-    /// Apply argument mapping for aliased tools.
+    /// Apply argument mapping for tool calls.
     fn apply_arg_mapping(mut args: Value, mapping: &ArgMapping) -> Value {
         if let Value::Object(ref mut map) = args {
             // Apply renames
@@ -1298,6 +1304,11 @@ impl McpOrchestrator {
             for (key, default_value) in &mapping.defaults {
                 map.entry(key.clone())
                     .or_insert_with(|| default_value.clone());
+            }
+
+            // Apply forced overrides last so config wins over model-produced values
+            for (key, override_value) in &mapping.overrides {
+                map.insert(key.clone(), override_value.clone());
             }
         }
         args
@@ -2010,12 +2021,14 @@ mod integration_tests {
 }
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::HashMap, time::Duration};
 
     use tokio::time::timeout;
 
     use super::*;
-    use crate::core::config::Tool as McpTool;
+    use crate::core::config::{
+        ArgMappingConfig, ResponseFormatConfig, Tool as McpTool, ToolConfig,
+    };
 
     fn create_test_tool(name: &str) -> McpTool {
         use std::sync::Arc;
@@ -2206,6 +2219,86 @@ mod tests {
         assert!(obj.contains_key("search_query"));
         assert!(!obj.contains_key("query"));
         assert_eq!(obj.get("limit"), Some(&serde_json::json!(10)));
+    }
+
+    #[test]
+    fn test_arg_mapping_overrides_take_precedence() {
+        let mapping = ArgMapping::new()
+            .with_default("enable_source", serde_json::json!(true))
+            .with_override("enable_brave", serde_json::json!(false));
+
+        let args = serde_json::json!({
+            "query": "rust programming",
+            "enable_brave": true
+        });
+
+        let result = McpOrchestrator::apply_arg_mapping(args, &mapping);
+
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj.get("enable_source"), Some(&serde_json::json!(true)));
+        assert_eq!(obj.get("enable_brave"), Some(&serde_json::json!(false)));
+    }
+
+    #[test]
+    fn test_apply_tool_configs_sets_direct_arg_mapping() {
+        let orchestrator = McpOrchestrator::new_test();
+        orchestrator
+            .tool_inventory
+            .insert_entry(ToolEntry::from_server_tool(
+                "web-search",
+                create_test_tool("search_web"),
+            ));
+
+        let mut tools = HashMap::new();
+        tools.insert(
+            "search_web".to_string(),
+            ToolConfig {
+                alias: None,
+                response_format: ResponseFormatConfig::WebSearchCall,
+                arg_mapping: Some(ArgMappingConfig {
+                    renames: HashMap::new(),
+                    defaults: HashMap::from([(
+                        "enable_source".to_string(),
+                        serde_json::json!(true),
+                    )]),
+                    overrides: HashMap::from([(
+                        "enable_brave".to_string(),
+                        serde_json::json!(false),
+                    )]),
+                }),
+            },
+        );
+
+        let config = McpServerConfig {
+            name: "web-search".to_string(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:8080/sse".to_string(),
+                token: None,
+                headers: HashMap::new(),
+            },
+            proxy: None,
+            required: false,
+            tools: Some(tools),
+            builtin_type: None,
+            builtin_tool_name: None,
+        };
+
+        orchestrator.apply_tool_configs(&config);
+
+        let entry = orchestrator
+            .tool_inventory
+            .get_entry("web-search", "search_web")
+            .expect("tool entry should exist");
+        let mapping = entry.arg_mapping.expect("direct arg mapping should be set");
+        assert_eq!(
+            mapping.defaults,
+            vec![("enable_source".to_string(), serde_json::json!(true))]
+        );
+        assert_eq!(
+            mapping.overrides,
+            vec![("enable_brave".to_string(), serde_json::json!(false))]
+        );
+        assert_eq!(entry.response_format, ResponseFormat::WebSearchCall);
     }
 
     #[test]
