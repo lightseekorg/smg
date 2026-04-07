@@ -534,18 +534,34 @@ pub(crate) fn inject_mcp_metadata_streaming(
 
         let mut prefix = Vec::with_capacity(mcp_servers.len() + state.mcp_call_items.len());
         for binding in mcp_servers {
-            prefix.push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
+            if !session.is_internal_server_label(&binding.label) {
+                prefix.push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
+            }
         }
-        prefix.extend(state.mcp_call_items.iter().cloned());
+        prefix.extend(
+            state
+                .mcp_call_items
+                .iter()
+                .filter(|item| !is_internal_mcp_response_item(item, session))
+                .cloned(),
+        );
         output_array.splice(0..0, prefix);
     } else if let Some(obj) = response.as_object_mut() {
         let mut output_items = Vec::new();
         for binding in mcp_servers {
-            output_items
-                .push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
+            if !session.is_internal_server_label(&binding.label) {
+                output_items
+                    .push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
+            }
         }
         // Use stored transformed items (no reconstruction needed)
-        output_items.extend(state.mcp_call_items.iter().cloned());
+        output_items.extend(
+            state
+                .mcp_call_items
+                .iter()
+                .filter(|item| !is_internal_mcp_response_item(item, session))
+                .cloned(),
+        );
         obj.insert("output".to_string(), Value::Array(output_items));
     }
 }
@@ -786,10 +802,24 @@ fn build_incomplete_response(
                 mcp_servers.len() + state.mcp_call_items.len() + incomplete_items.len(),
             );
             for binding in mcp_servers {
-                prefix.push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
+                if !session.is_internal_server_label(&binding.label) {
+                    prefix.push(
+                        session.build_mcp_list_tools_json(&binding.label, &binding.server_key),
+                    );
+                }
             }
-            prefix.extend(state.mcp_call_items.iter().cloned());
-            prefix.extend(incomplete_items);
+            prefix.extend(
+                state
+                    .mcp_call_items
+                    .iter()
+                    .filter(|item| !is_internal_mcp_response_item(item, session))
+                    .cloned(),
+            );
+            prefix.extend(
+                incomplete_items
+                    .into_iter()
+                    .filter(|item| !is_internal_mcp_response_item(item, session)),
+            );
             output_array.splice(0..0, prefix);
         }
     }
@@ -811,6 +841,12 @@ fn build_incomplete_response(
     }
 
     Ok(response)
+}
+
+fn is_internal_mcp_response_item(item: &Value, session: &McpToolSession<'_>) -> bool {
+    item.get("server_label")
+        .and_then(|value| value.as_str())
+        .is_some_and(|server_label| session.is_internal_server_label(server_label))
 }
 
 /// Build a mcp_call output item

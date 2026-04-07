@@ -212,6 +212,10 @@ pub struct McpServerConfig {
     /// to invoke (e.g., "brave_web_search", "execute", "search").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builtin_tool_name: Option<String>,
+
+    /// Whether tools from this server should be hidden from client-visible output.
+    #[serde(default)]
+    pub internal: bool,
 }
 
 impl McpServerConfig {
@@ -1228,6 +1232,7 @@ builtin_tool_name: brave_web_search
             config.builtin_tool_name,
             Some("brave_web_search".to_string())
         );
+        assert!(!config.internal);
     }
 
     #[test]
@@ -1242,6 +1247,21 @@ url: "http://localhost:3000/sse"
         assert_eq!(config.name, "regular-server");
         assert!(config.builtin_type.is_none());
         assert!(config.builtin_tool_name.is_none());
+        assert!(!config.internal);
+    }
+
+    #[test]
+    fn test_server_config_with_internal_visibility() {
+        let yaml = r#"
+name: "internal-server"
+protocol: sse
+url: "http://localhost:3000/sse"
+internal: true
+"#;
+
+        let config: McpServerConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
+        assert_eq!(config.name, "internal-server");
+        assert!(config.internal);
     }
 
     #[test]
@@ -1310,6 +1330,7 @@ servers:
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         };
 
         assert!(config.validate().is_ok());
@@ -1329,6 +1350,7 @@ servers:
             tools: None,
             builtin_type: Some(BuiltinToolType::WebSearchPreview),
             builtin_tool_name: Some("brave_web_search".to_string()),
+            internal: false,
         };
 
         assert!(config.validate().is_ok());
@@ -1348,6 +1370,7 @@ servers:
             tools: None,
             builtin_type: Some(BuiltinToolType::WebSearchPreview),
             builtin_tool_name: None, // Missing!
+            internal: false,
         };
 
         let err = config.validate().unwrap_err();
@@ -1373,6 +1396,7 @@ servers:
             tools: None,
             builtin_type: None, // Missing!
             builtin_tool_name: Some("brave_web_search".to_string()),
+            internal: false,
         };
 
         let err = config.validate().unwrap_err();
@@ -1400,6 +1424,7 @@ servers:
                     tools: None,
                     builtin_type: Some(BuiltinToolType::WebSearchPreview),
                     builtin_tool_name: Some("search".to_string()),
+                    internal: false,
                 },
                 McpServerConfig {
                     name: "code-runner".to_string(),
@@ -1413,6 +1438,7 @@ servers:
                     tools: None,
                     builtin_type: Some(BuiltinToolType::CodeInterpreter),
                     builtin_tool_name: Some("execute".to_string()),
+                    internal: false,
                 },
             ],
             ..Default::default()
@@ -1437,6 +1463,7 @@ servers:
                     tools: None,
                     builtin_type: Some(BuiltinToolType::WebSearchPreview),
                     builtin_tool_name: Some("search1".to_string()),
+                    internal: false,
                 },
                 McpServerConfig {
                     name: "brave2".to_string(),
@@ -1450,6 +1477,7 @@ servers:
                     tools: None,
                     builtin_type: Some(BuiltinToolType::WebSearchPreview), // Duplicate!
                     builtin_tool_name: Some("search2".to_string()),
+                    internal: false,
                 },
             ],
             ..Default::default()

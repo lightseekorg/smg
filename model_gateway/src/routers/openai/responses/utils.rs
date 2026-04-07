@@ -6,6 +6,7 @@ use openai_protocol::{
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use smg_mcp::McpToolSession;
 use tracing::warn;
 
 use super::common::parse_sse_block;
@@ -238,22 +239,265 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
 ///
 /// The model receives function tools, but the response should mirror the original
 /// request's tool format (MCP tools with server_url, builtin tools like web_search_preview).
-pub(super) fn restore_original_tools(resp: &mut Value, original_body: &ResponsesRequest) {
+pub(super) fn restore_original_tools(
+    resp: &mut Value,
+    original_body: &ResponsesRequest,
+    session: Option<&McpToolSession<'_>>,
+) {
+    strip_internal_mcp_output_items(resp, session);
+    strip_internal_mcp_tools(resp, session);
+
     let Some(original_tools) = original_body.tools.as_ref() else {
         return;
     };
 
-    let restored_tools: Vec<Value> = original_tools
+    let mut restored_tools: Vec<Value> = original_tools
         .iter()
         .filter_map(response_tool_to_value)
         .collect();
 
+    restored_tools.retain(|tool| !is_internal_mcp_tool_value(tool, session));
+
     if restored_tools.is_empty() {
+        let had_restorable_original_tool = original_tools
+            .iter()
+            .any(|tool| response_tool_to_value(tool).is_some());
+        if had_restorable_original_tool {
+            if let Some(obj) = resp.as_object_mut() {
+                obj.remove("tools");
+            }
+        }
         return;
     }
 
     if let Some(obj) = resp.as_object_mut() {
         obj.insert("tools".to_string(), Value::Array(restored_tools));
         obj.entry("tool_choice").or_insert(json!("auto"));
+    }
+}
+
+fn strip_internal_mcp_tools(resp: &mut Value, session: Option<&McpToolSession<'_>>) {
+    let Some(obj) = resp.as_object_mut() else {
+        return;
+    };
+
+    let Some(tools) = obj.get_mut("tools").and_then(|value| value.as_array_mut()) else {
+        return;
+    };
+
+    tools.retain(|tool| !is_internal_mcp_tool_value(tool, session));
+}
+
+fn strip_internal_mcp_output_items(resp: &mut Value, session: Option<&McpToolSession<'_>>) {
+    let Some(obj) = resp.as_object_mut() else {
+        return;
+    };
+
+    let Some(output) = obj.get_mut("output").and_then(|value| value.as_array_mut()) else {
+        return;
+    };
+
+    output.retain(|item| !is_internal_mcp_output_item(item, session));
+}
+
+fn is_internal_mcp_tool_value(tool: &Value, session: Option<&McpToolSession<'_>>) -> bool {
+    let Some(session) = session else {
+        return false;
+    };
+
+    match (
+        tool.get("type").and_then(|value| value.as_str()),
+        tool.get("name").and_then(|value| value.as_str()),
+        tool.get("server_label").and_then(|value| value.as_str()),
+    ) {
+        (Some("function"), Some(name), _) => session.is_internal_tool(name),
+        (Some("mcp"), _, Some(server_label)) => session.is_internal_server_label(server_label),
+        _ => false,
+    }
+}
+
+fn is_internal_mcp_output_item(item: &Value, session: Option<&McpToolSession<'_>>) -> bool {
+    let Some(session) = session else {
+        return false;
+    };
+
+    match (
+        item.get("type").and_then(|value| value.as_str()),
+        item.get("name").and_then(|value| value.as_str()),
+        item.get("server_label").and_then(|value| value.as_str()),
+    ) {
+        (Some("mcp_list_tools"), _, Some(server_label)) => {
+            session.is_internal_server_label(server_label)
+        }
+        (Some("mcp_call"), Some(name), _) => session.is_internal_tool(name),
+        (Some("mcp_call"), _, Some(server_label)) => session.is_internal_server_label(server_label),
+        (Some("function_call"), Some(name), _) => session.is_internal_tool(name),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::responses::{ResponseInput, ResponsesRequest};
+    use serde_json::json;
+    use smg_mcp::{
+        McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig, McpToolSession,
+        McpTransport, Tool, ToolEntry,
+    };
+
+    use super::restore_original_tools;
+
+    fn test_tool(name: &str) -> Tool {
+        let schema = match json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            }
+        }) {
+            serde_json::Value::Object(schema) => schema,
+            _ => unreachable!("schema must be object"),
+        };
+
+        Tool {
+            name: name.to_string().into(),
+            title: None,
+            description: Some("internal".into()),
+            input_schema: schema.into(),
+            output_schema: None,
+            icons: None,
+            annotations: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_original_tools_strips_injected_internal_tool_when_request_had_no_tools() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            ..Default::default()
+        };
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: true,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                test_tool("internal_search"),
+            ));
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+        let mut response = serde_json::json!({
+            "tools": [{
+                "type": "function",
+                "name": "internal_search",
+                "description": "internal",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": ["query"]
+                }
+            }],
+            "tool_choice": "auto"
+        });
+
+        restore_original_tools(&mut response, &original_body, Some(&session));
+
+        assert_eq!(response["tools"], serde_json::json!([]));
+        assert_eq!(response["tool_choice"], "auto");
+    }
+
+    #[tokio::test]
+    async fn restore_original_tools_strips_internal_mcp_output_items() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            ..Default::default()
+        };
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: true,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                test_tool("internal_search"),
+            ));
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+        let mut response = serde_json::json!({
+            "output": [
+                {
+                    "type": "mcp_list_tools",
+                    "server_label": "internal-label",
+                    "tools": []
+                },
+                {
+                    "type": "mcp_call",
+                    "name": "internal_search",
+                    "server_label": "internal-label"
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "visible"}]
+                }
+            ]
+        });
+
+        restore_original_tools(&mut response, &original_body, Some(&session));
+
+        assert_eq!(
+            response["output"],
+            serde_json::json!([{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "visible"}]
+            }])
+        );
     }
 }

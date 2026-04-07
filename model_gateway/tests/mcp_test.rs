@@ -68,6 +68,7 @@ async fn test_server_connection_with_mock() {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         }],
         pool: Default::default(),
         proxy: None,
@@ -111,6 +112,7 @@ async fn test_tool_availability_checking() {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         }],
         pool: Default::default(),
         proxy: None,
@@ -163,6 +165,7 @@ async fn test_multi_server_connection() {
                 tools: None,
                 builtin_type: None,
                 builtin_tool_name: None,
+                internal: false,
             },
             McpServerConfig {
                 name: "mock_server_2".to_string(),
@@ -176,6 +179,7 @@ async fn test_multi_server_connection() {
                 tools: None,
                 builtin_type: None,
                 builtin_tool_name: None,
+                internal: false,
             },
         ],
         pool: Default::default(),
@@ -217,6 +221,7 @@ async fn test_tool_execution_with_mock() {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         }],
         pool: Default::default(),
         proxy: None,
@@ -289,6 +294,7 @@ async fn test_concurrent_tool_execution() {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         }],
         pool: Default::default(),
         proxy: None,
@@ -355,6 +361,7 @@ async fn test_tool_execution_errors() {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         }],
         pool: Default::default(),
         proxy: None,
@@ -409,6 +416,7 @@ async fn test_connection_without_server() {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         }],
         pool: Default::default(),
         proxy: None,
@@ -448,6 +456,7 @@ async fn test_tool_info_structure() {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         }],
         pool: Default::default(),
         proxy: None,
@@ -494,6 +503,7 @@ async fn test_sse_connection() {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         }],
         pool: Default::default(),
         proxy: None,
@@ -531,6 +541,7 @@ async fn test_transport_types() {
         tools: None,
         builtin_type: None,
         builtin_tool_name: None,
+        internal: false,
     };
     assert_eq!(http_config.name, "http_server");
 
@@ -547,6 +558,7 @@ async fn test_transport_types() {
         tools: None,
         builtin_type: None,
         builtin_tool_name: None,
+        internal: false,
     };
     assert_eq!(sse_config.name, "sse_server");
 
@@ -563,6 +575,7 @@ async fn test_transport_types() {
         tools: None,
         builtin_type: None,
         builtin_tool_name: None,
+        internal: false,
     };
     assert_eq!(stdio_config.name, "stdio_server");
 }
@@ -587,6 +600,7 @@ async fn test_complete_workflow() {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         }],
         pool: Default::default(),
         proxy: None,
