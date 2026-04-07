@@ -503,6 +503,9 @@ fn stable_streaming_tool_item_id(
         ResponseFormat::WebSearchCall => normalize_tool_item_id_with_prefix(source_id, "ws_"),
         ResponseFormat::CodeInterpreterCall => normalize_tool_item_id_with_prefix(source_id, "ci_"),
         ResponseFormat::FileSearchCall => normalize_tool_item_id_with_prefix(source_id, "fs_"),
+        ResponseFormat::ImageGenerationCall => {
+            normalize_tool_item_id_with_prefix(source_id, "ig_")
+        }
     }
 }
 
@@ -523,7 +526,8 @@ fn non_streaming_tool_item_id_source(item_id: &str, response_format: &ResponseFo
         ResponseFormat::Passthrough => item_id.to_string(),
         ResponseFormat::WebSearchCall
         | ResponseFormat::CodeInterpreterCall
-        | ResponseFormat::FileSearchCall => item_id
+        | ResponseFormat::FileSearchCall
+        | ResponseFormat::ImageGenerationCall => item_id
             .strip_prefix("fc_")
             .or_else(|| item_id.strip_prefix("call_"))
             .unwrap_or(item_id)
