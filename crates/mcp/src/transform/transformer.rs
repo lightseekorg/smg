@@ -58,7 +58,6 @@ impl ResponseTransformer {
         // Handle MCP CallToolResult-style wrapper:
         // [{"type":"text","text":"{...image_generation_call payload...}"}]
         if let Some(arr) = result.as_array() {
-            let mut fallback_candidate: Option<Value> = None;
             for item in arr {
                 let Some(obj) = item.as_object() else {
                     continue;
@@ -74,16 +73,8 @@ impl ResponseTransformer {
                         if parsed_obj.contains_key("result") {
                             return Some(parsed);
                         }
-                        if Self::is_image_payload_candidate(parsed_obj)
-                            && fallback_candidate.is_none()
-                        {
-                            fallback_candidate = Some(parsed);
-                        }
                     }
                 }
-            }
-            if fallback_candidate.is_some() {
-                return fallback_candidate;
             }
         }
 
