@@ -254,7 +254,8 @@ impl ResponseTransformer {
             .and_then(|v| v.as_str())
             .map(String::from)
             .or_else(|| payload.as_str().map(String::from))
-            .or_else(|| result.as_str().map(String::from));
+            .or_else(|| result.as_str().map(String::from))
+            .or_else(|| Some(payload.to_string()));
 
         ResponseOutputItem::ImageGenerationCall {
             id: format!("ig_{tool_call_id}"),
