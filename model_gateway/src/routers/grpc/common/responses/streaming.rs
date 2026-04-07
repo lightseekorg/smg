@@ -122,7 +122,8 @@ impl ResponseStreamEventEmitter {
     ///
     /// After MCP tools are executed, this updates the stored output items
     /// to include the output field from the tool results.
-    /// Supports mcp_call, web_search_call, code_interpreter_call, and file_search_call item types.
+    /// Supports mcp_call, web_search_call, code_interpreter_call, file_search_call,
+    /// and image_generation_call item types.
     pub(crate) fn update_mcp_call_outputs(&mut self, tool_results: &[ToolResult]) {
         for tool_result in tool_results {
             // Find the output item with matching call_id
@@ -136,15 +137,20 @@ impl ResponseStreamEventEmitter {
                             | Some("web_search_call")
                             | Some("code_interpreter_call")
                             | Some("file_search_call")
+                            | Some("image_generation_call")
                     );
                     if is_tool_call
                         && item_data.get("call_id").and_then(|c| c.as_str())
                             == Some(&tool_result.call_id)
                     {
-                        // Add output field
+                        // Add output/result field
                         let output_str = serde_json::to_string(&tool_result.output)
                             .unwrap_or_else(|_| "{}".to_string());
-                        item_data["output"] = json!(output_str);
+                        if item_type == Some("image_generation_call") {
+                            item_data["result"] = json!(output_str);
+                        } else {
+                            item_data["output"] = json!(output_str);
+                        }
 
                         // Update status based on success
                         if tool_result.is_error {
