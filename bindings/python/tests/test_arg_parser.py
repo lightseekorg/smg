@@ -406,6 +406,52 @@ class TestRouterArgs:
         assert router_args.policy == "random"
         assert router_args.pd_disaggregation is False
 
+    def test_prefixed_args_fall_back_to_backend_args_by_default(self):
+        """Prefixed router args should still fall back to backend args unless disabled."""
+        args = SimpleNamespace(
+            router_model_path=None,
+            router_disable_arg_fallback=False,
+            model_path="backend/model",
+            router_tokenizer_path=None,
+            tokenizer_path="backend/tokenizer",
+            router_worker_urls=[],
+            worker_urls=[],
+            router_prefill=None,
+            router_decode=None,
+            router_selector=None,
+            router_prefill_selector=None,
+            router_decode_selector=None,
+            router_router_selector=None,
+        )
+
+        router_args = RouterArgs.from_cli_args(args, use_router_prefix=True)
+
+        assert router_args.model_path == "backend/model"
+        assert router_args.tokenizer_path == "backend/tokenizer"
+
+    def test_prefixed_args_can_disable_backend_fallback(self):
+        """When router fallback is disabled, backend args should not fill router args."""
+        args = SimpleNamespace(
+            router_model_path=None,
+            router_disable_arg_fallback=True,
+            model_path="backend/model",
+            router_tokenizer_path=None,
+            tokenizer_path="backend/tokenizer",
+            router_worker_urls=[],
+            worker_urls=[],
+            router_prefill=None,
+            router_decode=None,
+            router_selector=None,
+            router_prefill_selector=None,
+            router_decode_selector=None,
+            router_router_selector=None,
+        )
+
+        router_args = RouterArgs.from_cli_args(args, use_router_prefix=True)
+
+        assert router_args.model_path is None
+        assert router_args.tokenizer_path is None
+
 
 class TestPolicyFromStr:
     """Test policy string to enum conversion."""
