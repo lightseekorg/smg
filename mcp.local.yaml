@@ -1,9 +1,9 @@
 servers:
-  - name: image_generation
+  - name: generate_image
     protocol: streamable
     url: http://localhost:8080/mcp
     builtin_type: image_generation
-    builtin_tool_name: image_generation
+    builtin_tool_name: generate_image
     tools:
-      image_generation:
+      generate_image:
         response_format: image_generation_call
