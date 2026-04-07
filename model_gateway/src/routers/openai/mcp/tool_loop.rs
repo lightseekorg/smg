@@ -488,40 +488,22 @@ fn stable_streaming_tool_item_id(
 
     match response_format {
         ResponseFormat::Passthrough => mcp_response_item_id(source_id),
-        ResponseFormat::WebSearchCall => source_id
-            .strip_prefix("fc_")
-            .or_else(|| source_id.strip_prefix("call_"))
-            .map(|stripped| format!("ws_{stripped}"))
-            .unwrap_or_else(|| {
-                if source_id.starts_with("ws_") {
-                    source_id.to_string()
-                } else {
-                    format!("ws_{source_id}")
-                }
-            }),
-        ResponseFormat::CodeInterpreterCall => source_id
-            .strip_prefix("fc_")
-            .or_else(|| source_id.strip_prefix("call_"))
-            .map(|stripped| format!("ci_{stripped}"))
-            .unwrap_or_else(|| {
-                if source_id.starts_with("ci_") {
-                    source_id.to_string()
-                } else {
-                    format!("ci_{source_id}")
-                }
-            }),
-        ResponseFormat::FileSearchCall => source_id
-            .strip_prefix("fc_")
-            .or_else(|| source_id.strip_prefix("call_"))
-            .map(|stripped| format!("fs_{stripped}"))
-            .unwrap_or_else(|| {
-                if source_id.starts_with("fs_") {
-                    source_id.to_string()
-                } else {
-                    format!("fs_{source_id}")
-                }
-            }),
+        ResponseFormat::WebSearchCall => normalize_tool_item_id_with_prefix(source_id, "ws_"),
+        ResponseFormat::CodeInterpreterCall => normalize_tool_item_id_with_prefix(source_id, "ci_"),
+        ResponseFormat::FileSearchCall => normalize_tool_item_id_with_prefix(source_id, "fs_"),
     }
+}
+
+fn normalize_tool_item_id_with_prefix(source_id: &str, target_prefix: &str) -> String {
+    if source_id.starts_with(target_prefix) {
+        return source_id.to_string();
+    }
+
+    source_id
+        .strip_prefix("fc_")
+        .or_else(|| source_id.strip_prefix("call_"))
+        .map(|stripped| format!("{target_prefix}{stripped}"))
+        .unwrap_or_else(|| format!("{target_prefix}{source_id}"))
 }
 
 fn non_streaming_tool_item_id_source(item_id: &str, response_format: &ResponseFormat) -> String {

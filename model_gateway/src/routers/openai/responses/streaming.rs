@@ -216,12 +216,6 @@ fn send_sse_event(
     tx.send(Ok(Bytes::from(block))).is_ok()
 }
 
-/// Transform fc_* item IDs to mcp_* format
-#[inline]
-fn transform_fc_to_mcp_id(item_id: &str) -> String {
-    mcp_response_item_id(item_id)
-}
-
 /// Map function_call event names to mcp_call event names
 #[inline]
 fn map_event_name(event_name: &str) -> &str {
@@ -272,7 +266,7 @@ fn send_buffered_arguments(
         .get("item_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let mcp_item_id = transform_fc_to_mcp_id(item_id);
+    let mcp_item_id = mcp_response_item_id(item_id);
 
     // Build synthetic delta event
     let mut delta_event = json!({
