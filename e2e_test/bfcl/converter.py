@@ -15,6 +15,10 @@ def _fix_parameter_type(params: dict) -> dict:
         result["type"] = "object"
     elif ptype == "float":
         result["type"] = "number"
+    elif ptype == "int":
+        result["type"] = "integer"
+    elif ptype in ("list", "tuple"):
+        result["type"] = "array"
     props = result.get("properties")
     if isinstance(props, dict):
         result["properties"] = {
