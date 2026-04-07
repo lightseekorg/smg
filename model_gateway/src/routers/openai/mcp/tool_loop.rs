@@ -858,6 +858,14 @@ fn sanitize_builtin_tool_arguments(response_format: &ResponseFormat, arguments: 
                 return;
             };
             obj.insert("model".to_string(), json!(IMAGE_MODEL));
+            let is_png = obj
+                .get("output_format")
+                .and_then(|v| v.as_str())
+                .map(|fmt| fmt.eq_ignore_ascii_case("png"))
+                .unwrap_or(true);
+            if is_png {
+                obj.insert("output_compression".to_string(), json!(100));
+            }
         }
         ResponseFormat::WebSearchCall
         | ResponseFormat::CodeInterpreterCall
