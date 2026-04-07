@@ -400,8 +400,10 @@ impl StreamingProcessor {
                             && tool_choice_enabled
                             && (tool_parser_available || used_json_schema)
                         {
-                            let tool_chunks = if is_specific_function {
-                                // Handle specific function case - emit tool call deltas with arguments
+                            let tool_chunks = if is_specific_function
+                                && !(self.configured_tool_parser.is_some()
+                                    && tool_parser_available)
+                            {
                                 Self::process_specific_function_stream(
                                     &delta,
                                     index,
@@ -414,7 +416,6 @@ impl StreamingProcessor {
                                     history_tool_calls_count,
                                 )
                             } else {
-                                // Use incremental parser for regular/required modes
                                 self.process_tool_calls_stream(
                                     &delta,
                                     index,
@@ -443,7 +444,19 @@ impl StreamingProcessor {
                         }
                     }
 
-                    // Regular content emission
+                    // Strip leaked chatml/think tokens when a parser is configured
+                    let mut delta = delta;
+                    if self.configured_tool_parser.is_some()
+                        || self.configured_reasoning_parser.is_some()
+                    {
+                        for token in [
+                            "<|im_end|>", "<|im_start|>", "<|im_user|>",
+                            "<|im_assistant|>", "<|im_system|>", "<|im_middle|>",
+                            "</think>",
+                        ] {
+                            delta = delta.replace(token, "");
+                        }
+                    }
                     if !delta.is_empty() {
                         let content_chunk =
                             ChatCompletionStreamResponse::builder(request_id, model)
@@ -1265,7 +1278,17 @@ impl StreamingProcessor {
 
             match parser.parse_incremental(delta, tools).await {
                 Ok(StreamingParseResult { normal_text, calls }) => {
-                    // Emit normal text if present
+                    let mut normal_text = normal_text;
+                    if self.configured_tool_parser.is_some()
+                        || self.configured_reasoning_parser.is_some()
+                    {
+                        for token in [
+                            "<|im_end|>", "<|im_start|>", "<|im_user|>",
+                            "<|im_assistant|>", "<|im_system|>", "<|im_middle|>",
+                        ] {
+                            normal_text = normal_text.replace(token, "");
+                        }
+                    }
                     if !normal_text.is_empty() {
                         chunks.push(
                             ChatCompletionStreamResponse::builder(request_id, model)
@@ -1787,7 +1810,9 @@ impl StreamingProcessor {
 
                     // Tool call handling: incremental streaming parser
                     if !in_reasoning && streaming_tool_parser.is_some() {
-                        if is_specific_function {
+                        if is_specific_function
+                            && !(self.configured_tool_parser.is_some() && tool_parser_available)
+                        {
                             // Specific function: entire output is arguments for one tool
                             if !has_tool_calls {
                                 has_tool_calls = true;
