@@ -88,7 +88,6 @@ pub struct CodeInterpreterTool {
 ///
 /// The upstream API may add optional fields over time. We keep this tool shape
 /// open by preserving unknown key/value pairs.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 pub struct ImageGenerationTool {
     #[serde(flatten)]

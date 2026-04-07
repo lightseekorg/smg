@@ -18,7 +18,10 @@ pub fn compact_tool_output_for_model_context(
             "note": "binary image payload omitted from model context"
         })
         .to_string(),
-        // No-op for other tools for now: keep full output text in model context.
-        _ => output.to_string(),
+        // No-op for other tools for now: preserve raw string outputs as-is.
+        _ => match output {
+            Value::String(text) => text.clone(),
+            _ => output.to_string(),
+        },
     }
 }
