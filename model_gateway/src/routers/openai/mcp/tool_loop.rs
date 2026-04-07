@@ -854,20 +854,24 @@ fn build_mcp_call_item(
 fn sanitize_builtin_tool_arguments(response_format: &ResponseFormat, arguments: &mut Value) {
     match response_format {
         ResponseFormat::ImageGenerationCall => {
-            let revised_prompt = arguments
+            let revised_prompt_from_prompt = arguments
                 .as_object()
-                .and_then(|obj| {
-                    obj.get("revised_prompt")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| obj.get("prompt").and_then(|v| v.as_str()))
-                })
-                .unwrap_or("")
-                .to_string();
+                .and_then(|obj| obj.get("prompt").and_then(|v| v.as_str()))
+                .map(str::to_string);
 
-            *arguments = json!({
-                "model": IMAGE_MODEL,
-                "revised_prompt": revised_prompt
-            });
+            if !arguments.is_object() {
+                *arguments = json!({});
+            }
+
+            if let Some(obj) = arguments.as_object_mut() {
+                obj.entry("model".to_string())
+                    .or_insert_with(|| json!(IMAGE_MODEL));
+                if !obj.contains_key("revised_prompt") {
+                    if let Some(prompt) = revised_prompt_from_prompt {
+                        obj.insert("revised_prompt".to_string(), json!(prompt));
+                    }
+                }
+            }
         }
         ResponseFormat::WebSearchCall
         | ResponseFormat::CodeInterpreterCall
