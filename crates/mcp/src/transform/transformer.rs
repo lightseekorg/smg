@@ -39,10 +39,7 @@ impl ResponseTransformer {
     // Extract image_generation_call payload from direct output, wrapped MCP text
     // content, or stringified JSON. Selection is gated by response format
     // (derived from builtin_type), not payload key heuristics.
-    fn image_payload_from_wrapped_content(
-        result: &serde_json::Value,
-        format: &ResponseFormat,
-    ) -> Option<Value> {
+    fn image_payload_from_wrapped_content(result: &Value, format: &ResponseFormat) -> Option<Value> {
         if !matches!(format, ResponseFormat::ImageGenerationCall) {
             return None;
         }
@@ -97,7 +94,7 @@ impl ResponseTransformer {
     ///
     /// Returns a `ResponseOutputItem` from the protocols crate.
     pub fn transform(
-        result: &serde_json::Value,
+        result: &Value,
         format: &ResponseFormat,
         tool_call_id: &str,
         server_label: &str,
@@ -121,7 +118,7 @@ impl ResponseTransformer {
 
     /// Transform to mcp_call output (passthrough).
     fn to_mcp_call(
-        result: &serde_json::Value,
+        result: &Value,
         tool_call_id: &str,
         server_label: &str,
         tool_name: &str,
@@ -140,9 +137,9 @@ impl ResponseTransformer {
     }
 
     /// Flatten passthrough MCP results into the plain-string output shape used by OpenAI.
-    fn flatten_mcp_output(result: &serde_json::Value) -> String {
+    fn flatten_mcp_output(result: &Value) -> String {
         match result {
-            serde_json::Value::String(text) => text.clone(),
+            Value::String(text) => text.clone(),
             _ => {
                 let mut text_parts = Vec::new();
                 Self::collect_text_parts(result, &mut text_parts);
@@ -155,14 +152,14 @@ impl ResponseTransformer {
         }
     }
 
-    fn collect_text_parts(value: &serde_json::Value, text_parts: &mut Vec<String>) {
+    fn collect_text_parts(value: &Value, text_parts: &mut Vec<String>) {
         match value {
-            serde_json::Value::Array(items) => {
+            Value::Array(items) => {
                 for item in items {
                     Self::collect_text_parts(item, text_parts);
                 }
             }
-            serde_json::Value::Object(obj) => {
+            Value::Object(obj) => {
                 if obj.get("type").and_then(|v| v.as_str()) == Some("text") {
                     if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
                         text_parts.push(text.to_string());
@@ -199,7 +196,7 @@ impl ResponseTransformer {
     }
 
     /// Transform MCP web search results to OpenAI web_search_call format.
-    fn to_web_search_call(result: &serde_json::Value, tool_call_id: &str) -> ResponseOutputItem {
+    fn to_web_search_call(result: &Value, tool_call_id: &str) -> ResponseOutputItem {
         let sources = Self::extract_web_sources(result);
         let queries = Self::extract_queries(result);
 
@@ -215,10 +212,7 @@ impl ResponseTransformer {
     }
 
     /// Transform MCP code interpreter results to OpenAI code_interpreter_call format.
-    fn to_code_interpreter_call(
-        result: &serde_json::Value,
-        tool_call_id: &str,
-    ) -> ResponseOutputItem {
+    fn to_code_interpreter_call(result: &Value, tool_call_id: &str) -> ResponseOutputItem {
         let obj = result.as_object();
 
         let container_id = obj
@@ -244,10 +238,7 @@ impl ResponseTransformer {
     }
 
     /// Transform MCP image generation results to OpenAI image_generation_call format.
-    fn to_image_generation_call(
-        result: &serde_json::Value,
-        tool_call_id: &str,
-    ) -> ResponseOutputItem {
+    fn to_image_generation_call(result: &Value, tool_call_id: &str) -> ResponseOutputItem {
         let payload = Self::image_payload_from_wrapped_content(
             result,
             &ResponseFormat::ImageGenerationCall,
@@ -301,7 +292,7 @@ impl ResponseTransformer {
     }
 
     /// Transform MCP file search results to OpenAI file_search_call format.
-    fn to_file_search_call(result: &serde_json::Value, tool_call_id: &str) -> ResponseOutputItem {
+    fn to_file_search_call(result: &Value, tool_call_id: &str) -> ResponseOutputItem {
         let obj = result.as_object();
 
         let queries = Self::extract_queries(result);
@@ -323,7 +314,7 @@ impl ResponseTransformer {
     }
 
     /// Extract web sources from MCP result.
-    fn extract_web_sources(result: &serde_json::Value) -> Vec<WebSearchSource> {
+    fn extract_web_sources(result: &Value) -> Vec<WebSearchSource> {
         let maybe_array = result.as_array().or_else(|| {
             result
                 .as_object()
@@ -337,7 +328,7 @@ impl ResponseTransformer {
     }
 
     /// Parse a single web source from JSON.
-    fn parse_web_source(item: &serde_json::Value) -> Option<WebSearchSource> {
+    fn parse_web_source(item: &Value) -> Option<WebSearchSource> {
         let obj = item.as_object()?;
         let url = obj.get("url").and_then(|v| v.as_str())?;
         Some(WebSearchSource {
@@ -347,7 +338,7 @@ impl ResponseTransformer {
     }
 
     /// Extract queries from MCP result.
-    fn extract_queries(result: &serde_json::Value) -> Vec<String> {
+    fn extract_queries(result: &Value) -> Vec<String> {
         result
             .as_object()
             .and_then(|obj| obj.get("queries"))
@@ -362,7 +353,7 @@ impl ResponseTransformer {
     }
 
     /// Extract code interpreter outputs from MCP result.
-    fn extract_code_outputs(result: &serde_json::Value) -> Vec<CodeInterpreterOutput> {
+    fn extract_code_outputs(result: &Value) -> Vec<CodeInterpreterOutput> {
         let mut outputs = Vec::new();
 
         if let Some(obj) = result.as_object() {
@@ -410,7 +401,7 @@ impl ResponseTransformer {
     }
 
     /// Extract file search results from MCP result.
-    fn extract_file_results(result: &serde_json::Value) -> Vec<FileSearchResult> {
+    fn extract_file_results(result: &Value) -> Vec<FileSearchResult> {
         result
             .as_object()
             .and_then(|obj| obj.get("results"))
@@ -420,7 +411,7 @@ impl ResponseTransformer {
     }
 
     /// Parse a file search result from JSON.
-    fn parse_file_result(item: &serde_json::Value) -> Option<FileSearchResult> {
+    fn parse_file_result(item: &Value) -> Option<FileSearchResult> {
         let obj = item.as_object()?;
         let file_id = obj.get("file_id").and_then(|v| v.as_str())?.to_string();
         let filename = obj.get("filename").and_then(|v| v.as_str())?.to_string();
