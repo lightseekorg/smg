@@ -32,6 +32,10 @@ pub fn mcp_response_item_id(source_id: &str) -> String {
 pub struct ResponseTransformer;
 
 impl ResponseTransformer {
+    fn is_image_payload_candidate(obj: &serde_json::Map<String, Value>) -> bool {
+        obj.contains_key("result")
+    }
+
     // Extract image_generation_call payload from direct output, wrapped MCP text
     // content, or stringified JSON. Selection is gated by response format
     // (derived from builtin_type), not payload key heuristics.
@@ -44,13 +48,17 @@ impl ResponseTransformer {
         }
 
         // Already a direct object payload.
-        if result.as_object().is_some_and(|obj| !obj.is_empty()) {
+        if result
+            .as_object()
+            .is_some_and(Self::is_image_payload_candidate)
+        {
             return Some(result.clone());
         }
 
         // Handle MCP CallToolResult-style wrapper:
         // [{"type":"text","text":"{...image_generation_call payload...}"}]
         if let Some(arr) = result.as_array() {
+            let mut fallback_candidate: Option<Value> = None;
             for item in arr {
                 let Some(obj) = item.as_object() else {
                     continue;
@@ -62,17 +70,30 @@ impl ResponseTransformer {
                     continue;
                 };
                 if let Ok(parsed) = serde_json::from_str::<Value>(text) {
-                    if parsed.as_object().is_some_and(|obj| !obj.is_empty()) {
-                        return Some(parsed);
+                    if let Some(parsed_obj) = parsed.as_object() {
+                        if parsed_obj.contains_key("result") {
+                            return Some(parsed);
+                        }
+                        if Self::is_image_payload_candidate(parsed_obj)
+                            && fallback_candidate.is_none()
+                        {
+                            fallback_candidate = Some(parsed);
+                        }
                     }
                 }
+            }
+            if fallback_candidate.is_some() {
+                return fallback_candidate;
             }
         }
 
         // Sometimes payload comes as a JSON string.
         if let Some(text) = result.as_str() {
             if let Ok(parsed) = serde_json::from_str::<Value>(text) {
-                if parsed.as_object().is_some_and(|obj| !obj.is_empty()) {
+                if parsed
+                    .as_object()
+                    .is_some_and(Self::is_image_payload_candidate)
+                {
                     return Some(parsed);
                 }
             }
