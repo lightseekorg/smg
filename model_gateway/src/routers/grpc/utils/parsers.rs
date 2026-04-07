@@ -1,12 +1,51 @@
 //! Reasoning and tool parser helpers.
 
+use llm_tokenizer::{
+    chat_template::{ThinkingKeyName, ThinkingToggle},
+    traits::Tokenizer,
+};
 use reasoning_parser::{
     ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser, ReasoningParser,
 };
+use serde_json::Value;
 use tool_parser::{
     ParserFactory as ToolParserFactory, PooledParser as ToolPooledParser, ToolParser,
 };
 use tracing::warn;
+
+/// Determine if thinking is effectively ON based on the template's thinking
+/// toggle and the user's request.
+///
+/// `user_thinking`: `Some(true)` = user enabled thinking, `Some(false)` = user
+/// disabled it, `None` = not specified (use template default).
+pub(crate) fn should_mark_reasoning_started(
+    user_thinking: Option<bool>,
+    tokenizer: &dyn Tokenizer,
+) -> bool {
+    match tokenizer.thinking_toggle() {
+        ThinkingToggle::None => false,
+        ThinkingToggle::DefaultOn => user_thinking != Some(false),
+        ThinkingToggle::DefaultOff => user_thinking == Some(true),
+    }
+}
+
+/// Extract the user's thinking preference from chat_template_kwargs.
+///
+/// Only checks the key that the template actually uses (e.g. `enable_thinking`
+/// for Qwen3, `thinking` for Kimi-K2.5). This prevents mismatches where the
+/// user passes the wrong key name and the template ignores it.
+pub(crate) fn extract_thinking_from_kwargs(
+    kwargs: Option<&std::collections::HashMap<String, Value>>,
+    tokenizer: &dyn Tokenizer,
+) -> Option<bool> {
+    let kwargs = kwargs?;
+    match tokenizer.thinking_key_name() {
+        Some(ThinkingKeyName::EnableThinking) => kwargs.get("enable_thinking"),
+        Some(ThinkingKeyName::Thinking) => kwargs.get("thinking"),
+        None => None,
+    }
+    .and_then(|v| v.as_bool())
+}
 
 /// Check if a reasoning parser is available for the given model
 pub(crate) fn check_reasoning_parser_availability(

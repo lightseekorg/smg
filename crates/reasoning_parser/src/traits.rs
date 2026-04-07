@@ -74,6 +74,19 @@ pub trait ReasoningParser: Send + Sync {
     ///
     /// Returns true if the parser is currently parsing reasoning content.
     fn is_in_reasoning(&self) -> bool;
+
+    /// Mark that reasoning has already started (e.g. `<think>` was injected in the prefill).
+    ///
+    /// Called when the chat template injects `<think>` in the generation prompt,
+    /// so the parser should treat output as reasoning from the start without
+    /// waiting for a `<think>` tag in the generated output.
+    fn mark_reasoning_started(&mut self);
+
+    /// Mark that the `<think>` start token was already consumed (in the prefill).
+    ///
+    /// Prevents the streaming parser from trying to find and strip `<think>`
+    /// from the model output when the template already included it.
+    fn mark_think_start_stripped(&mut self);
 }
 
 /// Error types for reasoning parsing operations.
@@ -110,8 +123,10 @@ pub struct ParserConfig {
     /// Maximum buffer size in bytes.
     pub max_buffer_size: usize,
 
-    /// Initial state for in_reasoning flag (fixed per parser type).
-    pub initial_in_reasoning: bool,
+    /// Whether this model always starts in reasoning mode (e.g. DeepSeek R1).
+    /// For models with a template thinking toggle, this should be `false` —
+    /// the runtime will call `mark_reasoning_started()` when appropriate.
+    pub always_in_reasoning: bool,
 }
 
 impl Default for ParserConfig {
@@ -121,7 +136,7 @@ impl Default for ParserConfig {
             think_end_token: "</think>".to_string(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            initial_in_reasoning: false, // Default to false (explicit reasoning)
+            always_in_reasoning: false, // Default to false (explicit reasoning)
         }
     }
 }
