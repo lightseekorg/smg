@@ -609,14 +609,6 @@ fn default_temperature() -> Option<f32> {
     Some(1.0)
 }
 
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "serde default function must match field type Option<T>"
-)]
-fn default_top_p() -> Option<f32> {
-    Some(1.0)
-}
-
 // ============================================================================
 // Request/Response Types
 // ============================================================================
@@ -709,7 +701,7 @@ pub struct ResponsesRequest {
     pub top_logprobs: Option<u32>,
 
     /// Top-p sampling parameter
-    #[serde(default = "default_top_p", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(custom(function = "validate_top_p_value"))]
     pub top_p: Option<f32>,
 
@@ -1456,5 +1448,53 @@ impl ResponseReasoningContent {
     /// Create a new reasoning text content
     pub fn new_reasoning_text(text: String) -> Self {
         Self::ReasoningText { text }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn test_responses_request_omitted_top_p_deserializes_to_none() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.4",
+            "input": "hello"
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(request.top_p, None);
+
+        let serialized = serde_json::to_value(&request).expect("request should serialize");
+        assert!(serialized.get("top_p").is_none());
+    }
+
+    #[test]
+    fn test_responses_request_null_top_p_deserializes_to_none() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.4",
+            "input": "hello",
+            "top_p": null
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(request.top_p, None);
+
+        let serialized = serde_json::to_value(&request).expect("request should serialize");
+        assert!(serialized.get("top_p").is_none());
+    }
+
+    #[test]
+    fn test_responses_request_explicit_top_p_preserved() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.4",
+            "input": "hello",
+            "top_p": 0.9
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(request.top_p, Some(0.9));
     }
 }
