@@ -857,8 +857,7 @@ fn sanitize_builtin_tool_arguments(response_format: &ResponseFormat, arguments: 
             let Some(obj) = arguments.as_object_mut() else {
                 return;
             };
-            obj.entry("model".to_string())
-                .or_insert_with(|| json!(IMAGE_MODEL));
+            obj.insert("model".to_string(), json!(IMAGE_MODEL));
         }
         ResponseFormat::WebSearchCall
         | ResponseFormat::CodeInterpreterCall
