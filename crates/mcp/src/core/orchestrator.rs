@@ -517,7 +517,7 @@ impl McpOrchestrator {
                 // No alias, but has custom response format - update the entry directly
                 if let Some(mut entry) = self.tool_inventory.get_entry(&config.name, tool_name) {
                     entry.response_format = response_format.clone();
-                    entry.arg_mapping = arg_mapping.clone();
+                    entry.arg_mapping.clone_from(&arg_mapping);
                     self.tool_inventory.insert_entry(entry);
                     info!(
                         "Set response format {:?} for '{}:{}'",
@@ -2021,13 +2021,14 @@ mod integration_tests {
 }
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::time::Duration;
+    use std::{collections::HashMap, time::Duration};
 
     use tokio::time::timeout;
 
     use super::*;
-    use crate::core::config::{ResponseFormatConfig, Tool as McpTool};
+    use crate::core::config::{
+        ArgMappingConfig, ResponseFormatConfig, Tool as McpTool, ToolConfig,
+    };
 
     fn create_test_tool(name: &str) -> McpTool {
         use std::sync::Arc;
@@ -2243,15 +2244,18 @@ mod tests {
         let orchestrator = McpOrchestrator::new_test();
         orchestrator
             .tool_inventory
-            .insert_entry(ToolEntry::from_server_tool("web-search", create_test_tool("search_web")));
+            .insert_entry(ToolEntry::from_server_tool(
+                "web-search",
+                create_test_tool("search_web"),
+            ));
 
         let mut tools = HashMap::new();
         tools.insert(
             "search_web".to_string(),
-            crate::core::config::ToolConfig {
+            ToolConfig {
                 alias: None,
                 response_format: ResponseFormatConfig::WebSearchCall,
-                arg_mapping: Some(crate::core::config::ArgMappingConfig {
+                arg_mapping: Some(ArgMappingConfig {
                     renames: HashMap::new(),
                     defaults: HashMap::from([(
                         "enable_source".to_string(),
