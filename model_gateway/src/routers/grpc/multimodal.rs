@@ -680,11 +680,7 @@ fn assemble_trtllm(intermediate: MultimodalIntermediate) -> TrtllmMultimodalData
 
 /// Serialize pixel values ndarray to raw little-endian f32 bytes + shape.
 fn serialize_pixel_values(preprocessed: &PreprocessedImages) -> (Vec<u8>, Vec<u32>) {
-    let pixel_bytes: Vec<u8> = if let Some(pixel_slice) = preprocessed
-        .pixel_values
-        .as_slice()
-        .or_else(|| preprocessed.pixel_values.as_slice_memory_order())
-    {
+    let pixel_bytes: Vec<u8> = if let Some(pixel_slice) = preprocessed.pixel_values.as_slice() {
         // Zero-copy reinterpret: &[f32] → &[u8] on little-endian (x86).
         // This replaces the per-element flat_map(to_le_bytes) which was the
         // #1 CPU hotspot (13% of SMG CPU in profiling).
@@ -698,7 +694,9 @@ fn serialize_pixel_values(preprocessed: &PreprocessedImages) -> (Vec<u8>, Vec<u3
             pixel_slice.iter().flat_map(|v| v.to_le_bytes()).collect()
         }
     } else {
-        // Fallback for non-contiguous arrays
+        // Non-C-contiguous array: .iter() walks in logical (row-major) order,
+        // which matches the shape — unlike as_slice_memory_order() which would
+        // silently serialize in wrong dimension order for Fortran-contiguous arrays.
         preprocessed
             .pixel_values
             .iter()

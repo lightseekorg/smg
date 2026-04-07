@@ -80,52 +80,6 @@ fn should_forward_header_no_alloc(name: &str) -> bool {
         || name.eq_ignore_ascii_case("host"))
 }
 
-/// Apply headers to a reqwest request builder, filtering out headers that shouldn't be forwarded
-/// or that will be set automatically by reqwest
-pub fn apply_request_headers(
-    headers: &HeaderMap,
-    mut request_builder: reqwest::RequestBuilder,
-    skip_content_headers: bool,
-) -> reqwest::RequestBuilder {
-    // Always forward Authorization header first if present
-    if let Some(auth) = headers
-        .get("authorization")
-        .or_else(|| headers.get("Authorization"))
-    {
-        request_builder = request_builder.header("Authorization", auth.clone());
-    }
-
-    // Forward other headers, filtering out problematic ones
-    // Use eq_ignore_ascii_case to avoid to_lowercase() allocation per header
-    for (key, value) in headers {
-        let key_str = key.as_str();
-
-        // Skip headers that:
-        // - Are set automatically by reqwest (content-type, content-length for POST/PUT)
-        // - We already handled (authorization)
-        // - Are hop-by-hop headers (connection, transfer-encoding)
-        // - Should not be forwarded (host)
-        let should_skip = key_str.eq_ignore_ascii_case("authorization") // Already handled above
-            || key_str.eq_ignore_ascii_case("host")
-            || key_str.eq_ignore_ascii_case("connection")
-            || key_str.eq_ignore_ascii_case("transfer-encoding")
-            || key_str.eq_ignore_ascii_case("keep-alive")
-            || key_str.eq_ignore_ascii_case("te")
-            || key_str.eq_ignore_ascii_case("trailers")
-            || key_str.eq_ignore_ascii_case("accept-encoding")
-            || key_str.eq_ignore_ascii_case("upgrade")
-            || (skip_content_headers
-                && (key_str.eq_ignore_ascii_case("content-type")
-                    || key_str.eq_ignore_ascii_case("content-length")));
-
-        if !should_skip {
-            request_builder = request_builder.header(key.clone(), value.clone());
-        }
-    }
-
-    request_builder
-}
-
 /// API provider types for provider-specific header handling
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiProvider {
@@ -374,5 +328,25 @@ mod tests {
         assert!(!should_forward_request_header("cookie"));
         assert!(!should_forward_request_header("x-custom-header"));
         assert!(!should_forward_request_header("x-api-key"));
+    }
+
+    #[test]
+    fn test_extract_auth_header_falls_back_with_non_auth_headers_present() {
+        let mut headers = HeaderMap::new();
+        headers.insert("openai-project", "project-123".parse().unwrap());
+
+        let auth = extract_auth_header(Some(&headers), Some(&"worker-secret".to_string()));
+
+        assert_eq!(auth.unwrap(), "Bearer worker-secret");
+    }
+
+    #[test]
+    fn test_provider_extract_auth_header_prefers_anthropic_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "anthropic-key".parse().unwrap());
+
+        let auth = ApiProvider::Anthropic.extract_auth_header(Some(&headers), None);
+
+        assert_eq!(auth.unwrap(), "anthropic-key");
     }
 }

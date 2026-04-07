@@ -121,6 +121,9 @@ jobs:
           - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bSingle }
           - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle }
           - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bSingle }
+          - { id: meta-llama/Llama-4-Scout-17B-16E-Instruct, slug: meta-llama-Llama-4-Scout-17B-16E-Instruct, test_class: TestNightlyLlama4ScoutSingle }
+          - { id: meta-llama/Llama-3.3-70B-Instruct, slug: meta-llama-Llama-3.3-70B-Instruct, test_class: TestNightlyLlama70bSingle }
+          - { id: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic, slug: RedHatAI-Llama-3.3-70B-Instruct-FP8-dynamic, test_class: TestNightlyLlama70bFp8Single }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false }
           - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false }

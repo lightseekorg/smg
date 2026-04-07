@@ -113,7 +113,7 @@ jobs:
 
       # Run tests
       - name: Run E2E tests
-        timeout-minutes: 20
+        timeout-minutes: 25
         env:
           SHOW_WORKER_LOGS: "0"
           SHOW_ROUTER_LOGS: "1"
@@ -128,16 +128,20 @@ jobs:
             --reruns 2 --reruns-delay 5 \
             -s -vv
 
-      - name: Compute log artifact label
+      - name: Worker failure diagnostics
         if: failure() || cancelled()
-        id: log-label
-        run: echo "label=$(echo '${{ inputs.test_dirs }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+        run: |
+          LABEL=$(echo '${{ inputs.test_dirs }}' | tr '/' '-')
+          ARTIFACT="e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${LABEL}"
+          bash scripts/ci_dump_worker_logs.sh e2e-logs "$ARTIFACT"
+          echo "label=${LABEL}" >> "$GITHUB_OUTPUT"
+        id: log-snapshot
 
       - name: Upload worker logs
         if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${{ steps.log-label.outputs.label }}
+          name: e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${{ steps.log-snapshot.outputs.label }}
           path: e2e-logs/
           retention-days: 7
           if-no-files-found: ignore

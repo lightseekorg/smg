@@ -43,7 +43,7 @@ use crate::{
     observability::metrics::Metrics,
     routers::{
         error,
-        header_utils::{apply_request_headers, preserve_response_headers},
+        header_utils::{preserve_response_headers, ApiProvider},
         mcp_utils::DEFAULT_MAX_ITERATIONS,
         openai::{
             context::{RequestContext, StreamingEventContext, StreamingRequest},
@@ -519,10 +519,9 @@ pub(super) async fn handle_simple_streaming_passthrough(
     req: StreamingRequest,
 ) -> Response {
     let mut request_builder = client.post(&req.url).json(&req.payload);
-
-    if let Some(headers) = headers {
-        request_builder = apply_request_headers(headers, request_builder, true);
-    }
+    let provider = ApiProvider::from_url(&req.url);
+    let auth_header = provider.extract_auth_header(headers, worker.api_key());
+    request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
 
     request_builder = request_builder.header("Accept", "text/event-stream");
 
@@ -669,6 +668,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
 /// Handle streaming WITH MCP tool call interception and execution
 pub(super) fn handle_streaming_with_tool_interception(
     client: &reqwest::Client,
+    worker_api_key: Option<String>,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
     orchestrator: &Arc<McpOrchestrator>,
@@ -719,13 +719,14 @@ pub(super) fn handle_streaming_with_tool_interception(
             previous_response_id: previous_response_id.as_deref(),
             session: Some(&session),
         };
+        let provider = ApiProvider::from_url(&url_clone);
+        let auth_header =
+            provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
 
         loop {
             // Make streaming request
             let mut request_builder = client_clone.post(&url_clone).json(&current_payload);
-            if let Some(ref h) = headers_opt {
-                request_builder = apply_request_headers(h, request_builder, true);
-            }
+            request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
             request_builder = request_builder.header("Accept", "text/event-stream");
 
             let response = match request_builder.send().await {
@@ -1060,6 +1061,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
 
     handle_streaming_with_tool_interception(
         &client,
+        worker.api_key().cloned(),
         headers.as_ref(),
         req,
         &mcp_orchestrator,

@@ -64,7 +64,7 @@ pub struct CompletionRequest {
     pub stop: Option<StringOrArray>,
 
     /// Whether to stream back partial progress
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_false")]
     pub stream: bool,
 
     /// Options for streaming response
@@ -262,6 +262,8 @@ pub struct CompletionStreamResponse {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]

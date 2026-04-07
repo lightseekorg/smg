@@ -354,6 +354,10 @@ pub struct ArgMappingConfig {
     /// Default values for arguments
     #[serde(default)]
     pub defaults: HashMap<String, serde_json::Value>,
+
+    /// Values that override model-provided arguments
+    #[serde(default)]
+    pub overrides: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -920,6 +924,40 @@ tools:
         assert_eq!(
             arg_mapping.defaults.get("count").unwrap(),
             &serde_json::json!(10)
+        );
+    }
+
+    #[test]
+    fn test_tool_config_arg_mapping_overrides() {
+        let yaml = r#"
+name: "web-search"
+protocol: sse
+url: "http://localhost:8080/sse"
+tools:
+  search_web:
+    response_format: web_search_call
+    arg_mapping:
+      defaults:
+        enable_source: true
+      overrides:
+        enable_brave: false
+"#;
+
+        let config: McpServerConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
+        let tool_config = config
+            .tools
+            .as_ref()
+            .and_then(|tools| tools.get("search_web"))
+            .expect("search_web config should exist");
+
+        let arg_mapping = tool_config.arg_mapping.as_ref().unwrap();
+        assert_eq!(
+            arg_mapping.defaults.get("enable_source").unwrap(),
+            &serde_json::json!(true)
+        );
+        assert_eq!(
+            arg_mapping.overrides.get("enable_brave").unwrap(),
+            &serde_json::json!(false)
         );
     }
 

@@ -185,7 +185,9 @@ class VllmWorkerLauncher(WorkerLauncher):
         ):
             cmd.append("--enable-prompt-tokens-details")
 
-        cmd.extend(self._filter_backend_args(backend_args, ["--model", "--host", "--port"]))
+        cmd.extend(
+            self._filter_backend_args(backend_args, ["--model", "--host", "--port", "--uds"])
+        )
 
         return cmd
 
@@ -384,13 +386,35 @@ def _add_sglang_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_vllm_args(parser: argparse.ArgumentParser) -> None:
-    """Add vllm-specific arguments."""
+    """Add vLLM engine CLI arguments."""
     try:
-        from vllm.engine.arg_utils import EngineArgs
+        from vllm.engine import arg_utils as vllm_arg_utils
 
-        EngineArgs.add_cli_args(parser)
+        engine_args_cls = getattr(vllm_arg_utils, "AsyncEngineArgs", None) or getattr(
+            vllm_arg_utils, "EngineArgs", None
+        )
+        if engine_args_cls is None:
+            raise ImportError("vllm.engine.arg_utils is missing EngineArgs")
+
+        engine_args_cls.add_cli_args(parser)
     except ImportError:
         parser.error("vllm is not installed. Install it with: pip install vllm")
+
+
+def _add_vllm_frontend_args(parser: argparse.ArgumentParser) -> None:
+    """Add vLLM OpenAI frontend arguments."""
+    try:
+        from vllm.entrypoints.openai import cli_args as vllm_openai_cli_args
+    except ImportError:
+        vllm_openai_cli_args = None
+
+    frontend_args_cls = (
+        getattr(vllm_openai_cli_args, "FrontendArgs", None)
+        if vllm_openai_cli_args is not None
+        else None
+    )
+    if frontend_args_cls is not None:
+        frontend_args_cls.add_cli_args(parser)
 
 
 def _add_trtllm_stub_args(parser: argparse.ArgumentParser) -> None:
@@ -524,12 +548,16 @@ def parse_serve_args(
     )
     add_serve_args(parser)
     _import_backend_args(backend, parser)
+    if backend == "vllm" and serve_router_args.connection_mode == "http":
+        logger.debug("Adding vLLM OpenAI frontend CLI arguments for HTTP workers.")
+        _add_vllm_frontend_args(parser)
     RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
 
     if backend == "trtllm":
         args, _ = parser.parse_known_args(argv)
     else:
         args = parser.parse_args(argv)
+
     return backend, args, backend_args
 
 

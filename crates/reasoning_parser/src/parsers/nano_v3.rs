@@ -1,5 +1,5 @@
 // NanoV3 specific reasoning parser.
-// Uses the same format as DeepSeek-R1 (<think>...</think>) with initial_in_reasoning=true.
+// Uses the same format as DeepSeek-R1 (<think>...</think>) with always_in_reasoning=true.
 
 use crate::{
     parsers::BaseReasoningParser,
@@ -9,7 +9,7 @@ use crate::{
 /// NanoV3 reasoning parser.
 ///
 /// Uses the same reasoning format as DeepSeek-R1: `<think>...</think>`.
-/// Starts with `initial_in_reasoning=true`, assuming all output is reasoning
+/// Starts with `always_in_reasoning=true`, assuming all output is reasoning
 /// until a `</think>` token is encountered.
 pub struct NanoV3Parser {
     base: BaseReasoningParser,
@@ -23,7 +23,7 @@ impl NanoV3Parser {
             think_end_token: "</think>".to_string(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            initial_in_reasoning: true,
+            always_in_reasoning: true,
         };
 
         Self {
@@ -60,6 +60,14 @@ impl ReasoningParser for NanoV3Parser {
 
     fn is_in_reasoning(&self) -> bool {
         self.base.is_in_reasoning()
+    }
+
+    fn mark_reasoning_started(&mut self) {
+        self.base.mark_reasoning_started();
+    }
+
+    fn mark_think_start_stripped(&mut self) {
+        self.base.mark_think_start_stripped();
     }
 }
 
