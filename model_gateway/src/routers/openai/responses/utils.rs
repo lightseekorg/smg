@@ -341,22 +341,21 @@ mod tests {
     use openai_protocol::responses::{ResponseInput, ResponsesRequest};
     use serde_json::json;
     use smg_mcp::{
-        McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig, McpToolSession,
-        McpTransport, Tool, ToolEntry,
+        BuiltinToolType, McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig,
+        McpToolSession, McpTransport, Tool, ToolEntry,
     };
 
     use super::restore_original_tools;
 
     fn test_tool(name: &str) -> Tool {
-        let schema = match json!({
-            "type": "object",
-            "properties": {
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".to_string(), json!("object"));
+        schema.insert(
+            "properties".to_string(),
+            json!({
                 "query": { "type": "string" }
-            }
-        }) {
-            serde_json::Value::Object(schema) => schema,
-            _ => unreachable!("schema must be object"),
-        };
+            }),
+        );
 
         Tool {
             name: name.to_string().into(),
@@ -498,6 +497,93 @@ mod tests {
                 "type": "message",
                 "content": [{"type": "output_text", "text": "visible"}]
             }])
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_original_tools_keeps_builtin_output_items_visible() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            ..Default::default()
+        };
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                builtin_tool_name: Some("brave_web_search".to_string()),
+                internal: true,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                test_tool("brave_web_search"),
+            ));
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+        let mut response = serde_json::json!({
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "ws_call_123",
+                    "server_label": "internal-label",
+                    "status": "completed",
+                    "action": {
+                        "type": "search",
+                        "query": "private query",
+                        "queries": ["private query"],
+                        "sources": []
+                    }
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "visible"}]
+                }
+            ]
+        });
+
+        restore_original_tools(&mut response, &original_body, Some(&session));
+
+        assert_eq!(
+            response["output"],
+            serde_json::json!([
+                {
+                    "type": "web_search_call",
+                    "id": "ws_call_123",
+                    "server_label": "internal-label",
+                    "status": "completed",
+                    "action": {
+                        "type": "search",
+                        "query": "private query",
+                        "queries": ["private query"],
+                        "sources": []
+                    }
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "visible"}]
+                }
+            ])
         );
     }
 }

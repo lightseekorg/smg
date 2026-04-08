@@ -943,3 +943,34 @@ fn extract_function_calls(resp: &Value) -> Vec<ExtractedFunctionCall> {
 
     calls
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use smg_mcp::ResponseFormat;
+
+    use super::build_transformed_mcp_call_item;
+
+    #[test]
+    fn build_transformed_mcp_call_item_does_not_add_server_label_for_builtin_formats() {
+        let item = build_transformed_mcp_call_item(
+            &json!({
+                "queries": ["private query"],
+                "results": [
+                    { "url": "https://example.com" }
+                ]
+            }),
+            &ResponseFormat::WebSearchCall,
+            "call_123",
+            "internal-label",
+            "brave_web_search",
+            r#"{"query":"private query"}"#,
+        );
+
+        assert_eq!(
+            item.get("type").and_then(|value| value.as_str()),
+            Some("web_search_call")
+        );
+        assert!(item.get("server_label").is_none());
+    }
+}

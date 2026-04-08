@@ -17,6 +17,12 @@ pub struct MockMCPServer {
     pub server_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Mock MCP server that always fails tool execution with a caller-provided marker.
+pub struct MockFailingMCPServer {
+    pub port: u16,
+    pub server_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
 /// Simple test server with mock search tools
 #[derive(Clone)]
 pub struct MockSearchServer {
@@ -29,7 +35,23 @@ impl Default for MockSearchServer {
     }
 }
 
-#[expect(
+/// Test server with a tool that always returns an MCP internal error.
+#[derive(Clone)]
+pub struct MockFailingSearchServer {
+    error_marker: String,
+    tool_router: ToolRouter<MockFailingSearchServer>,
+}
+
+impl MockFailingSearchServer {
+    pub fn new(error_marker: impl Into<String>) -> Self {
+        Self {
+            error_marker: error_marker.into(),
+            tool_router: Self::tool_router(),
+        }
+    }
+}
+
+#[allow(
     clippy::unused_self,
     clippy::unnecessary_wraps,
     reason = "proc macro generated"
@@ -146,9 +168,103 @@ impl Drop for MockMCPServer {
     }
 }
 
+#[allow(
+    clippy::unused_self,
+    clippy::unnecessary_wraps,
+    reason = "proc macro generated"
+)]
+#[tool_router]
+impl MockFailingSearchServer {
+    #[tool(description = "Mock web search tool that always fails")]
+    fn brave_web_search(
+        &self,
+        Parameters(_params): Parameters<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        Err(McpError::internal_error(
+            format!("mock internal MCP failure: {}", self.error_marker),
+            None,
+        ))
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for MockFailingSearchServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            server_info: Implementation::from_build_env(),
+            instructions: Some("Mock failing server for testing".to_string()),
+        }
+    }
+
+    async fn initialize(
+        &self,
+        _request: InitializeRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        Ok(self.get_info())
+    }
+}
+
+impl MockFailingMCPServer {
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::expect_used,
+        reason = "test infrastructure"
+    )]
+    pub async fn start(
+        error_marker: &str,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let error_marker = error_marker.to_string();
+
+        let service = StreamableHttpService::new(
+            move || Ok(MockFailingSearchServer::new(error_marker.clone())),
+            LocalSessionManager::default().into(),
+            Default::default(),
+        );
+
+        let app = axum::Router::new().nest_service("/mcp", service);
+
+        let server_handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("Mock failing MCP server failed to start");
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        Ok(Self {
+            port,
+            server_handle: Some(server_handle),
+        })
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/mcp", self.port)
+    }
+
+    pub async fn stop(&mut self) {
+        if let Some(handle) = self.server_handle.take() {
+            handle.abort();
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+    }
+}
+
+impl Drop for MockFailingMCPServer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.server_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::MockMCPServer;
+    use super::{MockFailingMCPServer, MockMCPServer};
 
     #[tokio::test]
     async fn test_mock_server_startup() {
@@ -183,6 +299,14 @@ mod tests {
             drop(client);
         }
 
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_mock_failing_server_startup() {
+        let mut server = MockFailingMCPServer::start("marker").await.unwrap();
+        assert!(server.port > 0);
+        assert!(server.url().contains(&server.port.to_string()));
         server.stop().await;
     }
 }
