@@ -879,7 +879,9 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             min_p=grpc_params.min_p,
             frequency_penalty=grpc_params.frequency_penalty,
             presence_penalty=grpc_params.presence_penalty,
-            repetition_penalty=grpc_params.repetition_penalty,
+            repetition_penalty=grpc_params.repetition_penalty
+            if grpc_params.repetition_penalty != 0.0
+            else 1.0,
             max_new_tokens=max_new_tokens,
             min_new_tokens=grpc_params.min_new_tokens,
             stop=stop,
