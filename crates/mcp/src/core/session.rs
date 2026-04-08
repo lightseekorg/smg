@@ -70,6 +70,8 @@ pub struct McpToolSession<'a> {
     mcp_tools: Vec<ToolEntry>,
     exposed_name_map: HashMap<String, ExposedToolBinding>,
     exposed_name_by_qualified: HashMap<QualifiedToolName, String>,
+    /// Internal server keys for this request snapshot.
+    internal_server_keys: HashSet<String>,
 }
 
 impl<'a> McpToolSession<'a> {
@@ -115,6 +117,17 @@ impl<'a> McpToolSession<'a> {
         }
         let (exposed_name_map, exposed_name_by_qualified) =
             Self::build_exposed_function_tools(&mcp_tools, &mcp_servers);
+        let configured_internal_servers = orchestrator.internal_server_names();
+        let internal_server_keys: HashSet<String> = mcp_servers
+            .iter()
+            .filter_map(|binding| {
+                if configured_internal_servers.contains(&binding.server_key) {
+                    Some(binding.server_key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         // Filter out servers configured with builtin_type from the visible list.
         let builtin_names = orchestrator.builtin_server_names();
@@ -132,6 +145,7 @@ impl<'a> McpToolSession<'a> {
             mcp_tools,
             exposed_name_map,
             exposed_name_by_qualified,
+            internal_server_keys,
         }
     }
 
@@ -265,9 +279,7 @@ impl<'a> McpToolSession<'a> {
     }
 
     fn is_internal_server_key(&self, server_key: &str) -> bool {
-        self.orchestrator
-            .internal_server_names()
-            .contains(server_key)
+        self.internal_server_keys.contains(server_key)
     }
 
     /// List tools for a single server key.
