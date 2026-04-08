@@ -666,23 +666,7 @@ async fn responses_handler(
                 })
             })
             .unwrap_or(false);
-        let has_mcp_history = payload
-            .get("input")
-            .and_then(|v| v.as_array())
-            .map(|items| {
-                items.iter().any(|item| {
-                    item.get("type")
-                        .and_then(|t| t.as_str())
-                        .is_some_and(|t| t == "mcp_list_tools" || t == "mcp_call")
-                })
-            })
-            .unwrap_or(false);
-        let has_previous_response_id = payload
-            .get("previous_response_id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|id| !id.is_empty());
-        let has_prior_tool_context =
-            has_function_output || has_previous_response_id || has_mcp_history;
+        let has_prior_tool_context = has_function_output;
 
         if has_tools && !has_prior_tool_context {
             // First turn: emit streaming tool call events using OpenAI-style function_call ids
@@ -1041,23 +1025,7 @@ async fn responses_handler(
                 })
             })
             .unwrap_or(false);
-        let has_mcp_history = payload
-            .get("input")
-            .and_then(|v| v.as_array())
-            .map(|items| {
-                items.iter().any(|item| {
-                    item.get("type")
-                        .and_then(|t| t.as_str())
-                        .is_some_and(|t| t == "mcp_list_tools" || t == "mcp_call")
-                })
-            })
-            .unwrap_or(false);
-        let has_previous_response_id = payload
-            .get("previous_response_id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|id| !id.is_empty());
-        let has_prior_tool_context =
-            has_function_output || has_previous_response_id || has_mcp_history;
+        let has_prior_tool_context = has_function_output;
 
         if has_tools && !has_prior_tool_context {
             let rid = format!("resp-{}", Uuid::now_v7());
