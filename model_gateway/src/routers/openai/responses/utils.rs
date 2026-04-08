@@ -251,12 +251,24 @@ pub(super) fn restore_original_tools(
         return;
     };
 
-    let mut restored_tools: Vec<Value> = original_tools
-        .iter()
-        .filter_map(response_tool_to_value)
-        .collect();
-
-    restored_tools.retain(|tool| !is_internal_mcp_tool_value(tool, session));
+    let mut restored_tools: Vec<Value> = Vec::with_capacity(original_tools.len());
+    for original_tool in original_tools {
+        match original_tool {
+            // Preserve user-defined function tools in original order.
+            ResponseTool::Function(_) => {
+                if let Ok(value) = serde_json::to_value(original_tool) {
+                    restored_tools.push(value);
+                }
+            }
+            _ => {
+                if let Some(value) = response_tool_to_value(original_tool) {
+                    if !is_internal_mcp_tool_value(&value, session) {
+                        restored_tools.push(value);
+                    }
+                }
+            }
+        }
+    }
 
     if restored_tools.is_empty() {
         let had_restorable_original_tool = original_tools
