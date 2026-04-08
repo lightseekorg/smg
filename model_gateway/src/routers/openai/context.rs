@@ -164,9 +164,10 @@ impl RequestContext {
 
 impl RequestContext {
     pub fn refresh_memory_execution_context(&mut self) {
-        let headers = self.headers().cloned().unwrap_or_default();
+        let empty_headers = HeaderMap::new();
+        let headers = self.headers().unwrap_or(&empty_headers);
         self.memory_execution_context =
-            middleware::build_memory_execution_context(self.components.router_config(), &headers);
+            middleware::build_memory_execution_context(self.components.router_config(), headers);
     }
 
     pub fn responses_request(&self) -> Option<&ResponsesRequest> {
