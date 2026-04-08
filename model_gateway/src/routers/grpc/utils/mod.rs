@@ -5,6 +5,7 @@ mod logprobs;
 pub(crate) mod message_utils;
 mod metrics;
 mod parsers;
+mod response_cleanup;
 pub(crate) mod tonic_ext;
 
 // Re-export all public items so consumer imports stay unchanged.
@@ -23,4 +24,7 @@ pub(crate) use parsers::{
     check_reasoning_parser_availability, check_tool_parser_availability, create_reasoning_parser,
     create_tool_parser, extract_thinking_from_kwargs, get_reasoning_parser, get_tool_parser,
     should_mark_reasoning_started,
+};
+pub(crate) use response_cleanup::{
+    clean_json_response, strip_leaked_special_tokens, strip_leaked_special_tokens_from_delta,
 };

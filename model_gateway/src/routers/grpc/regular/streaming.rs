@@ -398,6 +398,7 @@ impl StreamingProcessor {
                                     &mut tool_parsers,
                                     &mut has_tool_calls,
                                     tools_ref,
+                                    &tokenizer,
                                     request_id,
                                     model,
                                     created,
@@ -420,19 +421,13 @@ impl StreamingProcessor {
                         }
                     }
 
-                    // Strip leaked chatml/think tokens when a parser is configured
-                    let mut delta = delta;
-                    if self.configured_tool_parser.is_some()
+                    let delta = if self.configured_tool_parser.is_some()
                         || self.configured_reasoning_parser.is_some()
                     {
-                        for token in [
-                            "<|im_end|>", "<|im_start|>", "<|im_user|>",
-                            "<|im_assistant|>", "<|im_system|>", "<|im_middle|>",
-                            "</think>",
-                        ] {
-                            delta = delta.replace(token, "");
-                        }
-                    }
+                        utils::strip_leaked_special_tokens_from_delta(delta, tokenizer.as_ref())
+                    } else {
+                        delta
+                    };
                     if !delta.is_empty() {
                         let content_chunk =
                             ChatCompletionStreamResponse::builder(request_id, model)
@@ -1220,6 +1215,7 @@ impl StreamingProcessor {
         tool_parsers: &mut HashMap<u32, Arc<tokio::sync::Mutex<Box<dyn ToolParser>>>>,
         has_tool_calls: &mut HashMap<u32, bool>,
         tools: &[Tool],
+        tokenizer: &Arc<dyn Tokenizer>,
         request_id: &str,
         model: &str,
         created: u64,
@@ -1254,17 +1250,16 @@ impl StreamingProcessor {
 
             match parser.parse_incremental(delta, tools).await {
                 Ok(StreamingParseResult { normal_text, calls }) => {
-                    let mut normal_text = normal_text;
-                    if self.configured_tool_parser.is_some()
+                    let normal_text = if self.configured_tool_parser.is_some()
                         || self.configured_reasoning_parser.is_some()
                     {
-                        for token in [
-                            "<|im_end|>", "<|im_start|>", "<|im_user|>",
-                            "<|im_assistant|>", "<|im_system|>", "<|im_middle|>",
-                        ] {
-                            normal_text = normal_text.replace(token, "");
-                        }
-                    }
+                        utils::strip_leaked_special_tokens_from_delta(
+                            normal_text,
+                            tokenizer.as_ref(),
+                        )
+                    } else {
+                        normal_text
+                    };
                     if !normal_text.is_empty() {
                         chunks.push(
                             ChatCompletionStreamResponse::builder(request_id, model)
