@@ -829,6 +829,8 @@ jobs:
       - name: Run Go OAI server E2E tests
         run: |
           bash scripts/ci_killall_sglang.sh "nuke_gpus"
+          export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
+          export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/models" \
           E2E_LOG_DIR=e2e-logs \
             pytest --reruns 2 --reruns-delay 5 e2e_test/bindings_go -s -vv
@@ -898,6 +900,8 @@ jobs:
       - name: Run Go bindings benchmark
         run: |
           bash scripts/ci_killall_sglang.sh "nuke_gpus"
+          export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
+          export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/models" \
             pytest e2e_test/benchmarks/test_go_bindings_perf.py -s -vv
 
