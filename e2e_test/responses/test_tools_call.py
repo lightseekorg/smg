@@ -1058,6 +1058,7 @@ class TestToolChoiceGptOss:
         for mcp_call in mcp_calls:
             assert mcp_call.server_label == "brave"
 
+
 # =============================================================================
 # Local Backend Tests (gRPC with Qwen model) - Tool Choice
 # =============================================================================
