@@ -262,7 +262,10 @@ pub(super) fn restore_original_tools(
         let had_restorable_original_tool = original_tools
             .iter()
             .any(|tool| response_tool_to_value(tool).is_some());
-        if had_restorable_original_tool {
+        let had_function_tool = original_tools
+            .iter()
+            .any(|tool| matches!(tool, ResponseTool::Function(_)));
+        if had_restorable_original_tool && !had_function_tool {
             if let Some(obj) = resp.as_object_mut() {
                 obj.remove("tools");
             }
@@ -339,7 +342,10 @@ fn is_internal_mcp_output_item(item: &Value, session: Option<&McpToolSession<'_>
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::responses::{ResponseInput, ResponsesRequest};
+    use openai_protocol::{
+        common::Function,
+        responses::{FunctionTool, McpTool, ResponseInput, ResponseTool, ResponsesRequest},
+    };
     use serde_json::json;
     use smg_mcp::{
         BuiltinToolType, McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig,
@@ -652,6 +658,115 @@ mod tests {
                     "content": [{"type": "output_text", "text": "visible"}]
                 }
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_original_tools_keeps_user_function_tools_when_internal_tools_are_removed() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            tools: Some(vec![
+                ResponseTool::Function(FunctionTool {
+                    function: Function {
+                        name: "user_fn".to_string(),
+                        description: Some("user function".to_string()),
+                        parameters: json!({
+                            "type": "object",
+                            "properties": {
+                                "q": { "type": "string" }
+                            }
+                        }),
+                        strict: None,
+                    },
+                }),
+                ResponseTool::Mcp(McpTool {
+                    server_url: None,
+                    authorization: None,
+                    headers: None,
+                    server_label: "internal-label".to_string(),
+                    server_description: None,
+                    require_approval: None,
+                    allowed_tools: None,
+                }),
+            ]),
+            ..Default::default()
+        };
+
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: true,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                test_tool("internal_search"),
+            ));
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+
+        let mut response = serde_json::json!({
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "user_fn",
+                    "description": "user function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "q": { "type": "string" } }
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "internal_search",
+                    "description": "internal",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "query": { "type": "string" } }
+                    }
+                }
+            ],
+            "tool_choice": "auto"
+        });
+
+        restore_original_tools(&mut response, &original_body, Some(&session));
+
+        assert_eq!(
+            response["tools"],
+            serde_json::json!([{
+                "type": "function",
+                "name": "user_fn",
+                "description": "user function",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "q": { "type": "string" } }
+                }
+            }])
         );
     }
 }

@@ -477,7 +477,7 @@ pub(super) fn send_final_response_event(
         inject_mcp_metadata_streaming(&mut final_response, state, session);
     }
 
-    restore_original_tools(&mut final_response, ctx.original_request, ctx.session);
+    restore_original_tools(&mut final_response, ctx.original_request, None);
     patch_response_with_request_metadata(
         &mut final_response,
         ctx.original_request,
