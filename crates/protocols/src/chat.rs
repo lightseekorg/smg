@@ -48,6 +48,7 @@ pub enum ChatMessage {
     Tool {
         content: MessageContent,
         tool_call_id: String,
+        name: Option<String>,
     },
     #[serde(rename = "function")]
     Function { content: String, name: String },

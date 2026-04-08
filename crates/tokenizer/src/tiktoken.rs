@@ -436,8 +436,16 @@ pub fn is_tiktoken_file(path: &Path) -> bool {
 }
 
 impl Encoder for TiktokenTokenizer {
-    fn encode(&self, input: &str, _add_special_tokens: bool) -> Result<Encoding> {
-        let tokens = self.tokenizer.encode_ordinary(input);
+    fn encode(&self, input: &str, add_special_tokens: bool) -> Result<Encoding> {
+        // When add_special_tokens is true, use encode_with_special_tokens to
+        // correctly handle tokens like <|im_system|>, <|im_end|>, <think>.
+        // This is needed for chat template output which contains these markers.
+        // When false, use encode_ordinary (default for stop sequences, etc.).
+        let tokens = if add_special_tokens {
+            self.tokenizer.encode_with_special_tokens(input)
+        } else {
+            self.tokenizer.encode_ordinary(input)
+        };
         Ok(Encoding::Tiktoken(tokens))
     }
 

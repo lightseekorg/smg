@@ -96,7 +96,24 @@ impl ResponseProcessor {
         let mut reasoning_text: Option<String> = None;
         let mut processed_text = final_text;
 
-        if original_request.separate_reasoning && reasoning_parser_available {
+        // Skip reasoning parsing when the output is constrained (specific
+        // tool_choice or structured response_format).  Constrained decoding
+        // forces the model to emit pure JSON without <think>...</think>
+        // wrappers, so the reasoning parser would incorrectly swallow the
+        // entire output as reasoning content.
+        let output_is_constrained = matches!(
+            &original_request.tool_choice,
+            Some(ToolChoice::Function { .. })
+        ) || matches!(
+            &original_request.response_format,
+            Some(openai_protocol::common::ResponseFormat::JsonObject)
+                | Some(openai_protocol::common::ResponseFormat::JsonSchema { .. })
+        );
+
+        if original_request.separate_reasoning
+            && reasoning_parser_available
+            && !output_is_constrained
+        {
             let pooled_parser = utils::get_reasoning_parser(
                 &self.reasoning_parser_factory,
                 self.configured_reasoning_parser.as_deref(),
@@ -148,8 +165,11 @@ impl ResponseProcessor {
                 _ => false,
             };
 
-            if self.configured_tool_parser.is_some() && tool_parser_available {
-                // Explicitly configured parser takes priority (models may emit native tokens regardless of tool_choice)
+            if self.configured_tool_parser.is_some()
+                && tool_parser_available
+                && !output_is_constrained
+            {
+                // Configured parser for native tool call tokens (auto/required modes)
                 (tool_calls, processed_text) = self
                     .parse_tool_calls(
                         &processed_text,
@@ -157,14 +177,20 @@ impl ResponseProcessor {
                         history_tool_calls_count,
                     )
                     .await;
-            } else if used_json_schema {
+            }
+
+            if tool_calls.is_none() && used_json_schema {
+                // Constrained decoding output: pure JSON wrapped as a tool call
                 (tool_calls, processed_text) = utils::parse_json_schema_response(
                     &processed_text,
                     original_request.tool_choice.as_ref(),
                     &original_request.model,
                     history_tool_calls_count,
                 );
-            } else if tool_parser_available {
+            }
+
+            if tool_calls.is_none() && tool_parser_available {
+                // Fallback: auto-detected parser
                 (tool_calls, processed_text) = self
                     .parse_tool_calls(
                         &processed_text,
