@@ -30,7 +30,7 @@ pub(crate) struct LoadedInputHistory {
 /// Load conversation history and/or previous response chain into request input.
 ///
 /// Mutates `request_body.input` with the loaded items.
-/// Returns `Ok(original_previous_response_id)` on success, or `Err(response)` on validation failure.
+/// Returns `Ok(LoadedInputHistory)` on success, or `Err(response)` on validation failure.
 pub(crate) async fn load_input_history(
     components: &ResponsesComponents,
     conversation: Option<&str>,
