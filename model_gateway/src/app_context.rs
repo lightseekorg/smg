@@ -692,16 +692,47 @@ fn validate_memory_writer_configuration(
         );
     }
 
+    if config.memory_runtime.ltm_store_enabled
+        && config.storage_hook_wasm_path.is_some()
+        && memory_writer.is_some()
+    {
+        return Err(
+            "memory_runtime.ltm_store_enabled cannot be used with storage_hook_wasm_path until conversation memory writer hooks are implemented".to_string(),
+        );
+    }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use smg_data_connector::{
+        ConversationMemoryId, ConversationMemoryResult, ConversationMemoryStorageError,
+        ConversationMemoryWriter, NewConversationMemory,
+    };
+
     use super::validate_memory_writer_configuration;
     use crate::{
         config::{PolicyConfig, RouterConfig, RoutingMode},
         memory::MemoryRuntimeConfig,
     };
+
+    struct DummyConversationMemoryWriter;
+
+    #[async_trait]
+    impl ConversationMemoryWriter for DummyConversationMemoryWriter {
+        async fn create_memory(
+            &self,
+            _input: NewConversationMemory,
+        ) -> ConversationMemoryResult<ConversationMemoryId> {
+            Err(ConversationMemoryStorageError::StorageError(
+                "not used in this test".to_string(),
+            ))
+        }
+    }
 
     #[test]
     fn rejects_missing_memory_writer_when_ltm_store_is_enabled() {
@@ -718,5 +749,44 @@ mod tests {
 
         let err = validate_memory_writer_configuration(&config, None).expect_err("should fail");
         assert!(err.contains("does not provide conversation memory writer"));
+    }
+
+    #[test]
+    fn rejects_hook_with_memory_writer_when_ltm_store_is_enabled() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+        config.memory_runtime = MemoryRuntimeConfig {
+            ltm_enabled: true,
+            ltm_store_enabled: true,
+        };
+        config.storage_hook_wasm_path = Some("/tmp/hook.wasm".to_string());
+
+        let writer: Arc<dyn ConversationMemoryWriter> = Arc::new(DummyConversationMemoryWriter);
+        let err =
+            validate_memory_writer_configuration(&config, Some(&writer)).expect_err("should fail");
+        assert!(err.contains("storage_hook_wasm_path"));
+    }
+
+    #[test]
+    fn allows_hook_with_memory_writer_when_ltm_store_is_disabled() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+        config.memory_runtime = MemoryRuntimeConfig {
+            ltm_enabled: true,
+            ltm_store_enabled: false,
+        };
+        config.storage_hook_wasm_path = Some("/tmp/hook.wasm".to_string());
+
+        let writer: Arc<dyn ConversationMemoryWriter> = Arc::new(DummyConversationMemoryWriter);
+        validate_memory_writer_configuration(&config, Some(&writer))
+            .expect("should allow when store is disabled");
     }
 }

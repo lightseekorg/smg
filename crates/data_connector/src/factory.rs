@@ -167,13 +167,6 @@ pub async fn create_storage_bundle(
 
     // Wrap backends in hooked storage when a hook is provided
     if let Some(hook) = config.hook {
-        if bundle.conversation_memory_writer.is_some() {
-            return Err(
-                "storage hooks are not yet supported with conversation memory writer backends"
-                    .to_string(),
-            );
-        }
-
         info!("Wrapping storage backends with hook");
         Ok(StorageBundle {
             response_storage: Arc::new(HookedResponseStorage::new(
@@ -403,7 +396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_storage_with_hook_rejects_backends_with_memory_writer() {
+    async fn test_create_storage_with_hook_keeps_memory_writer_for_runtime_gating() {
         use std::sync::Arc;
 
         use async_trait::async_trait;
@@ -445,7 +438,7 @@ mod tests {
             redis: None,
             hook: Some(Arc::new(NoOpHook)),
         };
-        let err = create_storage(config).await.err().expect("should fail");
-        assert!(err.contains("conversation memory writer"));
+        let bundle = create_storage_bundle(config).await.expect("should succeed");
+        assert!(bundle.conversation_memory_writer.is_some());
     }
 }
