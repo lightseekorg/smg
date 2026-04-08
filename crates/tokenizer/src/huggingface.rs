@@ -218,6 +218,7 @@ impl HuggingFaceTokenizer {
             cls_token: find_token(&["[CLS]", "<cls>", "<CLS>"]),
             mask_token: find_token(&["[MASK]", "<mask>", "<MASK>"]),
             additional_special_tokens,
+            ..Default::default()
         }
     }
 
@@ -396,6 +397,10 @@ impl TokenizerTrait for HuggingFaceTokenizer {
     }
     fn think_in_prefill(&self) -> bool {
         self.chat_template.think_in_prefill()
+    }
+
+    fn eos_token_ids(&self) -> &[TokenIdType] {
+        &self.special_tokens.eos_token_ids
     }
 
     fn set_chat_template(&mut self, template: String) -> Result<()> {

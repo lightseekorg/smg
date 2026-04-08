@@ -114,6 +114,12 @@ pub trait Tokenizer: Encoder + Decoder {
         false
     }
 
+    /// Merged EOS token IDs from config.json and generation_config.json.
+    /// Backends should stop generation when any of these tokens is produced.
+    fn eos_token_ids(&self) -> &[TokenIdType] {
+        &[]
+    }
+
     /// Set or override the chat template.
     ///
     /// Returns an error if the template fails to parse or the tokenizer
@@ -184,4 +190,9 @@ pub struct SpecialTokens {
     pub cls_token: Option<String>,
     pub mask_token: Option<String>,
     pub additional_special_tokens: Vec<String>,
+    /// Merged EOS token IDs from config.json + generation_config.json.
+    /// Models like Kimi-K2.5 define different EOS tokens in each file
+    /// (e.g. `[EOS]` in config.json, `<|im_end|>` in generation_config.json).
+    /// The engine must stop at any of these tokens.
+    pub eos_token_ids: Vec<TokenIdType>,
 }
