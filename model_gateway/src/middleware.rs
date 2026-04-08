@@ -29,6 +29,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 pub use crate::core::token_bucket::TokenBucket;
 use crate::{
     config::RouterConfig,
+    memory::MemoryExecutionContext,
     observability::{
         inflight_tracker::InFlightRequestTracker,
         metrics::{method_to_static_str, metrics_labels, Metrics},
@@ -77,6 +78,13 @@ fn build_storage_request_context(
     }
 
     (!ctx.data().is_empty()).then_some(ctx)
+}
+
+pub(crate) fn build_memory_execution_context(
+    config: &RouterConfig,
+    headers: &http::HeaderMap,
+) -> MemoryExecutionContext {
+    MemoryExecutionContext::from_http_headers(headers, &config.memory_runtime)
 }
 
 pub async fn storage_context_middleware(

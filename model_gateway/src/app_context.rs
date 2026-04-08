@@ -7,8 +7,8 @@ use llm_tokenizer::registry::TokenizerRegistry;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use reqwest::Client;
 use smg_data_connector::{
-    create_storage, ConversationItemStorage, ConversationStorage, ResponseStorage,
-    StorageFactoryConfig,
+    create_storage_bundle, ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
+    ResponseStorage, StorageFactoryConfig,
 };
 use smg_mcp::McpOrchestrator;
 use tool_parser::ParserFactory as ToolParserFactory;
@@ -59,6 +59,7 @@ pub struct AppContext {
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
+    pub conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
     pub load_monitor: Option<Arc<LoadMonitor>>,
     pub configured_reasoning_parser: Option<String>,
     pub configured_tool_parser: Option<String>,
@@ -97,6 +98,7 @@ pub struct AppContextBuilder {
     response_storage: Option<Arc<dyn ResponseStorage>>,
     conversation_storage: Option<Arc<dyn ConversationStorage>>,
     conversation_item_storage: Option<Arc<dyn ConversationItemStorage>>,
+    conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
     load_monitor: Option<Arc<LoadMonitor>>,
     worker_job_queue: Option<Arc<OnceLock<Arc<JobQueue>>>>,
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
@@ -149,6 +151,7 @@ impl AppContextBuilder {
             response_storage: None,
             conversation_storage: None,
             conversation_item_storage: None,
+            conversation_memory_writer: None,
             load_monitor: None,
             worker_job_queue: None,
             workflow_engines: None,
@@ -226,6 +229,14 @@ impl AppContextBuilder {
         conversation_item_storage: Arc<dyn ConversationItemStorage>,
     ) -> Self {
         self.conversation_item_storage = Some(conversation_item_storage);
+        self
+    }
+
+    pub fn conversation_memory_writer(
+        mut self,
+        conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
+    ) -> Self {
+        self.conversation_memory_writer = conversation_memory_writer;
         self
     }
 
@@ -346,6 +357,7 @@ impl AppContextBuilder {
             conversation_item_storage: self.conversation_item_storage.ok_or(
                 AppContextBuildError::MissingField("conversation_item_storage"),
             )?,
+            conversation_memory_writer: self.conversation_memory_writer,
             load_monitor: self.load_monitor,
             configured_reasoning_parser,
             configured_tool_parser,
@@ -544,12 +556,12 @@ impl AppContextBuilder {
             redis: config.redis.as_ref(),
             hook,
         };
-        let (response_storage, conversation_storage, conversation_item_storage) =
-            create_storage(storage_config).await?;
+        let bundle = create_storage_bundle(storage_config).await?;
 
-        self.response_storage = Some(response_storage);
-        self.conversation_storage = Some(conversation_storage);
-        self.conversation_item_storage = Some(conversation_item_storage);
+        self.response_storage = Some(bundle.response_storage);
+        self.conversation_storage = Some(bundle.conversation_storage);
+        self.conversation_item_storage = Some(bundle.conversation_item_storage);
+        self.conversation_memory_writer = bundle.conversation_memory_writer;
 
         Ok(self)
     }

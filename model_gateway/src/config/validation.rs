@@ -9,6 +9,7 @@ impl ConfigValidator {
         Self::validate_policy(&config.policy)?;
         Self::validate_server_settings(config)?;
         Self::validate_storage_context_headers(config)?;
+        Self::validate_memory_runtime(config)?;
 
         if let Some(discovery) = &config.discovery {
             Self::validate_discovery(discovery, &config.mode)?;
@@ -73,6 +74,19 @@ impl ConfigValidator {
                     ),
                 });
             }
+        }
+
+        Ok(())
+    }
+
+    fn validate_memory_runtime(config: &RouterConfig) -> ConfigResult<()> {
+        let memory_runtime = &config.memory_runtime;
+
+        if !memory_runtime.ltm_enabled && memory_runtime.ltm_store_enabled {
+            return Err(ConfigError::ValidationFailed {
+                reason: "memory_runtime.ltm_enabled must be true when LTM store readiness is enabled"
+                    .to_string(),
+            });
         }
 
         Ok(())
@@ -719,6 +733,8 @@ impl ConfigValidator {
 
 #[cfg(test)]
 mod tests {
+    use crate::memory::MemoryRuntimeConfig;
+
     use super::*;
     use crate::core::ConnectionMode;
 
@@ -1130,6 +1146,24 @@ mod tests {
 
         config.storage_context_headers =
             std::collections::HashMap::from([(" ".to_string(), "tenant_id".to_string())]);
+
+        let result = ConfigValidator::validate(&config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reject_ltm_store_when_ltm_runtime_disabled() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker1:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+
+        config.memory_runtime = MemoryRuntimeConfig {
+            ltm_enabled: false,
+            ltm_store_enabled: true,
+        };
 
         let result = ConfigValidator::validate(&config);
         assert!(result.is_err());

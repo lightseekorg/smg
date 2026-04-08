@@ -7,7 +7,7 @@ use super::{
     HistoryBackend, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig, RedisConfig,
     RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig, TraceConfig,
 };
-use crate::core::ConnectionMode;
+use crate::{core::ConnectionMode, memory::MemoryRuntimeConfig};
 
 /// Builder for RouterConfig that wraps the config itself
 /// This eliminates field duplication and stays in sync automatically
@@ -348,6 +348,11 @@ impl RouterConfigBuilder {
 
     pub fn storage_context_headers(mut self, headers: HashMap<String, String>) -> Self {
         self.config.storage_context_headers = headers;
+        self
+    }
+
+    pub fn memory_runtime_config(mut self, config: MemoryRuntimeConfig) -> Self {
+        self.config.memory_runtime = config;
         self
     }
 
@@ -818,6 +823,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::memory::MemoryRuntimeConfig;
 
     /// Test that .to_builder() round-trip conversion works correctly
     #[test]
@@ -887,5 +893,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.storage_context_headers, headers);
+    }
+
+    #[test]
+    fn test_builder_memory_runtime_flags_round_trip() {
+        let config = RouterConfig::builder()
+            .memory_runtime_config(MemoryRuntimeConfig {
+                ltm_enabled: true,
+                ltm_store_enabled: true,
+            })
+            .build_unchecked();
+
+        assert!(config.memory_runtime.ltm_enabled);
+        assert!(config.memory_runtime.ltm_store_enabled);
     }
 }

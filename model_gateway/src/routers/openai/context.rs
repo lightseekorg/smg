@@ -6,13 +6,13 @@ use axum::http::HeaderMap;
 use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
 use serde_json::Value;
 use smg_data_connector::{
-    ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
-    ResponseStorage,
+    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
+    RequestContext as StorageRequestContext, ResponseStorage,
 };
 use smg_mcp::{McpOrchestrator, McpToolSession};
 
 use super::provider::Provider;
-use crate::core::Worker;
+use crate::{config::RouterConfig, core::Worker, memory::MemoryExecutionContext, middleware};
 
 pub struct RequestContext {
     pub input: RequestInput,
@@ -20,6 +20,7 @@ pub struct RequestContext {
     pub state: ProcessingState,
     /// Storage hook request context extracted from HTTP headers by middleware.
     pub storage_request_context: Option<StorageRequestContext>,
+    pub memory_execution_context: MemoryExecutionContext,
 }
 
 pub struct RequestInput {
@@ -36,6 +37,7 @@ pub enum RequestType {
 #[derive(Clone)]
 pub struct SharedComponents {
     pub client: reqwest::Client,
+    pub router_config: Arc<RouterConfig>,
 }
 
 pub struct ResponsesComponents {
@@ -44,6 +46,7 @@ pub struct ResponsesComponents {
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
+    pub conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
 }
 
 pub enum ComponentRefs {
@@ -56,6 +59,13 @@ impl ComponentRefs {
         match self {
             ComponentRefs::Shared(s) => &s.client,
             ComponentRefs::Responses(r) => &r.shared.client,
+        }
+    }
+
+    pub fn router_config(&self) -> &Arc<RouterConfig> {
+        match self {
+            ComponentRefs::Shared(s) => &s.router_config,
+            ComponentRefs::Responses(r) => &r.shared.router_config,
         }
     }
 
@@ -84,6 +94,13 @@ impl ComponentRefs {
         match self {
             ComponentRefs::Shared(_) => None,
             ComponentRefs::Responses(r) => Some(&r.conversation_item_storage),
+        }
+    }
+
+    pub fn conversation_memory_writer(&self) -> Option<&Arc<dyn ConversationMemoryWriter>> {
+        match self {
+            ComponentRefs::Shared(_) => None,
+            ComponentRefs::Responses(r) => r.conversation_memory_writer.as_ref(),
         }
     }
 }
@@ -121,6 +138,7 @@ impl RequestContext {
             components,
             state: ProcessingState::default(),
             storage_request_context: None,
+            memory_execution_context: MemoryExecutionContext::default(),
         }
     }
 
@@ -139,11 +157,18 @@ impl RequestContext {
             components,
             state: ProcessingState::default(),
             storage_request_context: None,
+            memory_execution_context: MemoryExecutionContext::default(),
         }
     }
 }
 
 impl RequestContext {
+    pub fn refresh_memory_execution_context(&mut self) {
+        let headers = self.headers().cloned().unwrap_or_default();
+        self.memory_execution_context =
+            middleware::build_memory_execution_context(self.components.router_config(), &headers);
+    }
+
     pub fn responses_request(&self) -> Option<&ResponsesRequest> {
         match &self.input.request_type {
             RequestType::Responses(req) => Some(req.as_ref()),
@@ -194,7 +219,9 @@ pub struct StorageHandles {
     pub response: Arc<dyn ResponseStorage>,
     pub conversation: Arc<dyn ConversationStorage>,
     pub conversation_item: Arc<dyn ConversationItemStorage>,
+    pub conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
     pub request_context: Option<StorageRequestContext>,
+    pub memory_execution_context: MemoryExecutionContext,
 }
 
 pub struct OwnedStreamingContext {
@@ -237,7 +264,9 @@ impl RequestContext {
                 response,
                 conversation,
                 conversation_item,
+                conversation_memory_writer: self.components.conversation_memory_writer().cloned(),
                 request_context: self.storage_request_context,
+                memory_execution_context: self.memory_execution_context,
             },
         })
     }

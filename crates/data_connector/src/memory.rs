@@ -274,7 +274,68 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
 }
 
 // ============================================================================
-// PART 3: MemoryResponseStorage
+// PART 3: MemoryConversationMemoryWriter
+// ============================================================================
+
+#[derive(Default, Clone)]
+pub struct MemoryConversationMemoryWriter {
+    inner: Arc<RwLock<HashMap<ConversationMemoryId, NewConversationMemory>>>,
+}
+
+impl MemoryConversationMemoryWriter {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl ConversationMemoryWriter for MemoryConversationMemoryWriter {
+    async fn create_memory(
+        &self,
+        input: NewConversationMemory,
+    ) -> ConversationMemoryResult<ConversationMemoryId> {
+        let id = ConversationMemoryId(format!("mem_{}", ulid::Ulid::new()));
+        self.inner.write().insert(id.clone(), input);
+        Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod conversation_memory_writer_tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn memory_writer_returns_generated_memory_id() {
+        let writer = MemoryConversationMemoryWriter::new();
+        let id = writer
+            .create_memory(NewConversationMemory {
+                conversation_id: ConversationId::from("conv_1"),
+                conversation_version: Some(3),
+                response_id: Some(ResponseId::from("resp_1")),
+                memory_type: ConversationMemoryType::Ltm,
+                status: ConversationMemoryStatus::Ready,
+                attempt: 0,
+                owner_id: Some("owner-1".to_string()),
+                next_run_at: Utc::now(),
+                lease_until: None,
+                content: None,
+                memory_config: Some("{\"memory_subject_id\":\"subject-1\"}".to_string()),
+                scope_id: None,
+                error_msg: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(!id.0.is_empty());
+    }
+}
+
+// ============================================================================
+// PART 4: MemoryResponseStorage
 // ============================================================================
 
 /// Internal store structure holding both maps together
