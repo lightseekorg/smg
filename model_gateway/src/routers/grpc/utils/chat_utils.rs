@@ -83,35 +83,36 @@ pub(crate) fn resolve_tokenizer(
 /// Process tool call arguments in messages
 /// Per Transformers docs, tool call arguments in assistant messages should be dicts
 pub(crate) fn process_tool_call_arguments(messages: &mut [Value]) -> Result<(), String> {
+    // Validate that arguments are valid JSON but keep them as strings.
+    // The chat template handles both string and object arguments:
+    //   {% if ... is string %}{{ args }}{% else %}{{ args | tojson }}{% endif %}
+    // Keeping strings preserves original formatting (e.g. spacing),
+    // matching the behavior of Python/TGL which passes arguments through as-is.
     for msg in messages {
         let role = msg.get("role").and_then(|v| v.as_str());
         if role != Some("assistant") {
             continue;
         }
 
-        let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) else {
+        let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) else {
             continue;
         };
 
         for call in tool_calls {
-            let Some(function) = call.get_mut("function") else {
+            let Some(function) = call.get("function") else {
                 continue;
             };
-            let Some(args) = function.get_mut("arguments") else {
+            let Some(args) = function.get("arguments") else {
                 continue;
             };
             let Some(args_str) = args.as_str() else {
                 continue;
             };
 
-            // Parse JSON string to object (like Python json.loads)
-            match serde_json::from_str::<Value>(args_str) {
-                Ok(parsed) => *args = parsed,
-                Err(e) => {
-                    return Err(format!(
-                        "Failed to parse tool call arguments as JSON: '{args_str}'. Error: {e}"
-                    ))
-                }
+            if serde_json::from_str::<Value>(args_str).is_err() {
+                return Err(format!(
+                    "Invalid JSON in tool call arguments: '{args_str}'"
+                ));
             }
         }
     }
@@ -291,8 +292,22 @@ pub fn process_chat_messages(
             .transpose()
             .map_err(|e| format!("Failed to serialize tools: {e}"))?;
 
-        let kwargs_capacity = 1 + request.chat_template_kwargs.as_ref().map_or(0, |k| k.len());
+        let kwargs_capacity = 2 + request.chat_template_kwargs.as_ref().map_or(0, |k| k.len());
         let mut combined_template_kwargs = HashMap::with_capacity(kwargs_capacity);
+
+        // Generate TypeScript-style tool declarations for models that use it
+        // (e.g., Kimi K2.5 chat template checks for tools_ts_str)
+        if let Some(ref tools) = request.tools {
+            if !tools.is_empty() {
+                let ts_str = tools_to_typescript(tools);
+                if !ts_str.is_empty() {
+                    combined_template_kwargs.insert(
+                        "tools_ts_str".to_string(),
+                        Value::String(ts_str),
+                    );
+                }
+            }
+        }
 
         // Add reasoning_effort if present (like Python does)
         if let Some(reasoning_effort) = &request.reasoning_effort {
@@ -426,10 +441,25 @@ pub(crate) fn parse_json_schema_response(
     model: &str,
     history_tool_calls_count: usize,
 ) -> (Option<Vec<ToolCall>>, String) {
+    // Strip chatml tokens that may trail the constrained JSON output
+    let mut clean = processed_text.to_string();
+    for token in [
+        "<|im_end|>",
+        "<|im_start|>",
+        "<|im_user|>",
+        "<|im_assistant|>",
+        "<|im_system|>",
+        "<|im_middle|>",
+        "</think>",
+    ] {
+        clean = clean.replace(token, "");
+    }
+    let clean = clean.trim();
+
     match tool_choice {
         Some(ToolChoice::Function { function, .. }) => {
             // Specific function: Parse parameters directly
-            match serde_json::from_str::<Value>(processed_text) {
+            match serde_json::from_str::<Value>(clean) {
                 Ok(params) => {
                     let tool_call = ToolCall {
                         id: generate_tool_call_id(
@@ -450,14 +480,14 @@ pub(crate) fn parse_json_schema_response(
                 }
                 Err(e) => {
                     error!("Failed to parse specific function parameters: {}", e);
-                    (None, processed_text.to_string())
+                    (None, clean.to_string())
                 }
             }
         }
         Some(ToolChoice::Value(ToolChoiceValue::Required))
         | Some(ToolChoice::AllowedTools { .. }) => {
             // Required mode: Parse array of tool calls
-            match serde_json::from_str::<Vec<Value>>(processed_text) {
+            match serde_json::from_str::<Vec<Value>>(clean) {
                 Ok(parsed_array) => {
                     let spec_tool_calls: Vec<ToolCall> = parsed_array
                         .into_iter()
@@ -489,11 +519,11 @@ pub(crate) fn parse_json_schema_response(
                 }
                 Err(e) => {
                     error!("Failed to parse required tool call array: {}", e);
-                    (None, processed_text.to_string())
+                    (None, clean.to_string())
                 }
             }
         }
-        _ => (None, processed_text.to_string()),
+        _ => (None, clean.to_string()),
     }
 }
 
@@ -780,4 +810,207 @@ mod tests {
         assert_eq!(content_array[0]["type"], "text");
         assert_eq!(content_array[1], json!({"type": "image"}));
     }
+}
+
+// ============================================================================
+// TypeScript-style tool declaration generator
+// ============================================================================
+
+/// Convert OpenAI tools to TypeScript-style declaration string.
+///
+/// Produces the format expected by models like Kimi K2.5, whose chat templates
+/// check for a `tools_ts_str` variable and prefer it over raw JSON.
+///
+/// Example output:
+/// ```text
+/// # Tools
+///
+/// ## functions
+/// namespace functions {
+/// // Get the current weather
+/// type getCurrentWeather = (_: {
+///   // The city and state
+///   location: string,
+///   unit?: "celsius" | "fahrenheit"
+/// }) => any;
+/// }
+/// ```
+pub fn tools_to_typescript(tools: &[Tool]) -> String {
+    let mut functions = Vec::new();
+
+    for tool in tools {
+        if tool.tool_type != "function" {
+            continue;
+        }
+        functions.push(function_to_typescript(&tool.function));
+    }
+
+    if functions.is_empty() {
+        return String::new();
+    }
+
+    let mut result = String::from("# Tools\n\n## functions\nnamespace functions {\n");
+    result.push_str(&functions.join("\n"));
+    result.push_str("\n}\n");
+    result
+}
+
+fn function_to_typescript(
+    func: &openai_protocol::common::Function,
+) -> String {
+    let mut out = String::new();
+
+    // Description comment
+    if let Some(ref desc) = func.description {
+        for line in desc.lines() {
+            if line.is_empty() {
+                out.push('\n');
+            } else {
+                out.push_str(&format!("// {line}\n"));
+            }
+        }
+    }
+
+    // Parameters
+    let params_str = if func.parameters.is_null() || func.parameters == Value::Object(Default::default()) {
+        "{}".to_string()
+    } else {
+        schema_to_typescript(&func.parameters, "", &[])
+    };
+
+    out.push_str(&format!("type {} = (_: {params_str}) => any;", func.name));
+    out
+}
+
+fn schema_to_typescript(schema: &Value, indent: &str, required: &[&str]) -> String {
+    match schema.get("type").and_then(|t| t.as_str()) {
+        Some("object") => object_to_typescript(schema, indent),
+        Some("array") => array_to_typescript(schema, indent),
+        Some("string") => {
+            if let Some(enum_vals) = schema.get("enum").and_then(|e| e.as_array()) {
+                enum_to_typescript(enum_vals)
+            } else {
+                "string".to_string()
+            }
+        }
+        Some("integer" | "number") => "number".to_string(),
+        Some("boolean") => "boolean".to_string(),
+        Some("null") => "null".to_string(),
+        _ => {
+            // Handle enum without type
+            if let Some(enum_vals) = schema.get("enum").and_then(|e| e.as_array()) {
+                return enum_to_typescript(enum_vals);
+            }
+            // Handle anyOf
+            if let Some(any_of) = schema.get("anyOf").and_then(|a| a.as_array()) {
+                let types: Vec<String> = any_of
+                    .iter()
+                    .map(|t| schema_to_typescript(t, indent, &[]))
+                    .collect();
+                return types.join(" | ");
+            }
+            "any".to_string()
+        }
+    }
+}
+
+fn object_to_typescript(schema: &Value, indent: &str) -> String {
+    let properties = match schema.get("properties").and_then(|p| p.as_object()) {
+        Some(p) => p,
+        None => return "{}".to_string(),
+    };
+
+    let required_fields: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    let child_indent = format!("{indent}  ");
+
+    // Sort: required first, then optional, both alphabetically
+    let mut required_params: Vec<(&String, &Value)> = Vec::new();
+    let mut optional_params: Vec<(&String, &Value)> = Vec::new();
+
+    for (name, prop) in properties {
+        if required_fields.contains(&name.as_str()) {
+            required_params.push((name, prop));
+        } else {
+            optional_params.push((name, prop));
+        }
+    }
+    required_params.sort_by_key(|(n, _)| *n);
+    optional_params.sort_by_key(|(n, _)| *n);
+
+    let mut params: Vec<(&String, &Value, bool)> = Vec::new();
+    for (n, v) in required_params {
+        params.push((n, v, false));
+    }
+    for (n, v) in optional_params {
+        params.push((n, v, true));
+    }
+
+    if params.is_empty() {
+        return "{}".to_string();
+    }
+
+    let mut parts = Vec::new();
+    for (name, prop, optional) in &params {
+        let mut part = String::new();
+
+        // Description comment
+        if let Some(desc) = prop.get("description").and_then(|d| d.as_str()) {
+            for line in desc.lines() {
+                if line.is_empty() {
+                    part.push('\n');
+                } else {
+                    part.push_str(&format!("{child_indent}// {line}\n"));
+                }
+            }
+        }
+
+        let type_str = schema_to_typescript(prop, &child_indent, &[]);
+        let opt_marker = if *optional { "?" } else { "" };
+        part.push_str(&format!("{child_indent}{name}{opt_marker}: {type_str}"));
+        parts.push(part);
+    }
+
+    format!("{{\n{}\n{indent}}}", parts.join(",\n"))
+}
+
+fn array_to_typescript(schema: &Value, indent: &str) -> String {
+    let items = schema.get("items");
+    let item_type = match items {
+        Some(item_schema) => {
+            let child_indent = format!("{indent}  ");
+            // Check if item has description
+            let item_desc = item_schema
+                .get("description")
+                .and_then(|d| d.as_str());
+            let type_str = schema_to_typescript(item_schema, &child_indent, &[]);
+
+            if let Some(desc) = item_desc {
+                return format!(
+                    "Array<\n{child_indent}// {desc}\n{child_indent}{type_str}\n{indent}>"
+                );
+            }
+            type_str
+        }
+        None => "any".to_string(),
+    };
+    format!("Array<{item_type}>")
+}
+
+fn enum_to_typescript(values: &[Value]) -> String {
+    let parts: Vec<String> = values
+        .iter()
+        .map(|v| match v {
+            Value::String(s) => format!("\"{s}\""),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Null => "null".to_string(),
+            _ => "any".to_string(),
+        })
+        .collect();
+    parts.join(" | ")
 }

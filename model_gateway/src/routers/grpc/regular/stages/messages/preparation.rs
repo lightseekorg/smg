@@ -151,8 +151,8 @@ impl MessagePreparationStage {
             }
         };
 
-        // Step 3: Tokenize the processed text
-        let encoding = match tokenizer.encode(&processed_messages.text, false) {
+        // Step 3: Tokenize the processed text (with special token recognition)
+        let encoding = match tokenizer.encode(&processed_messages.text, true) {
             Ok(encoding) => encoding,
             Err(e) => {
                 error!(function = "MessagePreparationStage::execute", error = %e, "Tokenization failed");

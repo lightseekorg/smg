@@ -277,6 +277,16 @@ impl StreamingProcessor {
         let is_specific_function =
             used_json_schema && matches!(tool_choice, Some(ToolChoice::Function { .. }));
 
+        // Skip reasoning parsing when constrained decoding is active.
+        // The model emits pure JSON without <think> wrappers, so the
+        // reasoning parser would swallow the output as reasoning content.
+        let output_is_constrained = is_specific_function
+            || matches!(
+                &original_request.response_format,
+                Some(openai_protocol::common::ResponseFormat::JsonObject)
+                    | Some(openai_protocol::common::ResponseFormat::JsonSchema { .. })
+            );
+
         let tool_parser_available = tools.is_some()
             && utils::check_tool_parser_availability(
                 &self.tool_parser_factory,
@@ -366,7 +376,10 @@ impl StreamingProcessor {
                     stream_buffer.push_str(&delta);
 
                     // Reasoning content handling
-                    let in_reasoning = if separate_reasoning && reasoning_parser_available {
+                    let in_reasoning = if separate_reasoning
+                        && reasoning_parser_available
+                        && !output_is_constrained
+                    {
                         let (normal_text, reasoning_chunk, in_reasoning) = self
                             .process_reasoning_stream(
                                 &delta,
@@ -401,8 +414,9 @@ impl StreamingProcessor {
                             && (tool_parser_available || used_json_schema)
                         {
                             let tool_chunks = if is_specific_function
-                                && !(self.configured_tool_parser.is_some()
-                                    && tool_parser_available)
+                                && (output_is_constrained
+                                    || !(self.configured_tool_parser.is_some()
+                                        && tool_parser_available))
                             {
                                 Self::process_specific_function_stream(
                                     &delta,
@@ -1220,12 +1234,24 @@ impl StreamingProcessor {
                 );
             }
 
-            // Emit arguments delta
-            if !delta.is_empty() {
+            // Emit arguments delta, stripping any chatml tokens
+            let mut clean_delta = delta.to_string();
+            for token in [
+                "<|im_end|>",
+                "<|im_start|>",
+                "<|im_user|>",
+                "<|im_assistant|>",
+                "<|im_system|>",
+                "<|im_middle|>",
+                "</think>",
+            ] {
+                clean_delta = clean_delta.replace(token, "");
+            }
+            if !clean_delta.is_empty() {
                 chunks.push(
                     ChatCompletionStreamResponse::builder(request_id, model)
                         .created(created)
-                        .add_choice_tool_args(index, delta.to_string())
+                        .add_choice_tool_args(index, clean_delta)
                         .maybe_system_fingerprint(system_fingerprint)
                         .build(),
                 );

@@ -443,20 +443,6 @@ pub fn is_tiktoken_file(path: &Path) -> bool {
 
 impl Encoder for TiktokenTokenizer {
     fn encode(&self, input: &str, _add_special_tokens: bool) -> Result<Encoding> {
-        // Always use encode_with_special_tokens so that special token strings
-        // in the input (e.g., <|media_pad|> from chat templates) are recognized
-        // as single tokens rather than split into BPE sub-tokens.
-        //
-        // NOTE: We intentionally ignore `add_special_tokens` here because the
-        // flag has different semantics across backends. For HuggingFace it
-        // controls BOS/EOS prepend/append (tiktoken has no such concept).
-        // For tiktoken, encode_ordinary vs encode_with_special_tokens controls
-        // whether special-token *patterns* in the input are recognized.
-        // All callers that encode chat-template-rendered text pass `false`
-        // (meaning "don't add BOS/EOS"), but tiktoken must still recognize
-        // the special tokens the template inserted. A proper fix requires
-        // redesigning the Encoder trait to separate "add wrapper tokens" from
-        // "recognize special-token patterns".
         let tokens = self.tokenizer.encode_with_special_tokens(input);
         Ok(Encoding::Tiktoken(tokens))
     }

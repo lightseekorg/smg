@@ -105,19 +105,20 @@ impl KimiK2Parser {
         reason = "regex patterns are compile-time string literals"
     )]
     pub fn new() -> Self {
-        // Supports alternative delimiters: <|func_start|>/<|func_end|>; (?s) for multi-line JSON
-        let tool_call_pattern = r"(?s)<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*(?:<\|tool_call_argument_begin\|>\s*|<\|func_start\|>\s*)?(?P<function_arguments>\{.*?\})\s*(?:<\|tool_call_end\|>|<\|func_end\|>)";
+        // Supports alternative delimiters: <|func_start|>/<|func_end|>; (?s) for multi-line JSON.
+        // Tool call IDs may contain hyphens (e.g. "functions.execute-tool:0").
+        let tool_call_pattern = r"(?s)<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.\-]+:\d+)\s*(?:<\|tool_call_argument_begin\|>\s*|<\|func_start\|>\s*)?(?P<function_arguments>\{.*?\})\s*(?:<\|tool_call_end\|>|<\|func_end\|>)";
         let tool_call_extractor = Regex::new(tool_call_pattern).expect("Valid regex pattern");
 
-        let stream_pattern = r"(?s)<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*(?:<\|tool_call_argument_begin\|>\s*|<\|func_start\|>\s*)?(?P<function_arguments>\{.*)";
+        let stream_pattern = r"(?s)<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.\-]+:\d+)\s*(?:<\|tool_call_argument_begin\|>\s*|<\|func_start\|>\s*)?(?P<function_arguments>\{.*)";
         let stream_tool_call_extractor = Regex::new(stream_pattern).expect("Valid regex pattern");
 
         // Pattern for removing completed tool calls
         let end_pattern = r"<\|tool_call_begin\|>.*?(?:<\|tool_call_end\|>|<\|func_end\|>)";
         let tool_call_end_pattern = Regex::new(end_pattern).expect("Valid regex pattern");
 
-        // Robust parser for ids like "functions.search:0" or fallback "search:0"
-        let id_pattern = r"^(?:functions\.)?(?P<name>[\w\.]+):(?P<index>\d+)$";
+        // Robust parser for ids like "functions.execute-tool:0" or fallback "search:0"
+        let id_pattern = r"^(?:functions\.)?(?P<name>[\w\.\-]+):(?P<index>\d+)$";
         let tool_call_id_regex = Regex::new(id_pattern).expect("Valid regex pattern");
 
         Self {
