@@ -14,7 +14,7 @@ pub fn compact_tool_output_for_model_context(
 ) -> String {
     match response_format {
         ResponseFormat::ImageGenerationCall => {
-            let is_error = is_image_generation_error(output).unwrap_or(false);
+            let is_error = is_image_generation_error(output);
             let note = if is_error {
                 extract_image_generation_fallback_text(output).unwrap_or_default()
             } else {

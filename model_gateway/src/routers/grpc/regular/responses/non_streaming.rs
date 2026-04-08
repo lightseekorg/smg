@@ -377,7 +377,6 @@ pub(super) async fn execute_tool_loop(
                     output_str,
                     result.response_format,
                     output_item,
-                    !result.is_error,
                 );
 
                 // Increment total calls counter

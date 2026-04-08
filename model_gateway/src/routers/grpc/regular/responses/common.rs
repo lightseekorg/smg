@@ -67,7 +67,6 @@ impl ToolLoopState {
         output_str: String,
         response_format: ResponseFormat,
         output_item: ResponseOutputItem,
-        _success: bool,
     ) {
         let output_value =
             serde_json::from_str::<Value>(&output_str).unwrap_or(Value::String(output_str));

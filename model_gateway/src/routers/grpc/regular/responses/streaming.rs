@@ -803,7 +803,6 @@ async fn execute_tool_loop_streaming_internal(
                     output_str,
                     tool_output.response_format,
                     output_item,
-                    success,
                 );
             }
 

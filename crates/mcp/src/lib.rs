@@ -57,6 +57,6 @@ pub use responses_bridge::{
 pub use tenant::{SessionId, TenantContext, TenantId};
 // Re-export from transform
 pub use transform::{
-    extract_image_generation_fallback_text, is_image_generation_error, mcp_response_item_id, ResponseFormat,
-    ResponseTransformer,
+    extract_image_generation_fallback_text, is_image_generation_error, mcp_response_item_id,
+    ResponseFormat, ResponseTransformer,
 };

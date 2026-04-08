@@ -49,13 +49,16 @@ pub fn extract_image_generation_fallback_text(value: &Value) -> Option<String> {
         })
 }
 
-pub fn is_image_generation_error(value: &Value) -> Option<bool> {
+/// Read image-generation error status from JSON-RPC payload:
+/// `result.isError` (defaults to `false` when missing).
+pub fn is_image_generation_error(value: &Value) -> bool {
     value
         .as_object()
         .and_then(|obj| obj.get("result"))
         .and_then(|v| v.as_object())
         .and_then(|result_obj| result_obj.get("isError"))
         .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 /// Transforms MCP CallToolResult to OpenAI Responses API output items.
@@ -78,21 +81,17 @@ impl ResponseTransformer {
     /// single fallback path.
     fn image_payload_from_wrapped_content(result: &Value) -> Option<Value> {
         // Parse the JSON-RPC wrapper object under top-level `result`.
-        let result_obj = result
-            .get("result")
-            .and_then(|v| v.as_object())?;
+        let result_obj = result.get("result").and_then(|v| v.as_object())?;
 
         // `isError` determines whether we extract raw error text or image payload JSON.
-        let is_error = is_image_generation_error(result)?;
+        let is_error = is_image_generation_error(result);
 
         // Error responses should preserve the raw text error payload.
         if is_error {
             return extract_image_generation_fallback_text(result).map(Value::String);
         }
 
-        let content = result_obj
-            .get("content")
-            .and_then(|v| v.as_array())?;
+        let content = result_obj.get("content").and_then(|v| v.as_array())?;
         for item in content {
             let Some(obj) = item.as_object() else {
                 continue;
@@ -268,9 +267,8 @@ impl ResponseTransformer {
 
     /// Transform MCP image generation results to OpenAI image_generation_call format.
     fn to_image_generation_call(result: &Value, tool_call_id: &str) -> ResponseOutputItem {
-        let payload = Self::image_payload_from_wrapped_content(result).unwrap_or_else(|| {
-            Value::String(Self::flatten_mcp_output(result))
-        });
+        let payload = Self::image_payload_from_wrapped_content(result)
+            .unwrap_or_else(|| Value::String(Self::flatten_mcp_output(result)));
         let obj = payload.as_object();
 
         let status = ImageGenerationCallStatus::Completed;
@@ -742,5 +740,4 @@ mod tests {
             _ => panic!("Expected ImageGenerationCall"),
         }
     }
-
 }

@@ -304,9 +304,9 @@ fn apply_request_tool_overrides(
         request_tool_overrides(response_format, original_body),
         arguments.as_object_mut(),
     ) {
-        let override_obj = overrides
-            .as_object()
-            .expect("request tool overrides must be JSON object");
+        let Some(override_obj) = overrides.as_object() else {
+            return;
+        };
         for (k, v) in override_obj {
             args_obj.insert(k.clone(), v.clone());
         }
@@ -736,10 +736,7 @@ pub(crate) async fn execute_tool_loop(
                 }
             };
             apply_request_tool_overrides(&response_format, original_body, &mut arguments);
-            debug!(
-                "Calling MCP tool '{}' with args: {}",
-                call.name, arguments
-            );
+            debug!("Calling MCP tool '{}' with args: {}", call.name, arguments);
             let tool_output = session
                 .execute_tool(ToolExecutionInput {
                     call_id: call.call_id.clone(),
