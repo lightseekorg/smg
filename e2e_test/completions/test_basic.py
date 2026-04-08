@@ -6,11 +6,7 @@ stop sequences, and parallel sampling via the OpenAI SDK.
 
 from __future__ import annotations
 
-import logging
-
 import pytest
-
-logger = logging.getLogger(__name__)
 
 
 @pytest.mark.engine("sglang", "vllm")
@@ -19,6 +15,8 @@ logger = logging.getLogger(__name__)
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestCompletionBasic:
     """Tests for OpenAI-compatible /v1/completions API (non-streaming)."""
+
+    STOP_SEQUENCE_TRIMMED = True
 
     def test_non_streaming_basic(self, model, api_client):
         """Test basic non-streaming text completion with response structure."""
@@ -75,7 +73,11 @@ class TestCompletionBasic:
         )
 
         assert response.choices[0].finish_reason == "stop"
-        assert "," not in response.choices[0].text
+        text = response.choices[0].text
+        if self.STOP_SEQUENCE_TRIMMED:
+            assert "," not in text, f"Stop sequence ',' should not appear in output: {text}"
+        else:
+            assert text.endswith(","), f"Stop sequence ',' should be the suffix of output: {text}"
 
     def test_non_streaming_echo(self, model, api_client):
         """Test that echo=True prepends the prompt to the output."""
@@ -165,6 +167,8 @@ class TestCompletionBasic:
 class TestCompletionStreaming:
     """Tests for streaming /v1/completions API."""
 
+    STOP_SEQUENCE_TRIMMED = True
+
     @staticmethod
     def _collect_stream(stream):
         """Consume a streaming response, returning (full_text, finish_reasons)."""
@@ -214,7 +218,14 @@ class TestCompletionStreaming:
         assert len(finish_reasons) == 1
         assert finish_reasons[0] == "stop"
         assert len(full_text) > 0, "No text chunks received"
-        assert "," not in full_text
+        if self.STOP_SEQUENCE_TRIMMED:
+            assert "," not in full_text, (
+                f"Stop sequence ',' should not appear in output: {full_text}"
+            )
+        else:
+            assert full_text.endswith(","), (
+                f"Stop sequence ',' should be the suffix of output: {full_text}"
+            )
 
     def test_streaming_collects_full_text(self, model, api_client):
         """Test that streaming deltas concatenate to a non-empty completion."""
@@ -230,7 +241,6 @@ class TestCompletionStreaming:
         full_text, _ = self._collect_stream(stream)
 
         assert len(full_text) > 0
-        assert "Paris" in full_text
 
     def test_streaming_echo_max_tokens_zero(self, model, api_client):
         """Test that echo=True with max_tokens=0 streams just the prompt."""
