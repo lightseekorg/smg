@@ -13,6 +13,8 @@ pub struct MemoryRuntimeConfig {
 pub struct MemoryExecutionContext {
     pub store_ltm_requested: bool,
     pub store_ltm_active: bool,
+    pub recall_requested: bool,
+    pub recall_active: bool,
     pub subject_id: Option<String>,
     pub recall_method: Option<String>,
     pub embedding_model: Option<String>,
@@ -29,12 +31,15 @@ impl MemoryExecutionContext {
         let policy = Policy::from_value(headers.policy.as_deref());
         let store_ltm_requested =
             policy.allows_ltm_store() || is_enabled(headers.ltm_store_enabled.as_deref());
+        let recall_requested = policy.allows_recall();
 
         Self {
             store_ltm_active: store_ltm_requested
                 && runtime.ltm_enabled
                 && runtime.ltm_store_enabled,
             store_ltm_requested,
+            recall_active: recall_requested && runtime.ltm_enabled,
+            recall_requested,
             subject_id: headers.subject_id.clone(),
             recall_method: headers.recall_method.clone(),
             embedding_model: headers.embedding_model.clone(),
@@ -57,19 +62,19 @@ impl Policy {
             return Self::None;
         };
 
-        if value.eq_ignore_ascii_case("store_only") {
-            Self::StoreOnly
-        } else if value.eq_ignore_ascii_case("store_and_recall") {
-            Self::StoreAndRecall
-        } else if value.eq_ignore_ascii_case("none") || value.eq_ignore_ascii_case("no_policy") {
-            Self::None
-        } else {
-            Self::None
+        match value {
+            v if v.eq_ignore_ascii_case("store_only") => Self::StoreOnly,
+            v if v.eq_ignore_ascii_case("store_and_recall") => Self::StoreAndRecall,
+            _ => Self::None,
         }
     }
 
     fn allows_ltm_store(self) -> bool {
         matches!(self, Self::StoreOnly | Self::StoreAndRecall)
+    }
+
+    fn allows_recall(self) -> bool {
+        matches!(self, Self::StoreAndRecall)
     }
 }
 
@@ -102,6 +107,7 @@ mod tests {
         let ctx = MemoryExecutionContext::from_headers(&headers, &MemoryRuntimeConfig::default());
 
         assert!(ctx.store_ltm_requested);
+        assert!(ctx.recall_requested);
     }
 
     #[test]
@@ -132,5 +138,43 @@ mod tests {
 
         assert!(ctx.store_ltm_active);
         assert_eq!(ctx.subject_id.as_deref(), Some("subject-1"));
+    }
+
+    #[test]
+    fn recall_is_active_for_store_and_recall_when_ltm_runtime_enabled() {
+        let headers = MemoryHeaderView {
+            policy: Some("store_and_recall".to_string()),
+            ..Default::default()
+        };
+
+        let ctx = MemoryExecutionContext::from_headers(
+            &headers,
+            &MemoryRuntimeConfig {
+                ltm_enabled: true,
+                ltm_store_enabled: false,
+            },
+        );
+
+        assert!(ctx.recall_requested);
+        assert!(ctx.recall_active);
+    }
+
+    #[test]
+    fn store_only_policy_does_not_request_recall() {
+        let headers = MemoryHeaderView {
+            policy: Some("store_only".to_string()),
+            ..Default::default()
+        };
+
+        let ctx = MemoryExecutionContext::from_headers(
+            &headers,
+            &MemoryRuntimeConfig {
+                ltm_enabled: true,
+                ltm_store_enabled: true,
+            },
+        );
+
+        assert!(!ctx.recall_requested);
+        assert!(!ctx.recall_active);
     }
 }

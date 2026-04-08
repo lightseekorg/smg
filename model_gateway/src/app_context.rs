@@ -557,6 +557,7 @@ impl AppContextBuilder {
             hook,
         };
         let bundle = create_storage_bundle(storage_config).await?;
+        validate_memory_writer_configuration(config, bundle.conversation_memory_writer.as_ref())?;
 
         self.response_storage = Some(bundle.response_storage);
         self.conversation_storage = Some(bundle.conversation_storage);
@@ -678,5 +679,44 @@ impl AppContextBuilder {
 impl Default for AppContextBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn validate_memory_writer_configuration(
+    config: &RouterConfig,
+    memory_writer: Option<&Arc<dyn ConversationMemoryWriter>>,
+) -> Result<(), String> {
+    if config.memory_runtime.ltm_store_enabled && memory_writer.is_none() {
+        return Err(
+            "memory_runtime.ltm_store_enabled is true but selected storage backend does not provide conversation memory writer".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_memory_writer_configuration;
+    use crate::{
+        config::{PolicyConfig, RouterConfig, RoutingMode},
+        memory::MemoryRuntimeConfig,
+    };
+
+    #[test]
+    fn rejects_missing_memory_writer_when_ltm_store_is_enabled() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+        config.memory_runtime = MemoryRuntimeConfig {
+            ltm_enabled: true,
+            ltm_store_enabled: true,
+        };
+
+        let err = validate_memory_writer_configuration(&config, None).expect_err("should fail");
+        assert!(err.contains("does not provide conversation memory writer"));
     }
 }

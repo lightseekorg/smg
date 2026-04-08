@@ -167,6 +167,13 @@ pub async fn create_storage_bundle(
 
     // Wrap backends in hooked storage when a hook is provided
     if let Some(hook) = config.hook {
+        if bundle.conversation_memory_writer.is_some() {
+            return Err(
+                "storage hooks are not yet supported with conversation memory writer backends"
+                    .to_string(),
+            );
+        }
+
         info!("Wrapping storage backends with hook");
         Ok(StorageBundle {
             response_storage: Arc::new(HookedResponseStorage::new(
@@ -396,7 +403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_storage_with_hook() {
+    async fn test_create_storage_with_hook_rejects_backends_with_memory_writer() {
         use std::sync::Arc;
 
         use async_trait::async_trait;
@@ -438,38 +445,7 @@ mod tests {
             redis: None,
             hook: Some(Arc::new(NoOpHook)),
         };
-        let (resp, conv, items) = create_storage(config).await.unwrap();
-
-        // Verify hooked storage works end-to-end
-        let mut response = StoredResponse::new(None);
-        response.input = json!("hello");
-        let id = resp.store_response(response).await.unwrap();
-        assert!(resp.get_response(&id).await.unwrap().is_some());
-
-        let conversation = conv
-            .create_conversation(NewConversation {
-                id: None,
-                metadata: None,
-            })
-            .await
-            .unwrap();
-        assert!(conv
-            .get_conversation(&conversation.id)
-            .await
-            .unwrap()
-            .is_some());
-
-        let item = items
-            .create_item(NewConversationItem {
-                id: None,
-                response_id: None,
-                item_type: "message".to_string(),
-                role: Some("user".to_string()),
-                content: json!([]),
-                status: Some("completed".to_string()),
-            })
-            .await
-            .unwrap();
-        assert!(items.get_item(&item.id).await.unwrap().is_some());
+        let err = create_storage(config).await.err().expect("should fail");
+        assert!(err.contains("conversation memory writer"));
     }
 }
