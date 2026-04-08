@@ -115,6 +115,7 @@ jobs:
       - name: Run E2E tests
         timeout-minutes: 25
         env:
+          HF_HUB_OFFLINE: "1"
           SHOW_WORKER_LOGS: "0"
           SHOW_ROUTER_LOGS: "1"
           E2E_LOG_DIR: e2e-logs
