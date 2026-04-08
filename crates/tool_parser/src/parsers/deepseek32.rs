@@ -392,8 +392,10 @@ impl ToolParser for DeepSeek32Parser {
                         None
                     }
                 }
-            } else if sent_len < current_args.len() {
-                // First partial chunk — no prev_args yet, emit from sent_len
+            } else if sent_len < current_args.len() && current_args != "{}" {
+                // First partial chunk — no prev_args yet, emit from sent_len.
+                // Skip empty "{}" to avoid corrupting the delta stream when the
+                // buffer ends right after <invoke> with no parameter content yet.
                 Some(current_args[sent_len..].to_string())
             } else {
                 None
