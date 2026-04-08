@@ -17,6 +17,7 @@ pub mod error;
 pub mod http_client;
 pub mod job_queue;
 pub mod kv_event_monitor;
+pub mod lora;
 pub mod metrics_aggregator;
 pub mod resilience;
 pub mod retry;
