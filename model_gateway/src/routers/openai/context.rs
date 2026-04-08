@@ -174,67 +174,6 @@ impl RequestContext {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use axum::http::{HeaderMap, HeaderValue};
-    use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
-
-    use super::{ComponentRefs, RequestContext, SharedComponents};
-    use crate::{config::RouterConfig, memory::MemoryRuntimeConfig};
-
-    fn shared_components_with_memory_enabled() -> ComponentRefs {
-        let router_config = RouterConfig::builder()
-            .memory_runtime_config(MemoryRuntimeConfig {
-                ltm_enabled: true,
-                ltm_store_enabled: true,
-            })
-            .build_unchecked();
-
-        ComponentRefs::Shared(Arc::new(SharedComponents {
-            client: reqwest::Client::new(),
-            router_config: Arc::new(router_config),
-        }))
-    }
-
-    #[test]
-    fn for_responses_initializes_memory_context_from_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-smg-memory-ltm-store-enabled",
-            HeaderValue::from_static("enabled"),
-        );
-
-        let ctx = RequestContext::for_responses(
-            Arc::new(ResponsesRequest::default()),
-            Some(headers),
-            None,
-            shared_components_with_memory_enabled(),
-        );
-
-        assert!(ctx.memory_execution_context.store_ltm_active);
-    }
-
-    #[test]
-    fn for_chat_initializes_memory_context_from_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-smg-memory-ltm-store-enabled",
-            HeaderValue::from_static("enabled"),
-        );
-
-        let ctx = RequestContext::for_chat(
-            Arc::new(ChatCompletionRequest::default()),
-            Some(headers),
-            None,
-            shared_components_with_memory_enabled(),
-        );
-
-        assert!(ctx.memory_execution_context.store_ltm_active);
-    }
-}
-
 impl RequestContext {
     pub fn refresh_memory_execution_context(&mut self) {
         let empty_headers = HeaderMap::new();
@@ -353,3 +292,64 @@ pub struct StreamingEventContext<'a> {
 }
 
 pub type StreamingRequest = OwnedStreamingContext;
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::http::{HeaderMap, HeaderValue};
+    use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
+
+    use super::{ComponentRefs, RequestContext, SharedComponents};
+    use crate::{config::RouterConfig, memory::MemoryRuntimeConfig};
+
+    fn shared_components_with_memory_enabled() -> ComponentRefs {
+        let router_config = RouterConfig::builder()
+            .memory_runtime_config(MemoryRuntimeConfig {
+                ltm_enabled: true,
+                ltm_store_enabled: true,
+            })
+            .build_unchecked();
+
+        ComponentRefs::Shared(Arc::new(SharedComponents {
+            client: reqwest::Client::new(),
+            router_config: Arc::new(router_config),
+        }))
+    }
+
+    #[test]
+    fn for_responses_initializes_memory_context_from_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-smg-memory-ltm-store-enabled",
+            HeaderValue::from_static("enabled"),
+        );
+
+        let ctx = RequestContext::for_responses(
+            Arc::new(ResponsesRequest::default()),
+            Some(headers),
+            None,
+            shared_components_with_memory_enabled(),
+        );
+
+        assert!(ctx.memory_execution_context.store_ltm_active);
+    }
+
+    #[test]
+    fn for_chat_initializes_memory_context_from_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-smg-memory-ltm-store-enabled",
+            HeaderValue::from_static("enabled"),
+        );
+
+        let ctx = RequestContext::for_chat(
+            Arc::new(ChatCompletionRequest::default()),
+            Some(headers),
+            None,
+            shared_components_with_memory_enabled(),
+        );
+
+        assert!(ctx.memory_execution_context.store_ltm_active);
+    }
+}
