@@ -20,7 +20,8 @@ use tracing::{debug, error, warn};
 
 use super::{
     common::{
-        build_next_request_with_tools, inject_mcp_metadata, load_previous_messages, McpCallTracking,
+        build_next_request_with_tools, inject_mcp_metadata, load_previous_messages,
+        LoadedPreviousMessages, McpCallTracking,
     },
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools, ToolResult},
 };
@@ -56,14 +57,23 @@ pub(crate) async fn serve_harmony_responses(
     let original_request = request.clone();
 
     // Load previous conversation history if previous_response_id is set
-    let current_request = load_previous_messages(ctx, request).await?;
+    let LoadedPreviousMessages {
+        request: current_request,
+        existing_mcp_list_tools_labels,
+    } = load_previous_messages(ctx, request).await?;
 
     // Check MCP connection and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, current_request.tools.as_deref()).await?;
 
     let response = if has_mcp_tools {
-        execute_with_mcp_loop(ctx, current_request, mcp_servers).await?
+        execute_with_mcp_loop(
+            ctx,
+            current_request,
+            mcp_servers,
+            existing_mcp_list_tools_labels,
+        )
+        .await?
     } else {
         // No MCP tools - execute pipeline once (may have function tools or no tools)
         execute_without_mcp_loop(ctx, current_request).await?
@@ -90,10 +100,14 @@ async fn execute_with_mcp_loop(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     mcp_servers: Vec<McpServerBinding>,
+    existing_mcp_list_tools_labels: Vec<String>,
 ) -> Result<ResponsesResponse, Response> {
     let mut iteration_count = 0;
 
     let mut mcp_tracking = McpCallTracking::new();
+    let existing_mcp_list_tools_labels = existing_mcp_list_tools_labels
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
 
     // Extract user's max_tool_calls limit (if set)
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
@@ -227,7 +241,12 @@ async fn execute_with_mcp_loop(
 
                     // Inject MCP metadata if any calls were executed
                     if mcp_tracking.total_calls() > 0 {
-                        inject_mcp_metadata(&mut response, &mcp_tracking, &session);
+                        inject_mcp_metadata(
+                            &mut response,
+                            &mcp_tracking,
+                            &session,
+                            &existing_mcp_list_tools_labels,
+                        );
                     }
 
                     return Ok(response);
@@ -272,7 +291,12 @@ async fn execute_with_mcp_loop(
 
                     // Inject MCP metadata for all executed calls
                     if mcp_tracking.total_calls() > 0 {
-                        inject_mcp_metadata(&mut response, &mcp_tracking, &session);
+                        inject_mcp_metadata(
+                            &mut response,
+                            &mcp_tracking,
+                            &session,
+                            &existing_mcp_list_tools_labels,
+                        );
                     }
 
                     return Ok(response);
@@ -304,7 +328,12 @@ async fn execute_with_mcp_loop(
                 );
 
                 // Inject MCP metadata into final response
-                inject_mcp_metadata(&mut response, &mcp_tracking, &session);
+                inject_mcp_metadata(
+                    &mut response,
+                    &mcp_tracking,
+                    &session,
+                    &existing_mcp_list_tools_labels,
+                );
 
                 // Restore original tools (hide internal MCP tools from response)
                 response.tools = original_tools.take().unwrap_or_default();

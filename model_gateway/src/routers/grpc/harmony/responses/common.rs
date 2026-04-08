@@ -1,8 +1,11 @@
 //! Shared helpers and state tracking for Harmony Responses
 
+use std::collections::HashSet;
+
 use axum::response::Response;
 use openai_protocol::{
     common::{ToolCall, ToolChoice, ToolChoiceValue},
+    event_types::ItemType,
     responses::{
         ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
         ResponseReasoningContent, ResponsesRequest, ResponsesResponse, StringOrContentParts,
@@ -35,6 +38,11 @@ pub(super) struct McpCallRecord {
 pub(super) struct McpCallTracking {
     /// All tool call records across all iterations
     pub tool_calls: Vec<McpCallRecord>,
+}
+
+pub(super) struct LoadedPreviousMessages {
+    pub request: ResponsesRequest,
+    pub existing_mcp_list_tools_labels: Vec<String>,
 }
 
 impl McpCallTracking {
@@ -164,14 +172,27 @@ pub(super) fn inject_mcp_metadata(
     response: &mut ResponsesResponse,
     tracking: &McpCallTracking,
     session: &McpToolSession<'_>,
+    existing_labels: &HashSet<String>,
 ) {
     let tool_output_items: Vec<ResponseOutputItem> = tracking
         .tool_calls
         .iter()
         .map(|record| record.output_item.clone())
         .collect();
+    let existing = std::mem::take(&mut response.output);
+    let list_tools_bindings =
+        mcp_list_tools_bindings_to_emit(existing_labels, session.mcp_servers());
 
-    session.inject_mcp_output_items(&mut response.output, tool_output_items);
+    response
+        .output
+        .reserve(list_tools_bindings.len() + tool_output_items.len() + existing.len());
+    for (server_label, server_key) in &list_tools_bindings {
+        response
+            .output
+            .push(session.build_mcp_list_tools_item(server_label, server_key));
+    }
+    response.output.extend(tool_output_items);
+    response.output.extend(existing);
 }
 
 /// Load previous conversation messages from storage
@@ -181,10 +202,13 @@ pub(super) fn inject_mcp_metadata(
 pub(super) async fn load_previous_messages(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
-) -> Result<ResponsesRequest, Response> {
+) -> Result<LoadedPreviousMessages, Response> {
     let Some(ref prev_id_str) = request.previous_response_id else {
         // No previous_response_id, return request as-is
-        return Ok(request);
+        return Ok(LoadedPreviousMessages {
+            request,
+            existing_mcp_list_tools_labels: Vec::new(),
+        });
     };
 
     let prev_id = ResponseId::from(prev_id_str.as_str());
@@ -225,6 +249,7 @@ pub(super) async fn load_previous_messages(
 
     // Build conversation history from stored responses
     let mut history_items = Vec::new();
+    let mut existing_mcp_list_tools_labels = HashSet::new();
 
     // Helper to deserialize and collect items from a JSON array
     let deserialize_items = |arr: &Value, item_type: &str| -> Vec<ResponseInputOutputItem> {
@@ -245,6 +270,9 @@ pub(super) async fn load_previous_messages(
     };
 
     for stored in &chain.responses {
+        existing_mcp_list_tools_labels.extend(extract_mcp_list_tools_labels(
+            stored.raw_response.get("output").unwrap_or(&Value::Null),
+        ));
         history_items.extend(deserialize_items(&stored.input, "input"));
         history_items.extend(deserialize_items(
             stored
@@ -287,5 +315,35 @@ pub(super) async fn load_previous_messages(
     modified_request.input = ResponseInput::Items(all_items);
     modified_request.previous_response_id = None;
 
-    Ok(modified_request)
+    Ok(LoadedPreviousMessages {
+        request: modified_request,
+        existing_mcp_list_tools_labels: existing_mcp_list_tools_labels.into_iter().collect(),
+    })
+}
+
+pub(super) fn extract_mcp_list_tools_labels(array: &Value) -> Vec<String> {
+    array
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    (item.get("type").and_then(|t| t.as_str()) == Some(ItemType::MCP_LIST_TOOLS))
+                        .then(|| item.get("server_label").and_then(|v| v.as_str()))
+                        .flatten()
+                        .map(ToOwned::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(super) fn mcp_list_tools_bindings_to_emit(
+    existing_labels: &HashSet<String>,
+    mcp_servers: &[smg_mcp::McpServerBinding],
+) -> Vec<(String, String)> {
+    mcp_servers
+        .iter()
+        .filter(|binding| !existing_labels.contains(&binding.label))
+        .map(|binding| (binding.label.clone(), binding.server_key.clone()))
+        .collect()
 }

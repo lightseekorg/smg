@@ -108,10 +108,11 @@ async fn route_responses_streaming(
     params: ResponsesCallContext,
 ) -> Response {
     // 1. Load conversation history
-    let modified_request = match load_conversation_history(ctx, &request).await {
-        Ok(req) => req,
+    let loaded_history = match load_conversation_history(ctx, &request).await {
+        Ok(history) => history,
         Err(response) => return response, // Already a Response with proper status code
     };
+    let modified_request = loaded_history.request;
 
     // 2. Check MCP connection and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) =
@@ -129,6 +130,7 @@ async fn route_responses_streaming(
             &request,
             params,
             mcp_servers,
+            loaded_history.existing_mcp_list_tools_labels,
         );
     }
 

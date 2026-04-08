@@ -43,7 +43,8 @@ use uuid::Uuid;
 use super::{
     common::{
         build_next_request, convert_mcp_tools_to_chat_tools, extract_all_tool_calls_from_chat,
-        prepare_chat_tools_and_choice, ExtractedToolCall, ResponsesCallContext, ToolLoopState,
+        mcp_list_tools_bindings_to_emit, prepare_chat_tools_and_choice, ExtractedToolCall,
+        ResponsesCallContext, ToolLoopState,
     },
     conversions,
 };
@@ -430,6 +431,7 @@ pub(super) fn execute_tool_loop_streaming(
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
     mcp_servers: Vec<McpServerBinding>,
+    existing_mcp_list_tools_labels: Vec<String>,
 ) -> Response {
     // Create SSE channel for client
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
@@ -450,6 +452,7 @@ pub(super) fn execute_tool_loop_streaming(
             &original_request_clone,
             params,
             mcp_servers,
+            existing_mcp_list_tools_labels,
             tx.clone(),
         )
         .await;
@@ -499,9 +502,13 @@ async fn execute_tool_loop_streaming_internal(
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
     mcp_servers: Vec<McpServerBinding>,
+    existing_mcp_list_tools_labels: Vec<String>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
-    let mut state = ToolLoopState::new(original_request.input.clone());
+    let mut state = ToolLoopState::new(
+        original_request.input.clone(),
+        existing_mcp_list_tools_labels,
+    );
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
     // Generate response ID first so we can use it for both emitter and session
@@ -534,6 +541,10 @@ async fn execute_tool_loop_streaming_internal(
 
     // Flag to track if mcp_list_tools has been emitted
     let mut mcp_list_tools_emitted = false;
+    let list_tools_bindings = mcp_list_tools_bindings_to_emit(
+        &state.existing_mcp_list_tools_labels,
+        session.mcp_servers(),
+    );
 
     loop {
         state.iteration += 1;
@@ -551,10 +562,10 @@ async fn execute_tool_loop_streaming_internal(
 
         // Emit mcp_list_tools as first output item (only once, on first iteration)
         if !mcp_list_tools_emitted {
-            for binding in session.mcp_servers() {
-                let tools_for_server = session.list_tools_for_server(&binding.server_key);
+            for (server_label, server_key) in &list_tools_bindings {
+                let tools_for_server = session.list_tools_for_server(server_key);
 
-                emitter.emit_mcp_list_tools_sequence(&binding.label, &tools_for_server, &tx)?;
+                emitter.emit_mcp_list_tools_sequence(server_label, &tools_for_server, &tx)?;
             }
             mcp_list_tools_emitted = true;
         }

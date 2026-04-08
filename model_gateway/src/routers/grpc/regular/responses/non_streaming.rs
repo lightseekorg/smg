@@ -16,8 +16,8 @@ use tracing::{debug, error, trace, warn};
 use super::{
     common::{
         build_next_request, convert_mcp_tools_to_chat_tools, extract_all_tool_calls_from_chat,
-        load_conversation_history, prepare_chat_tools_and_choice, ExtractedToolCall,
-        ResponsesCallContext, ToolLoopState,
+        load_conversation_history, mcp_list_tools_bindings_to_emit, prepare_chat_tools_and_choice,
+        ExtractedToolCall, LoadedConversationHistory, ResponsesCallContext, ToolLoopState,
     },
     conversions,
 };
@@ -45,7 +45,10 @@ pub(super) async fn route_responses_internal(
     params: ResponsesCallContext,
 ) -> Result<ResponsesResponse, Response> {
     // 1. Load conversation history and build modified request
-    let modified_request = load_conversation_history(ctx, &request).await?;
+    let LoadedConversationHistory {
+        request: modified_request,
+        existing_mcp_list_tools_labels,
+    } = load_conversation_history(ctx, &request).await?;
 
     // 2. Check MCP connection and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) =
@@ -55,7 +58,15 @@ pub(super) async fn route_responses_internal(
         debug!("MCP tools detected, using tool loop");
 
         // Execute with MCP tool loop
-        execute_tool_loop(ctx, modified_request, &request, &params, mcp_servers).await?
+        execute_tool_loop(
+            ctx,
+            modified_request,
+            &request,
+            &params,
+            mcp_servers,
+            existing_mcp_list_tools_labels,
+        )
+        .await?
     } else {
         // No MCP tools - execute without MCP (may have function tools or no tools)
         execute_without_mcp(ctx, &modified_request, &request, params).await?
@@ -135,8 +146,12 @@ pub(super) async fn execute_tool_loop(
     original_request: &ResponsesRequest,
     params: &ResponsesCallContext,
     mcp_servers: Vec<McpServerBinding>,
+    existing_mcp_list_tools_labels: Vec<String>,
 ) -> Result<ResponsesResponse, Response> {
-    let mut state = ToolLoopState::new(original_request.input.clone());
+    let mut state = ToolLoopState::new(
+        original_request.input.clone(),
+        existing_mcp_list_tools_labels,
+    );
 
     // Configuration: max iterations as safety limit
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
@@ -224,12 +239,27 @@ pub(super) async fn execute_tool_loop(
 
             // Inject MCP metadata into output
             if state.total_calls > 0 {
-                session
-                    .inject_mcp_output_items(&mut responses_response.output, state.mcp_call_items);
+                let existing = std::mem::take(&mut responses_response.output);
+                let list_tools_bindings = mcp_list_tools_bindings_to_emit(
+                    &state.existing_mcp_list_tools_labels,
+                    session.mcp_servers(),
+                );
+
+                responses_response.output.reserve(
+                    list_tools_bindings.len() + state.mcp_call_items.len() + existing.len(),
+                );
+
+                for (server_label, server_key) in &list_tools_bindings {
+                    responses_response
+                        .output
+                        .push(session.build_mcp_list_tools_item(server_label, server_key));
+                }
+                responses_response.output.extend(state.mcp_call_items);
+                responses_response.output.extend(existing);
 
                 trace!(
                     "Injected MCP metadata: {} mcp_list_tools + {} mcp_call items",
-                    session.mcp_servers().len(),
+                    list_tools_bindings.len(),
                     state.total_calls
                 );
             }
