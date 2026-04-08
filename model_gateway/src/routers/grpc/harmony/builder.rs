@@ -1073,6 +1073,7 @@ impl HarmonyBuilder {
                 ChatMessage::Tool {
                     content,
                     tool_call_id,
+                    ..
                 } => {
                     // Look up the function name from the tool_call_id
                     let function_name = tool_call_map

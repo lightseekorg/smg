@@ -162,8 +162,11 @@ impl ResponseProcessor {
                 }
             };
 
-            if self.configured_tool_parser.is_some() && tool_parser_available {
-                // Explicitly configured parser takes priority (models may emit native tokens regardless of tool_choice)
+            if self.configured_tool_parser.is_some()
+                && tool_parser_available
+                && !output_is_constrained
+            {
+                // Configured parser for native tool call tokens (auto/required modes)
                 (tool_calls, processed_text) = self
                     .parse_tool_calls(
                         &processed_text,
@@ -171,14 +174,20 @@ impl ResponseProcessor {
                         history_tool_calls_count,
                     )
                     .await;
-            } else if used_json_schema {
+            }
+
+            if tool_calls.is_none() && used_json_schema {
+                // Constrained decoding output: pure JSON wrapped as a tool call
                 (tool_calls, processed_text) = utils::parse_json_schema_response(
                     &processed_text,
                     original_request.tool_choice.as_ref(),
                     &original_request.model,
                     history_tool_calls_count,
                 );
-            } else if tool_parser_available {
+            }
+
+            if tool_calls.is_none() && tool_parser_available {
+                // Fallback: auto-detected parser
                 (tool_calls, processed_text) = self
                     .parse_tool_calls(
                         &processed_text,
