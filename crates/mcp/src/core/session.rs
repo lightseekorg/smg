@@ -49,6 +49,7 @@ pub struct McpServerBinding {
 #[derive(Debug, Clone)]
 struct ExposedToolBinding {
     server_key: String,
+    associated_server_key: String,
     server_label: String,
     resolved_tool_name: String,
     response_format: ResponseFormat,
@@ -275,7 +276,7 @@ impl<'a> McpToolSession<'a> {
     pub fn is_internal_tool(&self, tool_name: &str) -> bool {
         self.exposed_name_map
             .get(tool_name)
-            .is_some_and(|binding| self.is_internal_server_key(&binding.server_key))
+            .is_some_and(|binding| self.is_internal_server_key(&binding.associated_server_key))
     }
 
     fn is_internal_server_key(&self, server_key: &str) -> bool {
@@ -430,6 +431,7 @@ impl<'a> McpToolSession<'a> {
                 exposed_name,
                 ExposedToolBinding {
                     server_key,
+                    associated_server_key: associated_server_key.to_string(),
                     server_label,
                     resolved_tool_name,
                     response_format: entry.response_format.clone(),
@@ -933,6 +935,66 @@ mod tests {
         assert!(session.has_exposed_tool("web_search"));
         assert_eq!(session.mcp_tools().len(), 1);
         assert_eq!(session.mcp_tools()[0].tool_name(), "web_search");
+    }
+
+    #[test]
+    fn test_is_internal_tool_for_alias_from_internal_server() {
+        use crate::core::config::{McpConfig, McpServerConfig, McpTransport};
+
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: true,
+            }],
+            ..Default::default()
+        };
+
+        let orchestrator = McpOrchestrator::new_test_with_config(config);
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                create_test_tool("brave_web_search"),
+            ));
+
+        orchestrator
+            .register_alias(
+                "web_search",
+                "internal-server",
+                "brave_web_search",
+                None,
+                ResponseFormat::WebSearchCall,
+            )
+            .expect("alias registration should succeed");
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+
+        assert!(
+            session.has_exposed_tool("web_search"),
+            "alias should be exposed in session"
+        );
+        assert!(
+            session.is_internal_tool("web_search"),
+            "aliases targeting internal servers must be classified as internal"
+        );
     }
 
     #[test]
