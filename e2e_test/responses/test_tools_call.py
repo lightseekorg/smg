@@ -274,7 +274,9 @@ def assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client
                 "Search the web for 'Rust programming language'. Set count to 1 and return one "
                 "sentence response."
             ),
-            previous_response_id=[e for e in events1 if e.type == "response.completed"][0].response.id,
+            previous_response_id=[e for e in events1 if e.type == "response.completed"][
+                0
+            ].response.id,
             tools=[BRAVE_MCP_TOOL],
             stream=True,
             reasoning={"effort": "low"},
@@ -291,7 +293,9 @@ def assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client
                 "supports, and also use brave_web_search to search the web for 'Rust programming "
                 "language'. Return exactly two bullet points."
             ),
-            previous_response_id=[e for e in events2 if e.type == "response.completed"][0].response.id,
+            previous_response_id=[e for e in events2 if e.type == "response.completed"][
+                0
+            ].response.id,
             tools=[BRAVE_MCP_TOOL, DEEPWIKI_MCP_TOOL],
             stream=True,
             reasoning={"effort": "low"},
