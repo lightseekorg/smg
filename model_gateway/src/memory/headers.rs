@@ -1,5 +1,7 @@
 use axum::http::HeaderMap;
 
+// Placeholder header names for memory controls.
+// These names are under active discussion and may change in a follow-up PR.
 const MEMORY_POLICY_HEADER: &str = "x-smg-memory-policy";
 const MEMORY_LTM_STORE_ENABLED_HEADER: &str = "x-smg-memory-ltm-store-enabled";
 const MEMORY_SUBJECT_ID_HEADER: &str = "x-smg-memory-subject-id";
