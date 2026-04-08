@@ -413,8 +413,7 @@ fn split_sse_lines(s: &str) -> impl Iterator<Item = &str> {
 /// the field name and value. A single leading space after the colon is stripped.
 fn parse_frame(frame: &str) -> Option<SseFrame<'_>> {
     let mut event_type: Option<&str> = None;
-    let mut first_data: Option<&str> = None;
-    let mut extra_data: Option<Vec<&str>> = None;
+    let mut data: Option<Cow<'_, str>> = None;
     let mut saw_data = false;
 
     for line in split_sse_lines(frame) {
@@ -431,9 +430,20 @@ fn parse_frame(frame: &str) -> Option<SseFrame<'_>> {
         match field {
             "data" => {
                 saw_data = true;
-                match first_data {
-                    None => first_data = Some(value),
-                    Some(_) => extra_data.get_or_insert_with(Vec::new).push(value),
+                match data.take() {
+                    None => data = Some(Cow::Borrowed(value)),
+                    Some(Cow::Borrowed(first)) => {
+                        let mut joined = String::with_capacity(first.len() + 1 + value.len());
+                        joined.push_str(first);
+                        joined.push('\n');
+                        joined.push_str(value);
+                        data = Some(Cow::Owned(joined));
+                    }
+                    Some(Cow::Owned(mut joined)) => {
+                        joined.push('\n');
+                        joined.push_str(value);
+                        data = Some(Cow::Owned(joined));
+                    }
                 }
             }
             "event" => {
@@ -449,21 +459,7 @@ fn parse_frame(frame: &str) -> Option<SseFrame<'_>> {
         return None;
     }
 
-    let data = match (first_data, extra_data) {
-        (None, _) => Cow::Borrowed(""),
-        (Some(first), None) => Cow::Borrowed(first),
-        (Some(first), Some(rest)) => {
-            let mut joined = String::with_capacity(
-                first.len() + rest.iter().map(|s| s.len() + 1).sum::<usize>(),
-            );
-            joined.push_str(first);
-            for line in rest {
-                joined.push('\n');
-                joined.push_str(line);
-            }
-            Cow::Owned(joined)
-        }
-    };
+    let data = data.unwrap_or(Cow::Borrowed(""));
 
     Some(SseFrame { event_type, data })
 }
@@ -787,6 +783,15 @@ mod tests {
         assert!(dec.next_frame().is_none());
         // After draining, flush also returns None — no meaningful data.
         assert!(dec.flush().is_none());
+    }
+
+    #[test]
+    fn test_decode_flush_incomplete() {
+        let mut dec = SseDecoder::new();
+        dec.push(b"data: a\n\ndata: b\n\n").unwrap();
+        // Complete frames remain — flush should reject
+        let result = dec.flush().unwrap();
+        assert!(matches!(result, Err(SseDecodeError::IncompleteFlush)));
     }
 
     #[test]
