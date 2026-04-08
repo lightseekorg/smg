@@ -283,7 +283,14 @@ impl TrtllmServiceClient {
         // Build guided decoding params if needed
         let guided_decoding = Self::build_guided_decoding_from_chat(body, tool_call_constraint)?;
 
-        let stop = Self::extract_stop_strings(body.stop.as_ref());
+        let mut stop = Self::extract_stop_strings(body.stop.as_ref());
+        // TRT-LLM gRPC does not reliably apply generation_config.eos_token_id
+        // in its _setup() path.  Chatml models use <|im_end|> as the turn
+        // delimiter, which differs from tokenizer.eos_token_id.  Explicitly
+        // include it so the engine stops generating at turn boundaries.
+        if !stop.iter().any(|s| s == "<|im_end|>") {
+            stop.push("<|im_end|>".to_string());
+        }
 
         let max_tokens = body.max_completion_tokens.unwrap_or(2048);
 
@@ -363,8 +370,11 @@ impl TrtllmServiceClient {
             .and_then(|p| p.max_new_tokens)
             .unwrap_or(2048);
 
-        let stop =
+        let mut stop =
             Self::extract_stop_strings(body.sampling_params.as_ref().and_then(|p| p.stop.as_ref()));
+        if !stop.iter().any(|s| s == "<|im_end|>") {
+            stop.push("<|im_end|>".to_string());
+        }
 
         let grpc_request = proto::GenerateRequest {
             request_id,
