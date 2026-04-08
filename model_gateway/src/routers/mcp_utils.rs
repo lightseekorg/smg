@@ -114,7 +114,7 @@ pub async fn connect_mcp_servers(
 
 /// Routing information for a built-in tool type.
 ///
-/// When a built-in tool type (web_search_preview, code_interpreter, image_generation)
+/// When a built-in tool type (web_search_preview, code_interpreter, image_generation, file_search)
 /// is configured to route to an MCP server, this struct holds the routing details.
 #[derive(Debug, Clone)]
 pub struct BuiltinToolRouting {
@@ -130,7 +130,7 @@ pub struct BuiltinToolRouting {
 
 /// Collect routing information for built-in tools in a request.
 ///
-/// Scans request tools for built-in types (web_search_preview, code_interpreter, image_generation)
+/// Scans request tools for built-in types (web_search_preview, code_interpreter, image_generation, file_search)
 /// and looks up configured MCP servers to handle them.
 ///
 /// # Arguments

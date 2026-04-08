@@ -801,6 +801,7 @@ async fn execute_tool_loop_streaming_internal(
                     tool_output.tool_name,
                     tool_output.arguments_str,
                     output_str,
+                    tool_output.response_format,
                     output_item,
                     success,
                 );

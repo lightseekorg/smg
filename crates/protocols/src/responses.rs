@@ -86,12 +86,20 @@ pub struct CodeInterpreterTool {
 
 /// Built-in image generation tool.
 ///
-/// The upstream API may add optional fields over time. We keep this tool shape
-/// open by preserving unknown key/value pairs.
+/// Known fields are typed for validation; unknown fields are preserved for
+/// forward compatibility via `extra`.
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 pub struct ImageGenerationTool {
+    pub size: Option<String>,
+    pub quality: Option<String>,
+    pub background: Option<String>,
+    pub output_format: Option<String>,
+    pub output_compression: Option<u32>,
+    pub moderation: Option<String>,
+    pub model: Option<String>,
     #[serde(flatten)]
-    pub options: HashMap<String, Value>,
+    pub extra: HashMap<String, Value>,
 }
 
 /// `require_approval` values.
@@ -1506,14 +1514,16 @@ mod tests {
         let tool: ResponseTool = serde_json::from_value(json!({
             "type": "image_generation",
             "size": "1024x1024",
-            "quality": "high"
+            "quality": "high",
+            "custom_flag": true
         }))
         .expect("image_generation tool should deserialize");
 
         match tool {
             ResponseTool::ImageGeneration(t) => {
-                assert_eq!(t.options.get("size"), Some(&json!("1024x1024")));
-                assert_eq!(t.options.get("quality"), Some(&json!("high")));
+                assert_eq!(t.size.as_deref(), Some("1024x1024"));
+                assert_eq!(t.quality.as_deref(), Some("high"));
+                assert_eq!(t.extra.get("custom_flag"), Some(&json!(true)));
             }
             other => panic!("expected image_generation tool, got {other:?}"),
         }

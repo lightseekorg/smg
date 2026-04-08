@@ -17,7 +17,7 @@ use openai_protocol::{
         is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent,
         ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent, WebSearchCallEvent,
     },
-    responses::{generate_id, ResponseInput, ResponsesRequest},
+    responses::{generate_id, ResponseInput, ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, to_value, Value};
 use smg_mcp::{
@@ -34,9 +34,6 @@ use crate::{
         tool_output_context::compact_tool_output_for_model_context,
     },
 };
-
-// TODO: Temporary hardcoded image model; replace with configurable model routing later.
-const IMAGE_MODEL: &str = "openai.gpt-image-1.5";
 
 /// State for tracking multi-turn tool calling loop
 pub(crate) struct ToolLoopState {
@@ -102,7 +99,7 @@ pub(crate) async fn execute_streaming_tool_calls(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     state: &mut ToolLoopState,
     sequence_number: &mut u64,
-    model_id: &str,
+    original_body: &ResponsesRequest,
 ) -> bool {
     for call in pending_calls {
         if call.name.is_empty() {
@@ -166,13 +163,12 @@ pub(crate) async fn execute_streaming_tool_calls(
                 continue;
             }
         };
-        sanitize_builtin_tool_arguments(&response_format, &mut arguments);
-
+        apply_request_tool_overrides(&response_format, original_body, &mut arguments);
         if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
             return false;
         }
 
-        debug!("Calling MCP tool '{}' with args: {}", call.name, args_str);
+        debug!("Calling MCP tool '{}' with args: {}", call.name, arguments);
         let tool_output = session
             .execute_tool(ToolExecutionInput {
                 call_id: call.call_id.clone(),
@@ -181,9 +177,13 @@ pub(crate) async fn execute_streaming_tool_calls(
             })
             .await;
 
-        Metrics::record_mcp_tool_duration(model_id, &tool_output.tool_name, tool_output.duration);
+        Metrics::record_mcp_tool_duration(
+            &original_body.model,
+            &tool_output.tool_name,
+            tool_output.duration,
+        );
         Metrics::record_mcp_tool_call(
-            model_id,
+            &original_body.model,
             &tool_output.tool_name,
             if tool_output.is_error {
                 metrics_labels::RESULT_ERROR
@@ -258,6 +258,58 @@ pub(crate) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpT
     if !tools_json.is_empty() {
         obj.insert("tools".to_string(), Value::Array(tools_json));
         obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
+    }
+}
+
+/// Extract request-level builtin tool overrides to merge into tool-call arguments.
+///
+/// Currently this is intentionally scoped to image generation only.
+/// We can extend this to other builtin tools later if needed.
+fn request_tool_overrides(
+    response_format: &ResponseFormat,
+    original_body: &ResponsesRequest,
+) -> Option<Value> {
+    if !matches!(response_format, ResponseFormat::ImageGenerationCall) {
+        return None;
+    }
+
+    // Read request-defined tools and find the image_generation config.
+    let tools = original_body.tools.as_ref()?;
+
+    tools.iter().find_map(|tool| {
+        // Serialize image tool config into a JSON object for merge.
+        let mut serialized = match tool {
+            ResponseTool::ImageGeneration(image_tool) => match to_value(image_tool).ok()? {
+                Value::Object(obj) => obj,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        // Drop nulls so absent fields do not overwrite generated call arguments.
+        serialized.retain(|_, v| !v.is_null());
+        if serialized.is_empty() {
+            None
+        } else {
+            Some(Value::Object(serialized))
+        }
+    })
+}
+
+fn apply_request_tool_overrides(
+    response_format: &ResponseFormat,
+    original_body: &ResponsesRequest,
+    arguments: &mut Value,
+) {
+    if let (Some(overrides), Some(args_obj)) = (
+        request_tool_overrides(response_format, original_body),
+        arguments.as_object_mut(),
+    ) {
+        let override_obj = overrides
+            .as_object()
+            .expect("request tool overrides must be JSON object");
+        for (k, v) in override_obj {
+            args_obj.insert(k.clone(), v.clone());
+        }
     }
 }
 
@@ -683,11 +735,10 @@ pub(crate) async fn execute_tool_loop(
                     continue;
                 }
             };
-            sanitize_builtin_tool_arguments(&response_format, &mut arguments);
-
+            apply_request_tool_overrides(&response_format, original_body, &mut arguments);
             debug!(
                 "Calling MCP tool '{}' with args: {}",
-                call.name, call.arguments
+                call.name, arguments
             );
             let tool_output = session
                 .execute_tool(ToolExecutionInput {
@@ -847,37 +898,6 @@ fn build_mcp_call_item(
         "output": output,
         "server_label": server_label
     })
-}
-
-// TODO: Extend this with per-tool argument override rules as we add more
-// builtin tool formats that need request-time normalization.
-fn sanitize_builtin_tool_arguments(response_format: &ResponseFormat, arguments: &mut Value) {
-    match response_format {
-        ResponseFormat::ImageGenerationCall => {
-            // Current fallback behavior: we intentionally narrow image arguments
-            // to `model` + `revised_prompt` for compatibility. This drops extra
-            // image options for now; we'll later pass either explicit user-provided
-            // values or safe defaults per option instead of truncating.
-            let revised_prompt = arguments
-                .as_object()
-                .and_then(|obj| {
-                    obj.get("revised_prompt")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| obj.get("prompt").and_then(|v| v.as_str()))
-                })
-                .unwrap_or("")
-                .to_string();
-
-            *arguments = json!({
-                "model": IMAGE_MODEL,
-                "revised_prompt": revised_prompt
-            });
-        }
-        ResponseFormat::WebSearchCall
-        | ResponseFormat::CodeInterpreterCall
-        | ResponseFormat::FileSearchCall
-        | ResponseFormat::Passthrough => {}
-    }
 }
 
 /// Build a transformed output item using ResponseTransformer

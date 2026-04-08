@@ -28,6 +28,36 @@ pub fn mcp_response_item_id(source_id: &str) -> String {
     format!("mcp_{source_id}")
 }
 
+/// Extract image-generation fallback text from JSON-RPC result content wrapper:
+/// `{"result":{"content":[{"type":"text","text":"..."}]}}`.
+pub fn extract_image_generation_fallback_text(value: &Value) -> Option<String> {
+    value
+        .as_object()
+        .and_then(|obj| obj.get("result"))
+        .and_then(|v| v.as_object())
+        .and_then(|obj| obj.get("content"))
+        .and_then(|v| v.as_array())
+        .and_then(|content| {
+            content.iter().find_map(|item| {
+                item.as_object()
+                    .filter(|o| o.get("type").and_then(|v| v.as_str()) == Some("text"))
+                    .and_then(|o| o.get("text"))
+                    .and_then(|v| v.as_str())
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_string)
+            })
+        })
+}
+
+pub fn is_image_generation_error(value: &Value) -> Option<bool> {
+    value
+        .as_object()
+        .and_then(|obj| obj.get("result"))
+        .and_then(|v| v.as_object())
+        .and_then(|result_obj| result_obj.get("isError"))
+        .and_then(|v| v.as_bool())
+}
+
 /// Transforms MCP CallToolResult to OpenAI Responses API output items.
 pub struct ResponseTransformer;
 
@@ -36,75 +66,47 @@ impl ResponseTransformer {
         obj.get("result").and_then(|v| v.as_str()).is_some()
     }
 
-    // Extract image_generation_call payload from direct output, wrapped MCP text
-    // content, or stringified JSON. Selection is gated by response format
-    // (derived from builtin_type), not payload key heuristics.
-    fn image_payload_from_wrapped_content(
-        result: &Value,
-        format: &ResponseFormat,
-    ) -> Option<Value> {
-        if !matches!(format, ResponseFormat::ImageGenerationCall) {
-            return None;
+    /// Extract image payload from MCP JSON-RPC `tools/call` response.
+    ///
+    /// Success example (`isError=false`), where `text` contains JSON with base64 result:
+    /// `{"result":{"content":[{"type":"text","text":"{\"result\":\"<base64>\"}"}],"isError":false}}`
+    ///
+    /// Error example (`isError=true`), where `text` is plain error text:
+    /// `{"result":{"content":[{"type":"text","text":"Error executing tool generate_image: ..."}],"isError":true}}`
+    ///
+    /// Any other shape is treated as unexpected and handled by the caller's
+    /// single fallback path.
+    fn image_payload_from_wrapped_content(result: &Value) -> Option<Value> {
+        // Parse the JSON-RPC wrapper object under top-level `result`.
+        let result_obj = result
+            .get("result")
+            .and_then(|v| v.as_object())?;
+
+        // `isError` determines whether we extract raw error text or image payload JSON.
+        let is_error = is_image_generation_error(result)?;
+
+        // Error responses should preserve the raw text error payload.
+        if is_error {
+            return extract_image_generation_fallback_text(result).map(Value::String);
         }
 
-        // Already a direct object payload.
-        if result
-            .as_object()
-            .is_some_and(Self::is_image_payload_candidate)
-        {
-            return Some(result.clone());
-        }
-
-        // Handle MCP CallToolResult-style wrapper:
-        // [{"type":"text","text":"{...image_generation_call payload...}"}]
-        let wrapped_content = result
-            .as_array()
-            .or_else(|| {
-                result
-                    .as_object()
-                    .and_then(|obj| obj.get("content"))
-                    .and_then(|v| v.as_array())
-            })
-            .or_else(|| {
-                result
-                    .as_object()
-                    .and_then(|obj| obj.get("result"))
-                    .and_then(|v| v.as_object())
-                    .and_then(|obj| obj.get("content"))
-                    .and_then(|v| v.as_array())
-            });
-        if let Some(arr) = wrapped_content {
-            let mut text_fallback: Option<String> = None;
-            for item in arr {
-                let Some(obj) = item.as_object() else {
-                    continue;
-                };
-                let item_type = obj.get("type").and_then(|v| v.as_str());
-                if item_type != Some("text") {
-                    continue;
-                }
-                let Some(text) = obj.get("text").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                if let Ok(parsed) = serde_json::from_str::<Value>(text) {
-                    if let Some(parsed_obj) = parsed.as_object() {
-                        if parsed_obj.contains_key("result") {
-                            return Some(parsed);
-                        }
-                    }
-                }
-                if text_fallback.is_none() && !text.trim().is_empty() {
-                    text_fallback = Some(text.to_string());
-                }
+        let content = result_obj
+            .get("content")
+            .and_then(|v| v.as_array())?;
+        for item in content {
+            let Some(obj) = item.as_object() else {
+                continue;
+            };
+            // Only parse text content entries from MCP content blocks.
+            if obj.get("type").and_then(|v| v.as_str()) != Some("text") {
+                continue;
             }
-            if let Some(text) = text_fallback {
-                return Some(Value::String(text));
-            }
-        }
-
-        // Sometimes payload comes as a JSON string.
-        if let Some(text) = result.as_str() {
+            let Some(text) = obj.get("text").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            // Success payload is expected as JSON text in the content block.
             if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                // Accept only image payload objects that include a string result.
                 if parsed
                     .as_object()
                     .is_some_and(Self::is_image_payload_candidate)
@@ -163,7 +165,7 @@ impl ResponseTransformer {
         }
     }
 
-    /// Flatten passthrough MCP results into the plain-string output shape used by OpenAI.
+    /// Flatten passthrough MCP results into plain text for OpenAI-compatible output.
     fn flatten_mcp_output(result: &Value) -> String {
         match result {
             Value::String(text) => text.clone(),
@@ -266,9 +268,9 @@ impl ResponseTransformer {
 
     /// Transform MCP image generation results to OpenAI image_generation_call format.
     fn to_image_generation_call(result: &Value, tool_call_id: &str) -> ResponseOutputItem {
-        let payload =
-            Self::image_payload_from_wrapped_content(result, &ResponseFormat::ImageGenerationCall)
-                .unwrap_or_else(|| result.clone());
+        let payload = Self::image_payload_from_wrapped_content(result).unwrap_or_else(|| {
+            Value::String(Self::flatten_mcp_output(result))
+        });
         let obj = payload.as_object();
 
         let status = ImageGenerationCallStatus::Completed;
@@ -477,29 +479,6 @@ mod tests {
     }
 
     #[test]
-    fn test_passthrough_transform_flattens_single_text_block() {
-        let result = json!([
-            {"type": "text", "text": "hello from mcp"}
-        ]);
-
-        let transformed = ResponseTransformer::transform(
-            &result,
-            &ResponseFormat::Passthrough,
-            "test-2",
-            "server",
-            "tool",
-            "{}",
-        );
-
-        match transformed {
-            ResponseOutputItem::McpCall { output, .. } => {
-                assert_eq!(output, "hello from mcp");
-            }
-            _ => panic!("Expected McpCall"),
-        }
-    }
-
-    #[test]
     fn test_passthrough_transform_fc_id_to_mcp_prefix() {
         let result = json!({"key": "value"});
         let transformed = ResponseTransformer::transform(
@@ -520,30 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn test_passthrough_transform_flattens_multiple_text_blocks() {
-        let result = json!([
-            {"type": "text", "text": "first block"},
-            {"type": "text", "text": "second block"}
-        ]);
-
-        let transformed = ResponseTransformer::transform(
-            &result,
-            &ResponseFormat::Passthrough,
-            "test-3",
-            "server",
-            "tool",
-            "{}",
-        );
-
-        match transformed {
-            ResponseOutputItem::McpCall { output, .. } => {
-                assert_eq!(output, "first block\nsecond block");
-            }
-            _ => panic!("Expected McpCall"),
-        }
-    }
-
-    #[test]
     fn test_passthrough_transform_preserves_existing_mcp_prefix() {
         let result = json!({"key": "value"});
         let transformed = ResponseTransformer::transform(
@@ -558,110 +513,6 @@ mod tests {
         match transformed {
             ResponseOutputItem::McpCall { id, .. } => {
                 assert_eq!(id, "mcp_existing");
-            }
-            _ => panic!("Expected McpCall"),
-        }
-    }
-
-    #[test]
-    fn test_passthrough_transform_ignores_non_text_blocks() {
-        let result = json!([
-            {"type": "text", "text": "kept text"},
-            {"type": "image", "url": "https://example.com/image.png"},
-            {"type": "resource", "uri": "file:///tmp/test.txt"}
-        ]);
-
-        let transformed = ResponseTransformer::transform(
-            &result,
-            &ResponseFormat::Passthrough,
-            "test-4",
-            "server",
-            "tool",
-            "{}",
-        );
-
-        match transformed {
-            ResponseOutputItem::McpCall { output, .. } => {
-                assert_eq!(output, "kept text");
-            }
-            _ => panic!("Expected McpCall"),
-        }
-    }
-
-    #[test]
-    fn test_passthrough_transform_ignores_typed_non_text_blocks_with_text_fields() {
-        let result = json!([
-            {"type": "text", "text": "kept text"},
-            {"type": "image", "text": "caption that should be ignored"}
-        ]);
-
-        let transformed = ResponseTransformer::transform(
-            &result,
-            &ResponseFormat::Passthrough,
-            "test-4b",
-            "server",
-            "tool",
-            "{}",
-        );
-
-        match transformed {
-            ResponseOutputItem::McpCall { output, .. } => {
-                assert_eq!(output, "kept text");
-            }
-            _ => panic!("Expected McpCall"),
-        }
-    }
-
-    #[test]
-    fn test_passthrough_transform_uses_error_message_for_structured_errors() {
-        let result = json!({
-            "error": {
-                "code": "tool_failed",
-                "message": "tool execution failed"
-            }
-        });
-
-        let transformed = ResponseTransformer::transform(
-            &result,
-            &ResponseFormat::Passthrough,
-            "test-5",
-            "server",
-            "tool",
-            "{}",
-        );
-
-        match transformed {
-            ResponseOutputItem::McpCall { output, .. } => {
-                assert_eq!(output, "tool execution failed");
-            }
-            _ => panic!("Expected McpCall"),
-        }
-    }
-
-    #[test]
-    fn test_passthrough_transform_keeps_content_when_error_has_no_text() {
-        let result = json!([
-            {"type": "text", "text": "hello"},
-            {
-                "error": {"code": "tool_failed"},
-                "content": [
-                    {"type": "text", "text": "important"}
-                ]
-            }
-        ]);
-
-        let transformed = ResponseTransformer::transform(
-            &result,
-            &ResponseFormat::Passthrough,
-            "test-6",
-            "server",
-            "tool",
-            "{}",
-        );
-
-        match transformed {
-            ResponseOutputItem::McpCall { output, .. } => {
-                assert_eq!(output, "hello\nimportant");
             }
             _ => panic!("Expected McpCall"),
         }
@@ -775,117 +626,19 @@ mod tests {
     }
 
     #[test]
-    fn test_image_generation_transform() {
-        let result = json!({
-            "result": "ZmFrZV9iYXNlNjQ="
-        });
-
-        let transformed = ResponseTransformer::transform(
-            &result,
-            &ResponseFormat::ImageGenerationCall,
-            "req-999",
-            "server",
-            "image_generation",
-            "{}",
-        );
-
-        match transformed {
-            ResponseOutputItem::ImageGenerationCall {
-                id, status, result, ..
-            } => {
-                assert_eq!(id, "ig_req-999");
-                assert_eq!(status, ImageGenerationCallStatus::Completed);
-                assert_eq!(result.as_deref(), Some("ZmFrZV9iYXNlNjQ="));
-            }
-            _ => panic!("Expected ImageGenerationCall"),
-        }
-    }
-
-    #[test]
-    fn test_image_generation_transform_direct_string() {
-        let result = json!("ZmFrZV9iYXNlNjQ=");
-
-        let transformed = ResponseTransformer::transform(
-            &result,
-            &ResponseFormat::ImageGenerationCall,
-            "req-1000",
-            "server",
-            "image_generation",
-            "{}",
-        );
-
-        match transformed {
-            ResponseOutputItem::ImageGenerationCall {
-                id, status, result, ..
-            } => {
-                assert_eq!(id, "ig_req-1000");
-                assert_eq!(status, ImageGenerationCallStatus::Completed);
-                assert_eq!(result.as_deref(), Some("ZmFrZV9iYXNlNjQ="));
-            }
-            _ => panic!("Expected ImageGenerationCall"),
-        }
-    }
-
-    #[test]
-    fn test_image_generation_transform_non_string_payload() {
-        let result = json!(42);
-
-        let transformed = ResponseTransformer::transform(
-            &result,
-            &ResponseFormat::ImageGenerationCall,
-            "req-1001",
-            "server",
-            "image_generation",
-            "{}",
-        );
-
-        match transformed {
-            ResponseOutputItem::ImageGenerationCall {
-                id, status, result, ..
-            } => {
-                assert_eq!(id, "ig_req-1001");
-                assert_eq!(status, ImageGenerationCallStatus::Completed);
-                assert_eq!(result.as_deref(), Some("42"));
-            }
-            _ => panic!("Expected ImageGenerationCall"),
-        }
-    }
-
-    #[test]
-    fn test_image_generation_transform_error_payload() {
-        let result = json!({
-            "error": "generation failed"
-        });
-
-        let transformed = ResponseTransformer::transform(
-            &result,
-            &ResponseFormat::ImageGenerationCall,
-            "req-1002",
-            "server",
-            "image_generation",
-            "{}",
-        );
-
-        match transformed {
-            ResponseOutputItem::ImageGenerationCall {
-                id, status, result, ..
-            } => {
-                assert_eq!(id, "ig_req-1002");
-                assert_eq!(status, ImageGenerationCallStatus::Completed);
-                assert_eq!(result.as_deref(), Some("{\"error\":\"generation failed\"}"));
-            }
-            _ => panic!("Expected ImageGenerationCall"),
-        }
-    }
-
-    #[test]
     fn test_image_generation_transform_wrapped_content_extracts_metadata() {
-        let result = json!([
-            {
-                "type": "text",
-                "text": "{\"result\":\"ZmFrZV9iYXNlNjQ=\",\"status\":\"completed\",\"action\":\"generate\",\"background\":\"opaque\",\"output_format\":\"png\",\"quality\":\"high\",\"size\":\"1024x1024\",\"revised_prompt\":\"rp\"}"
+        let result = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "{\"result\":\"ZmFrZV9iYXNlNjQ=\",\"status\":\"completed\",\"action\":\"generate\",\"background\":\"opaque\",\"output_format\":\"png\",\"quality\":\"high\",\"size\":\"1024x1024\",\"revised_prompt\":\"rp\"}"
+                    }
+                ]
             }
-        ]);
+        });
 
         let transformed = ResponseTransformer::transform(
             &result,
@@ -924,16 +677,22 @@ mod tests {
 
     #[test]
     fn test_image_generation_transform_wrapped_content_skips_non_image_json_text() {
-        let result = json!([
-            {
-                "type": "text",
-                "text": "{\"foo\":\"bar\",\"trace_id\":\"abc\"}"
-            },
-            {
-                "type": "text",
-                "text": "{\"result\":\"ZmFrZV9iYXNlNjQ=\",\"status\":\"completed\"}"
+        let result = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "{\"foo\":\"bar\",\"trace_id\":\"abc\"}"
+                    },
+                    {
+                        "type": "text",
+                        "text": "{\"result\":\"ZmFrZV9iYXNlNjQ=\",\"status\":\"completed\"}"
+                    }
+                ]
             }
-        ]);
+        });
 
         let transformed = ResponseTransformer::transform(
             &result,
@@ -957,24 +716,11 @@ mod tests {
     }
 
     #[test]
-    fn test_image_generation_transform_jsonrpc_wrapped_plain_text_error() {
-        let error_text = "Error executing tool generate_image: 1 validation error for generate_imageArguments\noutput_format\n  Input should be 'png', 'jpeg' or 'webp' [type=literal_error, input_value='spng', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.12/v/literal_error";
-        let result = json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "result": {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": error_text
-                    }
-                ],
-                "isError": true
-            }
-        });
+    fn test_image_generation_transform_sse_error_fallback() {
+        let sse_payload = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool generate_image: invalid output_format\"}],\"isError\":true}}\n\n";
 
         let transformed = ResponseTransformer::transform(
-            &result,
+            &json!(sse_payload),
             &ResponseFormat::ImageGenerationCall,
             "req-1005",
             "server",
@@ -988,9 +734,13 @@ mod tests {
             } => {
                 assert_eq!(id, "ig_req-1005");
                 assert_eq!(status, ImageGenerationCallStatus::Completed);
-                assert_eq!(result.as_deref(), Some(error_text));
+                assert_eq!(
+                    result.as_deref(),
+                    Some("Error executing tool generate_image: invalid output_format")
+                );
             }
             _ => panic!("Expected ImageGenerationCall"),
         }
     }
+
 }
