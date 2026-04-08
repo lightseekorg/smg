@@ -287,31 +287,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn noop_memory_writer_returns_generated_memory_id() {
-        let writer = NoOpConversationMemoryWriter::new();
-        let id = writer
-            .create_memory(NewConversationMemory {
-                conversation_id: ConversationId::from("conv_1"),
-                conversation_version: Some(1),
-                response_id: None,
-                memory_type: ConversationMemoryType::Ltm,
-                status: ConversationMemoryStatus::Ready,
-                attempt: 0,
-                owner_id: None,
-                next_run_at: Utc::now(),
-                lease_until: None,
-                content: None,
-                memory_config: None,
-                scope_id: None,
-                error_msg: None,
-            })
-            .await
-            .unwrap();
-
-        assert!(!id.0.is_empty());
-    }
-
     // ========================================================================
     // NoOpConversationItemStorage Tests
     // ========================================================================

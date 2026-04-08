@@ -53,11 +53,18 @@ enum Policy {
 
 impl Policy {
     fn from_value(value: Option<&str>) -> Self {
-        match value.map(normalize) {
-            Some("store_only") => Self::StoreOnly,
-            Some("store_and_recall") => Self::StoreAndRecall,
-            Some("none") | Some("no_policy") => Self::None,
-            _ => Self::None,
+        let Some(value) = value.map(normalize) else {
+            return Self::None;
+        };
+
+        if value.eq_ignore_ascii_case("store_only") {
+            Self::StoreOnly
+        } else if value.eq_ignore_ascii_case("store_and_recall") {
+            Self::StoreAndRecall
+        } else if value.eq_ignore_ascii_case("none") || value.eq_ignore_ascii_case("no_policy") {
+            Self::None
+        } else {
+            Self::None
         }
     }
 
@@ -67,7 +74,14 @@ impl Policy {
 }
 
 fn is_enabled(value: Option<&str>) -> bool {
-    matches!(value.map(normalize), Some("1" | "true" | "yes" | "enabled"))
+    let Some(value) = value.map(normalize) else {
+        return false;
+    };
+
+    value == "1"
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("enabled")
 }
 
 fn normalize(value: &str) -> &str {

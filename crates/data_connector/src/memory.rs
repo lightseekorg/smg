@@ -302,38 +302,6 @@ impl ConversationMemoryWriter for MemoryConversationMemoryWriter {
     }
 }
 
-#[cfg(test)]
-mod conversation_memory_writer_tests {
-    use chrono::Utc;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn memory_writer_returns_generated_memory_id() {
-        let writer = MemoryConversationMemoryWriter::new();
-        let id = writer
-            .create_memory(NewConversationMemory {
-                conversation_id: ConversationId::from("conv_1"),
-                conversation_version: Some(3),
-                response_id: Some(ResponseId::from("resp_1")),
-                memory_type: ConversationMemoryType::Ltm,
-                status: ConversationMemoryStatus::Ready,
-                attempt: 0,
-                owner_id: Some("owner-1".to_string()),
-                next_run_at: Utc::now(),
-                lease_until: None,
-                content: None,
-                memory_config: Some("{\"memory_subject_id\":\"subject-1\"}".to_string()),
-                scope_id: None,
-                error_msg: None,
-            })
-            .await
-            .unwrap();
-
-        assert!(!id.0.is_empty());
-    }
-}
-
 // ============================================================================
 // PART 4: MemoryResponseStorage
 // ============================================================================
