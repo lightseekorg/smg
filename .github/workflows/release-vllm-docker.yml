@@ -60,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        base_image: ${{ github.event_name == 'push' && fromJSON('["vllm/vllm-openai:v0.19.0","vllm/vllm-openai:v0.17.1","vllm/vllm-openai:v0.16.0"]') || fromJSON(format('["{0}"]', inputs.base_image_ref || 'vllm/vllm-openai:v0.19.0')) }}
+        base_image: ${{ github.event_name == 'push' && fromJSON('["vllm/vllm-openai:v0.19.0","vllm/vllm-openai:v0.18.0","vllm/vllm-openai:v0.17.0"]') || fromJSON(format('["{0}"]', inputs.base_image_ref || 'vllm/vllm-openai:v0.19.0')) }}
     uses: ./.github/workflows/_build-engine-image.yml
     with:
       engine: vllm
