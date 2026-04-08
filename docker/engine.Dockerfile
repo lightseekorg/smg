@@ -10,7 +10,7 @@
 #   SMG_COMMIT      - commit/ref for SMG_REPO ("latest" = HEAD)
 #
 # Usage:
-#   docker build --build-arg BASE_IMAGE_REF=lmsysorg/sglang:v0.5.9 \
+#   docker build --build-arg BASE_IMAGE_REF=lmsysorg/sglang:v0.5.10 \
 #                --build-arg ENGINE=sglang \
 #                --build-arg SMG_REPO=https://github.com/lightseekorg/smg \
 #                --build-arg SMG_COMMIT=v1.1.0 \
