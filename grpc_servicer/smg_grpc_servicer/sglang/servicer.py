@@ -773,7 +773,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         return torch.from_numpy(arr)
 
     def _parse_mm_inputs(self, mm_proto) -> MultimodalInputs:
-        """Parse proto MultimodalInputs into the mm_inputs dict expected by scheduler."""
+        """Parse proto MultimodalInputs into the mm_inputs expected by scheduler."""
         # Decode pixel_values from typed TensorData field
         pixel_values = self._decode_tensor_data(mm_proto.pixel_values)
 
