@@ -252,8 +252,9 @@ impl<'a> McpToolSession<'a> {
     pub fn is_internal_server_label(&self, server_label: &str) -> bool {
         self.all_mcp_servers
             .iter()
-            .find(|binding| binding.label == server_label)
-            .is_some_and(|binding| self.is_internal_server_key(&binding.server_key))
+            .any(|binding| {
+                binding.label == server_label && self.is_internal_server_key(&binding.server_key)
+            })
     }
 
     /// Returns true if the given tool resolves to an internal server.
@@ -965,6 +966,68 @@ mod tests {
         assert!(session.has_exposed_tool("internal_search"));
         assert!(session.is_internal_tool("internal_search"));
         assert!(session.is_internal_server_label("internal-label"));
+    }
+
+    #[test]
+    fn test_is_internal_server_label_checks_all_bindings_for_shared_label() {
+        use crate::core::config::{McpConfig, McpServerConfig, McpTransport};
+
+        let config = McpConfig {
+            servers: vec![
+                McpServerConfig {
+                    name: "public-server".to_string(),
+                    transport: McpTransport::Sse {
+                        url: "http://localhost:3000/sse".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: None,
+                    builtin_type: None,
+                    builtin_tool_name: None,
+                    internal: false,
+                },
+                McpServerConfig {
+                    name: "internal-server".to_string(),
+                    transport: McpTransport::Sse {
+                        url: "http://localhost:3001/sse".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: None,
+                    builtin_type: None,
+                    builtin_tool_name: None,
+                    internal: true,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let orchestrator = McpOrchestrator::new_test_with_config(config);
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![
+                McpServerBinding {
+                    label: "shared-label".to_string(),
+                    server_key: "public-server".to_string(),
+                    allowed_tools: None,
+                },
+                McpServerBinding {
+                    label: "shared-label".to_string(),
+                    server_key: "internal-server".to_string(),
+                    allowed_tools: None,
+                },
+            ],
+            "test-request",
+        );
+
+        assert!(
+            session.is_internal_server_label("shared-label"),
+            "shared labels should be internal when any matching binding is internal"
+        );
     }
 
     /// Verify that `inject_mcp_output_items` produces the exact ordering:
