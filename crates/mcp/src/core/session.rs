@@ -988,6 +988,60 @@ mod tests {
     }
 
     #[test]
+    fn test_is_internal_tool_for_alias_targeting_internal_server() {
+        use crate::core::config::{McpConfig, McpServerConfig, McpTransport};
+
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: true,
+            }],
+            ..Default::default()
+        };
+
+        let orchestrator = McpOrchestrator::new_test_with_config(config);
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                create_test_tool("internal_search"),
+            ));
+
+        orchestrator
+            .register_alias(
+                "alias_search",
+                "internal-server",
+                "internal_search",
+                None,
+                ResponseFormat::Passthrough,
+            )
+            .expect("alias registration should succeed");
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+
+        assert!(session.has_exposed_tool("alias_search"));
+        assert!(session.is_internal_tool("alias_search"));
+    }
+
+    #[test]
     fn test_is_internal_server_label_checks_all_bindings_for_shared_label() {
         use crate::core::config::{McpConfig, McpServerConfig, McpTransport};
 
