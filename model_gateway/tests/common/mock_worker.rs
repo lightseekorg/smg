@@ -666,8 +666,25 @@ async fn responses_handler(
                 })
             })
             .unwrap_or(false);
+        let has_mcp_history = payload
+            .get("input")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items.iter().any(|item| {
+                    item.get("type")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| t == "mcp_list_tools" || t == "mcp_call")
+                })
+            })
+            .unwrap_or(false);
+        let has_previous_response_id = payload
+            .get("previous_response_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| !id.is_empty());
+        let has_prior_tool_context =
+            has_function_output || has_previous_response_id || has_mcp_history;
 
-        if has_tools && !has_function_output {
+        if has_tools && !has_prior_tool_context {
             // First turn: emit streaming tool call events using OpenAI-style function_call ids
             let call_id = format!("call_{}", &Uuid::now_v7().simple().to_string()[..24]);
             let item_id = format!("fc_{}", Uuid::now_v7().simple());
@@ -814,8 +831,8 @@ async fn responses_handler(
             Sse::new(stream)
                 .keep_alive(KeepAlive::default())
                 .into_response()
-        } else if has_tools && has_function_output {
-            // Second turn: emit streaming text response
+        } else if has_tools && has_prior_tool_context {
+            // Resume turn: emit streaming text response
             let rid = request_id.clone();
             let msg_id = format!("msg_{}", &Uuid::now_v7().simple().to_string()[..24]);
 
@@ -1024,8 +1041,25 @@ async fn responses_handler(
                 })
             })
             .unwrap_or(false);
+        let has_mcp_history = payload
+            .get("input")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items.iter().any(|item| {
+                    item.get("type")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| t == "mcp_list_tools" || t == "mcp_call")
+                })
+            })
+            .unwrap_or(false);
+        let has_previous_response_id = payload
+            .get("previous_response_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| !id.is_empty());
+        let has_prior_tool_context =
+            has_function_output || has_previous_response_id || has_mcp_history;
 
-        if has_tools && !has_function_output {
+        if has_tools && !has_prior_tool_context {
             let rid = format!("resp-{}", Uuid::now_v7());
             let call_id = format!("call_{}", &Uuid::now_v7().simple().to_string()[..24]);
             let item_id = format!("fc_{}", Uuid::now_v7().simple());
@@ -1046,7 +1080,7 @@ async fn responses_handler(
                 "usage": null
             }))
             .into_response()
-        } else if has_tools && has_function_output {
+        } else if has_tools && has_prior_tool_context {
             Json(json!({
                 "id": format!("resp-{}", Uuid::now_v7()),
                 "object": "response",

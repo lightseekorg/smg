@@ -191,6 +191,124 @@ def assert_streaming_mcp_call_ids_match(events):
     assert set(final_mcp_ids) == expected_ids
 
 
+def mcp_list_tools_labels(output):
+    return [item.server_label for item in output if item.type == "mcp_list_tools"]
+
+
+def streaming_added_mcp_list_tools_labels(events):
+    return [
+        event.item.server_label
+        for event in events
+        if event.type == "response.output_item.added"
+        and event.item is not None
+        and event.item.type == "mcp_list_tools"
+    ]
+
+
+def assert_previous_response_id_mcp_binding_behavior_non_streaming(model, api_client):
+    time.sleep(2)
+
+    resp1 = api_client.responses.create(
+        model=model,
+        input=MCP_TEST_PROMPT,
+        tools=[BRAVE_MCP_TOOL],
+        stream=False,
+        reasoning={"effort": "low"},
+    )
+    assert resp1.error is None
+    assert resp1.status == "completed"
+    assert mcp_list_tools_labels(resp1.output) == ["brave"]
+
+    resp2 = api_client.responses.create(
+        model=model,
+        input=(
+            "Search the web for 'Rust programming language'. Set count to 1 and return one "
+            "sentence response."
+        ),
+        previous_response_id=resp1.id,
+        tools=[BRAVE_MCP_TOOL],
+        stream=False,
+        reasoning={"effort": "low"},
+    )
+    assert resp2.error is None
+    assert resp2.status == "completed"
+    assert mcp_list_tools_labels(resp2.output) == []
+    assert any(item.type == "mcp_call" for item in resp2.output)
+
+    resp3 = api_client.responses.create(
+        model=model,
+        input=(
+            "Use deepwiki to tell me which transport protocols the 2025-03-26 MCP spec "
+            "supports, and also use brave_web_search to search the web for 'Rust programming "
+            "language'. Return exactly two bullet points."
+        ),
+        previous_response_id=resp2.id,
+        tools=[BRAVE_MCP_TOOL, DEEPWIKI_MCP_TOOL],
+        stream=False,
+        reasoning={"effort": "low"},
+    )
+    assert resp3.error is None
+    assert resp3.status == "completed"
+    assert mcp_list_tools_labels(resp3.output) == ["deepwiki"]
+    assert any(item.type == "mcp_call" for item in resp3.output)
+
+
+def assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client):
+    time.sleep(2)
+
+    events1 = list(
+        api_client.responses.create(
+            model=model,
+            input=MCP_TEST_PROMPT,
+            tools=[BRAVE_MCP_TOOL],
+            stream=True,
+            reasoning={"effort": "low"},
+        )
+    )
+    assert streaming_added_mcp_list_tools_labels(events1) == ["brave"]
+
+    events2 = list(
+        api_client.responses.create(
+            model=model,
+            input=(
+                "Search the web for 'Rust programming language'. Set count to 1 and return one "
+                "sentence response."
+            ),
+            previous_response_id=[e for e in events1 if e.type == "response.completed"][
+                0
+            ].response.id,
+            tools=[BRAVE_MCP_TOOL],
+            stream=True,
+            reasoning={"effort": "low"},
+        )
+    )
+    assert streaming_added_mcp_list_tools_labels(events2) == []
+    assert any(event.type == "response.mcp_call.completed" for event in events2)
+
+    events3 = list(
+        api_client.responses.create(
+            model=model,
+            input=(
+                "Use deepwiki to tell me which transport protocols the 2025-03-26 MCP spec "
+                "supports, and also use brave_web_search to search the web for 'Rust programming "
+                "language'. Return exactly two bullet points."
+            ),
+            previous_response_id=[e for e in events2 if e.type == "response.completed"][
+                0
+            ].response.id,
+            tools=[BRAVE_MCP_TOOL, DEEPWIKI_MCP_TOOL],
+            stream=True,
+            reasoning={"effort": "low"},
+        )
+    )
+    assert streaming_added_mcp_list_tools_labels(events3) == ["deepwiki"]
+    assert [e.type for e in events3].count("response.mcp_list_tools.in_progress") == 1
+    assert [e.type for e in events3].count("response.mcp_list_tools.completed") == 1
+    completed_events = [e for e in events3 if e.type == "response.completed"]
+    assert len(completed_events) == 1
+    assert mcp_list_tools_labels(completed_events[0].response.output) == ["deepwiki"]
+
+
 @pytest.mark.vendor("openai")
 @pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
@@ -469,6 +587,16 @@ class TestToolCallingCloud:
         assert len(mcp_calls) > 0
         for mcp_call in mcp_calls:
             assert mcp_call.server_label == "brave"
+
+    def test_previous_response_id_mcp_binding_behavior(self, model, api_client):
+        """Resumed turns should not relist existing MCP bindings."""
+
+        assert_previous_response_id_mcp_binding_behavior_non_streaming(model, api_client)
+
+    def test_previous_response_id_mcp_binding_behavior_streaming(self, model, api_client):
+        """Streaming resumed turns should only list newly added MCP bindings."""
+
+        assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client)
 
     def test_concurrent_mcp_different_servers(self, model, api_client):
         """Concurrent non-streaming requests with different MCP servers don't contaminate each other."""
@@ -929,7 +1057,6 @@ class TestToolChoiceGptOss:
         assert len(mcp_calls) > 0
         for mcp_call in mcp_calls:
             assert mcp_call.server_label == "brave"
-
 
 # =============================================================================
 # Local Backend Tests (gRPC with Qwen model) - Tool Choice

@@ -3,6 +3,8 @@
 //! Loads conversation history and/or previous response chains into the request
 //! input before forwarding to the upstream provider.
 
+use std::collections::HashSet;
+
 use axum::response::Response;
 use openai_protocol::{
     event_types::ItemType,
@@ -20,20 +22,26 @@ use crate::{
 
 const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
 
+pub(crate) struct LoadedInputHistory {
+    pub previous_response_id: Option<String>,
+    pub existing_mcp_list_tools_labels: Vec<String>,
+}
+
 /// Load conversation history and/or previous response chain into request input.
 ///
 /// Mutates `request_body.input` with the loaded items.
-/// Returns `Ok(original_previous_response_id)` on success, or `Err(response)` on validation failure.
+/// Returns `Ok(LoadedInputHistory)` on success, or `Err(response)` on validation failure.
 pub(crate) async fn load_input_history(
     components: &ResponsesComponents,
     conversation: Option<&str>,
     request_body: &mut ResponsesRequest,
     model: &str,
-) -> Result<Option<String>, Response> {
+) -> Result<LoadedInputHistory, Response> {
     let previous_response_id = request_body
         .previous_response_id
         .take()
         .filter(|id| !id.is_empty());
+    let mut existing_mcp_list_tools_labels = HashSet::new();
 
     // Load items from previous response chain if specified
     let mut chain_items: Option<Vec<ResponseInputOutputItem>> = None;
@@ -45,6 +53,12 @@ pub(crate) async fn load_input_history(
             .await
         {
             Ok(chain) if !chain.responses.is_empty() => {
+                existing_mcp_list_tools_labels.extend(chain.responses.iter().flat_map(|stored| {
+                    extract_mcp_list_tools_labels(
+                        stored.raw_response.get("output").unwrap_or(&Value::Null),
+                    )
+                }));
+
                 let items: Vec<ResponseInputOutputItem> = chain
                     .responses
                     .iter()
@@ -206,7 +220,10 @@ pub(crate) async fn load_input_history(
         request_body.input = ResponseInput::Items(items);
     }
 
-    Ok(previous_response_id)
+    Ok(LoadedInputHistory {
+        previous_response_id,
+        existing_mcp_list_tools_labels: existing_mcp_list_tools_labels.into_iter().collect(),
+    })
 }
 
 /// Deserialize ResponseInputOutputItems from a JSON array value
@@ -219,6 +236,22 @@ fn deserialize_items_from_array(array: &Value) -> Vec<ResponseInputOutputItem> {
                     serde_json::from_value::<ResponseInputOutputItem>(item.clone())
                         .map_err(|e| warn!("Failed to deserialize item: {}. Item: {}", e, item))
                         .ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn extract_mcp_list_tools_labels(array: &Value) -> Vec<String> {
+    array
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    (item.get("type").and_then(|t| t.as_str()) == Some(ItemType::MCP_LIST_TOOLS))
+                        .then(|| item.get("server_label").and_then(|v| v.as_str()))
+                        .flatten()
+                        .map(ToOwned::to_owned)
                 })
                 .collect()
         })
