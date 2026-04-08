@@ -189,6 +189,10 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 ProtoGenerateRequest::Vllm(Box::new(req))
             }
             GrpcClient::Trtllm(trtllm_client) => {
+                let eos_ids = ctx
+                    .tokenizer_arc()
+                    .map(|t| t.eos_token_ids().to_vec())
+                    .unwrap_or_default();
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
                         let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
@@ -200,6 +204,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 token_ids,
                                 None, // No multimodal in Harmony pipeline
                                 tool_constraints,
+                                &eos_ids,
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request");

@@ -441,7 +441,7 @@ pub(crate) fn parse_json_schema_response(
     model: &str,
     history_tool_calls_count: usize,
 ) -> (Option<Vec<ToolCall>>, String) {
-    // Strip chatml tokens that may trail the constrained JSON output
+    // Strip chatml / special tokens that may trail the constrained JSON output
     let mut clean = processed_text.to_string();
     for token in [
         "<|im_end|>",
@@ -451,6 +451,8 @@ pub(crate) fn parse_json_schema_response(
         "<|im_system|>",
         "<|im_middle|>",
         "</think>",
+        "[EOS]",
+        "[BOS]",
     ] {
         clean = clean.replace(token, "");
     }

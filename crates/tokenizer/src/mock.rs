@@ -51,11 +51,7 @@ impl MockTokenizer {
             bos_token: Some("<bos>".to_string()),
             eos_token: Some("<eos>".to_string()),
             unk_token: Some("<unk>".to_string()),
-            sep_token: None,
-            pad_token: None,
-            cls_token: None,
-            mask_token: None,
-            additional_special_tokens: vec![],
+            ..Default::default()
         };
 
         Self {
