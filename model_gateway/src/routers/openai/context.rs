@@ -103,6 +103,7 @@ pub struct PayloadState {
     pub json: Value,
     pub url: String,
     pub previous_response_id: Option<String>,
+    pub existing_mcp_list_tools_labels: Vec<String>,
 }
 
 impl RequestContext {
@@ -202,6 +203,7 @@ pub struct OwnedStreamingContext {
     pub payload: Value,
     pub original_body: ResponsesRequest,
     pub previous_response_id: Option<String>,
+    pub existing_mcp_list_tools_labels: Vec<String>,
     pub storage: StorageHandles,
 }
 
@@ -233,6 +235,7 @@ impl RequestContext {
             payload: payload_state.json,
             original_body,
             previous_response_id: payload_state.previous_response_id,
+            existing_mcp_list_tools_labels: payload_state.existing_mcp_list_tools_labels,
             storage: StorageHandles {
                 response,
                 conversation,

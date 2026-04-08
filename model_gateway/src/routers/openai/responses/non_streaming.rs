@@ -18,7 +18,7 @@ use crate::routers::{
     mcp_utils::ensure_request_mcp_client,
     openai::{
         context::{PayloadState, RequestContext},
-        mcp::{execute_tool_loop, prepare_mcp_tools_as_functions},
+        mcp::{execute_tool_loop, prepare_mcp_tools_as_functions, ToolLoopExecutionContext},
     },
     persistence_utils::persist_conversation_items,
 };
@@ -36,6 +36,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         json: mut payload,
         url,
         previous_response_id,
+        existing_mcp_list_tools_labels,
     } = payload_state;
 
     let original_body = match ctx.responses_request() {
@@ -80,8 +81,11 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             ctx.headers(),
             worker.api_key(),
             payload,
-            original_body,
-            &session,
+            ToolLoopExecutionContext {
+                original_body,
+                existing_mcp_list_tools_labels: &existing_mcp_list_tools_labels,
+                session: &session,
+            },
         )
         .await
         {
