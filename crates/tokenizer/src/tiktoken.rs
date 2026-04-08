@@ -119,6 +119,7 @@ fn parse_special_tokens(config: &serde_json::Value) -> SpecialTokens {
         cls_token: get_str("cls_token"),
         mask_token: get_str("mask_token"),
         additional_special_tokens: additional,
+        ..Default::default()
     }
 }
 
@@ -259,9 +260,13 @@ impl TiktokenTokenizer {
             })
         };
 
+        // 6. Load merged EOS token IDs from config.json + generation_config.json
+        let mut special_tokens = config.special_tokens;
+        special_tokens.eos_token_ids = crate::eos::load_eos_token_ids(dir);
+
         Ok(TiktokenTokenizer {
             tokenizer,
-            special_tokens: config.special_tokens,
+            special_tokens,
             vocab,
             reverse_vocab,
             vocab_size,
@@ -308,27 +313,20 @@ impl TiktokenTokenizer {
             TiktokenModel::Cl100kBase => SpecialTokens {
                 bos_token: Some("<|endoftext|>".to_string()),
                 eos_token: Some("<|endoftext|>".to_string()),
-                unk_token: None,
-                sep_token: None,
                 pad_token: Some("<|endoftext|>".to_string()),
-                cls_token: None,
-                mask_token: None,
                 additional_special_tokens: vec![
                     "<|fim_prefix|>".to_string(),
                     "<|fim_middle|>".to_string(),
                     "<|fim_suffix|>".to_string(),
                     "<|endofprompt|>".to_string(),
                 ],
+                ..Default::default()
             },
             _ => SpecialTokens {
                 bos_token: Some("<|endoftext|>".to_string()),
                 eos_token: Some("<|endoftext|>".to_string()),
-                unk_token: None,
-                sep_token: None,
                 pad_token: Some("<|endoftext|>".to_string()),
-                cls_token: None,
-                mask_token: None,
-                additional_special_tokens: vec![],
+                ..Default::default()
             },
         }
     }
@@ -519,6 +517,10 @@ impl TokenizerTrait for TiktokenTokenizer {
     fn thinking_key_name(&self) -> Option<ThinkingKeyName> {
         self.chat_template.thinking_key_name()
     }
+    fn eos_token_ids(&self) -> &[TokenIdType] {
+        &self.special_tokens.eos_token_ids
+    }
+
     fn think_in_prefill(&self) -> bool {
         self.chat_template.think_in_prefill()
     }

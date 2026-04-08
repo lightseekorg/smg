@@ -184,8 +184,9 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 body,
                                 placeholder_processed_text,
                                 prep.token_ids.clone(),
-                                None, // No multimodal in Harmony pipeline
+                                None,
                                 prep.tool_constraints.clone(),
+                                &[],
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request");
@@ -199,6 +200,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             placeholder_processed_text,
                             prep.token_ids.clone(),
                             prep.tool_constraints.clone(),
+                            &[],
                         )
                         .map_err(|e| {
                             error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request from responses");
