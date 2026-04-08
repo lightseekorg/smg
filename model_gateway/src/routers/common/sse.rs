@@ -203,7 +203,7 @@ impl SseDecoder {
 
     pub fn with_max_size(max_size: usize) -> Self {
         Self {
-            buf: Vec::with_capacity(4096),
+            buf: Vec::with_capacity(max_size.min(4096)),
             consumed: 0,
             max_size,
         }
