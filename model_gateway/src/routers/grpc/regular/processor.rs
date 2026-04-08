@@ -148,8 +148,12 @@ impl ResponseProcessor {
                 _ => false,
             };
 
-            if self.configured_tool_parser.is_some() && tool_parser_available {
-                // Explicitly configured parser takes priority (models may emit native tokens regardless of tool_choice)
+            let has_native_parser = self
+                .configured_tool_parser
+                .as_deref()
+                .is_some_and(|p| p != "json");
+
+            if has_native_parser && tool_parser_available {
                 (tool_calls, processed_text) = self
                     .parse_tool_calls(
                         &processed_text,
@@ -630,7 +634,12 @@ impl ResponseProcessor {
                 Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
             );
 
-            if self.configured_tool_parser.is_some() && tool_parser_available {
+            let has_native_parser = self
+                .configured_tool_parser
+                .as_deref()
+                .is_some_and(|p| p != "json");
+
+            if has_native_parser && tool_parser_available {
                 (tool_calls, processed_text) = self
                     .parse_tool_calls(
                         &processed_text,

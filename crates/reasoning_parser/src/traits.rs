@@ -127,6 +127,13 @@ pub struct ParserConfig {
     /// For models with a template thinking toggle, this should be `false` —
     /// the runtime will call `mark_reasoning_started()` when appropriate.
     pub always_in_reasoning: bool,
+
+    /// Tokens that mark the start of a tool-call section in the model's output.
+    ///
+    /// When the model skips the reasoning end token and jumps straight to
+    /// tool calls, the reasoning parser uses these markers to stop consuming
+    /// content as reasoning and return it as normal text for the tool parser.
+    pub tool_section_start_markers: Vec<String>,
 }
 
 impl Default for ParserConfig {
@@ -136,7 +143,8 @@ impl Default for ParserConfig {
             think_end_token: "</think>".to_string(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            always_in_reasoning: false, // Default to false (explicit reasoning)
+            always_in_reasoning: false,
+            tool_section_start_markers: Vec::new(),
         }
     }
 }

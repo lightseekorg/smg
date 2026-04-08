@@ -57,14 +57,15 @@ impl KimiK2Parser {
         reason = "regex patterns are compile-time string literals"
     )]
     pub fn new() -> Self {
-        // Supports alternative delimiters: <|func_start|>/<|func_end|>; (?s) for multi-line JSON
+        // (?s) for multi-line JSON args. Delimiter group is optional (trailing ?) to
+        // be lenient with models that omit it between the ID and JSON body.
         let tool_call_pattern = r"(?s)<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*(?:<\|tool_call_argument_begin\|>\s*|<\|func_start\|>\s*)?(?P<function_arguments>\{.*?\})\s*(?:<\|tool_call_end\|>|<\|func_end\|>)";
         let tool_call_extractor = Regex::new(tool_call_pattern).expect("Valid regex pattern");
 
         let stream_pattern = r"(?s)<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*(?:<\|tool_call_argument_begin\|>\s*|<\|func_start\|>\s*)?(?P<function_arguments>\{.*)";
         let stream_tool_call_extractor = Regex::new(stream_pattern).expect("Valid regex pattern");
 
-        let end_pattern = r"<\|tool_call_begin\|>.*?(?:<\|tool_call_end\|>|<\|func_end\|>)";
+        let end_pattern = r"(?s)<\|tool_call_begin\|>.*?(?:<\|tool_call_end\|>|<\|func_end\|>)";
         let tool_call_end_pattern = Regex::new(end_pattern).expect("Valid regex pattern");
 
         // Robust parser for ids like "functions.search:0" or fallback "search:0"
@@ -179,7 +180,11 @@ impl ToolParser for KimiK2Parser {
             // No tool markers detected - return all buffered content as normal text
             let mut normal_text = std::mem::take(&mut self.buffer);
             // Remove end tokens if present
-            for e_token in ["<|tool_calls_section_end|>", "<|tool_call_end|>", "<|func_end|>"] {
+            for e_token in [
+                "<|tool_calls_section_end|>",
+                "<|tool_call_end|>",
+                "<|func_end|>",
+            ] {
                 normal_text = normal_text.replace(e_token, "");
             }
             return Ok(StreamingParseResult {
@@ -240,8 +245,13 @@ impl ToolParser for KimiK2Parser {
                             function_args
                         };
 
-                        let end_pos = argument_diff.find("<|tool_call_end|>")
-                            .or_else(|| argument_diff.find("<|func_end|>"));
+                        let end_pos = [
+                            argument_diff.find("<|tool_call_end|>"),
+                            argument_diff.find("<|func_end|>"),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .min();
                         let parsed_args_diff = if let Some(pos) = end_pos {
                             &argument_diff[..pos]
                         } else {
@@ -262,8 +272,13 @@ impl ToolParser for KimiK2Parser {
                             }
                         }
 
-                        let end_pos2 = function_args.find("<|tool_call_end|>")
-                            .or_else(|| function_args.find("<|func_end|>"));
+                        let end_pos2 = [
+                            function_args.find("<|tool_call_end|>"),
+                            function_args.find("<|func_end|>"),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .min();
                         let parsed_args = if let Some(pos) = end_pos2 {
                             &function_args[..pos]
                         } else {
