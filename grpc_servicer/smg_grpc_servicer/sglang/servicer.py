@@ -351,7 +351,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                 rid=rid,
                 input_text="",
                 input_ids=[0],
-                image_inputs={"mm_items": []},
+                image_inputs=None,
                 token_type_ids=[0],
                 sampling_params=sampling_params,
             )
@@ -827,7 +827,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             rid=grpc_req.request_id,
             input_text=input_text,
             input_ids=input_ids,
-            image_inputs={"mm_items": []},
+            image_inputs=None,
             token_type_ids=list(grpc_req.token_type_ids),
             sampling_params=sampling_params,
         )
