@@ -54,7 +54,7 @@ use super::{
     get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, CacheAwareConfig,
     LoadBalancingPolicy, SelectWorkerInfo,
 };
-use crate::core::{KvEventMonitor, Worker, UNKNOWN_MODEL_ID};
+use crate::worker::{KvEventMonitor, Worker, UNKNOWN_MODEL_ID};
 
 /// Cache-aware routing policy
 ///
@@ -920,7 +920,7 @@ mod tests {
     use kv_index::{compute_content_hash, SequenceHash, StoredBlock, WorkerBlockMap};
 
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
 
     #[test]
     fn test_cache_aware_with_balanced_load() {

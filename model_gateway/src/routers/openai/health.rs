@@ -10,8 +10,8 @@ use axum::{
 use serde_json::json;
 
 use crate::{
-    core::{RuntimeType, Worker, WorkerRegistry},
     routers::error,
+    worker::{RuntimeType, Worker, WorkerRegistry},
 };
 
 fn external_workers(registry: &WorkerRegistry) -> Vec<Arc<dyn Worker>> {

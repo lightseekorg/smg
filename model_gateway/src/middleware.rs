@@ -26,7 +26,7 @@ use tower_http::trace::{MakeSpan, OnRequest, OnResponse, TraceLayer};
 use tracing::{debug, error, field::Empty, info, info_span, warn, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-pub use crate::core::token_bucket::TokenBucket;
+pub use crate::worker::token_bucket::TokenBucket;
 use crate::{
     config::RouterConfig,
     observability::{

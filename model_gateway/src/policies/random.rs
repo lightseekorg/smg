@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rand::Rng;
 
 use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
-use crate::core::Worker;
+use crate::worker::Worker;
 
 /// Random selection policy
 ///
@@ -51,7 +51,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
 
     #[test]
     fn test_random_selection() {

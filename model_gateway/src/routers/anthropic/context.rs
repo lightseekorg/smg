@@ -9,7 +9,7 @@ use axum::http::HeaderMap;
 use openai_protocol::messages::CreateMessageRequest;
 use smg_mcp::{McpOrchestrator, McpServerBinding};
 
-use crate::core::{Worker, WorkerRegistry};
+use crate::worker::{Worker, WorkerRegistry};
 
 /// Shared context passed to all Anthropic handler functions.
 #[derive(Clone)]

@@ -9,7 +9,6 @@ use smg::{
         PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode, SchemaConfig,
         TokenizerCacheConfig, TraceConfig,
     },
-    core::ConnectionMode,
     observability::{
         metrics::PrometheusConfig,
         otel_trace::{is_otel_enabled, shutdown_otel},
@@ -17,6 +16,7 @@ use smg::{
     server::{self, ServerConfig},
     service_discovery::{ModelIdSource, ServiceDiscoveryConfig},
     version,
+    worker::ConnectionMode,
 };
 use smg_auth::{ApiKeyEntry, ControlPlaneAuthConfig, JwtConfig, Role};
 use smg_mesh::MeshServerConfig;

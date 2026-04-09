@@ -19,9 +19,9 @@ use serde_json::json;
 use serial_test::serial;
 use smg::{
     config::{RouterConfig, TraceConfig},
-    core::Job,
     observability::{logging, otel_trace},
     routers::RouterFactory,
+    worker::Job,
 };
 use tokio::sync::oneshot;
 use tonic::{metadata::MetadataMap, transport::Server, Request as TonicRequest, Response, Status};

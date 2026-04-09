@@ -8,7 +8,7 @@ use std::{fmt::Debug, sync::Arc};
 use openai_protocol::worker::WorkerLoadResponse;
 use smg_mesh::OptionalMeshSyncManager;
 
-use crate::core::{HashRing, Worker};
+use crate::worker::{HashRing, Worker};
 
 mod bucket;
 mod cache_aware;
@@ -156,7 +156,7 @@ pub(crate) fn get_healthy_worker_indices(workers: &[Arc<dyn Worker>]) -> Vec<usi
 #[inline]
 pub(crate) fn normalize_model_key(model_id: &str) -> &str {
     if model_id.is_empty() {
-        crate::core::UNKNOWN_MODEL_ID
+        crate::worker::UNKNOWN_MODEL_ID
     } else {
         model_id
     }
@@ -183,7 +183,7 @@ pub struct SelectWorkerInfo<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
 
     #[test]
     fn test_get_healthy_worker_indices() {

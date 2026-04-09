@@ -3,8 +3,8 @@ use std::{hint::black_box, sync::Arc, thread};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use smg::{
-    core::{BasicWorkerBuilder, Worker, WorkerType},
     policies::{LoadBalancingPolicy, ManualPolicy, SelectWorkerInfo},
+    worker::{BasicWorkerBuilder, Worker, WorkerType},
 };
 
 // ============================================================================

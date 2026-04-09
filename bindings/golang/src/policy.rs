@@ -22,12 +22,6 @@ use openai_protocol::{
     worker::{HealthCheckConfig, WorkerSpec},
 };
 use smg::{
-    core::{
-        circuit_breaker::CircuitBreaker,
-        resilience::ResolvedResilience,
-        worker::{RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad},
-        ConnectionMode, Worker, WorkerResult, WorkerType,
-    },
     policies::{
         BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
         RoundRobinPolicy, SelectWorkerInfo,
@@ -35,6 +29,12 @@ use smg::{
     routers::grpc::{
         client::GrpcClient,
         utils::{generate_tool_constraints, process_chat_messages},
+    },
+    worker::{
+        circuit_breaker::CircuitBreaker,
+        resilience::ResolvedResilience,
+        worker::{RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad},
+        ConnectionMode, Worker, WorkerResult, WorkerType,
     },
 };
 use smg_grpc_client::sglang_scheduler::SglangSchedulerClient;

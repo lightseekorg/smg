@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
-use crate::core::Worker;
+use crate::worker::Worker;
 
 /// Round-robin selection policy
 ///
@@ -59,7 +59,7 @@ impl LoadBalancingPolicy for RoundRobinPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
 
     #[test]
     fn test_round_robin_selection() {

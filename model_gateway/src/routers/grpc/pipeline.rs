@@ -48,10 +48,10 @@ use super::{
     utils::error_type_from_status,
 };
 use crate::{
-    core::WorkerRegistry,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     policies::PolicyRegistry,
     routers::error,
+    worker::WorkerRegistry,
 };
 
 /// Generic request pipeline for all request types

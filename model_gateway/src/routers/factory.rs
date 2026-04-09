@@ -13,8 +13,8 @@ use super::{
 use crate::{
     app_context::AppContext,
     config::{PolicyConfig, RoutingMode},
-    core::ConnectionMode,
     policies::{DPRankLoadPolicy, MinimumTokensPolicy, PolicyFactory},
+    worker::ConnectionMode,
 };
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]

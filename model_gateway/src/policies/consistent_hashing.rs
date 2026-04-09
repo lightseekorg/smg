@@ -22,9 +22,9 @@ use rand::Rng as _;
 
 use super::{LoadBalancingPolicy, SelectWorkerInfo};
 use crate::{
-    core::Worker,
     observability::metrics::Metrics,
     routers::header_utils::{extract_routing_key, extract_target_worker},
+    worker::Worker,
 };
 
 /// Execution branch for metrics
@@ -199,7 +199,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::core::{BasicWorkerBuilder, HashRing, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, HashRing, WorkerType};
 
     fn headers_with_routing_key(key: &str) -> http::HeaderMap {
         let mut headers = http::HeaderMap::new();
