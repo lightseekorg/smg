@@ -490,6 +490,25 @@ mod tests {
                     builtin_tool_name: Some("generate_image".to_string()),
                     internal: false,
                 },
+                McpServerConfig {
+                    name: "image-server".to_string(),
+                    transport: McpTransport::Streamable {
+                        url: "http://localhost:9997/image".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: Some(HashMap::from([(
+                        "generate_image".to_string(),
+                        ToolConfig {
+                            response_format: ResponseFormatConfig::ImageGenerationCall,
+                            ..Default::default()
+                        },
+                    )])),
+                    builtin_type: Some(BuiltinToolType::ImageGeneration),
+                    builtin_tool_name: Some("generate_image".to_string()),
+                },
             ],
             pool: Default::default(),
             proxy: None,
