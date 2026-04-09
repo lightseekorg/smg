@@ -1118,9 +1118,7 @@ class RouterArgs:
         prefix = "router_" if use_router_prefix else ""
         cli_args_dict = vars(args)
         args_dict = {}
-        disable_arg_fallback = bool(
-            cli_args_dict.get(f"{prefix}disable_arg_fallback", False)
-        )
+        disable_arg_fallback = bool(cli_args_dict.get(f"{prefix}disable_arg_fallback", False))
 
         for attr in dataclasses.fields(cls):
             # Auto strip prefix from args.
