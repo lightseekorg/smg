@@ -29,6 +29,7 @@ pub struct MemoryConversationStorage {
 }
 
 impl MemoryConversationStorage {
+    /// Create an empty in-memory conversation storage backend.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
@@ -98,6 +99,7 @@ pub struct MemoryConversationItemStorage {
 }
 
 impl MemoryConversationItemStorage {
+    /// Create an empty in-memory conversation item storage backend.
     pub fn new() -> Self {
         Self::default()
     }
@@ -324,6 +326,7 @@ pub struct MemoryResponseStorage {
 }
 
 impl MemoryResponseStorage {
+    /// Create an empty in-memory response storage backend.
     pub fn new() -> Self {
         Self {
             store: Arc::new(RwLock::new(InnerStore::default())),

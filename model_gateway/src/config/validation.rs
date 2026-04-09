@@ -79,6 +79,7 @@ impl ConfigValidator {
         Ok(())
     }
 
+    /// Validate memory runtime feature flag dependencies.
     fn validate_memory_runtime(config: &RouterConfig) -> ConfigResult<()> {
         let memory_runtime = &config.memory_runtime;
 
