@@ -336,30 +336,35 @@ fn is_internal_mcp_output_item(item: &Value, session: Option<&McpToolSession<'_>
         return false;
     };
 
-    match (
-        item.get("type").and_then(|value| value.as_str()),
-        item.get("name").and_then(|value| value.as_str()),
-        item.get("server_label").and_then(|value| value.as_str()),
-    ) {
-        (Some("mcp_list_tools"), _, Some(server_label)) => {
-            session.is_internal_server_label(server_label)
+    match item.get("type").and_then(|value| value.as_str()) {
+        Some("mcp_list_tools") => item
+            .get("server_label")
+            .and_then(|value| value.as_str())
+            .is_some_and(|server_label| session.is_internal_server_label(server_label)),
+        Some("mcp_call") | Some("mcp_approval_request") => {
+            let matches_internal_name = item
+                .get("name")
+                .and_then(|value| value.as_str())
+                .is_some_and(|name| {
+                    session.is_internal_tool(name) && !session.is_builtin_tool(name)
+                });
+            let matches_internal_server = item
+                .get("server_label")
+                .and_then(|value| value.as_str())
+                .is_some_and(|server_label| {
+                    session.is_internal_server_label(server_label)
+                        && !session.is_builtin_server_label(server_label)
+                });
+            matches_internal_name || matches_internal_server
         }
-        (Some("mcp_call"), Some(name), _) => {
-            session.is_internal_tool(name) && !session.is_builtin_tool(name)
-        }
-        (Some("mcp_call"), _, Some(server_label)) => {
-            session.is_internal_server_label(server_label)
-                && !session.is_builtin_server_label(server_label)
-        }
-        (Some("mcp_approval_request"), Some(name), _) => {
-            session.is_internal_tool(name) && !session.is_builtin_tool(name)
-        }
-        (Some("mcp_approval_request"), _, Some(server_label)) => {
-            session.is_internal_server_label(server_label)
-                && !session.is_builtin_server_label(server_label)
-        }
-        (Some("function_call"), Some(name), _) => session.is_internal_tool(name),
-        (Some("function_tool_call"), Some(name), _) => session.is_internal_tool(name),
+        Some("function_call") => item
+            .get("name")
+            .and_then(|value| value.as_str())
+            .is_some_and(|name| session.is_internal_tool(name)),
+        Some("function_tool_call") => item
+            .get("name")
+            .and_then(|value| value.as_str())
+            .is_some_and(|name| session.is_internal_tool(name)),
         _ => false,
     }
 }
@@ -641,6 +646,71 @@ mod tests {
                 {
                     "type": "mcp_approval_request",
                     "name": "internal_search",
+                    "server_label": "internal-label"
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "visible"}]
+                }
+            ]
+        });
+
+        restore_original_tools(&mut response, &original_body, Some(&session));
+
+        assert_eq!(
+            response["output"],
+            serde_json::json!([{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "visible"}]
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_original_tools_strips_internal_mcp_items_by_server_label_when_name_unknown() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            ..Default::default()
+        };
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: true,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+        let mut response = serde_json::json!({
+            "output": [
+                {
+                    "type": "mcp_call",
+                    "name": "unknown_tool_name",
+                    "server_label": "internal-label"
+                },
+                {
+                    "type": "mcp_approval_request",
+                    "name": "unknown_tool_name",
                     "server_label": "internal-label"
                 },
                 {
