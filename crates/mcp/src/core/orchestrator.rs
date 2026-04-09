@@ -1623,6 +1623,51 @@ impl McpOrchestrator {
                     inventory_clone.insert_entry(entry);
                 }
 
+                // Apply per-tool response format/arg-mapping from config to dynamic entries.
+                if let Some(tool_cfgs) = &config.tools {
+                    for (tool_name, tool_cfg) in tool_cfgs {
+                        if let Some(mut entry) = inventory_clone.get_entry(&server_key, tool_name) {
+                            entry.response_format = tool_cfg.response_format.clone().into();
+                            entry.arg_mapping = tool_cfg.arg_mapping.as_ref().map(|cfg| {
+                                let mut mapping = ArgMapping::new();
+                                for (from, to) in &cfg.renames {
+                                    mapping = mapping.with_rename(from, to);
+                                }
+                                for (key, value) in &cfg.defaults {
+                                    mapping = mapping.with_default(key, value.clone());
+                                }
+                                for (key, value) in &cfg.overrides {
+                                    mapping = mapping.with_override(key, value.clone());
+                                }
+                                mapping
+                            });
+                            inventory_clone.insert_entry(entry);
+                        }
+                    }
+                }
+
+                // Apply builtin response format when configured and not explicitly overridden.
+                if let (Some(builtin_type), Some(builtin_tool_name)) =
+                    (&config.builtin_type, &config.builtin_tool_name)
+                {
+                    let has_explicit_format = config
+                        .tools
+                        .as_ref()
+                        .and_then(|tools| tools.get(builtin_tool_name))
+                        .is_some_and(|cfg| {
+                            cfg.response_format != ResponseFormatConfig::Passthrough
+                        });
+
+                    if !has_explicit_format {
+                        if let Some(mut entry) =
+                            inventory_clone.get_entry(&server_key, builtin_tool_name)
+                        {
+                            entry.response_format = builtin_type.response_format().into();
+                            inventory_clone.insert_entry(entry);
+                        }
+                    }
+                }
+
             }
             Err(e) => warn!("Failed to list tools from '{}': {}", server_key, e),
         }
