@@ -2,6 +2,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use axum::http::HeaderMap;
 use openai_protocol::responses::ResponseTool;
 use smg_mcp::{
     BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpTransport,
@@ -253,6 +254,7 @@ pub async fn ensure_mcp_servers(
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
+    request_headers: Option<&HeaderMap>,
 ) -> Option<Vec<McpServerBinding>> {
     let inputs: Vec<McpServerInput> = tools
         .iter()
@@ -269,6 +271,7 @@ pub async fn ensure_request_mcp_client(
         .collect();
 
     let builtin_types = extract_builtin_types(tools);
+    let _ = request_headers;
 
     ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types).await
 }
@@ -591,7 +594,7 @@ mod tests {
             WebSearchPreviewTool::default(),
         )];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
 
         // Should return Some because built-in routing is configured
         assert!(result.is_some());
@@ -614,7 +617,7 @@ mod tests {
             WebSearchPreviewTool::default(),
         )];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
 
         // Should return None because no MCP or built-in routing is available
         assert!(result.is_none());
@@ -634,7 +637,7 @@ mod tests {
             },
         })];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
 
         // Should return None - function tools don't need MCP processing
         assert!(result.is_none());
@@ -658,7 +661,7 @@ mod tests {
             ResponseTool::WebSearchPreview(WebSearchPreviewTool::default()),
         ];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
 
         // Should return Some because web_search_preview has built-in routing
         assert!(result.is_some());

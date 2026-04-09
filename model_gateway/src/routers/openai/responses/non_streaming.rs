@@ -63,7 +63,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
 
     // Check for MCP tools and create session if needed
     let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(mcp_orchestrator, tools).await
+        ensure_request_mcp_client(mcp_orchestrator, tools, ctx.headers()).await
     } else {
         None
     };
