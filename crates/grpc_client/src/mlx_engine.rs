@@ -233,14 +233,19 @@ impl MlxEngineClient {
 
     // ── Unsupported feature validation ────────────────────────────────
     //
-    // TODO(mlx): These are mlx-lm engine limitations, not proto limitations.
-    // mlx-lm currently lacks:
+    // TODO(mlx): Gaps preventing feature parity with vLLM/SGLang:
+    //
+    // mlx-lm engine limitations:
     //   - Constrained decoding (json_schema, regex, grammar, structural_tag)
     //     — needs outlines/xgrammar integration in mlx-lm
-    //   - Parallel samples (n > 1) — BatchGenerator doesn't support it
-    //   - String stop sequences — only token ID stops via SequenceStateMachine
+    //   - Parallel samples (n > 1) — mlx-lm server doesn't expose this
     //   - response_format — same as constrained decoding
-    // These are the main gaps preventing feature parity with vLLM/SGLang.
+    //
+    // Servicer limitations (fixable without mlx-lm changes):
+    //   - String stop sequences — mlx-lm supports this via tokenizer.encode()
+    //     → SequenceStateMachine, but our gRPC servicer doesn't do the
+    //     string-to-token-ID conversion yet
+    //
     // Track upstream: https://github.com/ml-explore/mlx-lm
 
     fn reject_constraint(constraint: Option<&(String, String)>) -> Result<(), String> {
