@@ -2,6 +2,7 @@
 
 pub mod data;
 pub mod engines;
+pub mod job_queue;
 pub mod mcp_registration;
 pub mod steps;
 pub mod tokenizer_registration;
@@ -17,6 +18,7 @@ pub use data::{
 };
 // Typed workflow engines
 pub use engines::WorkflowEngines;
+pub use job_queue::{Job, JobQueue, JobQueueConfig};
 pub use mcp_registration::{
     create_mcp_registration_workflow, create_mcp_workflow_data, ConnectMcpServerStep,
     McpServerConfigRequest, ValidateRegistrationStep,

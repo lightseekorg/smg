@@ -66,13 +66,11 @@ use crate::{
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
-    worker::{
+    worker::{manager::WorkerManager, worker::WorkerType},
+    workflow::{
         job_queue::{JobQueue, JobQueueConfig},
-        manager::WorkerManager,
-        worker::WorkerType,
-        Job,
+        Job, TokenizerConfigRequest, WorkflowEngines,
     },
-    workflow::{TokenizerConfigRequest, WorkflowEngines},
 };
 #[derive(Clone)]
 pub struct AppState {

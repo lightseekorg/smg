@@ -20,8 +20,10 @@ use crate::{
         WasmMetrics, WasmModuleAddRequest, WasmModuleAddResponse, WasmModuleAddResult,
         WasmModuleListResponse,
     },
-    worker::job_queue::{Job, JobQueue},
-    workflow::WasmModuleConfigRequest,
+    workflow::{
+        job_queue::{Job, JobQueue},
+        WasmModuleConfigRequest,
+    },
 };
 
 /// Wait for job completion by polling job status

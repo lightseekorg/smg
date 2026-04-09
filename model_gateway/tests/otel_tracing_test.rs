@@ -21,7 +21,7 @@ use smg::{
     config::{RouterConfig, TraceConfig},
     observability::{logging, otel_trace},
     routers::RouterFactory,
-    worker::Job,
+    workflow::Job,
 };
 use tokio::sync::oneshot;
 use tonic::{metadata::MetadataMap, transport::Server, Request as TonicRequest, Response, Status};

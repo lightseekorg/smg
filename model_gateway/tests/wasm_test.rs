@@ -99,7 +99,7 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
     // Initialize JobQueue after AppContext is created
     let weak_context = Arc::downgrade(&app_context);
     let job_queue =
-        smg::worker::JobQueue::new(smg::worker::JobQueueConfig::default(), weak_context);
+        smg::workflow::JobQueue::new(smg::workflow::JobQueueConfig::default(), weak_context);
     app_context
         .worker_job_queue
         .set(job_queue)
