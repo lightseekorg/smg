@@ -938,6 +938,14 @@ impl WorkerLoadResponse {
     pub fn total_used_tokens(&self) -> i64 {
         self.loads.iter().map(|l| l.num_used_tokens as i64).sum()
     }
+
+    pub fn dp_rank_loads(&self) -> HashMap<isize, isize> {
+        let mut map = HashMap::new();
+        for snapshot in &self.loads {
+            map.insert(snapshot.dp_rank as isize, snapshot.num_used_tokens as isize);
+        }
+        map
+    }
 }
 
 /// Individual worker load information

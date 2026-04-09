@@ -126,6 +126,7 @@ Controls how requests are distributed across workers.
 |--------|-------------|---------|
 | `--dp-aware` | Enable data parallelism aware scheduling | `false` |
 | `--enable-igw` | Enable IGW (Inference Gateway) mode for multi-model support | `false` |
+| `--dp-minimum-tokens-scheduler` | Enable minimum tokens scheduler for data parallel group | `false` |
 
 ---
 

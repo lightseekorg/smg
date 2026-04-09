@@ -263,7 +263,7 @@ impl ParserFactory {
         registry.register_pattern("c4ai-command", "cohere_cmd");
         registry.register_pattern("cohere", "cohere_cmd");
 
-        // Nano V3 / Nemotron uses same format as DeepSeek-R1 (always_in_reasoning=true)
+        // Nano V3 / Nemotron (always_in_reasoning=false, uses enable_thinking toggle)
         registry.register_pattern("nemotron-nano", "nano_v3");
         registry.register_pattern("nemotron-super", "nano_v3");
         registry.register_pattern("nano-v3", "nano_v3");

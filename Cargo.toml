@@ -29,7 +29,7 @@ tonic = { version = "0.14.2", features = ["gzip", "transport"] }
 tonic-prost = "0.14.2"
 axum = { version = "0.8.6" }
 blake3 = "1.5"
-lz4_flex = "0.11"
+lz4_flex = "0.13"
 bytemuck = { version = "1.21" }
 chrono = { version = "0.4" }
 dashmap = "6.1.0"
@@ -54,7 +54,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 webpki-roots = "1.0"
 multer = "3"
-str0m = { version = "0.16", default-features = false, features = ["openssl"] }
+str0m = { version = "0.18", default-features = false, features = ["openssl"] }
 scopeguard = "1.2"
 bitflags = "2.10.0"
 schemars = "0.8"

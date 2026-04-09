@@ -10,7 +10,7 @@ use std::{
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
-    api::Api,
+    api::{Api, ListParams},
     runtime::{
         watcher::{watcher, Config},
         WatchStreamExt,
@@ -105,6 +105,31 @@ pub struct ServiceDiscoveryConfig {
     pub model_id_source: Option<ModelIdSource>,
 }
 
+impl ServiceDiscoveryConfig {
+    /// Build a label selector string for K8s list calls.
+    ///
+    /// In regular mode, uses the worker selector directly.
+    /// In PD mode, uses labels common to both prefill and decode selectors
+    /// so a single list call covers both pod types. If there are no common
+    /// labels, returns an empty string (no server-side filtering).
+    fn list_label_selector(&self) -> String {
+        if self.pd_mode {
+            self.prefill_selector
+                .iter()
+                .filter(|(k, v)| self.decode_selector.get(*k) == Some(*v))
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        } else {
+            self.selector
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+    }
+}
+
 impl Default for ServiceDiscoveryConfig {
     fn default() -> Self {
         ServiceDiscoveryConfig {
@@ -131,9 +156,10 @@ pub enum PodType {
     Regular,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct PodInfo {
     pub name: String,
+    pub uid: String,
     pub ip: String,
     pub status: String,
     pub is_ready: bool,
@@ -142,6 +168,26 @@ pub struct PodInfo {
     pub is_router: bool,
     pub mesh_port: Option<u16>,
     pub model_id_override: Option<String>,
+}
+
+// Identity is (name, uid) — the uid changes on every pod restart, so
+// StatefulSet pods that keep the same name+IP across restarts are still
+// detected as different entities.  Mutable fields like status and is_ready
+// must not affect set membership, otherwise reconciliation produces false
+// diffs when a pod's readiness changes between watcher events and a full list.
+impl PartialEq for PodInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.uid == other.uid
+    }
+}
+
+impl Eq for PodInfo {}
+
+impl std::hash::Hash for PodInfo {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.uid.hash(state);
+    }
 }
 
 impl PodInfo {
@@ -175,6 +221,16 @@ impl PodInfo {
 
     pub fn from_pod(pod: &Pod, config: Option<&ServiceDiscoveryConfig>) -> Option<Self> {
         let name = pod.metadata.name.clone()?;
+        let uid = match pod.metadata.uid.clone() {
+            Some(uid) => uid,
+            None => {
+                warn!(
+                    "Pod {} has no UID, skipping -- cannot track identity for reconciliation",
+                    name
+                );
+                return None;
+            }
+        };
         let status = pod.status.clone()?;
         let pod_ip = status.pod_ip?;
 
@@ -248,6 +304,7 @@ impl PodInfo {
 
         Some(PodInfo {
             name,
+            uid,
             ip: pod_ip,
             status: pod_status,
             is_ready,
@@ -365,9 +422,21 @@ pub async fn start_service_discovery(
                     clippy::disallowed_methods,
                     reason = "router discovery runs for the lifetime of the server alongside worker discovery"
                 )]
-                tokio::spawn(async move {
+                let router_handle = tokio::spawn(async move {
                     start_router_discovery(router_config, router_pods, cluster_state, mesh_port)
                         .await;
+                });
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "monitor task runs for the lifetime of the server"
+                )]
+                tokio::spawn(async move {
+                    if let Err(e) = router_handle.await {
+                        error!(
+                            "Router discovery task panicked and is no longer running: {}",
+                            e
+                        );
+                    }
                 });
                 info!("Router discovery enabled (requires mesh to be enabled)");
             } else {
@@ -376,6 +445,60 @@ pub async fn start_service_discovery(
                     Router discovery requires mesh to be enabled. Skipping router discovery."
                 );
             }
+        }
+
+        // Spawn a supervisor that runs periodic reconciliation and restarts it
+        // on panic. This is a safety net independent of the watcher: it catches
+        // missed events regardless of whether the watcher is healthy, restarting,
+        // or erroring out.
+        {
+            let reconcile_pods_api = pods.clone();
+            let reconcile_config = Arc::clone(&config_arc);
+            let reconcile_tracked = Arc::clone(&tracked_pods);
+            let reconcile_ctx = Arc::clone(&app_context);
+            let reconcile_interval = config.check_interval;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "reconciliation supervisor runs for the lifetime of the server"
+            )]
+            tokio::spawn(async move {
+                loop {
+                    let api = reconcile_pods_api.clone();
+                    let cfg = Arc::clone(&reconcile_config);
+                    let trk = Arc::clone(&reconcile_tracked);
+                    let ctx = Arc::clone(&reconcile_ctx);
+                    let handle = tokio::spawn(async move {
+                        // Delay the first tick so the watcher has time to populate initial state.
+                        let start = time::Instant::now() + reconcile_interval;
+                        let mut interval = time::interval_at(start, reconcile_interval);
+                        loop {
+                            interval.tick().await;
+                            reconcile_pods(
+                                &api,
+                                Arc::clone(&cfg),
+                                Arc::clone(&trk),
+                                Arc::clone(&ctx),
+                                port,
+                            )
+                            .await;
+                        }
+                    });
+                    if let Err(e) = handle.await {
+                        error!(
+                            "Periodic reconciliation task panicked: {} -- restarting after {}s",
+                            e,
+                            reconcile_interval.as_secs()
+                        );
+                        time::sleep(reconcile_interval).await;
+                    } else {
+                        break;
+                    }
+                }
+            });
+            info!(
+                "Periodic reconciliation enabled | interval: {}s",
+                config.check_interval.as_secs()
+            );
         }
 
         let mut retry_delay = Duration::from_secs(1);
@@ -409,7 +532,7 @@ pub async fn start_service_discovery(
             let app_context_clone = Arc::clone(&app_context);
             let config_clone2 = Arc::clone(&config_arc);
 
-            match filtered_stream
+            let watcher_ok = filtered_stream
                 .try_for_each(move |pod| {
                     let tracked_pods_inner = Arc::clone(&tracked_pods_clone2);
                     let app_context_inner = Arc::clone(&app_context_clone);
@@ -441,8 +564,9 @@ pub async fn start_service_discovery(
                         Ok(())
                     }
                 })
-                .await
-            {
+                .await;
+
+            match watcher_ok {
                 Ok(()) => {
                     retry_delay = Duration::from_secs(1);
                 }
@@ -479,8 +603,10 @@ async fn handle_pod_event(
     let worker_url = pod_info.worker_url(port);
 
     if pod_info.is_healthy() {
-        // Track whether to add and get count in single lock acquisition
-        let (should_add, tracked_count) = {
+        // Track whether to add and get count in single lock acquisition.
+        // Also detect UID changes (StatefulSet pod restarts with same name):
+        // evict the old entry so the router replaces the stale connection.
+        let (should_add, evicted, tracked_count) = {
             let mut tracker = match tracked_pods.lock() {
                 Ok(tracker) => tracker,
                 Err(e) => {
@@ -490,12 +616,40 @@ async fn handle_pod_event(
             };
 
             if tracker.contains(pod_info) {
-                (false, tracker.len())
+                (false, None, tracker.len())
             } else {
+                // Check for same-name pod with different UID (restart).
+                let old = tracker
+                    .iter()
+                    .find(|p| p.name == pod_info.name && p.uid != pod_info.uid)
+                    .cloned();
+                if let Some(ref old) = old {
+                    tracker.remove(old);
+                }
                 tracker.insert(pod_info.clone());
-                (true, tracker.len())
+                (true, old, tracker.len())
             }
         };
+
+        // Submit RemoveWorker for the evicted old-UID pod outside the lock.
+        if let Some(ref old) = evicted {
+            let old_url = old.worker_url(port);
+            info!(
+                "Evicting restarted pod {} (old uid={}) | url: {}",
+                old.name, old.uid, old_url
+            );
+            let job = Job::RemoveWorker {
+                url: old_url.clone(),
+            };
+            if let Some(job_queue) = app_context.worker_job_queue.get() {
+                if let Err(e) = job_queue.submit(job).await {
+                    error!(
+                        "Failed to submit removal for evicted pod {}: {}",
+                        old_url, e
+                    );
+                }
+            }
+        }
 
         if should_add {
             info!(
@@ -577,8 +731,16 @@ async fn handle_pod_event(
                             metrics_labels::REGISTRATION_FAILED,
                         );
 
-                        if let Ok(mut tracker) = tracked_pods.lock() {
-                            tracker.remove(pod_info);
+                        match tracked_pods.lock() {
+                            Ok(mut tracker) => {
+                                tracker.remove(pod_info);
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Lock poisoned during rollback for {}: {} -- tracked state is now inconsistent",
+                                    worker_url, e
+                                );
+                            }
                         }
                     }
                 }
@@ -662,6 +824,191 @@ async fn handle_pod_deletion(
             pod_info.name, pod_info.pod_type, worker_url
         );
     }
+}
+
+/// Build the set of live pods from a K8s pod list, filtering by config selectors
+/// and excluding pods with a deletion timestamp.
+fn build_live_pod_set(pod_list: &[Pod], config: &ServiceDiscoveryConfig) -> HashSet<PodInfo> {
+    let mut live_pods = HashSet::new();
+    for pod in pod_list {
+        if !PodInfo::should_include(pod, config) {
+            continue;
+        }
+        if pod.metadata.deletion_timestamp.is_some() {
+            continue;
+        }
+        if let Some(info) = PodInfo::from_pod(pod, Some(config)) {
+            live_pods.insert(info);
+        }
+    }
+    live_pods
+}
+
+/// Compute the reconciliation diff between tracked and live pod sets.
+///
+/// Returns `(stale, missing)` where:
+/// - `stale`: pods in `tracked` but not in `live` (should be removed)
+/// - `missing`: pods in `live` but not in `tracked` that are healthy (should be added)
+fn compute_reconciliation_diff(
+    tracked: &HashSet<PodInfo>,
+    live: &HashSet<PodInfo>,
+) -> (Vec<PodInfo>, Vec<PodInfo>) {
+    let stale: Vec<PodInfo> = tracked.difference(live).cloned().collect();
+    let missing: Vec<PodInfo> = live
+        .difference(tracked)
+        .filter(|p| p.is_healthy())
+        .cloned()
+        .collect();
+    (stale, missing)
+}
+
+/// Reconcile the tracked pod set with actual Kubernetes state.
+///
+/// Performs a full pod list via the K8s API and compares with `tracked_pods`:
+/// - Pods in `tracked_pods` but no longer in K8s → submit `RemoveWorker` job
+/// - Healthy pods in K8s but missing from `tracked_pods` → submit `AddWorker` job
+///
+/// This closes two gaps in the event-driven watcher:
+/// 1. Missed deletion events (pod force-deleted, watcher down during delete)
+/// 2. Missed creation events (pod created while watcher was restarting)
+async fn reconcile_pods(
+    pods: &Api<Pod>,
+    config: Arc<ServiceDiscoveryConfig>,
+    tracked_pods: Arc<Mutex<HashSet<PodInfo>>>,
+    app_context: Arc<AppContext>,
+    port: u16,
+) {
+    let reconcile_start = time::Instant::now();
+    let label_selector = config.list_label_selector();
+    let list_params = if label_selector.is_empty() {
+        ListParams::default()
+    } else {
+        ListParams::default().labels(&label_selector)
+    };
+    let pod_list = match pods.list(&list_params).await {
+        Ok(list) => list,
+        Err(e) => {
+            error!("Reconciliation: failed to list pods: {}", e);
+            return;
+        }
+    };
+
+    // Build the set of live pods that match our selectors.
+    // Include all non-deleted pods regardless of health: the router's own health
+    // checker handles unhealthy workers. Only pods completely gone from K8s are stale.
+    let live_pods = build_live_pod_set(&pod_list.items, &config);
+
+    // Diff: stale = tracked but not live, missing = live-and-healthy but not tracked
+    let (stale, missing) = {
+        let tracked = match tracked_pods.lock() {
+            Ok(t) => t,
+            Err(e) => {
+                error!("Reconciliation: failed to acquire lock: {}", e);
+                return;
+            }
+        };
+        compute_reconciliation_diff(&tracked, &live_pods)
+    };
+
+    if stale.is_empty() && missing.is_empty() {
+        debug!("Reconciliation: tracked state is consistent with K8s");
+        return;
+    }
+
+    info!(
+        "Reconciliation: removing {} stale, adding {} missing pods",
+        stale.len(),
+        missing.len()
+    );
+
+    // Remove stale workers (only update tracked_pods after successful job submission)
+    for pod_info in &stale {
+        let worker_url = pod_info.worker_url(port);
+        info!(
+            "Reconciliation: removing stale pod {} (uid={}) | url: {}",
+            pod_info.name, pod_info.uid, worker_url
+        );
+        let job = Job::RemoveWorker {
+            url: worker_url.clone(),
+        };
+        if let Some(job_queue) = app_context.worker_job_queue.get() {
+            match job_queue.submit(job).await {
+                Ok(()) => {
+                    match tracked_pods.lock() {
+                        Ok(mut tracker) => {
+                            tracker.remove(pod_info);
+                        }
+                        Err(e) => {
+                            error!(
+                                "Reconciliation: lock poisoned while removing {}: {} -- aborting reconciliation",
+                                pod_info.name, e
+                            );
+                            return;
+                        }
+                    }
+                    Metrics::record_discovery_deregistration(
+                        metrics_labels::DISCOVERY_KUBERNETES,
+                        metrics_labels::DEREGISTRATION_RECONCILED,
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "Reconciliation: failed to submit removal for {}: {}",
+                        worker_url, e
+                    );
+                }
+            }
+        } else {
+            warn!(
+                "Reconciliation: JobQueue not initialized, cannot remove stale worker: {}",
+                worker_url
+            );
+        }
+    }
+
+    // Add missing workers, tracking how many succeed.
+    let mut added = 0usize;
+    for pod_info in &missing {
+        let pre = tracked_pods.lock().map(|t| t.len()).unwrap_or(0);
+        handle_pod_event(
+            pod_info,
+            Arc::clone(&tracked_pods),
+            Arc::clone(&app_context),
+            port,
+            config.pd_mode,
+        )
+        .await;
+        let post = tracked_pods.lock().map(|t| t.len()).unwrap_or(0);
+        if post > pre {
+            added += 1;
+        }
+    }
+    if !missing.is_empty() && added < missing.len() {
+        warn!(
+            "Reconciliation: only {}/{} missing pods were successfully added",
+            added,
+            missing.len()
+        );
+    }
+
+    // Update gauge to final post-reconciliation count
+    match tracked_pods.lock() {
+        Ok(tracker) => {
+            Metrics::set_discovery_workers_discovered(
+                metrics_labels::DISCOVERY_KUBERNETES,
+                tracker.len(),
+            );
+        }
+        Err(e) => {
+            error!("Reconciliation: lock poisoned during gauge update: {}", e);
+        }
+    }
+
+    // Record reconciliation cycle duration for observability.
+    Metrics::record_discovery_sync_duration(
+        metrics_labels::DISCOVERY_KUBERNETES,
+        reconcile_start.elapsed(),
+    );
 }
 
 /// Start router node discovery for mesh cluster
@@ -816,6 +1163,7 @@ mod tests {
         let mut pod = Pod {
             metadata: ObjectMeta {
                 name: name.map(String::from),
+                uid: name.map(|n| format!("uid-{n}")),
                 deletion_timestamp,
                 ..Default::default()
             },
@@ -861,6 +1209,7 @@ mod tests {
         Pod {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
+                uid: Some(format!("uid-{name}")),
                 labels: Some(labels),
                 annotations: Some(annotations),
                 ..Default::default()
@@ -1154,6 +1503,7 @@ mod tests {
     fn test_pod_info_is_healthy() {
         let healthy_pod = PodInfo {
             name: "p1".into(),
+            uid: "uid-p1".into(),
             ip: "1.1.1.1".into(),
             status: "Running".into(),
             is_ready: true,
@@ -1167,6 +1517,7 @@ mod tests {
 
         let not_ready_pod = PodInfo {
             name: "p2".into(),
+            uid: "uid-p2".into(),
             ip: "1.1.1.2".into(),
             status: "Running".into(),
             is_ready: false,
@@ -1180,6 +1531,7 @@ mod tests {
 
         let not_running_pod = PodInfo {
             name: "p3".into(),
+            uid: "uid-p3".into(),
             ip: "1.1.1.3".into(),
             status: "Pending".into(),
             is_ready: true,
@@ -1193,9 +1545,12 @@ mod tests {
     }
 
     #[test]
-    fn test_pod_info_equality_with_pod_type() {
+    fn test_pod_info_identity_based_equality() {
+        // PodInfo equality is based on (name, uid) only — mutable fields like
+        // status, is_ready, ip, and pod_type do not affect identity.
         let pod1 = PodInfo {
             name: "pod1".into(),
+            uid: "uid-1".into(),
             ip: "1.2.3.4".into(),
             status: "Running".into(),
             is_ready: true,
@@ -1206,23 +1561,12 @@ mod tests {
             model_id_override: None,
         };
 
-        let pod2 = PodInfo {
+        let pod2_same_identity = PodInfo {
             name: "pod1".into(),
+            uid: "uid-1".into(),
             ip: "1.2.3.4".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Prefill),
-            bootstrap_port: Some(8081),
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-
-        let pod3 = PodInfo {
-            name: "pod1".into(),
-            ip: "1.2.3.4".into(),
-            status: "Running".into(),
-            is_ready: true,
+            status: "Pending".into(),
+            is_ready: false,
             pod_type: Some(PodType::Decode),
             bootstrap_port: None,
             is_router: false,
@@ -1230,8 +1574,23 @@ mod tests {
             model_id_override: None,
         };
 
-        assert_eq!(pod1, pod2);
-        assert_ne!(pod1, pod3);
+        let pod3_different_identity = PodInfo {
+            name: "pod2".into(),
+            uid: "uid-2".into(),
+            ip: "1.2.3.5".into(),
+            status: "Running".into(),
+            is_ready: true,
+            pod_type: Some(PodType::Prefill),
+            bootstrap_port: Some(8081),
+            is_router: false,
+            mesh_port: None,
+            model_id_override: None,
+        };
+
+        // Same (name, uid) → equal, even with different status/type/readiness
+        assert_eq!(pod1, pod2_same_identity);
+        // Different (name, uid) → not equal
+        assert_ne!(pod1, pod3_different_identity);
     }
 
     #[tokio::test]
@@ -1240,6 +1599,7 @@ mod tests {
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "pod1".into(),
+            uid: "uid-pod1".into(),
             ip: "1.2.3.4".into(),
             status: "Pending".into(),
             is_ready: false,
@@ -1269,6 +1629,7 @@ mod tests {
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "pod1".into(),
+            uid: "uid-pod1".into(),
             ip: "1.2.3.4".into(),
             status: "Running".into(),
             is_ready: true,
@@ -1297,6 +1658,7 @@ mod tests {
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "prefill-pod".into(),
+            uid: "uid-prefill-pod".into(),
             ip: "1.2.3.4".into(),
             status: "Running".into(),
             is_ready: true,
@@ -1331,6 +1693,7 @@ mod tests {
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "decode-pod".into(),
+            uid: "uid-decode-pod".into(),
             ip: "1.2.3.5".into(),
             status: "Running".into(),
             is_ready: true,
@@ -1365,6 +1728,7 @@ mod tests {
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "test-pod".into(),
+            uid: "uid-test-pod".into(),
             ip: "1.2.3.4".into(),
             status: "Running".into(),
             is_ready: true,
@@ -1401,6 +1765,7 @@ mod tests {
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "untracked-pod".into(),
+            uid: "uid-untracked-pod".into(),
             ip: "1.2.3.4".into(),
             status: "Running".into(),
             is_ready: true,
@@ -1432,6 +1797,7 @@ mod tests {
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "regular-pod".into(),
+            uid: "uid-regular-pod".into(),
             ip: "1.2.3.4".into(),
             status: "Running".into(),
             is_ready: true,
@@ -1467,6 +1833,7 @@ mod tests {
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "prefill-pod".into(),
+            uid: "uid-prefill-pod-2".into(),
             ip: "1.2.3.4".into(),
             status: "Running".into(),
             is_ready: true,
@@ -1501,6 +1868,7 @@ mod tests {
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "decode-pod".into(),
+            uid: "uid-decode-pod-2".into(),
             ip: "1.2.3.4".into(),
             status: "Running".into(),
             is_ready: true,
@@ -1696,5 +2064,446 @@ mod tests {
         let config = ServiceDiscoveryConfig::default();
         let info = PodInfo::from_pod(&pod, Some(&config)).unwrap();
         assert_eq!(info.model_id_override, None);
+    }
+
+    // ========== Reconciliation helper tests ==========
+
+    fn make_pod_info(name: &str, ip: &str, status: &str, is_ready: bool) -> PodInfo {
+        make_pod_info_with_uid(name, name, ip, status, is_ready)
+    }
+
+    fn make_pod_info_with_uid(
+        name: &str,
+        uid: &str,
+        ip: &str,
+        status: &str,
+        is_ready: bool,
+    ) -> PodInfo {
+        PodInfo {
+            name: name.into(),
+            uid: uid.into(),
+            ip: ip.into(),
+            status: status.into(),
+            is_ready,
+            pod_type: Some(PodType::Regular),
+            bootstrap_port: None,
+            is_router: false,
+            mesh_port: None,
+            model_id_override: None,
+        }
+    }
+
+    fn make_regular_config() -> ServiceDiscoveryConfig {
+        let mut selector = HashMap::new();
+        selector.insert("app".to_string(), "sglang".to_string());
+        ServiceDiscoveryConfig {
+            enabled: true,
+            selector,
+            pd_mode: false,
+            ..Default::default()
+        }
+    }
+
+    fn make_labeled_pod(name: &str, ip: &str, labels: &[(&str, &str)]) -> Pod {
+        let mut label_map = std::collections::BTreeMap::new();
+        for &(k, v) in labels {
+            label_map.insert(k.to_string(), v.to_string());
+        }
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                uid: Some(format!("uid-{name}")),
+                labels: Some(label_map),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                pod_ip: Some(ip.to_string()),
+                phase: Some("Running".to_string()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    last_probe_time: None,
+                    last_transition_time: None,
+                    message: None,
+                    reason: None,
+                    observed_generation: None,
+                }]),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn test_build_live_pod_set_includes_matching_pods() {
+        let config = make_regular_config();
+        let pods = vec![
+            make_labeled_pod("pod-a", "10.0.0.1", &[("app", "sglang")]),
+            make_labeled_pod("pod-b", "10.0.0.2", &[("app", "sglang")]),
+        ];
+
+        let live = build_live_pod_set(&pods, &config);
+        assert_eq!(live.len(), 2);
+        assert!(live.iter().any(|p| p.name == "pod-a"));
+        assert!(live.iter().any(|p| p.name == "pod-b"));
+    }
+
+    #[test]
+    fn test_build_live_pod_set_excludes_non_matching_pods() {
+        let config = make_regular_config();
+        let pods = vec![
+            make_labeled_pod("pod-a", "10.0.0.1", &[("app", "sglang")]),
+            make_labeled_pod("pod-b", "10.0.0.2", &[("app", "other")]),
+        ];
+
+        let live = build_live_pod_set(&pods, &config);
+        assert_eq!(live.len(), 1);
+        assert!(live.iter().any(|p| p.name == "pod-a"));
+    }
+
+    #[test]
+    fn test_build_live_pod_set_excludes_pods_with_deletion_timestamp() {
+        let config = make_regular_config();
+        let mut deleted_pod = make_labeled_pod("pod-a", "10.0.0.1", &[("app", "sglang")]);
+        deleted_pod.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
+        let live_pod = make_labeled_pod("pod-b", "10.0.0.2", &[("app", "sglang")]);
+
+        let live = build_live_pod_set(&[deleted_pod, live_pod], &config);
+        assert_eq!(live.len(), 1);
+        assert!(live.iter().any(|p| p.name == "pod-b"));
+    }
+
+    #[test]
+    fn test_build_live_pod_set_empty_list() {
+        let config = make_regular_config();
+        let live = build_live_pod_set(&[], &config);
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn test_build_live_pod_set_pd_mode() {
+        let config = create_pd_config();
+        let pods = vec![
+            create_pd_k8s_pod("prefill-0", "10.0.0.1", "prefill", Some(8081)),
+            create_pd_k8s_pod("decode-0", "10.0.0.2", "decode", None),
+            create_pd_k8s_pod("other-0", "10.0.0.3", "other", None),
+        ];
+
+        let live = build_live_pod_set(&pods, &config);
+        // Only prefill and decode selectors match; "other" does not
+        assert_eq!(live.len(), 2);
+        assert!(live.iter().any(|p| p.name == "prefill-0"));
+        assert!(live.iter().any(|p| p.name == "decode-0"));
+    }
+
+    #[test]
+    fn test_compute_reconciliation_diff_no_changes() {
+        let pod = make_pod_info("pod-a", "10.0.0.1", "Running", true);
+        let tracked: HashSet<PodInfo> = [pod.clone()].into_iter().collect();
+        let live: HashSet<PodInfo> = [pod].into_iter().collect();
+
+        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
+        assert!(stale.is_empty());
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn test_compute_reconciliation_diff_stale_pod() {
+        let tracked_pod = make_pod_info("pod-a", "10.0.0.1", "Running", true);
+        let tracked: HashSet<PodInfo> = [tracked_pod.clone()].into_iter().collect();
+        let live: HashSet<PodInfo> = HashSet::new();
+
+        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].name, "pod-a");
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn test_compute_reconciliation_diff_missing_healthy_pod() {
+        let tracked: HashSet<PodInfo> = HashSet::new();
+        let live_pod = make_pod_info("pod-b", "10.0.0.2", "Running", true);
+        let live: HashSet<PodInfo> = [live_pod].into_iter().collect();
+
+        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
+        assert!(stale.is_empty());
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, "pod-b");
+    }
+
+    #[test]
+    fn test_compute_reconciliation_diff_missing_unhealthy_pod_excluded() {
+        let tracked: HashSet<PodInfo> = HashSet::new();
+        // Pod exists in K8s but is not ready — should NOT be added
+        let unhealthy_pod = make_pod_info("pod-c", "10.0.0.3", "Running", false);
+        let live: HashSet<PodInfo> = [unhealthy_pod].into_iter().collect();
+
+        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
+        assert!(stale.is_empty());
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn test_compute_reconciliation_diff_missing_pending_pod_excluded() {
+        let tracked: HashSet<PodInfo> = HashSet::new();
+        // Pod is "Pending" with is_ready=true — is_healthy() returns false
+        let pending_pod = make_pod_info("pod-d", "10.0.0.4", "Pending", true);
+        let live: HashSet<PodInfo> = [pending_pod].into_iter().collect();
+
+        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
+        assert!(stale.is_empty());
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn test_compute_reconciliation_diff_mixed() {
+        // tracked: {A, B}, live: {B, C (healthy), D (unhealthy)}
+        // Expected: stale=[A], missing=[C]
+        let pod_a = make_pod_info("pod-a", "10.0.0.1", "Running", true);
+        let pod_b = make_pod_info("pod-b", "10.0.0.2", "Running", true);
+        let pod_c = make_pod_info("pod-c", "10.0.0.3", "Running", true);
+        let pod_d = make_pod_info("pod-d", "10.0.0.4", "Running", false);
+
+        let tracked: HashSet<PodInfo> = [pod_a.clone(), pod_b.clone()].into_iter().collect();
+        let live: HashSet<PodInfo> = [pod_b, pod_c.clone(), pod_d].into_iter().collect();
+
+        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].name, "pod-a");
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, "pod-c");
+    }
+
+    #[test]
+    fn test_compute_reconciliation_diff_both_empty() {
+        let tracked: HashSet<PodInfo> = HashSet::new();
+        let live: HashSet<PodInfo> = HashSet::new();
+
+        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
+        assert!(stale.is_empty());
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn test_build_live_pod_set_includes_unhealthy_non_deleted_pods() {
+        // Reconciliation should include unhealthy pods in live set (they are not stale),
+        // but compute_reconciliation_diff will filter them out of "missing" additions.
+        let config = make_regular_config();
+        let mut unhealthy_pod = make_labeled_pod("pod-a", "10.0.0.1", &[("app", "sglang")]);
+        // Make it not-ready
+        if let Some(ref mut status) = unhealthy_pod.status {
+            status.conditions = Some(vec![PodCondition {
+                type_: "Ready".to_string(),
+                status: "False".to_string(),
+                last_probe_time: None,
+                last_transition_time: None,
+                message: None,
+                reason: None,
+                observed_generation: None,
+            }]);
+        }
+
+        let live = build_live_pod_set(&[unhealthy_pod], &config);
+        // Pod should still be in the live set (not considered stale)
+        assert_eq!(live.len(), 1);
+        assert!(!live.iter().next().unwrap().is_ready);
+    }
+
+    #[test]
+    fn test_reconciliation_readiness_change_not_considered_stale() {
+        // A tracked pod that exists in K8s but changed readiness should NOT be
+        // considered stale — PodInfo identity is (name, uid), not full state.
+        let tracked_pod = make_pod_info("pod-a", "10.0.0.1", "Running", true);
+        let live_pod = make_pod_info("pod-a", "10.0.0.1", "Running", false);
+
+        let tracked: HashSet<PodInfo> = [tracked_pod].into_iter().collect();
+        let live: HashSet<PodInfo> = [live_pod].into_iter().collect();
+
+        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
+        // Same (name, uid) means the pod is recognized as the same entity.
+        // Not stale (still in K8s), not missing (already tracked).
+        assert!(stale.is_empty());
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn test_reconciliation_detects_pod_restart_same_name_and_ip() {
+        // LWS / StatefulSet pods keep the same name across restarts,
+        // and hostNetwork pods keep the same IP (the node IP).
+        // The uid changes on every restart, so reconciliation must
+        // detect the old instance as stale and the new one as missing.
+        let old_pod = make_pod_info_with_uid("worker-0", "uid-old", "10.0.0.1", "Running", true);
+        let new_pod = make_pod_info_with_uid("worker-0", "uid-new", "10.0.0.1", "Running", true);
+
+        let tracked: HashSet<PodInfo> = [old_pod].into_iter().collect();
+        let live: HashSet<PodInfo> = [new_pod].into_iter().collect();
+
+        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].uid, "uid-old");
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].uid, "uid-new");
+    }
+
+    #[test]
+    fn test_pod_info_from_pod_missing_uid() {
+        let mut k8s_pod = create_k8s_pod(
+            Some("test-pod"),
+            Some("10.0.0.1"),
+            Some("Running"),
+            Some("True"),
+            None,
+        );
+        k8s_pod.metadata.uid = None;
+        assert!(PodInfo::from_pod(&k8s_pod, None).is_none());
+    }
+
+    #[test]
+    fn test_pod_info_hash_consistent_with_eq() {
+        use std::{
+            collections::hash_map::DefaultHasher,
+            hash::{Hash, Hasher},
+        };
+
+        let pod1 = PodInfo {
+            name: "pod1".into(),
+            uid: "uid-1".into(),
+            ip: "1.2.3.4".into(),
+            status: "Running".into(),
+            is_ready: true,
+            pod_type: Some(PodType::Prefill),
+            bootstrap_port: Some(8081),
+            is_router: false,
+            mesh_port: None,
+            model_id_override: None,
+        };
+        let pod2 = PodInfo {
+            name: "pod1".into(),
+            uid: "uid-1".into(),
+            ip: "5.6.7.8".into(),
+            status: "Pending".into(),
+            is_ready: false,
+            pod_type: Some(PodType::Decode),
+            bootstrap_port: None,
+            is_router: true,
+            mesh_port: Some(9090),
+            model_id_override: Some("model".into()),
+        };
+
+        assert_eq!(pod1, pod2);
+
+        let mut h1 = DefaultHasher::new();
+        let mut h2 = DefaultHasher::new();
+        pod1.hash(&mut h1);
+        pod2.hash(&mut h2);
+        assert_eq!(
+            h1.finish(),
+            h2.finish(),
+            "Equal PodInfos must produce the same hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_pod_event_evicts_old_uid_on_restart() {
+        // When a StatefulSet pod restarts with same name but new UID,
+        // handle_pod_event should evict the old entry and insert the new one.
+        let app_context = create_test_app_context();
+        let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
+        let port = 8080u16;
+
+        let old_pod = PodInfo {
+            name: "worker-0".into(),
+            uid: "uid-old".into(),
+            ip: "10.0.0.1".into(),
+            status: "Running".into(),
+            is_ready: true,
+            pod_type: Some(PodType::Regular),
+            bootstrap_port: None,
+            is_router: false,
+            mesh_port: None,
+            model_id_override: None,
+        };
+        // Pre-populate tracked set with the old pod.
+        tracked_pods.lock().unwrap().insert(old_pod.clone());
+
+        let new_pod = PodInfo {
+            name: "worker-0".into(),
+            uid: "uid-new".into(),
+            ip: "10.0.0.1".into(),
+            status: "Running".into(),
+            is_ready: true,
+            pod_type: Some(PodType::Regular),
+            bootstrap_port: None,
+            is_router: false,
+            mesh_port: None,
+            model_id_override: None,
+        };
+
+        handle_pod_event(
+            &new_pod,
+            Arc::clone(&tracked_pods),
+            Arc::clone(&app_context),
+            port,
+            false,
+        )
+        .await;
+
+        let tracker = tracked_pods.lock().unwrap();
+        // Old pod should be evicted, new pod should be present.
+        assert_eq!(tracker.len(), 1);
+        assert!(!tracker.contains(&old_pod));
+        assert!(tracker.contains(&new_pod));
+    }
+
+    #[test]
+    fn test_list_label_selector_regular_mode() {
+        let mut selector = HashMap::new();
+        selector.insert("app".to_string(), "sglang".to_string());
+        let config = ServiceDiscoveryConfig {
+            selector,
+            pd_mode: false,
+            ..Default::default()
+        };
+        assert_eq!(config.list_label_selector(), "app=sglang");
+    }
+
+    #[test]
+    fn test_list_label_selector_pd_mode_common_labels() {
+        let mut prefill = HashMap::new();
+        prefill.insert("app".to_string(), "sglang".to_string());
+        prefill.insert("component".to_string(), "prefill".to_string());
+        let mut decode = HashMap::new();
+        decode.insert("app".to_string(), "sglang".to_string());
+        decode.insert("component".to_string(), "decode".to_string());
+        let config = ServiceDiscoveryConfig {
+            pd_mode: true,
+            prefill_selector: prefill,
+            decode_selector: decode,
+            ..Default::default()
+        };
+        // Only the common label "app=sglang" should be in the selector.
+        assert_eq!(config.list_label_selector(), "app=sglang");
+    }
+
+    #[test]
+    fn test_list_label_selector_pd_mode_no_common_labels() {
+        let mut prefill = HashMap::new();
+        prefill.insert("role".to_string(), "prefill".to_string());
+        let mut decode = HashMap::new();
+        decode.insert("role".to_string(), "decode".to_string());
+        let config = ServiceDiscoveryConfig {
+            pd_mode: true,
+            prefill_selector: prefill,
+            decode_selector: decode,
+            ..Default::default()
+        };
+        // No common labels → empty selector (falls back to listing all pods).
+        assert!(config.list_label_selector().is_empty());
+    }
+
+    #[test]
+    fn test_deregistration_reconciled_metric_label() {
+        // Verify the metric label constant exists and has expected value
+        assert_eq!(metrics_labels::DEREGISTRATION_RECONCILED, "reconciled");
     }
 }

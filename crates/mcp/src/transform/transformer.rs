@@ -7,6 +7,25 @@ use openai_protocol::responses::{
 
 use super::ResponseFormat;
 
+/// Normalize an MCP response item id source into an external `mcp_call.id`.
+///
+/// The input may be an upstream output item id (`fc_*`), an internal call id
+/// (`call_*`), or an already-normalized MCP id (`mcp_*`).
+pub fn mcp_response_item_id(source_id: &str) -> String {
+    if source_id.starts_with("mcp_") {
+        return source_id.to_string();
+    }
+
+    if let Some(stripped) = source_id
+        .strip_prefix("call_")
+        .or_else(|| source_id.strip_prefix("fc_"))
+    {
+        return format!("mcp_{stripped}");
+    }
+
+    format!("mcp_{source_id}")
+}
+
 /// Transforms MCP CallToolResult to OpenAI Responses API output items.
 pub struct ResponseTransformer;
 
@@ -43,7 +62,7 @@ impl ResponseTransformer {
         arguments: &str,
     ) -> ResponseOutputItem {
         ResponseOutputItem::McpCall {
-            id: tool_call_id.to_string(),
+            id: mcp_response_item_id(tool_call_id),
             status: "completed".to_string(),
             approval_request_id: None,
             arguments: arguments.to_string(),
@@ -307,7 +326,7 @@ mod tests {
         let transformed = ResponseTransformer::transform(
             &result,
             &ResponseFormat::Passthrough,
-            "test-1",
+            "call_test-1",
             "server",
             "tool",
             "{}",
@@ -315,7 +334,7 @@ mod tests {
 
         match transformed {
             ResponseOutputItem::McpCall { id, output, .. } => {
-                assert_eq!(id, "test-1");
+                assert_eq!(id, "mcp_test-1");
                 assert!(output.contains("key"));
             }
             _ => panic!("Expected McpCall"),
@@ -346,6 +365,26 @@ mod tests {
     }
 
     #[test]
+    fn test_passthrough_transform_fc_id_to_mcp_prefix() {
+        let result = json!({"key": "value"});
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::Passthrough,
+            "fc_abc123",
+            "server",
+            "tool",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::McpCall { id, .. } => {
+                assert_eq!(id, "mcp_abc123");
+            }
+            _ => panic!("Expected McpCall"),
+        }
+    }
+
+    #[test]
     fn test_passthrough_transform_flattens_multiple_text_blocks() {
         let result = json!([
             {"type": "text", "text": "first block"},
@@ -364,6 +403,26 @@ mod tests {
         match transformed {
             ResponseOutputItem::McpCall { output, .. } => {
                 assert_eq!(output, "first block\nsecond block");
+            }
+            _ => panic!("Expected McpCall"),
+        }
+    }
+
+    #[test]
+    fn test_passthrough_transform_preserves_existing_mcp_prefix() {
+        let result = json!({"key": "value"});
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::Passthrough,
+            "mcp_existing",
+            "server",
+            "tool",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::McpCall { id, .. } => {
+                assert_eq!(id, "mcp_existing");
             }
             _ => panic!("Expected McpCall"),
         }
