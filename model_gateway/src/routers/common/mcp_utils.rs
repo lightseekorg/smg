@@ -163,7 +163,7 @@ pub fn collect_builtin_routing(
             _ => continue,
         };
 
-        if let Some((server_name, tool_name, response_format)) =
+        if let Some((server_name, tool_name, response_format, _)) =
             mcp_orchestrator.find_builtin_server(builtin_type)
         {
             debug!(
@@ -221,7 +221,9 @@ pub async fn ensure_mcp_servers(
 
     // Add builtin tool routing servers
     for &builtin_type in builtin_types {
-        if let Some((server_name, tool_name, _)) = orchestrator.find_builtin_server(builtin_type) {
+        if let Some((server_name, tool_name, _, _)) =
+            orchestrator.find_builtin_server(builtin_type)
+        {
             debug!(
                 builtin_type = ?builtin_type,
                 server = %server_name,
@@ -283,11 +285,9 @@ pub async fn ensure_request_mcp_client(
     // inputs here to carry forwarded transport headers from the request.
     if !builtin_types.is_empty() {
         for builtin_type in &builtin_types {
-            let Some((server_name, _, _)) = mcp_orchestrator.find_builtin_server(*builtin_type)
+            let Some((server_name, _, _, server_cfg)) =
+                mcp_orchestrator.find_builtin_server(*builtin_type)
             else {
-                continue;
-            };
-            let Some(server_cfg) = mcp_orchestrator.find_server_config(&server_name) else {
                 continue;
             };
 

@@ -845,6 +845,7 @@ impl McpOrchestrator {
     /// - `server_key` - Internal identifier for the server (used for `call_tool`)
     /// - `tool_name` - The MCP tool to call on that server
     /// - `response_format` - The format to use for response transformation
+    /// - `server_config` - The matched MCP server config
     ///
     /// Returns `None` if no server is configured for this built-in type.
     ///
@@ -852,7 +853,7 @@ impl McpOrchestrator {
     ///
     /// ```ignore
     /// // Check if web_search_preview is configured
-    /// if let Some((server_key, tool_name, format)) =
+    /// if let Some((server_key, tool_name, format, _server_cfg)) =
     ///     orchestrator.find_builtin_server(BuiltinToolType::WebSearchPreview)
     /// {
     ///     // Route to MCP server
@@ -870,7 +871,7 @@ impl McpOrchestrator {
     pub fn find_builtin_server(
         &self,
         builtin_type: BuiltinToolType,
-    ) -> Option<(String, String, ResponseFormat)> {
+    ) -> Option<(String, String, ResponseFormat, McpServerConfig)> {
         // Helper to extract builtin info from a server config
         let extract_builtin = |server_config: &McpServerConfig| {
             if let (Some(cfg_type), Some(tool_name)) = (
@@ -890,6 +891,7 @@ impl McpOrchestrator {
                         server_config.name.clone(),
                         tool_name.clone(),
                         response_format,
+                        server_config.clone(),
                     ));
                 }
             }
@@ -954,22 +956,6 @@ impl McpOrchestrator {
 
         names
     }
-
-    /// Find a server config by server name.
-    ///
-    /// Checks connected static servers first, then falls back to the initial config.
-    pub fn find_server_config(&self, server_name: &str) -> Option<McpServerConfig> {
-        if let Some(entry) = self.static_servers.get(server_name) {
-            return Some(entry.config.clone());
-        }
-
-        self.config
-            .servers
-            .iter()
-            .find(|cfg| cfg.name == server_name)
-            .cloned()
-    }
-
     /// Execute a single tool using an already-resolved qualified binding.
     ///
     /// This path does not perform tool-name reverse lookup. Callers must provide
@@ -2542,7 +2528,7 @@ mod tests {
         let result = orchestrator.find_builtin_server(BuiltinToolType::WebSearchPreview);
         assert!(result.is_some());
 
-        let (server_key, tool_name, response_format) = result.unwrap();
+        let (server_key, tool_name, response_format, _) = result.unwrap();
         assert_eq!(server_key, "brave");
         assert_eq!(tool_name, "brave_web_search");
         assert_eq!(response_format, ResponseFormat::WebSearchCall);
@@ -2611,7 +2597,7 @@ mod tests {
         let result = orchestrator.find_builtin_server(BuiltinToolType::WebSearchPreview);
         assert!(result.is_some());
 
-        let (server_key, tool_name, response_format) = result.unwrap();
+        let (server_key, tool_name, response_format, _) = result.unwrap();
         assert_eq!(server_key, "custom-search");
         assert_eq!(tool_name, "my_search");
         // Should use the custom Passthrough format, not the default WebSearchCall
