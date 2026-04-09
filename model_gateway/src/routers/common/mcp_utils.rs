@@ -228,10 +228,11 @@ pub async fn ensure_mcp_servers(
                 tool = %tool_name,
                 "Adding static server for built-in tool routing"
             );
-            if !mcp_servers
-                .iter()
-                .any(|b| b.server_key == server_name || b.label == server_name)
-            {
+            // Deduplicate by internal server key only.
+            // A dynamic MCP tool may reuse the same user-facing label as a builtin server
+            // while pointing to a different URL; label-based dedupe would wrongly suppress
+            // the builtin binding in that case.
+            if !mcp_servers.iter().any(|b| b.server_key == server_name) {
                 mcp_servers.push(McpServerBinding {
                     label: server_name.clone(),
                     server_key: server_name,
