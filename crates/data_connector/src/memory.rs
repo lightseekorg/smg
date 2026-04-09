@@ -280,7 +280,8 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
 // ============================================================================
 
 #[derive(Default, Clone)]
-/// In-memory conversation memory writer used by memory/noop history backends.
+/// In-memory conversation memory writer used only by `HistoryBackend::Memory`.
+/// `HistoryBackend::None` is wired to `NoOpConversationMemoryWriter`.
 pub struct MemoryConversationMemoryWriter {
     inner: Arc<RwLock<HashMap<ConversationMemoryId, NewConversationMemory>>>,
 }

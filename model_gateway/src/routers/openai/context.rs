@@ -369,11 +369,35 @@ pub type StreamingRequest = OwnedStreamingContext;
 mod tests {
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use axum::http::{HeaderMap, HeaderValue};
     use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
+    use serde_json::json;
+    use smg_data_connector::{
+        ConversationMemoryId, ConversationMemoryResult, ConversationMemoryWriter,
+        MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
+        NewConversationMemory,
+    };
 
-    use super::{ComponentRefs, RequestContext, SharedComponents};
-    use crate::{config::RouterConfig, memory::MemoryRuntimeConfig};
+    use super::{
+        ComponentRefs, PayloadState, RequestContext, ResponsesComponents, SharedComponents,
+    };
+    use crate::{
+        config::RouterConfig,
+        memory::{MemoryRuntimeConfig, MEMORY_LTM_STORE_ENABLED_HEADER},
+    };
+
+    struct DummyMemoryWriter;
+
+    #[async_trait]
+    impl ConversationMemoryWriter for DummyMemoryWriter {
+        async fn create_memory(
+            &self,
+            _input: NewConversationMemory,
+        ) -> ConversationMemoryResult<ConversationMemoryId> {
+            Ok(ConversationMemoryId("mem_test".to_string()))
+        }
+    }
 
     fn shared_components_with_memory_enabled() -> ComponentRefs {
         let router_config = RouterConfig::builder()
@@ -393,7 +417,7 @@ mod tests {
     fn for_responses_initializes_memory_context_from_headers() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            "x-smg-memory-ltm-store-enabled",
+            MEMORY_LTM_STORE_ENABLED_HEADER,
             HeaderValue::from_static("enabled"),
         );
 
@@ -411,7 +435,7 @@ mod tests {
     fn for_chat_initializes_memory_context_from_headers() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            "x-smg-memory-ltm-store-enabled",
+            MEMORY_LTM_STORE_ENABLED_HEADER,
             HeaderValue::from_static("enabled"),
         );
 
@@ -423,5 +447,64 @@ mod tests {
         );
 
         assert!(ctx.memory_execution_context.store_ltm_active);
+    }
+
+    #[tokio::test]
+    async fn responses_streaming_context_preserves_memory_writer_and_execution_context() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            MEMORY_LTM_STORE_ENABLED_HEADER,
+            HeaderValue::from_static("enabled"),
+        );
+
+        let shared = Arc::new(SharedComponents {
+            client: reqwest::Client::new(),
+            router_config: Arc::new(
+                RouterConfig::builder()
+                    .memory_runtime_config(MemoryRuntimeConfig {
+                        ltm_enabled: true,
+                        ltm_store_enabled: true,
+                    })
+                    .build_unchecked(),
+            ),
+        });
+
+        let components = ComponentRefs::Responses(Arc::new(ResponsesComponents {
+            shared,
+            mcp_orchestrator: Arc::new(
+                smg_mcp::McpOrchestrator::new(smg_mcp::McpConfig {
+                    servers: vec![],
+                    pool: Default::default(),
+                    proxy: None,
+                    warmup: vec![],
+                    inventory: Default::default(),
+                    policy: Default::default(),
+                })
+                .await
+                .expect("mcp orchestrator should initialize"),
+            ),
+            response_storage: Arc::new(MemoryResponseStorage::new()),
+            conversation_storage: Arc::new(MemoryConversationStorage::new()),
+            conversation_item_storage: Arc::new(MemoryConversationItemStorage::new()),
+            conversation_memory_writer: Some(Arc::new(DummyMemoryWriter)),
+        }));
+
+        let mut ctx = RequestContext::for_responses(
+            Arc::new(ResponsesRequest::default()),
+            Some(headers),
+            None,
+            components,
+        );
+        ctx.state.payload = Some(PayloadState {
+            json: json!({"input":"hello"}),
+            url: "http://worker.local/v1/responses".to_string(),
+            previous_response_id: None,
+        });
+
+        let streaming = ctx
+            .into_streaming_context()
+            .expect("streaming context should be created");
+        assert!(streaming.storage.conversation_memory_writer.is_some());
+        assert!(streaming.storage.memory_execution_context.store_ltm_active);
     }
 }

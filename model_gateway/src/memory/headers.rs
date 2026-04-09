@@ -2,12 +2,12 @@ use axum::http::HeaderMap;
 
 // Placeholder header names for memory controls.
 // These names are under active discussion and may change in a follow-up PR.
-const MEMORY_POLICY_HEADER: &str = "x-smg-memory-policy";
-const MEMORY_LTM_STORE_ENABLED_HEADER: &str = "x-smg-memory-ltm-store-enabled";
-const MEMORY_SUBJECT_ID_HEADER: &str = "x-smg-memory-subject-id";
-const MEMORY_RECALL_METHOD_HEADER: &str = "x-smg-memory-recall-method";
-const MEMORY_EMBEDDING_MODEL_HEADER: &str = "x-smg-memory-embedding-model";
-const MEMORY_EXTRACTION_MODEL_HEADER: &str = "x-smg-memory-extraction-model";
+pub const MEMORY_POLICY_HEADER: &str = "x-smg-memory-policy";
+pub const MEMORY_LTM_STORE_ENABLED_HEADER: &str = "x-smg-memory-ltm-store-enabled";
+pub const MEMORY_SUBJECT_ID_HEADER: &str = "x-smg-memory-subject-id";
+pub const MEMORY_RECALL_METHOD_HEADER: &str = "x-smg-memory-recall-method";
+pub const MEMORY_EMBEDDING_MODEL_HEADER: &str = "x-smg-memory-embedding-model";
+pub const MEMORY_EXTRACTION_MODEL_HEADER: &str = "x-smg-memory-extraction-model";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// Normalized view of memory-related request headers.
