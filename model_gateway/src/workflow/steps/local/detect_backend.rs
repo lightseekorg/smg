@@ -1,8 +1,8 @@
 //! Backend runtime detection step.
 //!
 //! Detects the runtime type (sglang, vllm, trtllm, mlx) for both HTTP and gRPC workers.
-//! - HTTP: probes `/v1/models` (owned_by field), falls back to unique endpoints in parallel.
-//! - gRPC: probes all runtime health checks in parallel (`tokio::join!`).
+//! - HTTP: probes `/v1/models` (owned_by field), falls back to unique endpoints.
+//! - gRPC: tries sglang → vllm → trtllm → mlx health checks sequentially.
 
 use std::time::Duration;
 
@@ -22,11 +22,10 @@ use crate::{
 
 // ─── gRPC backend detection ────────────────────────────────────────────────
 
-/// Detect gRPC backend by probing runtime-specific health checks in parallel.
+/// Detect gRPC backend by trying runtime-specific health checks sequentially.
 ///
 /// If `runtime_hint` is provided (from explicit config), tries that first.
-/// Otherwise probes all runtimes concurrently, returning the first match
-/// with priority: sglang > vllm > trtllm > mlx.
+/// Otherwise tries sglang → vllm → trtllm → mlx.
 async fn detect_grpc_backend(
     url: &str,
     timeout_secs: u64,
@@ -44,25 +43,17 @@ async fn detect_grpc_backend(
         }
     }
 
-    // Probe all runtimes in parallel (most common first in result preference)
-    let (sglang, vllm, trtllm, mlx) = tokio::join!(
-        do_grpc_health_check(&grpc_url, timeout_secs, "sglang"),
-        do_grpc_health_check(&grpc_url, timeout_secs, "vllm"),
-        do_grpc_health_check(&grpc_url, timeout_secs, "trtllm"),
-        do_grpc_health_check(&grpc_url, timeout_secs, "mlx"),
-    );
-
-    if sglang.is_ok() {
-        return Ok("sglang".to_string());
-    }
-    if vllm.is_ok() {
-        return Ok("vllm".to_string());
-    }
-    if trtllm.is_ok() {
-        return Ok("trtllm".to_string());
-    }
-    if mlx.is_ok() {
-        return Ok("mlx".to_string());
+    // Try each runtime sequentially (most common first), skipping the hint we already tried
+    for runtime in &["sglang", "vllm", "trtllm", "mlx"] {
+        if Some(*runtime) == runtime_hint {
+            continue;
+        }
+        if do_grpc_health_check(&grpc_url, timeout_secs, runtime)
+            .await
+            .is_ok()
+        {
+            return Ok((*runtime).to_string());
+        }
     }
 
     Err(format!(
