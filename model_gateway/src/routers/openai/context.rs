@@ -62,6 +62,7 @@ impl ComponentRefs {
         }
     }
 
+    /// Access router configuration shared by both request context variants.
     pub fn router_config(&self) -> &Arc<RouterConfig> {
         match self {
             ComponentRefs::Shared(s) => &s.router_config,
@@ -97,6 +98,7 @@ impl ComponentRefs {
         }
     }
 
+    /// Access optional conversation memory writer when response storage is available.
     pub fn conversation_memory_writer(&self) -> Option<&Arc<dyn ConversationMemoryWriter>> {
         match self {
             ComponentRefs::Shared(_) => None,

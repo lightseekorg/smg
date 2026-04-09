@@ -139,6 +139,7 @@ impl ConversationItemStorage for NoOpConversationItemStorage {
 pub(super) struct NoOpConversationMemoryWriter;
 
 impl NoOpConversationMemoryWriter {
+    /// Create a no-op conversation memory writer.
     pub fn new() -> Self {
         Self
     }

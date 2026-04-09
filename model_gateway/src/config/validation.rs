@@ -85,7 +85,7 @@ impl ConfigValidator {
         if !memory_runtime.ltm_enabled && memory_runtime.ltm_store_enabled {
             return Err(ConfigError::ValidationFailed {
                 reason:
-                    "memory_runtime.ltm_enabled must be true when LTM store readiness is enabled"
+                    "memory_runtime.ltm_store_enabled requires memory_runtime.ltm_enabled to be true"
                         .to_string(),
             });
         }
@@ -1167,7 +1167,7 @@ mod tests {
         let err = ConfigValidator::validate(&config).expect_err("expected memory runtime failure");
         match err {
             ConfigError::ValidationFailed { reason } => {
-                assert!(reason.contains("ltm_enabled must be true"));
+                assert!(reason.contains("ltm_store_enabled requires"));
             }
             _ => panic!("unexpected error variant: {err:?}"),
         }

@@ -278,11 +278,13 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
 // ============================================================================
 
 #[derive(Default, Clone)]
+/// In-memory conversation memory writer used by memory/noop history backends.
 pub struct MemoryConversationMemoryWriter {
     inner: Arc<RwLock<HashMap<ConversationMemoryId, NewConversationMemory>>>,
 }
 
 impl MemoryConversationMemoryWriter {
+    /// Create a new in-memory conversation memory writer.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),

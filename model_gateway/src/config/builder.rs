@@ -351,6 +351,7 @@ impl RouterConfigBuilder {
         self
     }
 
+    /// Configure memory runtime feature flags for store/recall behavior.
     pub fn memory_runtime_config(mut self, config: MemoryRuntimeConfig) -> Self {
         self.config.memory_runtime = config;
         self
