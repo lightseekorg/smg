@@ -103,6 +103,13 @@ _NIGHTLY_MODELS: list[tuple[str, str, int, list[str], dict]] = [
     ("openai/gpt-oss-20b", "GptOss20b", 1, ["http", "grpc"], {}),
     ("minimaxai/minimax-m2", "MinimaxM2", 1, ["http", "grpc"], {}),
     (
+        "mistralai/Devstral-2-123B-Instruct-2512",
+        "Devstral2",
+        1,
+        ["http", "grpc"],
+        {},
+    ),
+    (
         "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
         "Llama4Maverick",
         1,
@@ -132,6 +139,9 @@ _NIGHTLY_MODELS: list[tuple[str, str, int, list[str], dict]] = [
     ),
 ]
 
+_SINGLE_ONLY_NIGHTLY_MODELS = {
+    "mistralai/Devstral-2-123B-Instruct-2512",
+}
 
 # ---------------------------------------------------------------------------
 # Dynamic test class generation
@@ -163,7 +173,10 @@ def _make_test_class(model_id, worker_count, backends, extra_kwargs):
 
 
 for _model_id, _name, _multi_workers, _backends, _extra in _NIGHTLY_MODELS:
-    for _suffix, _count in [("Single", 1), ("Multi", _multi_workers)]:
+    _variants = [("Single", 1)]
+    if _model_id not in _SINGLE_ONLY_NIGHTLY_MODELS:
+        _variants.append(("Multi", _multi_workers))
+    for _suffix, _count in _variants:
         _cls_name = f"TestNightly{_name}{_suffix}"
         _cls = _make_test_class(_model_id, _count, _backends, _extra)
         _cls.__name__ = _cls_name

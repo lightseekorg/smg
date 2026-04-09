@@ -121,6 +121,7 @@ jobs:
           - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bSingle }
           - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle }
           - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bSingle }
+          - { id: mistralai/Devstral-2-123B-Instruct-2512, slug: mistralai-Devstral-2-123B-Instruct-2512, test_class: TestNightlyDevstral2Single }
           - { id: meta-llama/Llama-4-Scout-17B-16E-Instruct, slug: meta-llama-Llama-4-Scout-17B-16E-Instruct, test_class: TestNightlyLlama4ScoutSingle }
           - { id: meta-llama/Llama-3.3-70B-Instruct, slug: meta-llama-Llama-3.3-70B-Instruct, test_class: TestNightlyLlama70bSingle }
           - { id: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic, slug: RedHatAI-Llama-3.3-70B-Instruct-FP8-dynamic, test_class: TestNightlyLlama70bFp8Single }

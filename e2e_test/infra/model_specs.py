@@ -114,6 +114,15 @@ MODEL_SPECS: dict[str, dict] = {
         "sglang_args": ["--trust-remote-code"],
         "vllm_args": ["--trust-remote-code"],
     },
+    # Devstral 2 123B - Nightly benchmarks
+    "mistralai/Devstral-2-123B-Instruct-2512": {
+        "model": _resolve_model_path("mistralai/Devstral-2-123B-Instruct-2512"),
+        "tp": 4,
+        "features": ["chat", "streaming", "function_calling", "reasoning"],
+        "startup_timeout": 1200,
+        "sglang_args": ["--trust-remote-code"],
+        "vllm_args": ["--trust-remote-code"],
+    },
     # Vision-language model for multimodal benchmarks (MMMU)
     "Qwen/Qwen3-VL-8B-Instruct": {
         "model": _resolve_model_path("Qwen/Qwen3-VL-8B-Instruct"),
