@@ -10,36 +10,45 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
 };
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio::time::{timeout, Duration};
 
 struct MockServerHarness {
     port: u16,
-    server_handle: Option<JoinHandle<()>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    server_handle: Option<JoinHandle<Result<(), std::io::Error>>>,
 }
 
 impl MockServerHarness {
     #[expect(
         clippy::disallowed_methods,
-        clippy::expect_used,
-        reason = "test infrastructure"
+        reason = "test infrastructure uses a background server task"
     )]
-    async fn start(
-        app: axum::Router,
-        start_error_message: &'static str,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    async fn start(app: axum::Router) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
 
         let server_handle = tokio::spawn(async move {
+            let _ = ready_tx.send(Ok(()));
             axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
                 .await
-                .expect(start_error_message);
         });
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        match ready_rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) => return Err("mock server readiness channel dropped unexpectedly".into()),
+        }
 
         Ok(Self {
             port,
+            shutdown_tx: Some(shutdown_tx),
             server_handle: Some(server_handle),
         })
     }
@@ -53,15 +62,29 @@ impl MockServerHarness {
     }
 
     async fn stop(&mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
         if let Some(handle) = self.server_handle.take() {
-            handle.abort();
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let mut handle = handle;
+            match timeout(Duration::from_secs(2), &mut handle).await {
+                Ok(join_result) => {
+                    let _ = join_result;
+                }
+                Err(_) => {
+                    handle.abort();
+                    let _ = handle.await;
+                }
+            }
         }
     }
 }
 
 impl Drop for MockServerHarness {
     fn drop(&mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
         if let Some(handle) = self.server_handle.take() {
             handle.abort();
         }
@@ -178,8 +201,7 @@ impl MockMCPServer {
     /// Start a mock MCP server on an available port
     pub async fn start() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
-            harness: MockServerHarness::start(Self::router(), "Mock MCP server failed to start")
-                .await?,
+            harness: MockServerHarness::start(Self::router()).await?,
         })
     }
 
@@ -252,11 +274,7 @@ impl MockFailingMCPServer {
         error_marker: &str,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
-            harness: MockServerHarness::start(
-                Self::router(error_marker.to_string()),
-                "Mock failing MCP server failed to start",
-            )
-            .await?,
+            harness: MockServerHarness::start(Self::router(error_marker.to_string())).await?,
         })
     }
 

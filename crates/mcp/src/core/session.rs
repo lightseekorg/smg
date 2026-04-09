@@ -270,11 +270,9 @@ impl<'a> McpToolSession<'a> {
 
     /// Returns true if the bound server label belongs to an internal server.
     pub fn is_internal_server_label(&self, server_label: &str) -> bool {
-        self.all_mcp_servers
-            .iter()
-            .any(|binding| {
-                binding.label == server_label && self.is_internal_server_key(&binding.server_key)
-            })
+        self.all_mcp_servers.iter().any(|binding| {
+            binding.label == server_label && self.is_internal_server_key(&binding.server_key)
+        })
     }
 
     /// Returns true if the given tool resolves to an internal server.
