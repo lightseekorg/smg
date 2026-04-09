@@ -599,15 +599,16 @@ fn expand_tokens(
 /// Assemble backend-specific multimodal data from the intermediate.
 ///
 /// Called in request_building after worker selection, when the backend is known.
+#[expect(clippy::unreachable, reason = "MLX multimodal rejected by caller before reaching here")]
 pub(crate) fn assemble_multimodal_data(
     intermediate: MultimodalIntermediate,
     client: &GrpcClient,
-) -> Result<MultimodalData, String> {
+) -> MultimodalData {
     match client {
-        GrpcClient::Sglang(_) => Ok(MultimodalData::Sglang(assemble_sglang(intermediate))),
-        GrpcClient::Vllm(_) => Ok(MultimodalData::Vllm(assemble_vllm(intermediate))),
-        GrpcClient::Trtllm(_) => Ok(MultimodalData::Trtllm(assemble_trtllm(intermediate))),
-        GrpcClient::Mlx(_) => Err("MLX backend does not support multimodal inputs".to_string()),
+        GrpcClient::Sglang(_) => MultimodalData::Sglang(assemble_sglang(intermediate)),
+        GrpcClient::Vllm(_) => MultimodalData::Vllm(assemble_vllm(intermediate)),
+        GrpcClient::Trtllm(_) => MultimodalData::Trtllm(assemble_trtllm(intermediate)),
+        GrpcClient::Mlx(_) => unreachable!("caller rejects multimodal for MLX in build_chat_request/build_messages_request"),
     }
 }
 
