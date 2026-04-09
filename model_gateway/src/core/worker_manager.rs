@@ -111,8 +111,12 @@ async fn collect_prometheus_multiproc_metrics() -> Result<String, String> {
         return Err(format!("python3 prometheus collector failed: {stderr}"));
     }
 
-    String::from_utf8(output.stdout)
-        .map_err(|e| format!("prometheus collector output is not valid UTF-8: {e}"))
+    let text = String::from_utf8(output.stdout)
+        .map_err(|e| format!("prometheus collector output is not valid UTF-8: {e}"))?;
+    if text.trim().is_empty() {
+        return Err("no metrics available from gRPC workers yet".to_string());
+    }
+    Ok(text)
 }
 
 pub struct WorkerManager;
@@ -332,11 +336,14 @@ impl WorkerManager {
 
         if has_grpc {
             match collect_prometheus_multiproc_metrics().await {
-                Ok(text) => {
+                Ok(text) if !text.trim().is_empty() => {
                     metric_packs.push(MetricPack {
                         labels: vec![],
                         metrics_text: text,
                     });
+                }
+                Ok(_) => {
+                    // No metrics available yet from gRPC workers — skip silently
                 }
                 Err(e) => {
                     warn!(
