@@ -461,19 +461,24 @@ impl McpOrchestrator {
 
     /// Apply tool configurations from server config (aliases, response formats, arg mappings).
     fn apply_tool_configs(&self, config: &McpServerConfig) {
+        self.apply_tool_configs_for_server_key(&config.name, config);
+    }
+
+    /// Apply tool configurations for a specific inventory server key.
+    ///
+    /// Static servers use `config.name` as the server key; dynamic servers use
+    /// URL-based server keys from the connection pool.
+    fn apply_tool_configs_for_server_key(&self, server_key: &str, config: &McpServerConfig) {
         let Some(tools) = &config.tools else {
             return;
         };
 
         for (tool_name, tool_config) in tools {
             // Check if the tool exists
-            if !self
-                .tool_inventory
-                .has_tool_qualified(&config.name, tool_name)
-            {
+            if !self.tool_inventory.has_tool_qualified(server_key, tool_name) {
                 warn!(
                     "Tool config for '{}:{}' but tool not found on server",
-                    config.name, tool_name
+                    server_key, tool_name
                 );
                 continue;
             }
@@ -498,30 +503,30 @@ impl McpOrchestrator {
             if let Some(alias_name) = &tool_config.alias {
                 if let Err(e) = self.register_alias(
                     alias_name,
-                    &config.name,
+                    server_key,
                     tool_name,
                     arg_mapping,
                     response_format.clone(),
                 ) {
                     warn!(
                         "Failed to register alias '{}' for '{}:{}': {}",
-                        alias_name, config.name, tool_name, e
+                        alias_name, server_key, tool_name, e
                     );
                 } else {
                     info!(
                         "Registered alias '{}' → '{}:{}' with format {:?}",
-                        alias_name, config.name, tool_name, response_format
+                        alias_name, server_key, tool_name, response_format
                     );
                 }
             } else if response_format != ResponseFormat::Passthrough {
                 // No alias, but has custom response format - update the entry directly
-                if let Some(mut entry) = self.tool_inventory.get_entry(&config.name, tool_name) {
+                if let Some(mut entry) = self.tool_inventory.get_entry(server_key, tool_name) {
                     entry.response_format = response_format.clone();
                     entry.arg_mapping.clone_from(&arg_mapping);
                     self.tool_inventory.insert_entry(entry);
                     info!(
                         "Set response format {:?} for '{}:{}'",
-                        response_format, config.name, tool_name
+                        response_format, server_key, tool_name
                     );
                 }
             }
@@ -534,6 +539,14 @@ impl McpOrchestrator {
     /// corresponding tool should use the response format associated with the builtin type
     /// (e.g., WebSearchPreview -> WebSearchCall) unless explicitly overridden in the tools config.
     fn apply_builtin_response_format(&self, config: &McpServerConfig) {
+        self.apply_builtin_response_format_for_server_key(&config.name, config);
+    }
+
+    fn apply_builtin_response_format_for_server_key(
+        &self,
+        server_key: &str,
+        config: &McpServerConfig,
+    ) {
         let Some(builtin_type) = &config.builtin_type else {
             return;
         };
@@ -548,7 +561,7 @@ impl McpOrchestrator {
 
         if has_explicit_config {
             debug!(
-                server = %config.name,
+                server = %server_key,
                 tool = %tool_name,
                 "Builtin tool has explicit config, skipping auto-apply of response_format"
             );
@@ -559,10 +572,10 @@ impl McpOrchestrator {
 
         let updated = self
             .tool_inventory
-            .update_entry(&config.name, tool_name, |entry| {
+            .update_entry(server_key, tool_name, |entry| {
                 if entry.response_format != response_format {
                     info!(
-                        server = %config.name,
+                        server = %server_key,
                         tool = %tool_name,
                         builtin_type = %builtin_type,
                         format = ?response_format,
@@ -574,7 +587,7 @@ impl McpOrchestrator {
 
         if !updated {
             warn!(
-                server = %config.name,
+                server = %server_key,
                 tool = %tool_name,
                 builtin_type = %builtin_type,
                 "Builtin tool not found on server"
@@ -1620,47 +1633,8 @@ impl McpOrchestrator {
                     inventory_clone.insert_entry(entry);
                 }
 
-                // Apply per-tool response format/arg-mapping from config to dynamic entries.
-                if let Some(tool_cfgs) = &config.tools {
-                    for (tool_name, tool_cfg) in tool_cfgs {
-                        if let Some(mut entry) = inventory_clone.get_entry(&server_key, tool_name) {
-                            entry.response_format = tool_cfg.response_format.clone().into();
-                            entry.arg_mapping = tool_cfg.arg_mapping.as_ref().map(|cfg| {
-                                let mut mapping = ArgMapping::new();
-                                for (from, to) in &cfg.renames {
-                                    mapping = mapping.with_rename(from, to);
-                                }
-                                for (key, value) in &cfg.defaults {
-                                    mapping = mapping.with_default(key, value.clone());
-                                }
-                                for (key, value) in &cfg.overrides {
-                                    mapping = mapping.with_override(key, value.clone());
-                                }
-                                mapping
-                            });
-                            inventory_clone.insert_entry(entry);
-                        }
-                    }
-                }
-
-                // Apply builtin response format when configured and not explicitly overridden.
-                if let (Some(builtin_type), Some(builtin_tool_name)) =
-                    (&config.builtin_type, &config.builtin_tool_name)
-                {
-                    let has_explicit_config = config
-                        .tools
-                        .as_ref()
-                        .is_some_and(|tools| tools.contains_key(builtin_tool_name));
-
-                    if !has_explicit_config {
-                        if let Some(mut entry) =
-                            inventory_clone.get_entry(&server_key, builtin_tool_name)
-                        {
-                            entry.response_format = builtin_type.response_format().into();
-                            inventory_clone.insert_entry(entry);
-                        }
-                    }
-                }
+                self.apply_tool_configs_for_server_key(&server_key, &config);
+                self.apply_builtin_response_format_for_server_key(&server_key, &config);
 
             }
             Err(e) => warn!("Failed to list tools from '{}': {}", server_key, e),
