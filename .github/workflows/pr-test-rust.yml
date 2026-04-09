@@ -232,6 +232,23 @@ jobs:
           python3 -m pip install pytest pytest-cov pytest-xdist
           pytest -q tests --cov=smg --cov-config=.coveragerc --cov-report=term-missing --cov-fail-under=80
 
+  grpc-servicer-unit-tests:
+    runs-on: k8s-runner-cpu
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Run grpc_servicer unit tests
+        run: |
+          python3 -m pip install pytest
+          PYTHONPATH=grpc_servicer pytest -q grpc_servicer/tests/
+
   unit-tests:
     runs-on: k8s-runner-cpu
     permissions:
@@ -913,7 +930,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-2gpu-chat, e2e-2gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-4gpu-gateway, e2e-vendor, go-unit-tests, go-bindings-e2e]
+    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, grpc-servicer-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-2gpu-chat, e2e-2gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-4gpu-gateway, e2e-vendor, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -925,6 +942,7 @@ jobs:
                 "${{ needs.grpc-proto-build-check.result }}" == "failure" || \
                 "${{ needs.build-wheel.result }}" == "failure" || \
                 "${{ needs.python-unit-tests.result }}" == "failure" || \
+                "${{ needs.grpc-servicer-unit-tests.result }}" == "failure" || \
                 "${{ needs.unit-tests.result }}" == "failure" || \
                 "${{ needs.benchmarks.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-chat.result }}" == "failure" || \
