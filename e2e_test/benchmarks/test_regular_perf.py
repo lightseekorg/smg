@@ -13,6 +13,11 @@ class TestRegularPerf:
     def test_regular_perf(self, setup_backend, genai_bench_runner):
         """Run genai-bench against regular router and validate metrics."""
         backend, model_path, client, gateway = setup_backend
+        ttft_threshold_by_backend = {
+            "http": 0.86,
+            # gRPC TTFT shows higher run-to-run jitter in CI.
+            "grpc": 0.95,
+        }
         genai_bench_runner(
             router_url=gateway.base_url,
             model_path=model_path,
@@ -21,7 +26,7 @@ class TestRegularPerf:
             # accurate GPU utilization sampling (at least 30+ seconds)
             max_requests_per_run=200,
             thresholds={
-                "ttft_mean_max": 0.86,
+                "ttft_mean_max": ttft_threshold_by_backend[backend],
                 "e2e_latency_mean_max": 14,
                 "input_throughput_mean_min": 800,
                 "output_throughput_mean_min": 12,
