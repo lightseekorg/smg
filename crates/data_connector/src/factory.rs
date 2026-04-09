@@ -38,10 +38,15 @@ pub type StorageTuple = (
     Arc<dyn ConversationItemStorage>,
 );
 
+/// Complete storage handles returned by the factory, including optional memory writer.
 pub struct StorageBundle {
+    /// Storage backend for responses.
     pub response_storage: Arc<dyn ResponseStorage>,
+    /// Storage backend for conversations.
     pub conversation_storage: Arc<dyn ConversationStorage>,
+    /// Storage backend for conversation items.
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
+    /// Optional writer used by long-term-memory store flows.
     pub conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
 }
 
@@ -76,6 +81,7 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageT
     ))
 }
 
+/// Create all configured storage handles, including optional conversation memory writer.
 pub async fn create_storage_bundle(
     config: StorageFactoryConfig<'_>,
 ) -> Result<StorageBundle, String> {

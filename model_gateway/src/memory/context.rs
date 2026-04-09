@@ -92,6 +92,7 @@ impl Policy {
     }
 }
 
+/// Parse common truthy header values after whitespace normalization.
 fn is_enabled(value: Option<&str>) -> bool {
     let Some(value) = value.map(normalize) else {
         return false;
@@ -100,9 +101,11 @@ fn is_enabled(value: Option<&str>) -> bool {
     value == "1"
         || value.eq_ignore_ascii_case("true")
         || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
         || value.eq_ignore_ascii_case("enabled")
 }
 
+/// Trim header input before policy/flag parsing.
 fn normalize(value: &str) -> &str {
     value.trim()
 }

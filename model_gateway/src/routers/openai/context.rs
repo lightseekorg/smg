@@ -123,6 +123,7 @@ pub struct PayloadState {
 }
 
 impl RequestContext {
+    /// Build request context for Responses API calls and initialize memory execution context.
     pub fn for_responses(
         request: Arc<ResponsesRequest>,
         headers: Option<HeaderMap>,
@@ -148,6 +149,7 @@ impl RequestContext {
         }
     }
 
+    /// Build request context for Chat Completions calls and initialize memory execution context.
     pub fn for_chat(
         request: Arc<ChatCompletionRequest>,
         headers: Option<HeaderMap>,
@@ -175,6 +177,7 @@ impl RequestContext {
 }
 
 impl RequestContext {
+    /// Recompute memory execution context from current headers and router runtime settings.
     pub fn refresh_memory_execution_context(&mut self) {
         let empty_headers = HeaderMap::new();
         let headers = self.headers().unwrap_or(&empty_headers);

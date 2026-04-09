@@ -59,6 +59,7 @@ pub struct AppContext {
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
+    /// Optional writer used for long-term-memory persistence.
     pub conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
     pub load_monitor: Option<Arc<LoadMonitor>>,
     pub configured_reasoning_parser: Option<String>,
@@ -232,6 +233,7 @@ impl AppContextBuilder {
         self
     }
 
+    /// Inject optional conversation memory writer for long-term-memory store operations.
     pub fn conversation_memory_writer(
         mut self,
         conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
@@ -682,6 +684,7 @@ impl Default for AppContextBuilder {
     }
 }
 
+/// Enforce runtime-aware constraints for conversation memory writer availability.
 fn validate_memory_writer_configuration(
     config: &RouterConfig,
     memory_writer: Option<&Arc<dyn ConversationMemoryWriter>>,
