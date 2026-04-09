@@ -233,9 +233,15 @@ impl MlxEngineClient {
 
     // ── Unsupported feature validation ────────────────────────────────
     //
-    // MLX is a lightweight backend without constrained decoding, parallel
-    // samples, or string stop sequences.  All rejections live here so each
-    // public builder stays concise.
+    // TODO(mlx): These are mlx-lm engine limitations, not proto limitations.
+    // mlx-lm currently lacks:
+    //   - Constrained decoding (json_schema, regex, grammar, structural_tag)
+    //     — needs outlines/xgrammar integration in mlx-lm
+    //   - Parallel samples (n > 1) — BatchGenerator doesn't support it
+    //   - String stop sequences — only token ID stops via SequenceStateMachine
+    //   - response_format — same as constrained decoding
+    // These are the main gaps preventing feature parity with vLLM/SGLang.
+    // Track upstream: https://github.com/ml-explore/mlx-lm
 
     fn reject_constraint(constraint: Option<&(String, String)>) -> Result<(), String> {
         if let Some((kind, _)) = constraint {
