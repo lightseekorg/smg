@@ -10,7 +10,7 @@ use rand::Rng;
 use tracing::debug;
 
 use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
-use crate::core::Worker;
+use crate::worker::Worker;
 
 /// Power-of-two choices policy
 ///
@@ -135,7 +135,7 @@ mod tests {
     use openai_protocol::worker::SchedulerLoadSnapshot;
 
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
 
     /// Create a `WorkerLoadResponse` with a single DP rank at the given token_usage ratio.
     fn make_load(token_usage: f64) -> WorkerLoadResponse {
@@ -255,7 +255,7 @@ mod tests {
     fn test_reproduce_incompatible_metric_bug() {
         use std::{collections::HashMap, sync::Arc};
 
-        use crate::core::{BasicWorkerBuilder, WorkerType};
+        use crate::worker::{BasicWorkerBuilder, WorkerType};
 
         // 1. Setup the policy
         let policy = PowerOfTwoPolicy::new();
@@ -313,7 +313,7 @@ mod tests {
     fn test_power_of_two_edge_cases() {
         use std::{collections::HashMap, sync::Arc};
 
-        use crate::core::{BasicWorkerBuilder, WorkerType};
+        use crate::worker::{BasicWorkerBuilder, WorkerType};
 
         let policy = PowerOfTwoPolicy::new();
 

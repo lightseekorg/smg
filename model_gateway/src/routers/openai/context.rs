@@ -12,7 +12,8 @@ use smg_data_connector::{
 use smg_mcp::{McpOrchestrator, McpToolSession};
 
 use super::provider::Provider;
-use crate::{config::RouterConfig, core::Worker, memory::MemoryExecutionContext, middleware};
+use crate::worker::Worker;
+use crate::{config::RouterConfig, memory::MemoryExecutionContext, middleware};
 
 /// Mutable per-request context used throughout OpenAI router handling.
 pub struct RequestContext {

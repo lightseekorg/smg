@@ -18,13 +18,13 @@ use super::{
 };
 use crate::{
     app_context::AppContext,
-    core::ProviderType,
     routers::{
         error::bad_gateway,
         header_utils, mcp_utils,
         worker_selection::{SelectWorkerRequest, WorkerSelector},
         RouterTrait,
     },
+    worker::ProviderType,
 };
 
 /// Router for Anthropic-specific APIs

@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use smg::{
-    core::{BasicWorkerBuilder, Worker, WorkerType},
     policies::{CacheAwareConfig, CacheAwarePolicy, LoadBalancingPolicy, SelectWorkerInfo},
+    worker::{BasicWorkerBuilder, Worker, WorkerType},
 };
 
 #[test]

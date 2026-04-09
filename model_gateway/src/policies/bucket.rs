@@ -15,7 +15,7 @@ use super::{
     get_healthy_worker_indices, normalize_model_key, BucketConfig, LoadBalancingPolicy,
     SelectWorkerInfo,
 };
-use crate::core::Worker;
+use crate::worker::Worker;
 
 #[derive(Debug)]
 pub struct BucketPolicy {
@@ -563,7 +563,7 @@ impl Bucket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
 
     #[tokio::test]
     async fn test_load_balancing_conditions() {

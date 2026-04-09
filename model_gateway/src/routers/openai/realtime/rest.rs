@@ -9,9 +9,9 @@ use axum::{
 use tracing::error;
 
 use crate::{
-    core::{worker::WorkerLoadGuard, Worker},
     observability::metrics::{metrics_labels, Metrics},
     routers::header_utils::extract_auth_header,
+    worker::{worker::WorkerLoadGuard, Worker},
 };
 
 /// Forward a realtime REST request to the upstream worker.

@@ -15,9 +15,9 @@ use tracing::{debug, error, info, warn};
 
 use super::utils::{read_response_body_limited, should_propagate_header, ReadBodyResult};
 use crate::{
-    core::Worker,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::error,
+    worker::Worker,
 };
 
 /// Maximum error response body size to prevent DoS (1 MB)

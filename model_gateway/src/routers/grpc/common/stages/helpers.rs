@@ -7,8 +7,8 @@ use smg_grpc_client::sglang_proto::DisaggregatedParams;
 use tracing::debug;
 
 use crate::{
-    core::{RuntimeType, Worker, DEFAULT_BOOTSTRAP_PORT},
     routers::grpc::{context::WorkerSelection, proto_wrapper::ProtoGenerateRequest},
+    worker::{RuntimeType, Worker, DEFAULT_BOOTSTRAP_PORT},
 };
 
 /// Inject PD bootstrap metadata for SGLang if needed.

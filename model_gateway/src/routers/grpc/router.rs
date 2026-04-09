@@ -25,9 +25,9 @@ use super::{
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
-    core::{is_retryable_status, RetryExecutor, WorkerRegistry},
     observability::metrics::{metrics_labels, Metrics},
     routers::RouterTrait,
+    worker::{is_retryable_status, RetryExecutor, WorkerRegistry},
 };
 
 /// gRPC router implementation for SGLang

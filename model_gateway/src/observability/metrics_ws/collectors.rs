@@ -11,7 +11,7 @@ use tokio::{sync::broadcast::error::RecvError, task::JoinHandle};
 use tracing::{debug, warn};
 
 use super::{registry::WatchRegistry, types::Topic};
-use crate::{app_context::AppContext, core::worker_event::WorkerEvent};
+use crate::{app_context::AppContext, worker::event::WorkerEvent};
 
 /// Configuration for collector intervals.
 pub struct CollectorConfig {
@@ -39,6 +39,9 @@ impl Default for CollectorConfig {
 }
 
 /// Start all collector tasks. Returns join handles (caller keeps them alive).
+///
+/// Covers 5 of 7 topics. Cluster and mesh topics are deferred — they require
+/// `MeshServerHandler` access (cross-crate) and change infrequently.
 pub fn start_collectors(
     context: Arc<AppContext>,
     registry: Arc<WatchRegistry>,

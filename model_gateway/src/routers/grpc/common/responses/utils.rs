@@ -16,10 +16,10 @@ use smg_mcp::{McpOrchestrator, McpServerBinding};
 use tracing::{debug, error, warn};
 
 use crate::{
-    core::WorkerRegistry,
     routers::{
         error, mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
     },
+    worker::WorkerRegistry,
 };
 
 /// Ensure MCP connection succeeds if MCP tools or builtin tools are declared
@@ -44,7 +44,9 @@ pub(crate) async fn ensure_mcp_connection(
             t.iter().any(|tool| {
                 matches!(
                     tool,
-                    ResponseTool::WebSearchPreview(_) | ResponseTool::CodeInterpreter(_)
+                    ResponseTool::WebSearchPreview(_)
+                        | ResponseTool::CodeInterpreter(_)
+                        | ResponseTool::ImageGeneration(_)
                 )
             })
         })

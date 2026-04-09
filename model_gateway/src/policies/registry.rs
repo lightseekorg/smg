@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 use super::{BucketPolicy, CacheAwarePolicy, DPRankLoadPolicy, LoadBalancingPolicy, PolicyFactory};
 use crate::{
     config::types::PolicyConfig,
-    core::{KvEventMonitor, Worker},
+    worker::{KvEventMonitor, Worker},
 };
 
 /// Registry for managing model-to-policy mappings
@@ -693,8 +693,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        core::{BasicWorkerBuilder, Worker, WorkerType, UNKNOWN_MODEL_ID},
         policies::SelectWorkerInfo,
+        worker::{BasicWorkerBuilder, Worker, WorkerType, UNKNOWN_MODEL_ID},
     };
 
     #[test]

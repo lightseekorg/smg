@@ -26,10 +26,6 @@ use tracing::{debug, error, warn};
 use super::pd_types::api_path;
 use crate::{
     config::types::RetryConfig,
-    core::{
-        is_retryable_status, HashRing, RetryExecutor, Worker, WorkerLoadGuard, WorkerRegistry,
-        WorkerType, UNKNOWN_MODEL_ID,
-    },
     observability::{
         events::{self, Event},
         metrics::{bool_to_static_str, metrics_labels, Metrics},
@@ -40,6 +36,10 @@ use crate::{
         error,
         grpc::utils::{error_type_from_status, route_to_endpoint},
         header_utils, RouterTrait,
+    },
+    worker::{
+        is_retryable_status, HashRing, RetryExecutor, Worker, WorkerLoadGuard, WorkerRegistry,
+        WorkerType, UNKNOWN_MODEL_ID,
     },
 };
 
@@ -892,7 +892,7 @@ impl PDRouter {
         prefill: Arc<dyn Worker>,
         decode: Arc<dyn Worker>,
     ) -> Response {
-        use crate::core::AttachedBody;
+        use crate::worker::AttachedBody;
 
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -1415,7 +1415,7 @@ mod tests {
     use super::*;
     use crate::{
         config::PolicyConfig,
-        core::{BasicWorkerBuilder, WorkerType},
+        worker::{BasicWorkerBuilder, WorkerType},
     };
 
     fn create_test_pd_router() -> PDRouter {
