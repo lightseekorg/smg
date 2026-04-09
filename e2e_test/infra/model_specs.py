@@ -149,6 +149,7 @@ MODEL_SPECS: dict[str, dict] = {
             "--cuda-graph-max-bs=256",
             "--max-running-requests=300",
             "--mem-fraction-static=0.85",
+            "--enable-multimodal",
         ],
         "vllm_args": [
             "--max-model-len=196608",

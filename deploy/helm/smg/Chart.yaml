@@ -2,8 +2,8 @@ apiVersion: v2
 name: smg
 description: "Shepherd Model Gateway - high-performance inference router for LLM deployments"
 type: application
-version: 1.4.0
-appVersion: "1.4.0"
+version: 1.4.1
+appVersion: "1.4.1"
 kubeVersion: ">=1.26.0-0"
 home: https://github.com/lightseekorg/smg
 sources:

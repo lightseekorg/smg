@@ -200,6 +200,10 @@ struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "Routing Policy")]
     enable_igw: bool,
 
+    /// Enable minimum tokens scheduler for data parallel group
+    #[arg(long, default_value_t = false, help_heading = "Routing Policy")]
+    dp_minimum_tokens_scheduler: bool,
+
     // ==================== PD Disaggregation ====================
     /// Enable PD (Prefill-Decode) disaggregated mode
     #[arg(long, default_value_t = false, help_heading = "PD Disaggregation")]
@@ -1227,6 +1231,7 @@ impl CliArgs {
             .enable_wasm(self.enable_wasm)
             .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .igw(self.enable_igw)
+            .dp_minimum_tokens_scheduler(self.dp_minimum_tokens_scheduler)
             .maybe_server_cert_and_key(self.tls_cert_path.as_ref(), self.tls_key_path.as_ref());
 
         builder.build()

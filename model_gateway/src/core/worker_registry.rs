@@ -684,34 +684,6 @@ impl WorkerRegistry {
             .unwrap_or_default()
     }
 
-    /// Update worker health status and sync to mesh
-    pub fn update_worker_health(&self, worker_id: &WorkerId, is_healthy: bool) {
-        if let Some(worker) = self.workers.get(worker_id) {
-            // Update worker health (if Worker trait has a method for this)
-            // For now, we'll just sync to mesh
-
-            // Sync to mesh if enabled (no-op if mesh is not enabled)
-            {
-                let guard = self.mesh_sync.read();
-                if let Some(ref mesh_sync) = *guard {
-                    mesh_sync.sync_worker_state(
-                        worker_id.as_str().to_string(),
-                        worker.model_id().to_string(),
-                        worker.url().to_string(),
-                        is_healthy,
-                        0.0, // TODO: Get actual load
-                        bincode::serialize(&worker.metadata().spec).unwrap_or_default(),
-                    );
-                }
-            }
-
-            let _ = self.event_tx.send(WorkerEvent::HealthChanged {
-                url: worker.url().to_string(),
-                healthy: is_healthy,
-            });
-        }
-    }
-
     /// Get all prefill workers (regardless of bootstrap_port)
     pub fn get_prefill_workers(&self) -> Vec<Arc<dyn Worker>> {
         self.workers
@@ -1008,18 +980,19 @@ impl WorkerRegistry {
                     let futs: Vec<_> = due_workers
                         .into_iter()
                         .map(|w| async move {
-                            let _ = w.check_health_async().await;
-                            w
+                            let failed = w.check_health_async().await.is_err();
+                            (w, failed)
                         })
                         .collect();
                     let checked_workers = futures::future::join_all(futs).await;
 
-                    // Submit removal jobs for workers that transitioned to unhealthy.
-                    // Goes through the full removal workflow (policy registry,
-                    // worker registry, metrics, load monitor).
+                    // Only remove workers whose health check actually failed
+                    // this tick. Workers that are unhealthy but passing checks
+                    // (e.g. mesh-synced, pre-activation) are recovering — leave
+                    // them alone until they either become healthy or truly fail.
                     if let Some(ref job_queue) = job_queue {
-                        for worker in &checked_workers {
-                            if !worker.is_healthy() {
+                        for (worker, failed) in &checked_workers {
+                            if !worker.is_healthy() && *failed {
                                 let url = worker.url().to_string();
                                 tracing::warn!(
                                     worker_url = %url,

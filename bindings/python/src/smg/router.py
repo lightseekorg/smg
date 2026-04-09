@@ -166,6 +166,7 @@ class Router:
         max_tree_size: Maximum size of the approximation tree for cache-aware routing.
             Default: 2^24
         dp_aware: Enable data parallelism aware schedule. Default: False
+        dp_minimum_tokens_scheduler: Enable minimum tokens scheduler for data parallel group. Default: False
         enable_igw: Enable IGW (Inference-Gateway) mode for multi-model support. When
             enabled, the router can manage multiple models simultaneously with per-model
             load balancing policies. Default: False

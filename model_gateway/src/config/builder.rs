@@ -494,6 +494,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn dp_minimum_tokens_scheduler(mut self, enable: bool) -> Self {
+        self.config.dp_minimum_tokens_scheduler = enable;
+        self
+    }
+
     // ==================== Option Setters ====================
     // Accept Option<T> and only set if Some
 
