@@ -256,7 +256,7 @@ pub async fn ensure_request_mcp_client(
     tools: &[ResponseTool],
     request_headers: Option<&HeaderMap>,
 ) -> Option<Vec<McpServerBinding>> {
-    let inputs: Vec<McpServerInput> = tools
+    let mut inputs: Vec<McpServerInput> = tools
         .iter()
         .filter_map(|tool| match tool {
             ResponseTool::Mcp(mcp) => Some(McpServerInput {
@@ -271,9 +271,76 @@ pub async fn ensure_request_mcp_client(
         .collect();
 
     let builtin_types = extract_builtin_types(tools);
-    let _ = request_headers;
+    if !builtin_types.is_empty() {
+        for builtin_type in &builtin_types {
+            let Some((server_name, _, _)) = mcp_orchestrator.find_builtin_server(*builtin_type)
+            else {
+                continue;
+            };
+            let Some(server_cfg) = mcp_orchestrator.find_server_config(&server_name) else {
+                continue;
+            };
+
+            if let Some((url, token, headers)) =
+                resolve_forwarded_headers(&server_cfg, request_headers)
+            {
+                inputs.push(McpServerInput {
+                    label: server_name,
+                    url: Some(url),
+                    authorization: token,
+                    headers,
+                    allowed_tools: None,
+                });
+            }
+        }
+    }
 
     ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types).await
+}
+
+/// Resolve forwarded headers from a static MCP server config.
+///
+/// In `mcp.local.yaml` transport.headers, an empty value means:
+/// "forward the same header from the incoming request".
+///
+/// Returns dynamic connection settings only when at least one forwarded-header
+/// reference is present and the transport is HTTP-based.
+fn resolve_forwarded_headers(
+    server_cfg: &McpServerConfig,
+    request_headers: Option<&HeaderMap>,
+) -> Option<(String, Option<String>, HashMap<String, String>)> {
+    let (url, token, configured_headers) = match &server_cfg.transport {
+        McpTransport::Sse {
+            url,
+            token,
+            headers,
+        }
+        | McpTransport::Streamable {
+            url,
+            token,
+            headers,
+        } => (url.clone(), token.clone(), headers),
+        McpTransport::Stdio { .. } => return None,
+    };
+
+    let mut merged_headers = HashMap::new();
+    let mut has_forward_ref = false;
+
+    for (name, value) in configured_headers {
+        if value.is_empty() {
+            has_forward_ref = true;
+            if let Some(header_value) = request_headers
+                .and_then(|h| h.get(name.as_str()))
+                .and_then(|v| v.to_str().ok())
+            {
+                merged_headers.insert(name.clone(), header_value.to_string());
+            }
+        } else {
+            merged_headers.insert(name.clone(), value.clone());
+        }
+    }
+
+    has_forward_ref.then_some((url, token, merged_headers))
 }
 
 #[cfg(test)]

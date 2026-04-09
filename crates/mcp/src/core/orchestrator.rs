@@ -942,6 +942,21 @@ impl McpOrchestrator {
         names
     }
 
+    /// Find a server config by server name.
+    ///
+    /// Checks connected static servers first, then falls back to the initial config.
+    pub fn find_server_config(&self, server_name: &str) -> Option<McpServerConfig> {
+        if let Some(entry) = self.static_servers.get(server_name) {
+            return Some(entry.config.clone());
+        }
+
+        self.config
+            .servers
+            .iter()
+            .find(|cfg| cfg.name == server_name)
+            .cloned()
+    }
+
     /// Execute a single tool using an already-resolved qualified binding.
     ///
     /// This path does not perform tool-name reverse lookup. Callers must provide
