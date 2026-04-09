@@ -9,10 +9,12 @@ use rmcp::{
     },
     ErrorData as McpError, RoleServer, ServerHandler,
 };
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
-use tokio::time::{timeout, Duration};
+use tokio::{
+    net::TcpListener,
+    sync::oneshot,
+    task::JoinHandle,
+    time::{timeout, Duration},
+};
 
 struct MockServerHarness {
     port: u16,
