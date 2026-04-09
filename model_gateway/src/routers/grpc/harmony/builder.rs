@@ -425,6 +425,7 @@ impl HarmonyBuilder {
                             ResponseTool::Function(_) => "function",
                             ResponseTool::WebSearchPreview(_) => "web_search_preview",
                             ResponseTool::CodeInterpreter(_) => "code_interpreter",
+                            ResponseTool::ImageGeneration(_) => "image_generation",
                             ResponseTool::Mcp(_) => "mcp",
                         })
                         .collect()
