@@ -266,28 +266,15 @@ pub async fn ensure_request_mcp_client(
     let inputs: Vec<McpServerInput> = tools
         .iter()
         .filter_map(|tool| match tool {
-            ResponseTool::Mcp(mcp) => {
-                let mut headers = HashMap::new();
-
-                if let Some(server_cfg) = mcp_orchestrator.find_server_config(&mcp.server_label) {
-                    if let Some((_, _, forwarded_headers)) =
-                        resolve_forwarded_headers(&server_cfg, request_headers)
-                    {
-                        headers.extend(forwarded_headers);
-                    }
-                }
-                headers.extend(mcp.headers.clone().unwrap_or_default());
-
-                Some(McpServerInput {
-                    label: mcp.server_label.clone(),
-                    url: mcp.server_url.clone(),
-                    authorization: mcp.authorization.clone(),
-                    headers,
-                    builtin_type: None,
-                    builtin_tool_name: None,
-                    allowed_tools: mcp.allowed_tools.clone(),
-                })
-            }
+            ResponseTool::Mcp(mcp) => Some(McpServerInput {
+                label: mcp.server_label.clone(),
+                url: mcp.server_url.clone(),
+                authorization: mcp.authorization.clone(),
+                headers: mcp.headers.clone().unwrap_or_default(),
+                builtin_type: None,
+                builtin_tool_name: None,
+                allowed_tools: mcp.allowed_tools.clone(),
+            }),
             _ => None,
         })
         .collect();
@@ -334,6 +321,13 @@ pub async fn ensure_request_mcp_client(
 ///
 /// Returns dynamic connection settings only when at least one forwarded-header
 /// reference is resolved from request headers, and the transport is HTTP-based.
+///
+/// Behavior note:
+/// - Empty configured header value (`""`) is treated as a per-request placeholder.
+/// - Non-empty configured header value is copied as a static header value.
+/// - Dynamic routing is enabled only if at least one placeholder header is
+///   successfully resolved from `request_headers`; otherwise callers should
+///   fall back to static server routing.
 fn resolve_forwarded_headers(
     server_cfg: &McpServerConfig,
     request_headers: Option<&HeaderMap>,
