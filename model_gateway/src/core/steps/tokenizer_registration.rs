@@ -25,7 +25,7 @@ use wfaas::{
 };
 
 use super::workflow_data::TokenizerWorkflowData;
-use crate::{app_context::AppContext, config::TokenizerCacheConfig, core::ConnectionMode};
+use crate::{app_context::AppContext, config::TokenizerCacheConfig, worker::ConnectionMode};
 
 /// Configuration for adding a tokenizer
 #[derive(Debug, Clone, Serialize, Deserialize)]

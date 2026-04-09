@@ -16,10 +16,10 @@ use smg_mcp::{McpOrchestrator, McpServerBinding};
 use tracing::{debug, error, warn};
 
 use crate::{
-    core::WorkerRegistry,
     routers::{
         error, mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
     },
+    worker::WorkerRegistry,
 };
 
 /// Ensure MCP connection succeeds if MCP tools or builtin tools are declared

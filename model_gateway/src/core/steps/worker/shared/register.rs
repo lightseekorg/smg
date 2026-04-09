@@ -9,12 +9,12 @@ use wfaas::{
 };
 
 use crate::{
-    core::{
-        steps::workflow_data::WorkerRegistrationData,
+    core::steps::workflow_data::WorkerRegistrationData,
+    observability::metrics::Metrics,
+    worker::{
         worker::{ConnectionModeExt, WorkerTypeExt},
         WorkerGroupKey, WorkerRegistry,
     },
-    observability::metrics::Metrics,
 };
 
 /// Unified step to register workers in the registry.

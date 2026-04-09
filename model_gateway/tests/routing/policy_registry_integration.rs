@@ -4,8 +4,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use openai_protocol::worker::WorkerSpec;
 use smg::{
-    config::PolicyConfig, core::WorkerRegistry, policies::PolicyRegistry,
-    routers::router_manager::RouterManager,
+    config::PolicyConfig, policies::PolicyRegistry, routers::router_manager::RouterManager,
+    worker::WorkerRegistry,
 };
 
 #[expect(clippy::print_stdout, reason = "test diagnostic output")]

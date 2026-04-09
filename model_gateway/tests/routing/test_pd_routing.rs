@@ -5,8 +5,8 @@ mod pd_routing_unit_tests {
     use smg::{
         app_context::AppContext,
         config::{PolicyConfig, RouterConfig, RoutingMode},
-        core::{BasicWorkerBuilder, Worker, WorkerType},
         routers::{http::pd_types::PDSelectionPolicy, RouterFactory},
+        worker::{BasicWorkerBuilder, Worker, WorkerType},
     };
 
     #[derive(Debug)]
@@ -39,7 +39,7 @@ mod pd_routing_unit_tests {
 
     #[test]
     fn test_worker_types() {
-        use smg::core::{BasicWorkerBuilder, Worker, WorkerType};
+        use smg::worker::{BasicWorkerBuilder, Worker, WorkerType};
 
         let prefill_worker: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://prefill:8080")
@@ -212,9 +212,9 @@ mod pd_routing_unit_tests {
                 use std::sync::{Arc, OnceLock};
 
                 use smg::{
-                    core::{LoadMonitor, WorkerRegistry},
                     middleware::TokenBucket,
                     policies::PolicyRegistry,
+                    worker::{LoadMonitor, WorkerRegistry},
                 };
                 use smg_data_connector::{
                     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
@@ -665,7 +665,7 @@ mod pd_routing_unit_tests {
 
     #[test]
     fn test_bootstrap_injection_with_benchmark_requests() {
-        use smg::core::{BasicWorkerBuilder, Worker, WorkerType};
+        use smg::worker::{BasicWorkerBuilder, Worker, WorkerType};
 
         let mut benchmark_request = json!({
             "input_ids": vec![vec![1, 2, 3, 4]; 16], // Batch size 16

@@ -6,13 +6,15 @@ use async_trait::async_trait;
 use tracing::{debug, info};
 use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::core::{
-    circuit_breaker::CircuitBreakerConfig,
-    http_client::build_worker_http_client,
-    resilience::resolve_resilience,
-    steps::workflow_data::{WorkerKind, WorkerList, WorkerWorkflowData},
-    worker::{RuntimeType, WorkerType},
-    BasicWorkerBuilder, ConnectionMode, Worker,
+use crate::{
+    core::steps::workflow_data::{WorkerKind, WorkerList, WorkerWorkflowData},
+    worker::{
+        circuit_breaker::CircuitBreakerConfig,
+        http_client::build_worker_http_client,
+        resilience::resolve_resilience,
+        worker::{RuntimeType, WorkerType},
+        BasicWorkerBuilder, ConnectionMode, Worker,
+    },
 };
 
 /// Normalize URL for external APIs (ensure https://).

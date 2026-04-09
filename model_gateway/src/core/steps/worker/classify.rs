@@ -15,9 +15,9 @@ use tracing::debug;
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::util::{http_base_url, try_grpc_reachable, try_http_reachable};
-use crate::core::{
-    steps::workflow_data::{WorkerKind, WorkerWorkflowData},
-    worker::RuntimeType,
+use crate::{
+    core::steps::workflow_data::{WorkerKind, WorkerWorkflowData},
+    worker::worker::RuntimeType,
 };
 
 /// Quick-probe timeout for classification. Deliberately short — the full

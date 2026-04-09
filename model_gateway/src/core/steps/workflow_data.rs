@@ -38,7 +38,7 @@ use super::{
     wasm_module_registration::WasmModuleConfigRequest,
     wasm_module_removal::WasmModuleRemovalRequest, worker::local::WorkerRemovalRequest,
 };
-use crate::{app_context::AppContext, core::Worker};
+use crate::{app_context::AppContext, worker::Worker};
 
 // ============================================================================
 // Shared trait for worker registration workflows
@@ -95,7 +95,7 @@ pub struct WorkerWorkflowData {
     /// Determined by ClassifyWorkerTypeStep (Local or External).
     pub worker_kind: Option<WorkerKind>,
     // -- Local-only fields --
-    pub connection_mode: Option<crate::core::ConnectionMode>,
+    pub connection_mode: Option<crate::worker::ConnectionMode>,
     pub detected_runtime_type: Option<String>,
     pub discovered_labels: HashMap<String, String>,
     pub dp_info: Option<super::worker::local::DpInfo>,

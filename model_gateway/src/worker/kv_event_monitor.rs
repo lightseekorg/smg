@@ -25,7 +25,7 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-use crate::core::{ConnectionMode, Worker, UNKNOWN_MODEL_ID};
+use crate::worker::{ConnectionMode, Worker, UNKNOWN_MODEL_ID};
 
 /// Default jump size for new `PositionalIndexer` instances.
 const DEFAULT_JUMP_SIZE: usize = 64;

@@ -24,13 +24,13 @@ use uuid::Uuid;
 
 use crate::{
     config::types::RetryConfig,
-    core::{
+    observability::metrics::Metrics,
+    worker::{
         circuit_breaker::CircuitState,
+        event::WorkerEvent,
         worker::{HealthChecker, RuntimeType, WorkerType},
-        worker_event::WorkerEvent,
         ConnectionMode, Job, JobQueue, Worker,
     },
-    observability::metrics::Metrics,
 };
 
 /// Number of virtual nodes per physical worker for even distribution.
@@ -1063,9 +1063,9 @@ impl smg_mesh::WorkerStateSubscriber for WorkerRegistry {
         let worker = match bincode::deserialize::<openai_protocol::worker::WorkerSpec>(&state.spec)
         {
             Ok(spec) if !state.spec.is_empty() => {
-                super::worker_builder::BasicWorkerBuilder::from_spec(spec).build()
+                super::builder::BasicWorkerBuilder::from_spec(spec).build()
             }
-            _ => super::worker_builder::BasicWorkerBuilder::new(&state.url)
+            _ => super::builder::BasicWorkerBuilder::new(&state.url)
                 .model(ModelCard::new(&state.model_id))
                 .build(),
         };
@@ -1122,7 +1122,7 @@ mod tests {
     use openai_protocol::model_card::ModelCard;
 
     use super::*;
-    use crate::core::{circuit_breaker::CircuitBreakerConfig, BasicWorkerBuilder};
+    use crate::worker::{circuit_breaker::CircuitBreakerConfig, BasicWorkerBuilder};
 
     #[test]
     fn test_worker_registry() {

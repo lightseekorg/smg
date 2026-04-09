@@ -12,7 +12,7 @@ use serde_json::Value;
 use smg_mcp::McpOrchestrator;
 
 use super::state::RequestState;
-use crate::core::{Worker, WorkerRegistry};
+use crate::worker::{Worker, WorkerRegistry};
 
 // ============================================================================
 // SharedComponents (per-router)

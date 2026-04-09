@@ -11,7 +11,7 @@ use tokio::{sync::broadcast::error::RecvError, task::JoinHandle};
 use tracing::{debug, warn};
 
 use super::{registry::WatchRegistry, types::Topic};
-use crate::{app_context::AppContext, core::worker_event::WorkerEvent};
+use crate::{app_context::AppContext, worker::event::WorkerEvent};
 
 /// Configuration for collector intervals.
 pub struct CollectorConfig {

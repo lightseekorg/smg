@@ -26,11 +26,11 @@ use openai_protocol::{
 use serde_json::json;
 use smg::{
     config::{ConfigError, HistoryBackend, OracleConfig, PolicyConfig, RouterConfig, RoutingMode},
-    core::{BasicWorkerBuilder, RuntimeType, Worker, WorkerType},
     routers::{
         factory::router_ids, openai::OpenAIRouter, router_manager::RouterManager, RouterFactory,
         RouterTrait,
     },
+    worker::{BasicWorkerBuilder, RuntimeType, Worker, WorkerType},
 };
 use smg_data_connector::{ResponseId, StoredResponse};
 use tokio::{

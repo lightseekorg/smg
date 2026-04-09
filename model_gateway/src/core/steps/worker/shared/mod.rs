@@ -13,7 +13,7 @@ pub use activate::ActivateWorkersStep;
 pub use register::RegisterWorkersStep;
 pub use update_policies::UpdatePoliciesStep;
 
-use crate::core::Worker;
+use crate::worker::Worker;
 
 /// Type alias for a collection of workers in workflow context.
 /// Both local (single/DP-aware) and external (multi-model) workflows

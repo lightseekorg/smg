@@ -8,12 +8,12 @@ use async_trait::async_trait;
 use tracing::debug;
 use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::core::{
-    steps::{
+use crate::{
+    core::steps::{
         worker::util::{try_grpc_reachable, try_http_reachable},
         workflow_data::{WorkerKind, WorkerWorkflowData},
     },
-    ConnectionMode,
+    worker::ConnectionMode,
 };
 
 /// Step 1: Detect connection mode (HTTP vs gRPC).

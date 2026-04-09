@@ -1,7 +1,7 @@
 use std::{collections::HashMap, hint::black_box, sync::Arc};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use smg::core::{BasicWorkerBuilder, CircuitBreakerConfig, WorkerRegistry, WorkerType};
+use smg::worker::{BasicWorkerBuilder, CircuitBreakerConfig, WorkerRegistry, WorkerType};
 
 // Helper to populate registry
 fn setup_registry(count: usize) -> Arc<WorkerRegistry> {

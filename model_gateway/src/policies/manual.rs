@@ -23,8 +23,8 @@ use super::{
     get_healthy_worker_indices, utils::PeriodicTask, LoadBalancingPolicy, SelectWorkerInfo,
 };
 use crate::{
-    config::ManualAssignmentMode, core::Worker, observability::metrics::Metrics,
-    routers::header_utils::extract_routing_key,
+    config::ManualAssignmentMode, observability::metrics::Metrics,
+    routers::header_utils::extract_routing_key, worker::Worker,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,7 +302,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
 
     fn create_workers(urls: &[&str]) -> Vec<Arc<dyn Worker>> {
         urls.iter()

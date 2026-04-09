@@ -431,7 +431,7 @@ struct Router {
     queue_size: usize,
     queue_timeout_secs: u64,
     rate_limit_tokens_per_second: Option<i32>,
-    connection_mode: core::ConnectionMode,
+    connection_mode: worker::ConnectionMode,
     model_path: Option<String>,
     tokenizer_path: Option<String>,
     chat_template: Option<String>,
@@ -468,13 +468,13 @@ struct Router {
 }
 
 impl Router {
-    fn determine_connection_mode(worker_urls: &[String]) -> core::ConnectionMode {
+    fn determine_connection_mode(worker_urls: &[String]) -> worker::ConnectionMode {
         for url in worker_urls {
             if url.starts_with("grpc://") || url.starts_with("grpcs://") {
-                return core::ConnectionMode::Grpc;
+                return worker::ConnectionMode::Grpc;
             }
         }
-        core::ConnectionMode::Http
+        worker::ConnectionMode::Http
     }
 
     fn parse_mesh_socket_addr(

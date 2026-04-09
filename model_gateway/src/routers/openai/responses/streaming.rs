@@ -506,7 +506,7 @@ pub(super) fn send_final_response_event(
 /// Simple pass-through streaming without MCP interception
 pub(super) async fn handle_simple_streaming_passthrough(
     client: &reqwest::Client,
-    worker: &Arc<dyn crate::core::Worker>,
+    worker: &Arc<dyn crate::worker::Worker>,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
 ) -> Response {

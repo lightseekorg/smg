@@ -20,11 +20,11 @@ use tokio::{
 use tracing::{debug, info};
 
 use crate::{
-    core::{
+    policies::PolicyRegistry,
+    worker::{
         metrics_aggregator::{self, MetricPack},
         ConnectionMode, Worker, WorkerLoadManager, WorkerRegistry, WorkerType,
     },
-    policies::PolicyRegistry,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);

@@ -5,9 +5,9 @@ use tracing::{debug, warn};
 use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::discover_metadata::get_server_info;
-use crate::core::{
-    steps::workflow_data::{WorkerKind, WorkerWorkflowData},
-    ConnectionMode, UNKNOWN_MODEL_ID,
+use crate::{
+    core::steps::workflow_data::{WorkerKind, WorkerWorkflowData},
+    worker::{ConnectionMode, UNKNOWN_MODEL_ID},
 };
 
 /// DP (Data Parallel) information for a worker.

@@ -7,13 +7,13 @@ use openai_protocol::{model_card::ModelCard, model_type::ModelType, worker::Work
 use tracing::debug;
 use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::core::{
-    circuit_breaker::CircuitBreakerConfig,
-    http_client::build_worker_http_client,
-    resilience::resolve_resilience,
-    steps::workflow_data::{WorkerKind, WorkerWorkflowData},
-    worker::RuntimeType,
-    BasicWorkerBuilder, ConnectionMode, Worker, UNKNOWN_MODEL_ID,
+use crate::{
+    core::steps::workflow_data::{WorkerKind, WorkerWorkflowData},
+    worker::{
+        circuit_breaker::CircuitBreakerConfig, http_client::build_worker_http_client,
+        resilience::resolve_resilience, worker::RuntimeType, BasicWorkerBuilder, ConnectionMode,
+        Worker, UNKNOWN_MODEL_ID,
+    },
 };
 
 /// Step 3: Create worker object(s) with merged configuration + metadata.

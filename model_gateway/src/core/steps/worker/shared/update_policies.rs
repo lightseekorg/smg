@@ -8,7 +8,10 @@ use wfaas::{
     StepExecutor, StepResult, WorkflowContext, WorkflowData, WorkflowError, WorkflowResult,
 };
 
-use crate::core::{steps::workflow_data::WorkerRegistrationData, ConnectionMode, Worker};
+use crate::{
+    core::steps::workflow_data::WorkerRegistrationData,
+    worker::{ConnectionMode, Worker},
+};
 
 /// Unified step to update policy registry for registered workers.
 ///

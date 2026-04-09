@@ -981,7 +981,7 @@ mod tests {
     use std::{thread, time::Duration};
 
     use super::*;
-    use crate::core::{
+    use crate::worker::{
         circuit_breaker::{CircuitBreakerConfig, CircuitState},
         BasicWorkerBuilder,
     };
@@ -1037,7 +1037,7 @@ mod tests {
 
     #[test]
     fn test_basic_worker_creation() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
             .build();
@@ -1054,7 +1054,7 @@ mod tests {
         labels.insert("env".to_string(), "prod".to_string());
         labels.insert("zone".to_string(), "us-west".to_string());
 
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
             .labels(labels.clone())
@@ -1074,7 +1074,7 @@ mod tests {
             disable_health_check: false,
         };
 
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
             .health_config(custom_config.clone())
@@ -1088,7 +1088,7 @@ mod tests {
 
     #[test]
     fn test_worker_url() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://worker1:8080")
             .worker_type(WorkerType::Regular)
             .build();
@@ -1097,7 +1097,7 @@ mod tests {
 
     #[test]
     fn test_worker_type_getter() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let regular = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
             .build();
@@ -1118,7 +1118,7 @@ mod tests {
 
     #[test]
     fn test_health_status() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
             .build();
@@ -1134,7 +1134,7 @@ mod tests {
 
     #[test]
     fn test_load_counter_operations() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
             .build();
@@ -1161,7 +1161,7 @@ mod tests {
 
     #[test]
     fn test_processed_counter() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
             .build();
@@ -1176,7 +1176,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_load_increments() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = Arc::new(
             BasicWorkerBuilder::new("http://test:8080")
                 .worker_type(WorkerType::Regular)
@@ -1206,7 +1206,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_load_decrements() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = Arc::new(
             BasicWorkerBuilder::new("http://test:8080")
                 .worker_type(WorkerType::Regular)
@@ -1241,7 +1241,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_health_updates() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = Arc::new(
             BasicWorkerBuilder::new("http://test:8080")
                 .worker_type(WorkerType::Regular)
@@ -1270,7 +1270,7 @@ mod tests {
 
     #[test]
     fn test_create_regular_worker() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://regular:8080")
                 .worker_type(WorkerType::Regular)
@@ -1282,7 +1282,7 @@ mod tests {
 
     #[test]
     fn test_create_prefill_worker() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker1: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://prefill:8080")
                 .worker_type(WorkerType::Prefill)
@@ -1304,7 +1304,7 @@ mod tests {
 
     #[test]
     fn test_create_decode_worker() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://decode:8080")
                 .worker_type(WorkerType::Decode)
@@ -1316,7 +1316,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_health_async() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
             .build();
@@ -1331,7 +1331,7 @@ mod tests {
     fn test_load_counter_performance() {
         use std::time::Instant;
 
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
 
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
@@ -1469,7 +1469,7 @@ mod tests {
 
     #[test]
     fn test_worker_circuit_breaker() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
             .build();
@@ -1500,7 +1500,7 @@ mod tests {
             window_duration: Duration::from_secs(60),
         };
 
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
             .circuit_breaker_config(config)
@@ -1539,7 +1539,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mixed_worker_types() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
         let regular: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://regular:8080")
                 .worker_type(WorkerType::Regular)
@@ -1725,7 +1725,7 @@ mod tests {
 
     #[test]
     fn test_worker_load_guard_with_routing_key() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
 
         let worker: Arc<dyn Worker> = Arc::new(
             BasicWorkerBuilder::new("http://test:8000")
@@ -1751,7 +1751,7 @@ mod tests {
 
     #[test]
     fn test_worker_load_guard_without_routing_key() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
 
         let worker: Arc<dyn Worker> = Arc::new(
             BasicWorkerBuilder::new("http://test:8000")
@@ -1774,7 +1774,7 @@ mod tests {
 
     #[test]
     fn test_worker_load_guard_multiple_same_routing_key() {
-        use crate::core::BasicWorkerBuilder;
+        use crate::worker::BasicWorkerBuilder;
 
         let worker: Arc<dyn Worker> = Arc::new(
             BasicWorkerBuilder::new("http://test:8000")

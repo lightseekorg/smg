@@ -27,13 +27,13 @@ use serde_json::json;
 use smg::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
-    core::{
-        BasicWorkerBuilder, Job, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry,
-        WorkerType,
-    },
     middleware::TokenBucket,
     policies::PolicyRegistry,
     routers::{router_manager::RouterManager, RouterFactory, RouterTrait},
+    worker::{
+        BasicWorkerBuilder, Job, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry,
+        WorkerType,
+    },
 };
 use smg_data_connector::{
     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
@@ -382,7 +382,7 @@ pub fn create_test_context(
         // Initialize JobQueue after AppContext is created
         let weak_context = Arc::downgrade(&app_context);
         let job_queue =
-            smg::core::JobQueue::new(smg::core::JobQueueConfig::default(), weak_context);
+            smg::worker::JobQueue::new(smg::worker::JobQueueConfig::default(), weak_context);
         app_context
             .worker_job_queue
             .set(job_queue)
@@ -517,7 +517,7 @@ pub fn create_test_context_with_parsers(
         // Initialize JobQueue after AppContext is created
         let weak_context = Arc::downgrade(&app_context);
         let job_queue =
-            smg::core::JobQueue::new(smg::core::JobQueueConfig::default(), weak_context);
+            smg::worker::JobQueue::new(smg::worker::JobQueueConfig::default(), weak_context);
         app_context
             .worker_job_queue
             .set(job_queue)
@@ -651,7 +651,7 @@ pub fn create_test_context_with_mcp_config(
         // Initialize JobQueue after AppContext is created
         let weak_context = Arc::downgrade(&app_context);
         let job_queue =
-            smg::core::JobQueue::new(smg::core::JobQueueConfig::default(), weak_context);
+            smg::worker::JobQueue::new(smg::worker::JobQueueConfig::default(), weak_context);
         app_context
             .worker_job_queue
             .set(job_queue)

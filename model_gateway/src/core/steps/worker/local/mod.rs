@@ -32,10 +32,8 @@ use wfaas::{BackoffStrategy, RetryPolicy, StepDefinition, WorkflowDefinition};
 
 use crate::{
     app_context::AppContext,
-    core::{
-        steps::workflow_data::{WorkerRemovalWorkflowData, WorkerUpdateWorkflowData},
-        Worker, WorkerRegistry,
-    },
+    core::steps::workflow_data::{WorkerRemovalWorkflowData, WorkerUpdateWorkflowData},
+    worker::{Worker, WorkerRegistry},
 };
 
 /// Find workers by URL, supporting both DP-aware (prefix match) and regular (exact match) modes.

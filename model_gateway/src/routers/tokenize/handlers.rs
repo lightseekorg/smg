@@ -20,7 +20,8 @@ use tracing::{debug, error, warn};
 
 use crate::{
     app_context::AppContext,
-    core::{steps::TokenizerConfigRequest, Job, UNKNOWN_MODEL_ID},
+    core::steps::TokenizerConfigRequest,
+    worker::{Job, UNKNOWN_MODEL_ID},
 };
 
 /// Helper to create error responses

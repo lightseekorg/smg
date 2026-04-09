@@ -5,7 +5,7 @@ use std::{collections::HashMap, fmt::Debug, sync::RwLock};
 
 use tracing::debug;
 
-use crate::core::Worker;
+use crate::worker::Worker;
 
 #[derive(Debug, Default)]
 pub struct WorkerLoadManager {
@@ -60,7 +60,7 @@ impl WorkerLoadManager {
 #[cfg(test)]
 mod dp_load_manager_tests {
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
 
     #[test]
     fn test_new_dp_load_manager_instance() {

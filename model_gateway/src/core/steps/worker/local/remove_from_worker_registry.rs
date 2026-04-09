@@ -7,12 +7,12 @@ use tracing::{debug, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::{
-    core::{
-        steps::workflow_data::WorkerRemovalWorkflowData,
+    core::steps::workflow_data::WorkerRemovalWorkflowData,
+    observability::metrics::Metrics,
+    worker::{
         worker::{ConnectionModeExt, WorkerTypeExt},
         WorkerGroupKey,
     },
-    observability::metrics::Metrics,
 };
 
 /// Step to remove workers from the worker registry.

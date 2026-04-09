@@ -6,7 +6,10 @@ use async_trait::async_trait;
 use tracing::{debug, info, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::core::{steps::workflow_data::WorkerUpdateWorkflowData, BasicWorkerBuilder, Worker};
+use crate::{
+    core::steps::workflow_data::WorkerUpdateWorkflowData,
+    worker::{BasicWorkerBuilder, Worker},
+};
 
 /// Step to update worker properties.
 ///

@@ -12,12 +12,12 @@ use tracing::debug;
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::discover_metadata::ModelsResponse;
-use crate::core::{
-    steps::{
+use crate::{
+    core::steps::{
         worker::util::{do_grpc_health_check, grpc_base_url, http_base_url},
         workflow_data::{WorkerKind, WorkerWorkflowData},
     },
-    ConnectionMode,
+    worker::ConnectionMode,
 };
 
 // ─── gRPC backend detection ────────────────────────────────────────────────

@@ -15,15 +15,13 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    core::{
-        job_queue::{Job, JobQueue},
-        steps::WasmModuleConfigRequest,
-    },
+    core::steps::WasmModuleConfigRequest,
     server::AppState,
     wasm::{
         WasmMetrics, WasmModuleAddRequest, WasmModuleAddResponse, WasmModuleAddResult,
         WasmModuleListResponse,
     },
+    worker::job_queue::{Job, JobQueue},
 };
 
 /// Wait for job completion by polling job status

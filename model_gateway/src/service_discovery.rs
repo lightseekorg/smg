@@ -28,8 +28,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     app_context::AppContext,
-    core::Job,
     observability::metrics::{metrics_labels, Metrics},
+    worker::Job,
 };
 
 /// Source for per-worker model_id override during Kubernetes service discovery.
@@ -1234,16 +1234,16 @@ mod tests {
 
     fn create_test_app_context() -> Arc<AppContext> {
         use crate::{
-            config::RouterConfig, core::WorkerService, middleware::TokenBucket,
+            config::RouterConfig, middleware::TokenBucket,
             observability::inflight_tracker::InFlightRequestTracker,
-            routers::openai::realtime::RealtimeRegistry,
+            routers::openai::realtime::RealtimeRegistry, worker::WorkerService,
         };
 
         let router_config = RouterConfig::builder()
             .worker_startup_timeout_secs(1)
             .build_unchecked();
 
-        let worker_registry = Arc::new(crate::core::WorkerRegistry::new());
+        let worker_registry = Arc::new(crate::worker::WorkerRegistry::new());
         let worker_job_queue = Arc::new(std::sync::OnceLock::new());
 
         // Note: Using uninitialized queue for tests to avoid spawning background workers

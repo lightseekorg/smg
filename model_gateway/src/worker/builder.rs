@@ -318,7 +318,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::core::worker::Worker;
+    use crate::worker::worker::Worker;
 
     #[test]
     fn test_basic_worker_builder_minimal() {

@@ -10,14 +10,12 @@ use tracing::{debug, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::{
-    core::{
-        steps::{
-            worker::util::{grpc_base_url, http_base_url},
-            workflow_data::{WorkerKind, WorkerWorkflowData},
-        },
-        ConnectionMode,
+    core::steps::{
+        worker::util::{grpc_base_url, http_base_url},
+        workflow_data::{WorkerKind, WorkerWorkflowData},
     },
     routers::grpc::client::{flat_labels, GrpcClient},
+    worker::ConnectionMode,
 };
 
 #[expect(
