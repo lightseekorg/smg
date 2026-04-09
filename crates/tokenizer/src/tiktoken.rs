@@ -42,6 +42,60 @@ struct TiktokenConfig {
     chat_template: Option<String>,
 }
 
+/// Load merged EOS token IDs from config.json and generation_config.json.
+///
+/// Models may define different EOS tokens in each file (e.g. Kimi-K2.5 has
+/// `[EOS]` (163585) in config.json and `<|im_end|>` (163586) in
+/// generation_config.json).  We merge both into a deduplicated list so the
+/// engine can stop at any of them — matching SGLang's behaviour.
+pub fn load_eos_token_ids(dir: &Path) -> Vec<TokenIdType> {
+    let mut ids = std::collections::BTreeSet::new();
+
+    // config.json — eos_token_id can be int or list
+    if let Ok(content) = std::fs::read_to_string(dir.join("config.json")) {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&content) {
+            match cfg.get("eos_token_id") {
+                Some(serde_json::Value::Number(n)) => {
+                    if let Some(id) = n.as_u64() {
+                        ids.insert(id as TokenIdType);
+                    }
+                }
+                Some(serde_json::Value::Array(arr)) => {
+                    for v in arr {
+                        if let Some(id) = v.as_u64() {
+                            ids.insert(id as TokenIdType);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // generation_config.json — eos_token_id can be int or list
+    if let Ok(content) = std::fs::read_to_string(dir.join("generation_config.json")) {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&content) {
+            match cfg.get("eos_token_id") {
+                Some(serde_json::Value::Number(n)) => {
+                    if let Some(id) = n.as_u64() {
+                        ids.insert(id as TokenIdType);
+                    }
+                }
+                Some(serde_json::Value::Array(arr)) => {
+                    for v in arr {
+                        if let Some(id) = v.as_u64() {
+                            ids.insert(id as TokenIdType);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    ids.into_iter().collect()
+}
+
 /// Parse `tokenizer_config.json` for tiktoken-based models.
 fn load_tiktoken_config(config_path: &Path) -> Result<TiktokenConfig> {
     let content = std::fs::read_to_string(config_path)?;
@@ -119,6 +173,7 @@ fn parse_special_tokens(config: &serde_json::Value) -> SpecialTokens {
         cls_token: get_str("cls_token"),
         mask_token: get_str("mask_token"),
         additional_special_tokens: additional,
+        ..Default::default()
     }
 }
 
@@ -259,9 +314,13 @@ impl TiktokenTokenizer {
             })
         };
 
+        // 6. Load merged EOS token IDs from config.json + generation_config.json
+        let mut special_tokens = config.special_tokens;
+        special_tokens.eos_token_ids = load_eos_token_ids(dir);
+
         Ok(TiktokenTokenizer {
             tokenizer,
-            special_tokens: config.special_tokens,
+            special_tokens,
             vocab,
             reverse_vocab,
             vocab_size,
@@ -308,27 +367,20 @@ impl TiktokenTokenizer {
             TiktokenModel::Cl100kBase => SpecialTokens {
                 bos_token: Some("<|endoftext|>".to_string()),
                 eos_token: Some("<|endoftext|>".to_string()),
-                unk_token: None,
-                sep_token: None,
                 pad_token: Some("<|endoftext|>".to_string()),
-                cls_token: None,
-                mask_token: None,
                 additional_special_tokens: vec![
                     "<|fim_prefix|>".to_string(),
                     "<|fim_middle|>".to_string(),
                     "<|fim_suffix|>".to_string(),
                     "<|endofprompt|>".to_string(),
                 ],
+                ..Default::default()
             },
             _ => SpecialTokens {
                 bos_token: Some("<|endoftext|>".to_string()),
                 eos_token: Some("<|endoftext|>".to_string()),
-                unk_token: None,
-                sep_token: None,
                 pad_token: Some("<|endoftext|>".to_string()),
-                cls_token: None,
-                mask_token: None,
-                additional_special_tokens: vec![],
+                ..Default::default()
             },
         }
     }
@@ -436,8 +488,16 @@ pub fn is_tiktoken_file(path: &Path) -> bool {
 }
 
 impl Encoder for TiktokenTokenizer {
-    fn encode(&self, input: &str, _add_special_tokens: bool) -> Result<Encoding> {
-        let tokens = self.tokenizer.encode_ordinary(input);
+    fn encode(&self, input: &str, add_special_tokens: bool) -> Result<Encoding> {
+        // When add_special_tokens is true, use encode_with_special_tokens to
+        // correctly handle tokens like <|im_system|>, <|im_end|>, <think>.
+        // This is needed for chat template output which contains these markers.
+        // When false, use encode_ordinary (default for stop sequences, etc.).
+        let tokens = if add_special_tokens {
+            self.tokenizer.encode_with_special_tokens(input)
+        } else {
+            self.tokenizer.encode_ordinary(input)
+        };
         Ok(Encoding::Tiktoken(tokens))
     }
 
@@ -519,6 +579,10 @@ impl TokenizerTrait for TiktokenTokenizer {
     fn thinking_key_name(&self) -> Option<ThinkingKeyName> {
         self.chat_template.thinking_key_name()
     }
+    fn eos_token_ids(&self) -> &[TokenIdType] {
+        &self.special_tokens.eos_token_ids
+    }
+
     fn think_in_prefill(&self) -> bool {
         self.chat_template.think_in_prefill()
     }

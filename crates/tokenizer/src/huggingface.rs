@@ -82,6 +82,12 @@ impl HuggingFaceTokenizer {
             }
         }
 
+        // Load merged EOS token IDs from config.json + generation_config.json
+        let mut special_tokens = special_tokens;
+        if let Some(dir) = std::path::Path::new(file_path).parent() {
+            special_tokens.eos_token_ids = crate::tiktoken::load_eos_token_ids(dir);
+        }
+
         Ok(HuggingFaceTokenizer {
             tokenizer,
             special_tokens,
@@ -208,6 +214,7 @@ impl HuggingFaceTokenizer {
             cls_token: find_token(&["[CLS]", "<cls>", "<CLS>"]),
             mask_token: find_token(&["[MASK]", "<mask>", "<MASK>"]),
             additional_special_tokens,
+            ..Default::default()
         }
     }
 
@@ -382,6 +389,10 @@ impl TokenizerTrait for HuggingFaceTokenizer {
     }
     fn think_in_prefill(&self) -> bool {
         self.chat_template.think_in_prefill()
+    }
+
+    fn eos_token_ids(&self) -> &[TokenIdType] {
+        &self.special_tokens.eos_token_ids
     }
 
     fn set_chat_template(&mut self, template: String) -> Result<()> {

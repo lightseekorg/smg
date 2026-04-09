@@ -28,12 +28,8 @@ async fn prometheus_handler(State(state): State<MetricsState>) -> impl IntoRespo
     )
 }
 
-/// Start the metrics HTTP server. Binds eagerly so callers fail fast on
-/// port conflicts or bad addresses.
-#[expect(
-    clippy::expect_used,
-    reason = "startup initialization — metrics server must bind or the process cannot serve metrics"
-)]
+/// Start the metrics HTTP server. If the port is unavailable, logs an error
+/// and returns a no-op handle so the router can still operate.
 pub async fn start_metrics_server(
     handle: PrometheusHandle,
     host: String,
@@ -45,9 +41,14 @@ pub async fn start_metrics_server(
     });
     let addr = SocketAddr::new(ip_addr, port);
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("failed to bind metrics server");
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("failed to bind metrics server on {addr}: {e} — metrics will be unavailable");
+            // Return a no-op handle so the router can still operate
+            return tokio::spawn(async {});
+        }
+    };
 
     info!("Metrics server listening on {addr}");
 

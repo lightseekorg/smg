@@ -80,6 +80,11 @@ impl PipelineStage for ChatRequestBuildingStage {
             .multimodal_intermediate
             .map(|intermediate| assemble_multimodal_data(intermediate, builder_client));
 
+        let eos_token_ids = ctx
+            .tokenizer_arc()
+            .map(|t| t.eos_token_ids().to_vec())
+            .unwrap_or_default();
+
         let mut proto_request = builder_client
             .build_chat_request(
                 request_id,
@@ -88,6 +93,7 @@ impl PipelineStage for ChatRequestBuildingStage {
                 prep.token_ids,
                 multimodal_data,
                 prep.tool_constraints,
+                &eos_token_ids,
             )
             .map_err(|e| {
                 error!(function = "ChatRequestBuildingStage::execute", error = %e, "Failed to build generate request");
