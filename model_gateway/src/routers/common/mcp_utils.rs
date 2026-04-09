@@ -262,23 +262,41 @@ pub async fn ensure_request_mcp_client(
     tools: &[ResponseTool],
     request_headers: Option<&HeaderMap>,
 ) -> Option<Vec<McpServerBinding>> {
-    let mut inputs: Vec<McpServerInput> = tools
+    let inputs: Vec<McpServerInput> = tools
         .iter()
         .filter_map(|tool| match tool {
-            ResponseTool::Mcp(mcp) => Some(McpServerInput {
-                label: mcp.server_label.clone(),
-                url: mcp.server_url.clone(),
-                authorization: mcp.authorization.clone(),
-                headers: mcp.headers.clone().unwrap_or_default(),
-                builtin_type: None,
-                builtin_tool_name: None,
-                allowed_tools: mcp.allowed_tools.clone(),
-            }),
+            ResponseTool::Mcp(mcp) => {
+                let mut headers = HashMap::new();
+
+                if let Some(server_cfg) = mcp_orchestrator.find_server_config(&mcp.server_label) {
+                    if let Some((_, _, forwarded_headers)) =
+                        resolve_forwarded_headers(&server_cfg, request_headers)
+                    {
+                        headers.extend(forwarded_headers);
+                    }
+                }
+                headers.extend(mcp.headers.clone().unwrap_or_default());
+
+                Some(McpServerInput {
+                    label: mcp.server_label.clone(),
+                    url: mcp.server_url.clone(),
+                    authorization: mcp.authorization.clone(),
+                    headers,
+                    builtin_type: None,
+                    builtin_tool_name: None,
+                    allowed_tools: mcp.allowed_tools.clone(),
+                })
+            }
             _ => None,
         })
         .collect();
 
     let builtin_types = extract_builtin_types(tools);
+
+    let mut inputs = inputs;
+    // Built-in tools (e.g. image_generation/web_search_preview) are also routed
+    // through MCP when configured in mcp.local.yaml, so we must add dynamic
+    // inputs here to carry forwarded transport headers from the request.
     if !builtin_types.is_empty() {
         for builtin_type in &builtin_types {
             let Some((server_name, _, _)) = mcp_orchestrator.find_builtin_server(*builtin_type)
