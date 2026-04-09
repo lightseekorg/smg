@@ -44,7 +44,6 @@ use wfaas::LoggingSubscriber;
 use crate::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
-    core::steps::{TokenizerConfigRequest, WorkflowEngines},
     middleware::{self, AuthConfig, QueuedRequest},
     observability::{
         logging::{self, LoggingConfig},
@@ -73,6 +72,7 @@ use crate::{
         worker::WorkerType,
         Job,
     },
+    workflow::{TokenizerConfigRequest, WorkflowEngines},
 };
 #[derive(Clone)]
 pub struct AppState {

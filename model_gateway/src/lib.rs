@@ -1,6 +1,5 @@
 pub mod app_context;
 pub mod config;
-pub mod core;
 pub mod middleware;
 pub mod observability;
 pub mod policies;
@@ -10,3 +9,4 @@ pub mod service_discovery;
 pub mod version;
 pub mod wasm;
 pub mod worker;
+pub mod workflow;

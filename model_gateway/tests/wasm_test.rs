@@ -106,7 +106,7 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
         .expect("JobQueue should only be initialized once");
 
     // Initialize WorkflowEngines
-    use smg::core::steps::WorkflowEngines;
+    use smg::workflow::WorkflowEngines;
     let engines = WorkflowEngines::new(&config);
     app_context
         .workflow_engines
@@ -663,7 +663,7 @@ async fn test_wasm_module_execution() {
         .expect("Workflow engines should be initialized");
 
     // Create workflow context for registration
-    use smg::core::steps::{WasmModuleConfigRequest, WasmRegistrationWorkflowData};
+    use smg::workflow::{WasmModuleConfigRequest, WasmRegistrationWorkflowData};
     use wfaas::WorkflowId;
 
     let descriptor = WasmModuleDescriptor {

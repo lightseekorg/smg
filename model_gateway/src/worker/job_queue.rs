@@ -20,7 +20,7 @@ use wfaas::WorkflowId;
 use crate::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
-    core::steps::{
+    workflow::{
         create_mcp_workflow_data, create_tokenizer_workflow_data,
         create_wasm_registration_workflow_data, create_wasm_removal_workflow_data,
         create_worker_removal_workflow_data, create_worker_update_workflow_data,

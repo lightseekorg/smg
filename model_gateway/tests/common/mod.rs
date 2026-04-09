@@ -389,7 +389,7 @@ pub fn create_test_context(
             .expect("JobQueue should only be initialized once");
 
         // Initialize typed workflow engines
-        use smg::core::steps::WorkflowEngines;
+        use smg::workflow::WorkflowEngines;
         let engines = WorkflowEngines::new(&config);
         app_context
             .workflow_engines
@@ -524,7 +524,7 @@ pub fn create_test_context_with_parsers(
             .expect("JobQueue should only be initialized once");
 
         // Initialize typed workflow engines
-        use smg::core::steps::WorkflowEngines;
+        use smg::workflow::WorkflowEngines;
         let engines = WorkflowEngines::new(&config);
         app_context
             .workflow_engines
@@ -658,7 +658,7 @@ pub fn create_test_context_with_mcp_config(
             .expect("JobQueue should only be initialized once");
 
         // Initialize typed workflow engines
-        use smg::core::steps::WorkflowEngines;
+        use smg::workflow::WorkflowEngines;
         let engines = WorkflowEngines::new(&config);
         app_context
             .workflow_engines
