@@ -242,9 +242,10 @@ impl MlxEngineClient {
     //   - response_format — same as constrained decoding
     //
     // Servicer limitations (fixable without mlx-lm changes):
-    //   - String stop sequences — mlx-lm supports this via tokenizer.encode()
-    //     → SequenceStateMachine, but our gRPC servicer doesn't do the
-    //     string-to-token-ID conversion yet
+    //   - TODO(mlx): String stop sequences — mlx-lm supports this via
+    //     tokenizer.encode() → SequenceStateMachine. Fix by converting stop
+    //     strings to token IDs in the preparation stage (which already has the
+    //     Rust tokenizer) and passing them as stop_token_ids in the proto.
     //
     // Track upstream: https://github.com/ml-explore/mlx-lm
 
