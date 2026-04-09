@@ -332,7 +332,7 @@ pub async fn ensure_request_mcp_client(
 /// "forward the same header from the incoming request".
 ///
 /// Returns dynamic connection settings only when at least one forwarded-header
-/// reference is present and the transport is HTTP-based.
+/// reference is resolved from request headers, and the transport is HTTP-based.
 fn resolve_forwarded_headers(
     server_cfg: &McpServerConfig,
     request_headers: Option<&HeaderMap>,
@@ -352,29 +352,30 @@ fn resolve_forwarded_headers(
     };
 
     let mut merged_headers = HashMap::new();
-    let mut has_forward_ref = false;
+    let mut has_resolved_forward_ref = false;
 
     for (name, value) in configured_headers {
         if value.is_empty() {
-            has_forward_ref = true;
             if let Some(header_value) = request_headers
                 .and_then(|h| h.get(name.as_str()))
                 .and_then(|v| v.to_str().ok())
             {
                 merged_headers.insert(name.clone(), header_value.to_string());
+                has_resolved_forward_ref = true;
             }
         } else {
             merged_headers.insert(name.clone(), value.clone());
         }
     }
 
-    has_forward_ref.then_some((url, token, merged_headers))
+    has_resolved_forward_ref.then_some((url, token, merged_headers))
 }
 
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
+    use axum::http::{HeaderMap, HeaderValue};
     use openai_protocol::{
         common::Function,
         responses::{
@@ -764,5 +765,67 @@ mod tests {
         let mcp_servers = result.unwrap();
         assert_eq!(mcp_servers.len(), 1);
         assert_eq!(mcp_servers[0].label, "search-server");
+    }
+
+    #[test]
+    fn test_resolve_forwarded_headers_returns_none_when_no_forward_header_value_present() {
+        let server_cfg = McpServerConfig {
+            name: "image-server".to_string(),
+            transport: McpTransport::Streamable {
+                url: "http://localhost:9999/mcp".to_string(),
+                token: None,
+                headers: HashMap::from([
+                    ("opc-compartment-id".to_string(), "".to_string()),
+                    ("x-static".to_string(), "fixed".to_string()),
+                ]),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+            builtin_type: Some(BuiltinToolType::ImageGeneration),
+            builtin_tool_name: Some("generate_image".to_string()),
+        };
+
+        let headers = HeaderMap::new();
+        let resolved = resolve_forwarded_headers(&server_cfg, Some(&headers));
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_resolve_forwarded_headers_returns_some_when_forward_header_value_present() {
+        let server_cfg = McpServerConfig {
+            name: "image-server".to_string(),
+            transport: McpTransport::Streamable {
+                url: "http://localhost:9999/mcp".to_string(),
+                token: None,
+                headers: HashMap::from([
+                    ("opc-compartment-id".to_string(), "".to_string()),
+                    ("x-static".to_string(), "fixed".to_string()),
+                ]),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+            builtin_type: Some(BuiltinToolType::ImageGeneration),
+            builtin_tool_name: Some("generate_image".to_string()),
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "opc-compartment-id",
+            HeaderValue::from_str("ocid1.compartment.oc1..example").unwrap(),
+        );
+
+        let resolved = resolve_forwarded_headers(&server_cfg, Some(&headers));
+        assert!(resolved.is_some());
+        let (_, _, merged_headers) = resolved.unwrap();
+        assert_eq!(
+            merged_headers.get("opc-compartment-id").map(String::as_str),
+            Some("ocid1.compartment.oc1..example")
+        );
+        assert_eq!(
+            merged_headers.get("x-static").map(String::as_str),
+            Some("fixed")
+        );
     }
 }
