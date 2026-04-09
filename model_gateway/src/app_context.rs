@@ -318,6 +318,12 @@ impl AppContextBuilder {
             }
         }
 
+        validate_memory_writer_configuration(
+            &router_config,
+            self.conversation_memory_writer.as_ref(),
+        )
+        .map_err(AppContextBuildError::InvalidConfig)?;
+
         let worker_registry = self
             .worker_registry
             .ok_or(AppContextBuildError::MissingField("worker_registry"))?;

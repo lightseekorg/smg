@@ -7,8 +7,7 @@ use super::{
     HistoryBackend, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig, RedisConfig,
     RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig, TraceConfig,
 };
-use crate::worker::ConnectionMode;
-use crate::memory::MemoryRuntimeConfig;
+use crate::{memory::MemoryRuntimeConfig, worker::ConnectionMode};
 
 /// Builder for RouterConfig that wraps the config itself
 /// This eliminates field duplication and stays in sync automatically
