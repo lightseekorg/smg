@@ -19,7 +19,7 @@ pub struct BaseReasoningParser {
 impl BaseReasoningParser {
     /// Create a new BaseReasoningParser with the given configuration.
     pub fn new(config: ParserConfig) -> Self {
-        let in_reasoning = config.initial_in_reasoning;
+        let in_reasoning = config.always_in_reasoning;
         Self {
             config,
             in_reasoning,
@@ -151,9 +151,17 @@ impl ReasoningParser for BaseReasoningParser {
     }
 
     fn reset(&mut self) {
-        self.in_reasoning = self.config.initial_in_reasoning;
+        self.in_reasoning = self.config.always_in_reasoning;
         self.buffer.clear();
         self.stripped_think_start = false;
+    }
+
+    fn mark_reasoning_started(&mut self) {
+        self.in_reasoning = true;
+    }
+
+    fn mark_think_start_stripped(&mut self) {
+        self.stripped_think_start = true;
     }
 
     fn model_type(&self) -> &str {
@@ -171,7 +179,7 @@ mod tests {
     use crate::traits::DEFAULT_MAX_BUFFER_SIZE;
 
     fn create_test_parser(
-        initial_in_reasoning: bool,
+        always_in_reasoning: bool,
         stream_reasoning: bool,
     ) -> BaseReasoningParser {
         let config = ParserConfig {
@@ -179,7 +187,7 @@ mod tests {
             think_end_token: "</think>".to_string(),
             stream_reasoning,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            initial_in_reasoning,
+            always_in_reasoning,
         };
         BaseReasoningParser::new(config)
     }
@@ -245,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn test_initial_in_reasoning_true() {
+    fn test_always_in_reasoning_true() {
         // Parser starts with in_reasoning=true (like DeepSeek-R1)
         let mut parser = create_test_parser(true, true);
         let result = parser

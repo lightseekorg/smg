@@ -22,7 +22,7 @@ impl Step3Parser {
             think_end_token: "</think>".to_string(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            initial_in_reasoning: true, // Assumes reasoning from start like DeepSeek-R1
+            always_in_reasoning: true,
         };
 
         Self {
@@ -59,6 +59,14 @@ impl ReasoningParser for Step3Parser {
 
     fn is_in_reasoning(&self) -> bool {
         self.base.is_in_reasoning()
+    }
+
+    fn mark_reasoning_started(&mut self) {
+        self.base.mark_reasoning_started();
+    }
+
+    fn mark_think_start_stripped(&mut self) {
+        self.base.mark_think_start_stripped();
     }
 }
 
@@ -106,7 +114,7 @@ mod tests {
     fn test_step3_streaming() {
         let mut parser = Step3Parser::new();
 
-        // First chunk - treated as reasoning (initial_in_reasoning=true)
+        // First chunk - treated as reasoning (always_in_reasoning=true)
         let result1 = parser
             .parse_reasoning_streaming_incremental("reasoning text ")
             .unwrap();

@@ -38,6 +38,69 @@ impl std::fmt::Display for ChatTemplateContentFormat {
     }
 }
 
+/// Result of detecting the thinking/reasoning toggle in a chat template.
+/// The variable name the template uses for the thinking toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingKeyName {
+    /// Template uses `enable_thinking` (Qwen3, GLM, Nemotron)
+    EnableThinking,
+    /// Template uses `thinking` (DeepSeek V3.1, Kimi-K2.5)
+    Thinking,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThinkingToggle {
+    /// Template has no thinking toggle. The model either always reasons
+    /// (e.g. DeepSeek R1) or never does — controlled by the parser's
+    /// `always_in_reasoning` config.
+    #[default]
+    None,
+    /// Template supports a thinking toggle that defaults to ON.
+    /// If the user doesn't pass anything, thinking is enabled.
+    /// (Qwen3, Qwen3.5, Nemotron, GLM-4.6, GLM-5, Kimi-K2.5)
+    DefaultOn,
+    /// Template supports a thinking toggle that defaults to OFF.
+    /// Thinking only activates when the user explicitly passes `thinking=true`.
+    /// (DeepSeek V3.1)
+    DefaultOff,
+}
+
+/// Detect whether the chat template supports a thinking/reasoning toggle
+/// and what its default value is.
+pub fn detect_thinking_toggle(template: &str) -> (ThinkingToggle, Option<ThinkingKeyName>) {
+    let has_enable_thinking = template.contains("enable_thinking");
+    // Trailing space prevents matching "thinking_mode", "thinking_budget", etc.
+    let has_thinking_var = template.contains("if thinking ")
+        || template.contains("thinking is ")
+        || template.contains("thinking ==")
+        || template.contains("set thinking ");
+
+    if !has_enable_thinking && !has_thinking_var {
+        return (ThinkingToggle::None, None);
+    }
+
+    // At least one must be true — both false returned ThinkingToggle::None above.
+    let key_name = if has_enable_thinking {
+        ThinkingKeyName::EnableThinking
+    } else {
+        ThinkingKeyName::Thinking
+    };
+
+    // Check if the template explicitly defaults thinking to false/off.
+    // DeepSeek V3.1 pattern: {% if not thinking is defined %}{% set thinking = false %}
+    if template.contains("set thinking = false") || template.contains("set thinking=false") {
+        return (ThinkingToggle::DefaultOff, Some(key_name));
+    }
+    if template.contains("set enable_thinking = false")
+        || template.contains("set enable_thinking=false")
+    {
+        return (ThinkingToggle::DefaultOff, Some(key_name));
+    }
+
+    // All other models default to thinking ON
+    (ThinkingToggle::DefaultOn, Some(key_name))
+}
+
 /// Detect the content format expected by a Jinja2 chat template
 ///
 /// This implements the same detection logic as SGLang's detect_jinja_template_content_format
@@ -77,6 +140,8 @@ struct Detector<'a> {
     scope: std::collections::VecDeque<String>,
     scope_set: std::collections::HashSet<String>,
     flags: Flags,
+    /// Whether `<think>` appears inside an `add_generation_prompt` if-block
+    think_in_prefill: bool,
 }
 
 impl<'a> Detector<'a> {
@@ -86,12 +151,13 @@ impl<'a> Detector<'a> {
             scope: std::collections::VecDeque::new(),
             scope_set: std::collections::HashSet::new(),
             flags: Flags::default(),
+            think_in_prefill: false,
         }
     }
 
-    fn run(mut self) -> Flags {
+    fn run(mut self) -> (Flags, bool) {
         self.walk_stmt(self.ast);
-        self.flags
+        (self.flags, self.think_in_prefill)
     }
 
     fn push_scope(&mut self, var: String) {
@@ -156,12 +222,45 @@ impl<'a> Detector<'a> {
         }
     }
 
-    fn walk_stmt(&mut self, stmt: &Stmt) {
-        // Early exit if we've already detected an OpenAI pattern
-        if self.flags.any() {
-            return;
+    /// Check if an expression references a variable by name (walks through BinOp/UnaryOp).
+    fn expr_references_var(expr: &Expr, name: &str) -> bool {
+        match expr {
+            Expr::Var(v) => v.id == name,
+            Expr::BinOp(b) => {
+                Self::expr_references_var(&b.left, name)
+                    || Self::expr_references_var(&b.right, name)
+            }
+            Expr::UnaryOp(u) => Self::expr_references_var(&u.expr, name),
+            _ => false,
         }
+    }
 
+    /// Check if a list of statements contains `<think>` in EmitRaw or string constants.
+    fn body_has_think_tag(stmts: &[Stmt]) -> bool {
+        for stmt in stmts {
+            match stmt {
+                Stmt::EmitRaw(raw) if raw.raw.contains("<think>") => return true,
+                Stmt::EmitExpr(e) => {
+                    if let Expr::Const(c) = &e.expr {
+                        if c.value.as_str().is_some_and(|s| s.contains("<think>")) {
+                            return true;
+                        }
+                    }
+                }
+                Stmt::IfCond(ic) => {
+                    if Self::body_has_think_tag(&ic.true_body)
+                        || Self::body_has_think_tag(&ic.false_body)
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn walk_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Template(t) => {
                 for ch in &t.children {
@@ -202,6 +301,14 @@ impl<'a> Detector<'a> {
             }
             Stmt::IfCond(ic) => {
                 self.inspect_expr_for_structure(&ic.expr);
+
+                // Detect <think> inside {% if add_generation_prompt [and ...] %} body
+                if !self.think_in_prefill
+                    && Self::expr_references_var(&ic.expr, "add_generation_prompt")
+                {
+                    self.think_in_prefill = Self::body_has_think_tag(&ic.true_body);
+                }
+
                 for b in &ic.true_body {
                     self.walk_stmt(b);
                 }
@@ -315,6 +422,30 @@ impl<'a> Detector<'a> {
 /// AST-based detection using minijinja's unstable machinery
 /// Single-pass detector with scope tracking
 fn detect_format_with_ast(template: &str) -> ChatTemplateContentFormat {
+    detect_all_with_ast(template).0
+}
+
+/// Single-pass detection of content format, think-in-prefill, and thinking toggle.
+fn detect_all(
+    template: &str,
+) -> (
+    ChatTemplateContentFormat,
+    bool,
+    ThinkingToggle,
+    Option<ThinkingKeyName>,
+) {
+    let (thinking_toggle, thinking_key_name) = detect_thinking_toggle(template);
+    let (content_format, think_in_prefill) = detect_all_with_ast(template);
+    (
+        content_format,
+        think_in_prefill,
+        thinking_toggle,
+        thinking_key_name,
+    )
+}
+
+/// AST detection of content format and think-in-prefill.
+fn detect_all_with_ast(template: &str) -> (ChatTemplateContentFormat, bool) {
     let ast = match parse(
         template,
         "template",
@@ -322,15 +453,16 @@ fn detect_format_with_ast(template: &str) -> ChatTemplateContentFormat {
         WhitespaceConfig::default(),
     ) {
         Ok(ast) => ast,
-        Err(_) => return ChatTemplateContentFormat::String,
+        Err(_) => return (ChatTemplateContentFormat::String, false),
     };
 
-    let flags = Detector::new(&ast).run();
-    if flags.any() {
+    let (flags, think_in_prefill) = Detector::new(&ast).run();
+    let content_format = if flags.any() {
         ChatTemplateContentFormat::OpenAI
     } else {
         ChatTemplateContentFormat::String
-    }
+    };
+    (content_format, think_in_prefill)
 }
 
 /// Parameters for chat template application
@@ -630,6 +762,12 @@ pub struct ChatTemplateState {
     /// Cached, fully-configured environment. `None` when no template is set.
     env: Option<Environment<'static>>,
     content_format: ChatTemplateContentFormat,
+    /// Thinking toggle support detected from the template.
+    thinking_toggle: ThinkingToggle,
+    /// The variable name used for the thinking toggle (if any).
+    thinking_key_name: Option<ThinkingKeyName>,
+    /// Whether the template injects `<think>` in the generation prompt.
+    think_in_prefill: bool,
 }
 
 impl std::fmt::Debug for ChatTemplateState {
@@ -637,20 +775,23 @@ impl std::fmt::Debug for ChatTemplateState {
         f.debug_struct("ChatTemplateState")
             .field("has_template", &self.env.is_some())
             .field("content_format", &self.content_format)
+            .field("thinking_toggle", &self.thinking_toggle)
+            .field("think_in_prefill", &self.think_in_prefill)
             .finish()
     }
 }
 
 impl ChatTemplateState {
     pub fn new(template: Option<String>) -> Result<Self> {
-        let content_format = template
-            .as_ref()
-            .map(|t| detect_chat_template_content_format(t))
-            .unwrap_or_default();
+        let (content_format, think_in_prefill, thinking_toggle, thinking_key_name) =
+            template.as_ref().map(|t| detect_all(t)).unwrap_or_default();
         let env = template.map(build_environment).transpose()?;
         Ok(Self {
             env,
             content_format,
+            thinking_toggle,
+            thinking_key_name,
+            think_in_prefill,
         })
     }
 
@@ -662,6 +803,9 @@ impl ChatTemplateState {
         Self {
             env: None,
             content_format: ChatTemplateContentFormat::default(),
+            thinking_toggle: ThinkingToggle::None,
+            thinking_key_name: None,
+            think_in_prefill: false,
         }
     }
 
@@ -682,15 +826,31 @@ impl ChatTemplateState {
     }
 
     pub fn set(&mut self, template: String) -> Result<()> {
-        let content_format = detect_chat_template_content_format(&template);
+        let (content_format, think_in_prefill, thinking_toggle, thinking_key_name) =
+            detect_all(&template);
         let env = build_environment(template)?;
         self.content_format = content_format;
+        self.thinking_toggle = thinking_toggle;
+        self.thinking_key_name = thinking_key_name;
+        self.think_in_prefill = think_in_prefill;
         self.env = Some(env);
         Ok(())
     }
 
     pub fn content_format(&self) -> ChatTemplateContentFormat {
         self.content_format
+    }
+
+    pub fn thinking_toggle(&self) -> ThinkingToggle {
+        self.thinking_toggle
+    }
+
+    pub fn thinking_key_name(&self) -> Option<ThinkingKeyName> {
+        self.thinking_key_name
+    }
+
+    pub fn think_in_prefill(&self) -> bool {
+        self.think_in_prefill
     }
 }
 

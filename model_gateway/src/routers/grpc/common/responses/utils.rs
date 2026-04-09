@@ -44,7 +44,9 @@ pub(crate) async fn ensure_mcp_connection(
             t.iter().any(|tool| {
                 matches!(
                     tool,
-                    ResponseTool::WebSearchPreview(_) | ResponseTool::CodeInterpreter(_)
+                    ResponseTool::WebSearchPreview(_)
+                        | ResponseTool::CodeInterpreter(_)
+                        | ResponseTool::ImageGeneration(_)
                 )
             })
         })

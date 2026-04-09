@@ -1,6 +1,6 @@
 // MiniMax M2 specific reasoning parser.
-// This parser automatically appends <think> token at the beginning of text,
-// similar to the Python MiniMaxAppendThinkDetector.
+// The MiniMax-M2 template always injects <think> in the prefill,
+// so the parser uses always_in_reasoning=true.
 
 use crate::{
     parsers::BaseReasoningParser,
@@ -9,11 +9,10 @@ use crate::{
 
 /// MiniMax M2 reasoning parser.
 ///
-/// This parser automatically appends <think> token at the beginning of the first chunk
-/// and uses <think> and </think> tokens for reasoning blocks.
+/// The MiniMax-M2 template always injects `<think>` in the prefill, so the model
+/// outputs reasoning content directly. Uses `always_in_reasoning=true`.
 pub struct MiniMaxParser {
     base: BaseReasoningParser,
-    is_first_chunk: bool,
 }
 
 impl MiniMaxParser {
@@ -24,12 +23,11 @@ impl MiniMaxParser {
             think_end_token: "</think>".to_string(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            initial_in_reasoning: false, // Start with false, we'll add <think> manually
+            always_in_reasoning: true,
         };
 
         Self {
             base: BaseReasoningParser::new(config).with_model_type("minimax".to_string()),
-            is_first_chunk: true,
         }
     }
 }
@@ -42,30 +40,18 @@ impl Default for MiniMaxParser {
 
 impl ReasoningParser for MiniMaxParser {
     fn detect_and_parse_reasoning(&mut self, text: &str) -> Result<ParserResult, ParseError> {
-        // For one-shot parsing, prepend <think> token to the text
-        let modified_text = format!("<think>{text}");
-        self.base.detect_and_parse_reasoning(&modified_text)
+        self.base.detect_and_parse_reasoning(text)
     }
 
     fn parse_reasoning_streaming_incremental(
         &mut self,
         text: &str,
     ) -> Result<ParserResult, ParseError> {
-        // For the first chunk, prepend <think> token
-        let modified_text = if self.is_first_chunk {
-            self.is_first_chunk = false;
-            format!("<think>{text}")
-        } else {
-            text.to_string()
-        };
-
-        self.base
-            .parse_reasoning_streaming_incremental(&modified_text)
+        self.base.parse_reasoning_streaming_incremental(text)
     }
 
     fn reset(&mut self) {
         self.base.reset();
-        self.is_first_chunk = true; // Reset the first chunk flag
     }
 
     fn model_type(&self) -> &str {
@@ -75,6 +61,14 @@ impl ReasoningParser for MiniMaxParser {
     fn is_in_reasoning(&self) -> bool {
         self.base.is_in_reasoning()
     }
+
+    fn mark_reasoning_started(&mut self) {
+        self.base.mark_reasoning_started();
+    }
+
+    fn mark_think_start_stripped(&mut self) {
+        self.base.mark_think_start_stripped();
+    }
 }
 
 #[cfg(test)]
@@ -82,10 +76,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_minimax_append_think_oneshot() {
+    fn test_minimax_always_in_reasoning() {
         let mut parser = MiniMaxParser::new();
 
-        // Should automatically prepend <think> and parse as reasoning
+        // always_in_reasoning=true: treats all text as reasoning until </think>
         let result = parser
             .detect_and_parse_reasoning("reasoning content</think>normal content")
             .unwrap();
@@ -106,56 +100,22 @@ mod tests {
     }
 
     #[test]
-    fn test_minimax_streaming_first_chunk() {
+    fn test_minimax_streaming() {
         let mut parser = MiniMaxParser::new();
 
-        // First chunk should have <think> prepended
+        // First chunk — already in reasoning mode
         let result1 = parser
             .parse_reasoning_streaming_incremental("thinking about")
             .unwrap();
         assert_eq!(result1.reasoning_text, "thinking about");
         assert_eq!(result1.normal_text, "");
 
-        // Second chunk should not have <think> prepended
+        // End of reasoning
         let result2 = parser
             .parse_reasoning_streaming_incremental(" the problem</think>answer")
             .unwrap();
-        assert_eq!(result2.reasoning_text, "the problem"); // Text is trimmed
+        assert_eq!(result2.reasoning_text, "the problem");
         assert_eq!(result2.normal_text, "answer");
-    }
-
-    #[test]
-    fn test_minimax_reset() {
-        let mut parser = MiniMaxParser::new();
-
-        // First use
-        let result1 = parser
-            .parse_reasoning_streaming_incremental("first")
-            .unwrap();
-        assert_eq!(result1.reasoning_text, "first");
-
-        // Reset the parser
-        parser.reset();
-
-        // After reset, should be first chunk again
-        let result2 = parser
-            .parse_reasoning_streaming_incremental("second")
-            .unwrap();
-        assert_eq!(result2.reasoning_text, "second");
-    }
-
-    #[test]
-    fn test_minimax_already_has_think() {
-        let mut parser = MiniMaxParser::new();
-
-        // Even if text already has <think>, it will add another one
-        // This mimics the Python behavior
-        let result = parser
-            .detect_and_parse_reasoning("<think>content</think>answer")
-            .unwrap();
-        // The double <think> gets handled by the base parser which removes duplicates
-        assert_eq!(result.normal_text, "answer");
-        assert_eq!(result.reasoning_text, "content");
     }
 
     #[test]

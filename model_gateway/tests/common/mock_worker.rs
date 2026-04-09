@@ -668,8 +668,9 @@ async fn responses_handler(
             .unwrap_or(false);
 
         if has_tools && !has_function_output {
-            // First turn: emit streaming tool call events
+            // First turn: emit streaming tool call events using OpenAI-style function_call ids
             let call_id = format!("call_{}", &Uuid::now_v7().simple().to_string()[..24]);
+            let item_id = format!("fc_{}", Uuid::now_v7().simple());
             let rid = request_id.clone();
 
             let events = vec![
@@ -703,14 +704,15 @@ async fn responses_handler(
                     })
                     .to_string(),
                 )),
-                // response.output_item.added with function_tool_call
+                // response.output_item.added with function_call
                 Ok(Event::default().event("response.output_item.added").data(
                     json!({
                         "type": "response.output_item.added",
                         "output_index": 0,
                         "item": {
-                            "id": call_id.clone(),
-                            "type": "function_tool_call",
+                            "id": item_id.clone(),
+                            "type": "function_call",
+                            "call_id": call_id.clone(),
                             "name": "brave_web_search",
                             "arguments": "",
                             "status": "in_progress"
@@ -725,7 +727,7 @@ async fn responses_handler(
                         json!({
                             "type": "response.function_call_arguments.delta",
                             "output_index": 0,
-                            "item_id": call_id.clone(),
+                            "item_id": item_id.clone(),
                             "delta": "{\"query\""
                         })
                         .to_string(),
@@ -736,7 +738,7 @@ async fn responses_handler(
                         json!({
                             "type": "response.function_call_arguments.delta",
                             "output_index": 0,
-                            "item_id": call_id.clone(),
+                            "item_id": item_id.clone(),
                             "delta": ":\"SGLang"
                         })
                         .to_string(),
@@ -747,7 +749,7 @@ async fn responses_handler(
                         json!({
                             "type": "response.function_call_arguments.delta",
                             "output_index": 0,
-                            "item_id": call_id.clone(),
+                            "item_id": item_id.clone(),
                             "delta": " router MCP"
                         })
                         .to_string(),
@@ -758,7 +760,7 @@ async fn responses_handler(
                         json!({
                             "type": "response.function_call_arguments.delta",
                             "output_index": 0,
-                            "item_id": call_id.clone(),
+                            "item_id": item_id.clone(),
                             "delta": " integration\"}"
                         })
                         .to_string(),
@@ -770,7 +772,7 @@ async fn responses_handler(
                         json!({
                             "type": "response.function_call_arguments.done",
                             "output_index": 0,
-                            "item_id": call_id.clone()
+                            "item_id": item_id.clone()
                         })
                         .to_string(),
                     )),
@@ -780,8 +782,9 @@ async fn responses_handler(
                         "type": "response.output_item.done",
                         "output_index": 0,
                         "item": {
-                            "id": call_id.clone(),
-                            "type": "function_tool_call",
+                            "id": item_id.clone(),
+                            "type": "function_call",
+                            "call_id": call_id.clone(),
                             "name": "brave_web_search",
                             "arguments": "{\"query\":\"SGLang router MCP integration\"}",
                             "status": "completed"
@@ -996,7 +999,7 @@ async fn responses_handler(
         .into_response()
     } else {
         // If tools are provided and this is the first call (no previous_response_id),
-        // emit a single function_tool_call to trigger the router's MCP flow.
+        // emit a single function_call to trigger the router's MCP flow.
         let has_tools = payload
             .get("tools")
             .and_then(|v| v.as_array())
@@ -1024,14 +1027,17 @@ async fn responses_handler(
 
         if has_tools && !has_function_output {
             let rid = format!("resp-{}", Uuid::now_v7());
+            let call_id = format!("call_{}", &Uuid::now_v7().simple().to_string()[..24]);
+            let item_id = format!("fc_{}", Uuid::now_v7().simple());
             Json(json!({
                 "id": rid,
                 "object": "response",
                 "created_at": timestamp,
                 "model": "mock-model",
                 "output": [{
-                    "type": "function_tool_call",
-                    "id": "call_1",
+                    "type": "function_call",
+                    "id": item_id,
+                    "call_id": call_id,
                     "name": "brave_web_search",
                     "arguments": "{\"query\":\"SGLang router MCP integration\"}",
                     "status": "in_progress"

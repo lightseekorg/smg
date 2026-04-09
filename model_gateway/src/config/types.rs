@@ -26,6 +26,8 @@ pub struct RouterConfig {
     #[serde(default = "default_load_monitor_interval_secs")]
     pub load_monitor_interval_secs: u64,
     pub dp_aware: bool,
+    #[serde(default)]
+    pub dp_minimum_tokens_scheduler: bool,
     pub api_key: Option<String>,
     pub discovery: Option<DiscoveryConfig>,
     pub metrics: Option<MetricsConfig>,
@@ -536,6 +538,7 @@ impl Default for RouterConfig {
             worker_startup_check_interval_secs: 30,
             load_monitor_interval_secs: 10,
             dp_aware: false,
+            dp_minimum_tokens_scheduler: false,
             api_key: None,
             discovery: None,
             metrics: None,
