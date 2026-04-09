@@ -535,6 +535,24 @@ mod tests {
         }
     }
 
+    fn make_new_memory(content: &str) -> NewConversationMemory {
+        NewConversationMemory {
+            conversation_id: ConversationId::from("conv_test"),
+            conversation_version: Some(1),
+            response_id: Some(ResponseId::from("resp_test")),
+            memory_type: ConversationMemoryType::Ltm,
+            status: ConversationMemoryStatus::Ready,
+            attempt: 0,
+            owner_id: Some("owner_1".to_string()),
+            next_run_at: Utc::now(),
+            lease_until: None,
+            content: Some(content.to_string()),
+            memory_config: Some("{\"k\":\"v\"}".to_string()),
+            scope_id: Some("scope_1".to_string()),
+            error_msg: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_list_ordering_and_cursors() {
         let store = MemoryConversationItemStorage::new();
@@ -785,6 +803,36 @@ mod tests {
         let found = clone.get_item(&item.id).await.unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, item.id);
+    }
+
+    #[tokio::test]
+    async fn test_memory_writer_create_memory_inserts_and_generates_prefixed_unique_ids() {
+        let writer = MemoryConversationMemoryWriter::new();
+        let first = make_new_memory("first");
+        let second = make_new_memory("second");
+
+        let id1 = writer.create_memory(first.clone()).await.unwrap();
+        let id2 = writer.create_memory(second.clone()).await.unwrap();
+
+        assert!(id1.0.starts_with("mem_"));
+        assert!(id2.0.starts_with("mem_"));
+        assert_ne!(id1, id2);
+
+        let store = writer.inner.read();
+        assert_eq!(store.get(&id1), Some(&first));
+        assert_eq!(store.get(&id2), Some(&second));
+    }
+
+    #[tokio::test]
+    async fn test_memory_writer_clone_shares_state() {
+        let writer = MemoryConversationMemoryWriter::new();
+        let clone = writer.clone();
+
+        let memory = make_new_memory("shared");
+        let created_id = writer.create_memory(memory.clone()).await.unwrap();
+
+        let from_clone = clone.inner.read().get(&created_id).cloned();
+        assert_eq!(from_clone, Some(memory));
     }
 
     // ========================================================================
