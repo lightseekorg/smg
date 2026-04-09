@@ -13,6 +13,7 @@ use crate::core::{HashRing, Worker};
 mod bucket;
 mod cache_aware;
 mod consistent_hashing;
+mod dp_min_token;
 mod factory;
 mod manual;
 mod power_of_two;
@@ -25,6 +26,7 @@ pub(crate) mod utils;
 pub use bucket::BucketPolicy;
 pub use cache_aware::CacheAwarePolicy;
 pub use consistent_hashing::ConsistentHashingPolicy;
+pub use dp_min_token::MinimumTokensPolicy;
 pub use factory::PolicyFactory;
 // Re-export PrefixMatchResult from kv_index for production use
 pub use kv_index::PrefixMatchResult;
@@ -87,6 +89,10 @@ pub trait LoadBalancingPolicy: Send + Sync + Debug {
 
     /// Get as Any for downcasting
     fn as_any(&self) -> &dyn std::any::Any;
+}
+
+pub trait DPRankLoadPolicy: Send + Sync + Debug {
+    fn select_dp_rank(&self, worker: &dyn Worker, estimated_cost: isize) -> Option<isize>;
 }
 
 /// Configuration for cache-aware policy

@@ -1,6 +1,6 @@
 [package]
 name = "smg"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2021"
 description = "High-performance model-routing gateway for large-scale LLM deployments"
 license = "Apache-2.0"
@@ -56,7 +56,7 @@ tracing-subscriber.workspace = true
 # Workspace dependencies (with extra features)
 axum = { workspace = true, features = ["macros", "ws", "tracing"] }
 bytemuck = { workspace = true, features = ["derive"] }
-reqwest = { workspace = true, features = ["stream", "blocking", "json", "rustls-tls"] }
+reqwest = { workspace = true, features = ["stream", "blocking", "json", "rustls-tls", "multipart"] }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
 tokio-util.workspace = true
@@ -120,6 +120,8 @@ tokio-tungstenite = { workspace = true }
 webpki-roots = { workspace = true }
 wasmtime = { workspace = true }
 tempfile = "3.8"
+multer = { workspace = true }
+str0m = { workspace = true }
 
 [build-dependencies]
 chrono = { version = "0.4", features = ["clock"] }
@@ -131,7 +133,7 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 portpicker = "0.1"
 lazy_static = "1.4"
-wasm-encoder = "0.245"
+wasm-encoder = "0.246"
 npyz = { version = "0.8", features = ["npz"] }
 opentelemetry-proto = { version = "0.31", features = ["gen-tonic"] }
 serial_test = "3.0"

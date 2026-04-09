@@ -138,6 +138,59 @@ MCP_TEST_PROMPT = (
 # =============================================================================
 
 
+def assert_all_mcp_call_ids_prefixed(output):
+    """Assert every mcp_call id uses the external mcp_ prefix."""
+    mcp_calls = [item for item in output if item.type == "mcp_call"]
+    assert len(mcp_calls) > 0, "Expected at least one mcp_call item"
+    for mcp_call in mcp_calls:
+        assert mcp_call.id is not None
+        assert mcp_call.id.startswith("mcp_"), (
+            f"mcp_call.id should use mcp_ prefix, got {mcp_call.id!r}"
+        )
+
+
+def assert_streaming_mcp_call_ids_match(events):
+    """Assert one streaming MCP call keeps the same external id across all events."""
+    added_ids = [
+        event.item.id
+        for event in events
+        if event.type == "response.output_item.added"
+        and event.item is not None
+        and event.item.type == "mcp_call"
+    ]
+    done_ids = [
+        event.item.id
+        for event in events
+        if event.type == "response.output_item.done"
+        and event.item is not None
+        and event.item.type == "mcp_call"
+    ]
+    arg_done_ids = [
+        event.item_id for event in events if event.type == "response.mcp_call_arguments.done"
+    ]
+    completed_ids = [
+        event.item_id for event in events if event.type == "response.mcp_call.completed"
+    ]
+
+    assert added_ids, "Expected at least one streaming mcp_call added event"
+    assert done_ids, "Expected at least one streaming mcp_call done event"
+    assert arg_done_ids, "Expected at least one streaming mcp_call_arguments.done event"
+    assert completed_ids, "Expected at least one streaming mcp_call.completed event"
+
+    expected_ids = set(added_ids)
+    assert all(item_id.startswith("mcp_") for item_id in expected_ids)
+    assert set(done_ids) == expected_ids
+    assert set(arg_done_ids) == expected_ids
+    assert set(completed_ids) == expected_ids
+
+    completed_events = [e for e in events if e.type == "response.completed"]
+    assert len(completed_events) == 1
+    final_mcp_ids = [
+        item.id for item in completed_events[0].response.output if item.type == "mcp_call"
+    ]
+    assert set(final_mcp_ids) == expected_ids
+
+
 @pytest.mark.vendor("openai")
 @pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
@@ -242,9 +295,9 @@ class TestToolCallingCloud:
 
         mcp_calls = [item for item in resp.output if item.type == "mcp_call"]
         assert len(mcp_calls) > 0
+        assert_all_mcp_call_ids_prefixed(resp.output)
 
         for mcp_call in mcp_calls:
-            assert mcp_call.id is not None
             assert mcp_call.error is None
             assert mcp_call.status == "completed"
             assert mcp_call.server_label == "brave"
@@ -300,6 +353,7 @@ class TestToolCallingCloud:
             "Should have mcp_call_arguments.done event"
         )
         assert "response.mcp_call.completed" in event_types, "Should have mcp_call.completed event"
+        assert_streaming_mcp_call_ids_match(events)
 
         completed_events = [e for e in events if e.type == "response.completed"]
         assert len(completed_events) == 1
@@ -317,6 +371,7 @@ class TestToolCallingCloud:
         # Verify mcp_call items in final output
         mcp_calls = [item for item in final_output if item.type == "mcp_call"]
         assert len(mcp_calls) > 0
+        assert_all_mcp_call_ids_prefixed(final_output)
 
         for mcp_call in mcp_calls:
             assert mcp_call.error is None

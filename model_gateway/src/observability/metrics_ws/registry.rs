@@ -5,7 +5,7 @@
 //! initial snapshots until collectors have published real data.
 
 use serde_json::Value;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 use super::types::Topic;
 
@@ -19,6 +19,7 @@ pub struct WatchRegistry {
     rate_limits: watch::Sender<Option<Value>>,
     models: watch::Sender<Option<Value>>,
     metrics: watch::Sender<Option<Value>>,
+    notify: Notify,
 }
 
 impl Default for WatchRegistry {
@@ -37,6 +38,7 @@ impl WatchRegistry {
             rate_limits: watch::Sender::new(None),
             models: watch::Sender::new(None),
             metrics: watch::Sender::new(None),
+            notify: Notify::new(),
         }
     }
 
@@ -57,6 +59,12 @@ impl WatchRegistry {
     /// Uses `send_replace` so state is retained even with zero active receivers.
     pub fn publish(&self, topic: Topic, value: Value) {
         self.sender(topic).send_replace(Some(value));
+        self.notify.notify_waiters();
+    }
+
+    /// Wait until any topic is published. Used by WS handlers to wake on changes.
+    pub async fn notified(&self) {
+        self.notify.notified().await;
     }
 
     /// Get a receiver for a topic (used by WS handlers).
@@ -123,6 +131,26 @@ mod tests {
         // Subscribe after publish — should immediately see the latest value
         let rx = registry.subscribe(Topic::Workers);
         assert_eq!(rx.borrow().as_ref().unwrap(), &data);
+    }
+
+    #[tokio::test]
+    async fn notify_fires_on_publish() {
+        use std::pin::pin;
+
+        let registry = WatchRegistry::new();
+        let mut notify = pin!(registry.notified());
+
+        // Poll once to register the waiter with Notify.
+        assert!(
+            futures::poll!(&mut notify).is_pending(),
+            "should be pending before publish"
+        );
+
+        registry.publish(Topic::Workers, serde_json::json!({"test": true}));
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), notify)
+            .await
+            .expect("notify should fire within 100ms");
     }
 
     #[test]

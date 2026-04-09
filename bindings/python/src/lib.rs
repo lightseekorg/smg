@@ -380,6 +380,7 @@ struct Router {
     assignment_mode: String,
     max_payload_size: usize,
     dp_aware: bool,
+    dp_minimum_tokens_scheduler: bool,
     api_key: Option<String>,
     log_dir: Option<String>,
     log_level: Option<String>,
@@ -739,6 +740,7 @@ impl Router {
                 self.server_cert_path.as_ref(),
                 self.server_key_path.as_ref(),
             )
+            .dp_minimum_tokens_scheduler(self.dp_minimum_tokens_scheduler)
             .build()
     }
 }
@@ -764,6 +766,7 @@ impl Router {
         assignment_mode = String::from("random"),
         max_payload_size = 512 * 1024 * 1024,
         dp_aware = false,
+        dp_minimum_tokens_scheduler = false,
         api_key = None,
         log_dir = None,
         log_level = None,
@@ -870,6 +873,7 @@ impl Router {
         assignment_mode: String,
         max_payload_size: usize,
         dp_aware: bool,
+        dp_minimum_tokens_scheduler: bool,
         api_key: Option<String>,
         log_dir: Option<String>,
         log_level: Option<String>,
@@ -985,6 +989,7 @@ impl Router {
             assignment_mode,
             max_payload_size,
             dp_aware,
+            dp_minimum_tokens_scheduler,
             api_key,
             log_dir,
             log_level,

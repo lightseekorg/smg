@@ -14,20 +14,25 @@ use axum::http::HeaderMap;
 use bytes::Bytes;
 use openai_protocol::{
     event_types::{
-        is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType, McpEvent,
-        OutputItemEvent, WebSearchCallEvent,
+        is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent,
+        ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent, WebSearchCallEvent,
     },
-    responses::{generate_id, ResponseInput, ResponsesRequest},
+    responses::{generate_id, ResponseInput, ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, to_value, Value};
-use smg_mcp::{McpToolSession, ResponseFormat, ResponseTransformer, ToolExecutionInput};
+use smg_mcp::{
+    mcp_response_item_id, McpToolSession, ResponseFormat, ResponseTransformer, ToolExecutionInput,
+};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::tool_handler::FunctionCallInProgress;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::{error, header_utils::ApiProvider, mcp_utils::DEFAULT_MAX_ITERATIONS},
+    routers::{
+        error, header_utils::ApiProvider, mcp_utils::DEFAULT_MAX_ITERATIONS,
+        tool_output_context::compact_tool_output_for_model_context,
+    },
 };
 
 /// State for tracking multi-turn tool calling loop
@@ -94,7 +99,7 @@ pub(crate) async fn execute_streaming_tool_calls(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     state: &mut ToolLoopState,
     sequence_number: &mut u64,
-    model_id: &str,
+    original_body: &ResponsesRequest,
 ) -> bool {
     for call in pending_calls {
         if call.name.is_empty() {
@@ -119,13 +124,13 @@ pub(crate) async fn execute_streaming_tool_calls(
         let response_format = session.tool_response_format(&call.name);
         let server_label = session.resolve_tool_server_label(&call.name);
 
-        let arguments: Value = match serde_json::from_str(args_str) {
+        let mut arguments: Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
             Err(e) => {
                 let err_str = format!("Failed to parse tool arguments: {e}");
                 warn!("{}", err_str);
                 let error_output = json!({ "error": &err_str });
-                let mcp_call_item = build_transformed_mcp_call_item(
+                let mut mcp_call_item = build_transformed_mcp_call_item(
                     &error_output,
                     &response_format,
                     &call.call_id,
@@ -133,7 +138,19 @@ pub(crate) async fn execute_streaming_tool_calls(
                     &call.name,
                     &call.arguments_buffer,
                 );
-                if !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number) {
+                if let Some(obj) = mcp_call_item.as_object_mut() {
+                    obj.insert(
+                        "id".to_string(),
+                        Value::String(stable_streaming_tool_item_id(&call, &response_format)),
+                    );
+                }
+                if !send_tool_call_completion_events(
+                    tx,
+                    &call,
+                    &mcp_call_item,
+                    &response_format,
+                    sequence_number,
+                ) {
                     return false;
                 }
                 state.record_call(
@@ -146,12 +163,12 @@ pub(crate) async fn execute_streaming_tool_calls(
                 continue;
             }
         };
-
+        apply_request_tool_overrides(&response_format, original_body, &mut arguments);
         if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
             return false;
         }
 
-        debug!("Calling MCP tool '{}' with args: {}", call.name, args_str);
+        debug!("Calling MCP tool '{}' with args: {}", call.name, arguments);
         let tool_output = session
             .execute_tool(ToolExecutionInput {
                 call_id: call.call_id.clone(),
@@ -160,9 +177,13 @@ pub(crate) async fn execute_streaming_tool_calls(
             })
             .await;
 
-        Metrics::record_mcp_tool_duration(model_id, &tool_output.tool_name, tool_output.duration);
+        Metrics::record_mcp_tool_duration(
+            &original_body.model,
+            &tool_output.tool_name,
+            tool_output.duration,
+        );
         Metrics::record_mcp_tool_call(
-            model_id,
+            &original_body.model,
             &tool_output.tool_name,
             if tool_output.is_error {
                 metrics_labels::RESULT_ERROR
@@ -171,21 +192,34 @@ pub(crate) async fn execute_streaming_tool_calls(
             },
         );
 
-        let output_str = tool_output.output.to_string();
-        let mcp_call_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
+        let model_context_output =
+            compact_tool_output_for_model_context(&response_format, &tool_output.output);
+        let mut mcp_call_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
             warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
             json!({})
         });
+        if let Some(obj) = mcp_call_item.as_object_mut() {
+            obj.insert(
+                "id".to_string(),
+                Value::String(stable_streaming_tool_item_id(&call, &response_format)),
+            );
+        }
 
-        if !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number) {
+        if !send_tool_call_completion_events(
+            tx,
+            &call,
+            &mcp_call_item,
+            &response_format,
+            sequence_number,
+        ) {
             return false;
         }
 
         state.record_call(
             call.call_id,
             call.name,
-            call.arguments_buffer,
-            output_str,
+            tool_output.arguments_str.clone(),
+            model_context_output,
             mcp_call_item,
         );
     }
@@ -224,6 +258,58 @@ pub(crate) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpT
     if !tools_json.is_empty() {
         obj.insert("tools".to_string(), Value::Array(tools_json));
         obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
+    }
+}
+
+/// Extract request-level builtin tool overrides to merge into tool-call arguments.
+///
+/// Currently this is intentionally scoped to image generation only.
+/// We can extend this to other builtin tools later if needed.
+fn request_tool_overrides(
+    response_format: &ResponseFormat,
+    original_body: &ResponsesRequest,
+) -> Option<Value> {
+    if !matches!(response_format, ResponseFormat::ImageGenerationCall) {
+        return None;
+    }
+
+    // Read request-defined tools and find the image_generation config.
+    let tools = original_body.tools.as_ref()?;
+
+    tools.iter().find_map(|tool| {
+        // Serialize image tool config into a JSON object for merge.
+        let mut serialized = match tool {
+            ResponseTool::ImageGeneration(image_tool) => match to_value(image_tool).ok()? {
+                Value::Object(obj) => obj,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        // Drop nulls so absent fields do not overwrite generated call arguments.
+        serialized.retain(|_, v| !v.is_null());
+        if serialized.is_empty() {
+            None
+        } else {
+            Some(Value::Object(serialized))
+        }
+    })
+}
+
+fn apply_request_tool_overrides(
+    response_format: &ResponseFormat,
+    original_body: &ResponsesRequest,
+    arguments: &mut Value,
+) {
+    if let (Some(overrides), Some(args_obj)) = (
+        request_tool_overrides(response_format, original_body),
+        arguments.as_object_mut(),
+    ) {
+        let Some(override_obj) = overrides.as_object() else {
+            return;
+        };
+        for (k, v) in override_obj {
+            args_obj.insert(k.clone(), v.clone());
+        }
     }
 }
 
@@ -373,22 +459,18 @@ fn send_tool_call_intermediate_event(
     response_format: &ResponseFormat,
     sequence_number: &mut u64,
 ) -> bool {
-    // Determine event type and ID prefix based on response format
-    let (event_type, id_prefix) = match response_format {
-        ResponseFormat::WebSearchCall => (WebSearchCallEvent::SEARCHING, "ws_"),
-        ResponseFormat::CodeInterpreterCall => (CodeInterpreterCallEvent::INTERPRETING, "ci_"),
-        ResponseFormat::FileSearchCall => (FileSearchCallEvent::SEARCHING, "fs_"),
+    // Determine event type based on response format
+    let event_type = match response_format {
+        ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
+        ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
+        ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
+        ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
         ResponseFormat::Passthrough => return true, // mcp_call has no intermediate event
     };
 
     let effective_output_index = call.effective_output_index();
 
-    // Transform call_id from fc_* to appropriate prefix
-    let item_id = call
-        .call_id
-        .strip_prefix("fc_")
-        .map(|stripped| format!("{id_prefix}{stripped}"))
-        .unwrap_or_else(|| call.call_id.clone());
+    let item_id = stable_streaming_tool_item_id(call, response_format);
 
     let event_payload = json!({
         "type": event_type,
@@ -409,14 +491,11 @@ fn send_tool_call_completion_events(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     call: &FunctionCallInProgress,
     tool_call_item: &Value,
+    response_format: &ResponseFormat,
     sequence_number: &mut u64,
 ) -> bool {
     let effective_output_index = call.effective_output_index();
-
-    let item_id = tool_call_item
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let item_id = stable_streaming_tool_item_id(call, response_format);
 
     // Determine the completion event type based on item type
     let item_type = tool_call_item
@@ -428,6 +507,7 @@ fn send_tool_call_completion_events(
         ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::COMPLETED,
         ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::COMPLETED,
         ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::COMPLETED,
+        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::COMPLETED,
         _ => McpEvent::CALL_COMPLETED, // Default to mcp_call for mcp_call and unknown types
     };
 
@@ -460,6 +540,47 @@ fn send_tool_call_completion_events(
         done_payload
     );
     tx.send(Ok(Bytes::from(done_event))).is_ok()
+}
+
+fn stable_streaming_tool_item_id(
+    call: &FunctionCallInProgress,
+    response_format: &ResponseFormat,
+) -> String {
+    let source_id = call.item_id.as_deref().unwrap_or(call.call_id.as_str());
+
+    match response_format {
+        ResponseFormat::Passthrough => mcp_response_item_id(source_id),
+        ResponseFormat::WebSearchCall => normalize_tool_item_id_with_prefix(source_id, "ws_"),
+        ResponseFormat::CodeInterpreterCall => normalize_tool_item_id_with_prefix(source_id, "ci_"),
+        ResponseFormat::FileSearchCall => normalize_tool_item_id_with_prefix(source_id, "fs_"),
+        ResponseFormat::ImageGenerationCall => normalize_tool_item_id_with_prefix(source_id, "ig_"),
+    }
+}
+
+fn normalize_tool_item_id_with_prefix(source_id: &str, target_prefix: &str) -> String {
+    if source_id.starts_with(target_prefix) {
+        return source_id.to_string();
+    }
+
+    source_id
+        .strip_prefix("fc_")
+        .or_else(|| source_id.strip_prefix("call_"))
+        .map(|stripped| format!("{target_prefix}{stripped}"))
+        .unwrap_or_else(|| format!("{target_prefix}{source_id}"))
+}
+
+fn non_streaming_tool_item_id_source(item_id: &str, response_format: &ResponseFormat) -> String {
+    match response_format {
+        ResponseFormat::Passthrough => item_id.to_string(),
+        ResponseFormat::WebSearchCall
+        | ResponseFormat::CodeInterpreterCall
+        | ResponseFormat::FileSearchCall
+        | ResponseFormat::ImageGenerationCall => item_id
+            .strip_prefix("fc_")
+            .or_else(|| item_id.strip_prefix("call_"))
+            .unwrap_or(item_id)
+            .to_string(),
+    }
 }
 
 /// Inject MCP metadata into a streaming response
@@ -565,6 +686,7 @@ pub(crate) async fn execute_tool_loop(
 
         for call in function_calls {
             state.total_calls += 1;
+            let response_format = session.tool_response_format(&call.name);
 
             if state.total_calls > effective_limit {
                 warn!(
@@ -579,18 +701,19 @@ pub(crate) async fn execute_tool_loop(
                     original_body,
                 );
             }
-            let arguments: Value = match serde_json::from_str(&call.arguments) {
+            let mut arguments: Value = match serde_json::from_str(&call.arguments) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(tool = %call.name, error = %e, "Failed to parse tool arguments as JSON");
                     let error_output = format!("Invalid tool arguments: {e}");
-                    let response_format = session.tool_response_format(&call.name);
                     let server_label = session.resolve_tool_server_label(&call.name);
+                    let tool_item_id =
+                        non_streaming_tool_item_id_source(&call.item_id, &response_format);
                     let error_json = json!({ "error": &error_output });
                     let transformed_item = build_transformed_mcp_call_item(
                         &error_json,
                         &response_format,
-                        &call.call_id,
+                        &tool_item_id,
                         &server_label,
                         &call.name,
                         &call.arguments,
@@ -612,11 +735,8 @@ pub(crate) async fn execute_tool_loop(
                     continue;
                 }
             };
-
-            debug!(
-                "Calling MCP tool '{}' with args: {}",
-                call.name, call.arguments
-            );
+            apply_request_tool_overrides(&response_format, original_body, &mut arguments);
+            debug!("Calling MCP tool '{}' with args: {}", call.name, arguments);
             let tool_output = session
                 .execute_tool(ToolExecutionInput {
                     call_id: call.call_id.clone(),
@@ -640,17 +760,25 @@ pub(crate) async fn execute_tool_loop(
                 },
             );
 
-            let output_str = tool_output.output.to_string();
-            let transformed_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
-                warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
-                json!({})
-            });
+            let response_format = session.tool_response_format(&call.name);
+            let model_context_output =
+                compact_tool_output_for_model_context(&response_format, &tool_output.output);
+            let server_label = session.resolve_tool_server_label(&call.name);
+            let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, &response_format);
+            let transformed_item = build_transformed_mcp_call_item(
+                &tool_output.output,
+                &response_format,
+                &tool_item_id,
+                &server_label,
+                &call.name,
+                &tool_output.arguments_str,
+            );
 
             state.record_call(
                 call.call_id,
                 call.name,
-                call.arguments,
-                output_str,
+                tool_output.arguments_str.clone(),
+                model_context_output,
                 transformed_item,
             );
         }
@@ -777,7 +905,7 @@ fn build_mcp_call_item(
 fn build_transformed_mcp_call_item(
     output: &Value,
     response_format: &ResponseFormat,
-    call_id: &str,
+    tool_item_id: &str,
     server_label: &str,
     tool_name: &str,
     arguments: &str,
@@ -785,7 +913,7 @@ fn build_transformed_mcp_call_item(
     let output_item = ResponseTransformer::transform(
         output,
         response_format,
-        call_id,
+        tool_item_id,
         server_label,
         tool_name,
         arguments,
@@ -799,6 +927,7 @@ fn build_transformed_mcp_call_item(
 /// A function call extracted from a non-streaming response
 struct ExtractedFunctionCall {
     pub call_id: String,
+    pub item_id: String,
     pub name: String,
     pub arguments: String,
 }
@@ -821,16 +950,17 @@ fn extract_function_calls(resp: &Value) -> Vec<ExtractedFunctionCall> {
             continue;
         }
 
-        let call_id = obj
-            .get("call_id")
-            .and_then(|v| v.as_str())
-            .or_else(|| obj.get("id").and_then(|v| v.as_str()));
+        let call_id = obj.get("call_id").and_then(|v| v.as_str());
+        let item_id = obj.get("id").and_then(|v| v.as_str()).or(call_id);
         let name = obj.get("name").and_then(|v| v.as_str());
         let arguments = obj.get("arguments").and_then(|v| v.as_str());
 
-        if let (Some(call_id), Some(name), Some(arguments)) = (call_id, name, arguments) {
+        if let (Some(call_id), Some(item_id), Some(name), Some(arguments)) =
+            (call_id, item_id, name, arguments)
+        {
             calls.push(ExtractedFunctionCall {
                 call_id: call_id.to_string(),
+                item_id: item_id.to_string(),
                 name: name.to_string(),
                 arguments: arguments.to_string(),
             });

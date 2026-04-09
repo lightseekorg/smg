@@ -292,6 +292,8 @@ pub enum BuiltinToolType {
     WebSearchPreview,
     /// Code interpreter tool (OpenAI: code_interpreter)
     CodeInterpreter,
+    /// Image generation tool (OpenAI: image_generation)
+    ImageGeneration,
     /// File search tool (OpenAI: file_search)
     FileSearch,
 }
@@ -302,6 +304,7 @@ impl BuiltinToolType {
         match self {
             BuiltinToolType::WebSearchPreview => ResponseFormatConfig::WebSearchCall,
             BuiltinToolType::CodeInterpreter => ResponseFormatConfig::CodeInterpreterCall,
+            BuiltinToolType::ImageGeneration => ResponseFormatConfig::ImageGenerationCall,
             BuiltinToolType::FileSearch => ResponseFormatConfig::FileSearchCall,
         }
     }
@@ -312,6 +315,7 @@ impl fmt::Display for BuiltinToolType {
         match self {
             BuiltinToolType::WebSearchPreview => write!(f, "web_search_preview"),
             BuiltinToolType::CodeInterpreter => write!(f, "code_interpreter"),
+            BuiltinToolType::ImageGeneration => write!(f, "image_generation"),
             BuiltinToolType::FileSearch => write!(f, "file_search"),
         }
     }
@@ -341,6 +345,7 @@ pub enum ResponseFormatConfig {
     Passthrough,
     WebSearchCall,
     CodeInterpreterCall,
+    ImageGenerationCall,
     FileSearchCall,
 }
 
@@ -354,6 +359,10 @@ pub struct ArgMappingConfig {
     /// Default values for arguments
     #[serde(default)]
     pub defaults: HashMap<String, serde_json::Value>,
+
+    /// Values that override model-provided arguments
+    #[serde(default)]
+    pub overrides: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -924,6 +933,40 @@ tools:
     }
 
     #[test]
+    fn test_tool_config_arg_mapping_overrides() {
+        let yaml = r#"
+name: "web-search"
+protocol: sse
+url: "http://localhost:8080/sse"
+tools:
+  search_web:
+    response_format: web_search_call
+    arg_mapping:
+      defaults:
+        enable_source: true
+      overrides:
+        enable_brave: false
+"#;
+
+        let config: McpServerConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
+        let tool_config = config
+            .tools
+            .as_ref()
+            .and_then(|tools| tools.get("search_web"))
+            .expect("search_web config should exist");
+
+        let arg_mapping = tool_config.arg_mapping.as_ref().unwrap();
+        assert_eq!(
+            arg_mapping.defaults.get("enable_source").unwrap(),
+            &serde_json::json!(true)
+        );
+        assert_eq!(
+            arg_mapping.overrides.get("enable_brave").unwrap(),
+            &serde_json::json!(false)
+        );
+    }
+
+    #[test]
     fn test_tool_config_format_only() {
         let yaml = r#"
 name: "filesystem"
@@ -977,6 +1020,10 @@ tools:
             (
                 ResponseFormatConfig::CodeInterpreterCall,
                 "\"code_interpreter_call\"",
+            ),
+            (
+                ResponseFormatConfig::ImageGenerationCall,
+                "\"image_generation_call\"",
             ),
             (ResponseFormatConfig::FileSearchCall, "\"file_search_call\""),
         ];
@@ -1144,6 +1191,7 @@ policy:
         let types = vec![
             (BuiltinToolType::WebSearchPreview, "\"web_search_preview\""),
             (BuiltinToolType::CodeInterpreter, "\"code_interpreter\""),
+            (BuiltinToolType::ImageGeneration, "\"image_generation\""),
             (BuiltinToolType::FileSearch, "\"file_search\""),
         ];
 
@@ -1165,6 +1213,10 @@ policy:
         assert_eq!(
             BuiltinToolType::CodeInterpreter.response_format(),
             ResponseFormatConfig::CodeInterpreterCall
+        );
+        assert_eq!(
+            BuiltinToolType::ImageGeneration.response_format(),
+            ResponseFormatConfig::ImageGenerationCall
         );
         assert_eq!(
             BuiltinToolType::FileSearch.response_format(),
@@ -1436,6 +1488,10 @@ servers:
         assert_eq!(
             BuiltinToolType::CodeInterpreter.to_string(),
             "code_interpreter"
+        );
+        assert_eq!(
+            BuiltinToolType::ImageGeneration.to_string(),
+            "image_generation"
         );
         assert_eq!(BuiltinToolType::FileSearch.to_string(), "file_search");
     }

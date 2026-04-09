@@ -19,6 +19,7 @@ use std::{
 use dashmap::{mapref::entry::Entry, DashMap};
 use parking_lot::RwLock;
 use smg_mesh::OptionalMeshSyncManager;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
@@ -26,6 +27,7 @@ use crate::{
     core::{
         circuit_breaker::CircuitState,
         worker::{HealthChecker, RuntimeType, WorkerType},
+        worker_event::WorkerEvent,
         ConnectionMode, Job, JobQueue, Worker,
     },
     observability::metrics::Metrics,
@@ -219,6 +221,9 @@ pub struct WorkerRegistry {
     /// Cleaned up when the last worker for a model is removed.
     /// When retries are disabled, max_retries is set to 1.
     model_retry_configs: Arc<DashMap<String, RetryConfig>>,
+
+    /// Broadcast channel for worker state change events.
+    event_tx: broadcast::Sender<WorkerEvent>,
 }
 
 impl WorkerRegistry {
@@ -234,7 +239,13 @@ impl WorkerRegistry {
             worker_mutation_locks: Arc::new(DashMap::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
             model_retry_configs: Arc::new(DashMap::new()),
+            event_tx: broadcast::Sender::new(64),
         }
+    }
+
+    /// Subscribe to worker state change events.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<WorkerEvent> {
+        self.event_tx.subscribe()
     }
 
     /// Rebuild the hash ring for a model based on current workers in the model index
@@ -358,6 +369,10 @@ impl WorkerRegistry {
                 );
             }
         }
+
+        let _ = self.event_tx.send(WorkerEvent::Registered {
+            url: worker.url().to_string(),
+        });
 
         Some(worker_id)
     }
@@ -504,6 +519,10 @@ impl WorkerRegistry {
             }
         }
 
+        let _ = self.event_tx.send(WorkerEvent::Registered {
+            url: new_worker.url().to_string(),
+        });
+
         true
     }
 
@@ -615,6 +634,10 @@ impl WorkerRegistry {
                 }
             }
 
+            let _ = self.event_tx.send(WorkerEvent::Removed {
+                url: worker.url().to_string(),
+            });
+
             Some(worker)
         } else {
             None
@@ -659,29 +682,6 @@ impl WorkerRegistry {
             .get(&worker_type)
             .map(|ids| ids.iter().filter_map(|id| self.get(id)).collect())
             .unwrap_or_default()
-    }
-
-    /// Update worker health status and sync to mesh
-    pub fn update_worker_health(&self, worker_id: &WorkerId, is_healthy: bool) {
-        if let Some(worker) = self.workers.get(worker_id) {
-            // Update worker health (if Worker trait has a method for this)
-            // For now, we'll just sync to mesh
-
-            // Sync to mesh if enabled (no-op if mesh is not enabled)
-            {
-                let guard = self.mesh_sync.read();
-                if let Some(ref mesh_sync) = *guard {
-                    mesh_sync.sync_worker_state(
-                        worker_id.as_str().to_string(),
-                        worker.model_id().to_string(),
-                        worker.url().to_string(),
-                        is_healthy,
-                        0.0, // TODO: Get actual load
-                        bincode::serialize(&worker.metadata().spec).unwrap_or_default(),
-                    );
-                }
-            }
-        }
     }
 
     /// Get all prefill workers (regardless of bootstrap_port)
@@ -980,18 +980,19 @@ impl WorkerRegistry {
                     let futs: Vec<_> = due_workers
                         .into_iter()
                         .map(|w| async move {
-                            let _ = w.check_health_async().await;
-                            w
+                            let failed = w.check_health_async().await.is_err();
+                            (w, failed)
                         })
                         .collect();
                     let checked_workers = futures::future::join_all(futs).await;
 
-                    // Submit removal jobs for workers that transitioned to unhealthy.
-                    // Goes through the full removal workflow (policy registry,
-                    // worker registry, metrics, load monitor).
+                    // Only remove workers whose health check actually failed
+                    // this tick. Workers that are unhealthy but passing checks
+                    // (e.g. mesh-synced, pre-activation) are recovering — leave
+                    // them alone until they either become healthy or truly fail.
                     if let Some(ref job_queue) = job_queue {
-                        for worker in &checked_workers {
-                            if !worker.is_healthy() {
+                        for (worker, failed) in &checked_workers {
+                            if !worker.is_healthy() && *failed {
                                 let url = worker.url().to_string();
                                 tracing::warn!(
                                     worker_url = %url,
@@ -1561,5 +1562,47 @@ mod tests {
             w.metadata().spec.labels.get("source"),
             Some(&"k8s".to_string())
         );
+    }
+
+    #[test]
+    fn test_worker_event_broadcast() {
+        let registry = WorkerRegistry::new();
+        let mut rx = registry.subscribe_events();
+
+        // Create and register a worker
+        let mut labels = HashMap::new();
+        labels.insert("model_id".to_string(), "test-model".to_string());
+
+        let worker: Box<dyn Worker> = Box::new(
+            BasicWorkerBuilder::new("http://event-worker:8080")
+                .worker_type(WorkerType::Regular)
+                .labels(labels)
+                .circuit_breaker_config(CircuitBreakerConfig::default())
+                .api_key("test_api_key")
+                .build(),
+        );
+
+        let worker_id = registry.register(Arc::from(worker)).unwrap();
+
+        // Should receive Registered event
+        let event = rx.try_recv().unwrap();
+        match event {
+            WorkerEvent::Registered { url } => {
+                assert_eq!(url, "http://event-worker:8080");
+            }
+            other => panic!("Expected Registered event, got: {other:?}"),
+        }
+
+        // Remove the worker
+        registry.remove(&worker_id);
+
+        // Should receive Removed event
+        let event = rx.try_recv().unwrap();
+        match event {
+            WorkerEvent::Removed { url } => {
+                assert_eq!(url, "http://event-worker:8080");
+            }
+            other => panic!("Expected Removed event, got: {other:?}"),
+        }
     }
 }

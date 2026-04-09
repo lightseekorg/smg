@@ -104,6 +104,21 @@ impl ResponseProcessor {
             );
 
             let mut parser = pooled_parser.lock().await;
+            // Reset pooled parser to clean state before each request
+            parser.reset();
+
+            // If the template injected `<think>` in the prefill (thinking toggle
+            // is supported and effectively ON), start in reasoning mode.
+            if utils::should_mark_reasoning_started(
+                utils::extract_thinking_from_kwargs(
+                    original_request.chat_template_kwargs.as_ref(),
+                    tokenizer.as_ref(),
+                ),
+                tokenizer.as_ref(),
+            ) {
+                parser.mark_reasoning_started();
+            }
+
             match parser.detect_and_parse_reasoning(&processed_text) {
                 Ok(result) => {
                     if !result.reasoning_text.is_empty() {
@@ -453,7 +468,7 @@ impl ResponseProcessor {
         execution_result: ExecutionResult,
         messages_request: Arc<CreateMessageRequest>,
         dispatch: DispatchMetadata,
-        _tokenizer: Arc<dyn Tokenizer>,
+        tokenizer: Arc<dyn Tokenizer>,
         stop_decoder: &mut StopSequenceDecoder,
     ) -> Result<Message, axum::response::Response> {
         // Collect all responses (no logprobs for Messages API)
@@ -568,6 +583,21 @@ impl ResponseProcessor {
                 &messages_request.model,
             );
             let mut parser = pooled_parser.lock().await;
+            // Reset pooled parser to clean state before each request
+            parser.reset();
+
+            // If thinking is effectively ON and template has a toggle, start in reasoning mode.
+            {
+                let user_thinking = match &messages_request.thinking {
+                    Some(messages::ThinkingConfig::Enabled { .. }) => Some(true),
+                    Some(messages::ThinkingConfig::Disabled) => Some(false),
+                    None => None,
+                };
+                if utils::should_mark_reasoning_started(user_thinking, tokenizer.as_ref()) {
+                    parser.mark_reasoning_started();
+                }
+            }
+
             match parser.detect_and_parse_reasoning(&processed_text) {
                 Ok(result) => {
                     if !result.reasoning_text.is_empty() {

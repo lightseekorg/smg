@@ -19,12 +19,15 @@ use futures_util::StreamExt;
 use openai_protocol::{
     event_types::{
         is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
-        FunctionCallEvent, ItemType, McpEvent, OutputItemEvent, ResponseEvent, WebSearchCallEvent,
+        FunctionCallEvent, ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent,
+        ResponseEvent, WebSearchCallEvent,
     },
     responses::{ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, Value};
-use smg_mcp::{McpOrchestrator, McpServerBinding, McpToolSession, ResponseFormat};
+use smg_mcp::{
+    mcp_response_item_id, McpOrchestrator, McpServerBinding, McpToolSession, ResponseFormat,
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -145,6 +148,9 @@ pub(super) fn apply_event_transformations_inplace(
                             // Determine item type and ID prefix based on response_format
                             let (new_type, id_prefix) = match response_format {
                                 ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
+                                ResponseFormat::ImageGenerationCall => {
+                                    (ItemType::IMAGE_GENERATION_CALL, "ig_")
+                                }
                                 _ => (ItemType::MCP_CALL, "mcp_"),
                             };
 
@@ -156,7 +162,9 @@ pub(super) fn apply_event_transformations_inplace(
 
                             // Transform ID from fc_* to appropriate prefix
                             if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                                if let Some(stripped) = id.strip_prefix("fc_") {
+                                if new_type == ItemType::MCP_CALL {
+                                    item["id"] = json!(mcp_response_item_id(id));
+                                } else if let Some(stripped) = id.strip_prefix("fc_") {
                                     let new_id = format!("{id_prefix}{stripped}");
                                     item["id"] = json!(new_id);
                                 }
@@ -173,10 +181,7 @@ pub(super) fn apply_event_transformations_inplace(
 
             // Transform item_id from fc_* to mcp_*
             if let Some(item_id) = parsed_data.get("item_id").and_then(|v| v.as_str()) {
-                if let Some(stripped) = item_id.strip_prefix("fc_") {
-                    let new_id = format!("mcp_{stripped}");
-                    parsed_data["item_id"] = json!(new_id);
-                }
+                parsed_data["item_id"] = json!(mcp_response_item_id(item_id));
             }
 
             changed = true;
@@ -213,15 +218,6 @@ fn send_sse_event(
 ) -> bool {
     let block = format!("event: {event_name}\ndata: {data}\n\n");
     tx.send(Ok(Bytes::from(block))).is_ok()
-}
-
-/// Transform fc_* item IDs to mcp_* format
-#[inline]
-fn transform_fc_to_mcp_id(item_id: &str) -> String {
-    item_id
-        .strip_prefix("fc_")
-        .map(|stripped| format!("mcp_{stripped}"))
-        .unwrap_or_else(|| item_id.to_string())
 }
 
 /// Map function_call event names to mcp_call event names
@@ -274,7 +270,7 @@ fn send_buffered_arguments(
         .get("item_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let mcp_item_id = transform_fc_to_mcp_id(item_id);
+    let mcp_item_id = mcp_response_item_id(item_id);
 
     // Build synthetic delta event
     let mut delta_event = json!({
@@ -437,6 +433,7 @@ fn maybe_inject_tool_in_progress(
         ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::IN_PROGRESS,
         ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::IN_PROGRESS,
         ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::IN_PROGRESS,
+        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::IN_PROGRESS,
         _ => return true, // Not a tool call item, nothing to inject
     };
 
@@ -975,7 +972,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 &tx,
                 &mut state,
                 &mut sequence_number,
-                &original_request.model,
+                &original_request,
             )
             .await
             {

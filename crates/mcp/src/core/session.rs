@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     approval::ApprovalMode,
-    inventory::{QualifiedToolName, ToolEntry},
+    inventory::{QualifiedToolName, ToolCategory, ToolEntry},
     responses_bridge::{
         build_chat_function_tools_with_names, build_function_tools_json_with_names,
         build_mcp_list_tools_item, build_mcp_list_tools_json, build_response_tools_with_names,
@@ -88,7 +88,7 @@ impl<'a> McpToolSession<'a> {
             ApprovalMode::PolicyOnly,
         );
         let server_keys: Vec<String> = mcp_servers.iter().map(|b| b.server_key.clone()).collect();
-        let mut mcp_tools = orchestrator.list_tools_for_servers(&server_keys);
+        let mut mcp_tools = Self::collect_visible_mcp_tools(orchestrator, &server_keys);
 
         // Build per-server allowlists from bindings that specify allowed_tools.
         let allowed_tools_by_server_key: HashMap<&str, HashSet<&str>> = mcp_servers
@@ -106,12 +106,12 @@ impl<'a> McpToolSession<'a> {
             .collect();
 
         if !allowed_tools_by_server_key.is_empty() {
-            mcp_tools.retain(
-                |entry| match allowed_tools_by_server_key.get(entry.server_key()) {
+            mcp_tools.retain(|entry| {
+                match allowed_tools_by_server_key.get(Self::associated_server_key(entry)) {
                     None => true,
-                    Some(allowed) => allowed.contains(entry.tool_name()),
-                },
-            );
+                    Some(allowed) => Self::matches_allowed_tool_name(entry, allowed),
+                }
+            });
         }
         let (exposed_name_map, exposed_name_by_qualified) =
             Self::build_exposed_function_tools(&mcp_tools, &mcp_servers);
@@ -255,7 +255,7 @@ impl<'a> McpToolSession<'a> {
         // Use the session's pre-filtered tool snapshot for consistency.
         self.mcp_tools
             .iter()
-            .filter(|entry| entry.server_key() == server_key)
+            .filter(|entry| Self::associated_server_key(entry) == server_key)
             .cloned()
             .collect()
     }
@@ -359,10 +359,11 @@ impl<'a> McpToolSession<'a> {
 
         for entry in tools {
             let server_key = entry.server_key().to_string();
+            let associated_server_key = Self::associated_server_key(entry);
             let server_label = server_labels
-                .get(server_key.as_str())
+                .get(associated_server_key)
                 .copied()
-                .unwrap_or(server_key.as_str())
+                .unwrap_or(associated_server_key)
                 .to_string();
             let resolved_tool_name = entry.tool_name().to_string();
 
@@ -403,6 +404,70 @@ impl<'a> McpToolSession<'a> {
         }
 
         (exposed_name_map, exposed_name_by_qualified)
+    }
+
+    fn collect_visible_mcp_tools(
+        orchestrator: &McpOrchestrator,
+        server_keys: &[String],
+    ) -> Vec<ToolEntry> {
+        let direct_tools = orchestrator.list_tools_for_servers(server_keys);
+        let server_key_set: HashSet<&str> = server_keys.iter().map(String::as_str).collect();
+
+        let mut aliases_by_target: HashMap<QualifiedToolName, Vec<ToolEntry>> = HashMap::new();
+        for alias_entry in orchestrator
+            .tool_inventory()
+            .list_by_category(ToolCategory::Alias)
+        {
+            let Some(target) = alias_entry
+                .alias_target
+                .as_ref()
+                .map(|alias| alias.target.clone())
+            else {
+                continue;
+            };
+            if !server_key_set.contains(target.server_key()) {
+                continue;
+            }
+            aliases_by_target
+                .entry(target)
+                .or_default()
+                .push(alias_entry);
+        }
+
+        let mut visible_tools = Vec::with_capacity(
+            direct_tools.len() + aliases_by_target.values().map(Vec::len).sum::<usize>(),
+        );
+
+        for direct_entry in direct_tools {
+            if let Some(mut alias_entries) = aliases_by_target.remove(&direct_entry.qualified_name)
+            {
+                visible_tools.append(&mut alias_entries);
+            } else {
+                visible_tools.push(direct_entry);
+            }
+        }
+
+        for (_, mut alias_entries) in aliases_by_target {
+            visible_tools.append(&mut alias_entries);
+        }
+
+        visible_tools
+    }
+
+    fn associated_server_key(entry: &ToolEntry) -> &str {
+        entry
+            .alias_target
+            .as_ref()
+            .map(|alias| alias.target.server_key())
+            .unwrap_or_else(|| entry.server_key())
+    }
+
+    fn matches_allowed_tool_name(entry: &ToolEntry, allowed: &HashSet<&str>) -> bool {
+        allowed.contains(entry.tool_name())
+            || entry
+                .alias_target
+                .as_ref()
+                .is_some_and(|alias| allowed.contains(alias.target.tool_name()))
     }
 }
 
@@ -747,6 +812,91 @@ mod tests {
         let listed = session.list_tools_for_server("server1");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].tool_name(), "brave_web_search");
+    }
+
+    #[test]
+    fn test_alias_tools_replace_target_tool_in_session_inventory() {
+        let orchestrator = McpOrchestrator::new_test();
+
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "server1",
+                create_test_tool("brave_web_search"),
+            ));
+
+        orchestrator
+            .register_alias(
+                "web_search",
+                "server1",
+                "brave_web_search",
+                Some(
+                    crate::inventory::ArgMapping::new()
+                        .with_override("enable_brave", serde_json::json!(false)),
+                ),
+                ResponseFormat::WebSearchCall,
+            )
+            .expect("alias registration should succeed");
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "brave".to_string(),
+                server_key: "server1".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+
+        assert!(session.has_exposed_tool("web_search"));
+        assert!(!session.has_exposed_tool("brave_web_search"));
+        assert_eq!(session.mcp_tools().len(), 1);
+        assert_eq!(session.mcp_tools()[0].tool_name(), "web_search");
+        assert_eq!(session.resolve_tool_server_label("web_search"), "brave");
+        assert_eq!(
+            session.tool_response_format("web_search"),
+            ResponseFormat::WebSearchCall
+        );
+
+        let listed = session.list_tools_for_server("server1");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].tool_name(), "web_search");
+    }
+
+    #[test]
+    fn test_allowed_tools_accepts_alias_name() {
+        let orchestrator = McpOrchestrator::new_test();
+
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "server1",
+                create_test_tool("brave_web_search"),
+            ));
+
+        orchestrator
+            .register_alias(
+                "web_search",
+                "server1",
+                "brave_web_search",
+                None,
+                ResponseFormat::WebSearchCall,
+            )
+            .expect("alias registration should succeed");
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "brave".to_string(),
+                server_key: "server1".to_string(),
+                allowed_tools: Some(vec!["web_search".to_string()]),
+            }],
+            "test-request",
+        );
+
+        assert!(session.has_exposed_tool("web_search"));
+        assert_eq!(session.mcp_tools().len(), 1);
+        assert_eq!(session.mcp_tools()[0].tool_name(), "web_search");
     }
 
     /// Verify that `inject_mcp_output_items` produces the exact ordering:

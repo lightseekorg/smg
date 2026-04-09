@@ -42,6 +42,7 @@ class RouterArgs:
     max_payload_size: int = 512 * 1024 * 1024  # 512MB default for large batches
     bucket_adjust_interval_secs: int = 5
     dp_aware: bool = False
+    dp_minimum_tokens_scheduler: bool = False
     enable_igw: bool = False  # Enable IGW (Inter-Gateway) mode for multi-model support
     api_key: str | None = None
     log_dir: str | None = None
@@ -381,6 +382,11 @@ class RouterArgs:
             f"--{prefix}dp-aware",
             action="store_true",
             help="Enable data parallelism aware schedule",
+        )
+        routing_group.add_argument(
+            f"--{prefix}dp-minimum-tokens-scheduler",
+            action="store_true",
+            help="Enable minimum tokens scheduler for data parallel group",
         )
         routing_group.add_argument(
             f"--{prefix}enable-igw",

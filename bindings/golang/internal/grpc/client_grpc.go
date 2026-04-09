@@ -148,10 +148,12 @@ func (c *GrpcClient) CreateChatCompletionStream(ctx context.Context, reqJSON str
 
 	// Set sampling parameters
 	samplingParams := &proto.SamplingParams{
-		Temperature:       1.0,
-		TopP:              1.0,
-		TopK:              -1,
-		SkipSpecialTokens: true,
+		Temperature:                1.0,
+		TopP:                       1.0,
+		TopK:                       -1,
+		RepetitionPenalty:          1.0,
+		SkipSpecialTokens:          true,
+		SpacesBetweenSpecialTokens: true,
 	}
 
 	if temp, ok := reqMap["temperature"].(float64); ok {

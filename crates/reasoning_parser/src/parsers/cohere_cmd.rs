@@ -11,7 +11,7 @@ use crate::{
 /// Cohere Command model reasoning parser.
 ///
 /// Handles `<|START_THINKING|>` and `<|END_THINKING|>` tokens.
-/// Unlike DeepSeek-R1, Cohere requires explicit start token (initial_in_reasoning=false).
+/// Unlike DeepSeek-R1, Cohere requires explicit start token (always_in_reasoning=false).
 pub struct CohereCmdParser {
     base: BaseReasoningParser,
 }
@@ -24,7 +24,7 @@ impl CohereCmdParser {
             think_end_token: "<|END_THINKING|>".to_string(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            initial_in_reasoning: false, // Requires explicit start token
+            always_in_reasoning: false,
         };
 
         Self {
@@ -61,6 +61,14 @@ impl ReasoningParser for CohereCmdParser {
 
     fn is_in_reasoning(&self) -> bool {
         self.base.is_in_reasoning()
+    }
+
+    fn mark_reasoning_started(&mut self) {
+        self.base.mark_reasoning_started();
+    }
+
+    fn mark_think_start_stripped(&mut self) {
+        self.base.mark_think_start_stripped();
     }
 }
 
