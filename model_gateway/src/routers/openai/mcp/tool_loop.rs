@@ -587,28 +587,18 @@ fn non_streaming_tool_item_id_source(item_id: &str, response_format: &ResponseFo
 pub(crate) fn inject_mcp_metadata_streaming(
     response: &mut Value,
     state: &ToolLoopState,
-    session: &McpToolSession<'_>,
+    _session: &McpToolSession<'_>,
 ) {
-    let mcp_servers = session.mcp_servers();
-
     if let Some(output_array) = response.get_mut("output").and_then(|v| v.as_array_mut()) {
         output_array.retain(|item| {
             item.get("type").and_then(|t| t.as_str()) != Some(ItemType::MCP_LIST_TOOLS)
         });
 
-        let mut prefix = Vec::with_capacity(mcp_servers.len() + state.mcp_call_items.len());
-        for binding in mcp_servers {
-            prefix.push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
-        }
+        let mut prefix = Vec::with_capacity(state.mcp_call_items.len());
         prefix.extend(state.mcp_call_items.iter().cloned());
         output_array.splice(0..0, prefix);
     } else if let Some(obj) = response.as_object_mut() {
         let mut output_items = Vec::new();
-        for binding in mcp_servers {
-            output_items
-                .push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
-        }
-        // Use stored transformed items (no reconstruction needed)
         output_items.extend(state.mcp_call_items.iter().cloned());
         obj.insert("output".to_string(), Value::Array(output_items));
     }
@@ -813,8 +803,6 @@ fn build_incomplete_response(
         json!({ "reason": reason }),
     );
 
-    let mcp_servers = session.mcp_servers();
-
     // Convert any function_call in output to mcp_call format
     if let Some(output_array) = obj.get_mut("output").and_then(|v| v.as_array_mut()) {
         // Find any function_call items and convert them to mcp_call (incomplete)
@@ -842,14 +830,10 @@ fn build_incomplete_response(
             }
         }
 
-        // Add mcp_list_tools and executed mcp_call items at the beginning
+        // Add executed tool-call items at the beginning.
         if state.total_calls > 0 || !incomplete_items.is_empty() {
-            let mut prefix = Vec::with_capacity(
-                mcp_servers.len() + state.mcp_call_items.len() + incomplete_items.len(),
-            );
-            for binding in mcp_servers {
-                prefix.push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
-            }
+            let mut prefix =
+                Vec::with_capacity(state.mcp_call_items.len() + incomplete_items.len());
             prefix.extend(state.mcp_call_items.iter().cloned());
             prefix.extend(incomplete_items);
             output_array.splice(0..0, prefix);
