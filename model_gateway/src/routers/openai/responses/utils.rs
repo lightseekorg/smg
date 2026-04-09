@@ -1,5 +1,7 @@
 //! Response patching and transformation utilities for OpenAI responses
 
+use std::collections::HashSet;
+
 use openai_protocol::{
     event_types::is_response_event,
     responses::{ResponseTool, ResponsesRequest},
@@ -244,7 +246,23 @@ pub(super) fn restore_original_tools(
     original_body: &ResponsesRequest,
     session: Option<&McpToolSession<'_>>,
 ) {
-    strip_internal_mcp_output_items(resp, session);
+    let user_function_names: HashSet<&str> = original_body
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| match tool {
+                    ResponseTool::Function(function_tool) => {
+                        Some(function_tool.function.name.as_str())
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    strip_internal_mcp_output_items(resp, session, &user_function_names);
     strip_internal_mcp_tools(resp, session);
 
     let Some(original_tools) = original_body.tools.as_ref() else {
@@ -303,7 +321,11 @@ fn strip_internal_mcp_tools(resp: &mut Value, session: Option<&McpToolSession<'_
     tools.retain(|tool| !is_internal_mcp_tool_value(tool, session));
 }
 
-fn strip_internal_mcp_output_items(resp: &mut Value, session: Option<&McpToolSession<'_>>) {
+fn strip_internal_mcp_output_items(
+    resp: &mut Value,
+    session: Option<&McpToolSession<'_>>,
+    user_function_names: &HashSet<&str>,
+) {
     let Some(obj) = resp.as_object_mut() else {
         return;
     };
@@ -312,7 +334,7 @@ fn strip_internal_mcp_output_items(resp: &mut Value, session: Option<&McpToolSes
         return;
     };
 
-    output.retain(|item| !is_internal_mcp_output_item(item, session));
+    output.retain(|item| !is_internal_mcp_output_item(item, session, user_function_names));
 }
 
 fn is_internal_mcp_tool_value(tool: &Value, session: Option<&McpToolSession<'_>>) -> bool {
@@ -331,7 +353,11 @@ fn is_internal_mcp_tool_value(tool: &Value, session: Option<&McpToolSession<'_>>
     }
 }
 
-fn is_internal_mcp_output_item(item: &Value, session: Option<&McpToolSession<'_>>) -> bool {
+fn is_internal_mcp_output_item(
+    item: &Value,
+    session: Option<&McpToolSession<'_>>,
+    user_function_names: &HashSet<&str>,
+) -> bool {
     let Some(session) = session else {
         return false;
     };
@@ -360,11 +386,15 @@ fn is_internal_mcp_output_item(item: &Value, session: Option<&McpToolSession<'_>
         Some("function_call") => item
             .get("name")
             .and_then(|value| value.as_str())
-            .is_some_and(|name| session.is_internal_tool(name)),
+            .is_some_and(|name| {
+                session.is_internal_tool(name) && !user_function_names.contains(name)
+            }),
         Some("function_tool_call") => item
             .get("name")
             .and_then(|value| value.as_str())
-            .is_some_and(|name| session.is_internal_tool(name)),
+            .is_some_and(|name| {
+                session.is_internal_tool(name) && !user_function_names.contains(name)
+            }),
         _ => false,
     }
 }
