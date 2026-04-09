@@ -225,7 +225,10 @@ pub async fn ensure_mcp_servers(
                 tool = %tool_name,
                 "Adding static server for built-in tool routing"
             );
-            if !mcp_servers.iter().any(|b| b.server_key == server_name) {
+            if !mcp_servers
+                .iter()
+                .any(|b| b.server_key == server_name || b.label == server_name)
+            {
                 mcp_servers.push(McpServerBinding {
                     label: server_name.clone(),
                     server_key: server_name,
