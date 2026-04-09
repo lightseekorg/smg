@@ -22,6 +22,9 @@ pub struct McpServerInput {
     pub url: Option<String>,
     pub authorization: Option<String>,
     pub headers: HashMap<String, String>,
+    /// Built-in routing metadata to preserve response format for dynamic connections.
+    pub builtin_type: Option<BuiltinToolType>,
+    pub builtin_tool_name: Option<String>,
     /// Optional per-server tool allowlist.
     pub allowed_tools: Option<Vec<String>>,
 }
@@ -79,8 +82,8 @@ pub async fn connect_mcp_servers(
                 proxy: None,
                 required: false,
                 tools: None,
-                builtin_type: None,
-                builtin_tool_name: None,
+                builtin_type: input.builtin_type.clone(),
+                builtin_tool_name: input.builtin_tool_name.clone(),
                 internal: false,
             };
 
@@ -267,6 +270,8 @@ pub async fn ensure_request_mcp_client(
                 url: mcp.server_url.clone(),
                 authorization: mcp.authorization.clone(),
                 headers: mcp.headers.clone().unwrap_or_default(),
+                builtin_type: None,
+                builtin_tool_name: None,
                 allowed_tools: mcp.allowed_tools.clone(),
             }),
             _ => None,
@@ -292,6 +297,8 @@ pub async fn ensure_request_mcp_client(
                     url: Some(url),
                     authorization: token,
                     headers,
+                    builtin_type: server_cfg.builtin_type.clone(),
+                    builtin_tool_name: server_cfg.builtin_tool_name.clone(),
                     allowed_tools: None,
                 });
             }

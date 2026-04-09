@@ -1654,7 +1654,9 @@ impl McpOrchestrator {
                         .tools
                         .as_ref()
                         .and_then(|tools| tools.get(builtin_tool_name))
-                        .is_some_and(|cfg| cfg.response_format != ResponseFormatConfig::Passthrough);
+                        .is_some_and(|cfg| {
+                            cfg.response_format != ResponseFormatConfig::Passthrough
+                        });
 
                     if !has_explicit_format {
                         if let Some(mut entry) =
