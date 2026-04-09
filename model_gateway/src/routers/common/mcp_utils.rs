@@ -328,6 +328,8 @@ fn resolve_forwarded_headers(
     server_cfg: &McpServerConfig,
     request_headers: Option<&HeaderMap>,
 ) -> Option<(String, Option<String>, HashMap<String, String>)> {
+    // Header forwarding only applies to HTTP transports (SSE/Streamable).
+    // Stdio has no HTTP header channel, so it cannot participate here.
     let (url, token, configured_headers) = match &server_cfg.transport {
         McpTransport::Sse {
             url,
