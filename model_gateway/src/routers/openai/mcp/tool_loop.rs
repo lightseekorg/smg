@@ -846,7 +846,10 @@ fn build_incomplete_response(
 fn is_internal_mcp_response_item(item: &Value, session: &McpToolSession<'_>) -> bool {
     item.get("server_label")
         .and_then(|value| value.as_str())
-        .is_some_and(|server_label| session.is_internal_server_label(server_label))
+        .is_some_and(|server_label| {
+            session.is_internal_server_label(server_label)
+                && !session.is_builtin_server_label(server_label)
+        })
 }
 
 /// Build a mcp_call output item
@@ -947,9 +950,28 @@ fn extract_function_calls(resp: &Value) -> Vec<ExtractedFunctionCall> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use smg_mcp::ResponseFormat;
+    use smg_mcp::{
+        BuiltinToolType, McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig,
+        McpToolSession, McpTransport, ResponseFormat, Tool, ToolEntry,
+    };
 
-    use super::build_transformed_mcp_call_item;
+    use super::{build_transformed_mcp_call_item, is_internal_mcp_response_item};
+
+    fn test_tool(name: &str) -> Tool {
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".to_string(), json!("object"));
+        schema.insert("properties".to_string(), json!({}));
+
+        Tool {
+            name: name.to_string().into(),
+            title: None,
+            description: Some("internal".into()),
+            input_schema: schema.into(),
+            output_schema: None,
+            icons: None,
+            annotations: None,
+        }
+    }
 
     #[test]
     fn build_transformed_mcp_call_item_does_not_add_server_label_for_builtin_formats() {
@@ -972,5 +994,53 @@ mod tests {
             Some("web_search_call")
         );
         assert!(item.get("server_label").is_none());
+    }
+
+    #[tokio::test]
+    async fn internal_filter_keeps_builtin_passthrough_mcp_call_items() {
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                builtin_tool_name: Some("brave_web_search".to_string()),
+                internal: true,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                test_tool("brave_web_search"),
+            ));
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+
+        let item = json!({
+            "type": "mcp_call",
+            "name": "brave_web_search",
+            "server_label": "internal-label"
+        });
+
+        assert!(!is_internal_mcp_response_item(&item, &session));
     }
 }
