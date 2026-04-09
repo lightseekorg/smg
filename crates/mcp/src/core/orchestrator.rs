@@ -49,10 +49,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::{
-    config::{
-        BuiltinToolType, McpConfig, McpProxyConfig, McpServerConfig, McpTransport,
-        ResponseFormatConfig,
-    },
+    config::{BuiltinToolType, McpConfig, McpProxyConfig, McpServerConfig, McpTransport},
     handler::{HandlerRequestContext, RefreshRequest, SmgClientHandler},
     metrics::McpMetrics,
     pool::{McpConnectionPool, PoolKey},
@@ -1650,15 +1647,12 @@ impl McpOrchestrator {
                 if let (Some(builtin_type), Some(builtin_tool_name)) =
                     (&config.builtin_type, &config.builtin_tool_name)
                 {
-                    let has_explicit_format = config
+                    let has_explicit_config = config
                         .tools
                         .as_ref()
-                        .and_then(|tools| tools.get(builtin_tool_name))
-                        .is_some_and(|cfg| {
-                            cfg.response_format != ResponseFormatConfig::Passthrough
-                        });
+                        .is_some_and(|tools| tools.contains_key(builtin_tool_name));
 
-                    if !has_explicit_format {
+                    if !has_explicit_config {
                         if let Some(mut entry) =
                             inventory_clone.get_entry(&server_key, builtin_tool_name)
                         {
