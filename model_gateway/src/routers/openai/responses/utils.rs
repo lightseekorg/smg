@@ -344,11 +344,19 @@ fn is_internal_mcp_output_item(item: &Value, session: Option<&McpToolSession<'_>
         (Some("mcp_list_tools"), _, Some(server_label)) => {
             session.is_internal_server_label(server_label)
         }
-        (Some("mcp_call"), Some(name), _) => session.is_internal_tool(name),
-        (Some("mcp_call"), _, Some(server_label)) => session.is_internal_server_label(server_label),
-        (Some("mcp_approval_request"), Some(name), _) => session.is_internal_tool(name),
+        (Some("mcp_call"), Some(name), _) => {
+            session.is_internal_tool(name) && !session.is_builtin_tool(name)
+        }
+        (Some("mcp_call"), _, Some(server_label)) => {
+            session.is_internal_server_label(server_label)
+                && !session.is_builtin_server_label(server_label)
+        }
+        (Some("mcp_approval_request"), Some(name), _) => {
+            session.is_internal_tool(name) && !session.is_builtin_tool(name)
+        }
         (Some("mcp_approval_request"), _, Some(server_label)) => {
             session.is_internal_server_label(server_label)
+                && !session.is_builtin_server_label(server_label)
         }
         (Some("function_call"), Some(name), _) => session.is_internal_tool(name),
         (Some("function_tool_call"), Some(name), _) => session.is_internal_tool(name),
@@ -731,6 +739,81 @@ mod tests {
                         "queries": ["private query"],
                         "sources": []
                     }
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "visible"}]
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_original_tools_keeps_builtin_passthrough_mcp_call_visible() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            ..Default::default()
+        };
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                builtin_tool_name: Some("brave_web_search".to_string()),
+                internal: true,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                test_tool("brave_web_search"),
+            ));
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+        let mut response = serde_json::json!({
+            "output": [
+                {
+                    "type": "mcp_call",
+                    "name": "brave_web_search",
+                    "server_label": "internal-label",
+                    "output": "{\"results\":[]}"
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "visible"}]
+                }
+            ]
+        });
+
+        restore_original_tools(&mut response, &original_body, Some(&session));
+
+        assert_eq!(
+            response["output"],
+            serde_json::json!([
+                {
+                    "type": "mcp_call",
+                    "name": "brave_web_search",
+                    "server_label": "internal-label",
+                    "output": "{\"results\":[]}"
                 },
                 {
                     "type": "message",

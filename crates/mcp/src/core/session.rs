@@ -78,6 +78,8 @@ pub struct McpToolSession<'a> {
     exposed_name_by_qualified: HashMap<QualifiedToolName, String>,
     /// Internal server keys for this request snapshot.
     internal_server_keys: HashSet<String>,
+    /// Builtin server keys for this request snapshot.
+    builtin_server_keys: HashSet<String>,
 }
 
 impl<'a> McpToolSession<'a> {
@@ -124,6 +126,7 @@ impl<'a> McpToolSession<'a> {
         let (exposed_name_map, exposed_name_by_qualified) =
             Self::build_exposed_function_tools(&mcp_tools, &mcp_servers);
         let configured_internal_servers = orchestrator.internal_server_names();
+        let configured_builtin_servers = orchestrator.builtin_server_names();
         let internal_server_keys: HashSet<String> = mcp_servers
             .iter()
             .filter_map(|binding| {
@@ -134,12 +137,21 @@ impl<'a> McpToolSession<'a> {
                 }
             })
             .collect();
+        let builtin_server_keys: HashSet<String> = mcp_servers
+            .iter()
+            .filter_map(|binding| {
+                if configured_builtin_servers.contains(&binding.server_key) {
+                    Some(binding.server_key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         // Filter out servers configured with builtin_type from the visible list.
-        let builtin_names = orchestrator.builtin_server_names();
         let visible_mcp_servers: Vec<McpServerBinding> = mcp_servers
             .iter()
-            .filter(|b| !builtin_names.contains(&b.server_key))
+            .filter(|b| !configured_builtin_servers.contains(&b.server_key))
             .cloned()
             .collect();
 
@@ -152,6 +164,7 @@ impl<'a> McpToolSession<'a> {
             exposed_name_map,
             exposed_name_by_qualified,
             internal_server_keys,
+            builtin_server_keys,
         }
     }
 
@@ -282,8 +295,26 @@ impl<'a> McpToolSession<'a> {
             .is_some_and(|binding| self.is_internal_server_key(&binding.associated_server_key))
     }
 
+    /// Returns true if the bound server label belongs to a builtin-routed server.
+    pub fn is_builtin_server_label(&self, server_label: &str) -> bool {
+        self.all_mcp_servers.iter().any(|binding| {
+            binding.label == server_label && self.is_builtin_server_key(&binding.server_key)
+        })
+    }
+
+    /// Returns true if the given tool resolves to a builtin-routed server.
+    pub fn is_builtin_tool(&self, tool_name: &str) -> bool {
+        self.exposed_name_map
+            .get(tool_name)
+            .is_some_and(|binding| self.is_builtin_server_key(&binding.associated_server_key))
+    }
+
     fn is_internal_server_key(&self, server_key: &str) -> bool {
         self.internal_server_keys.contains(server_key)
+    }
+
+    fn is_builtin_server_key(&self, server_key: &str) -> bool {
+        self.builtin_server_keys.contains(server_key)
     }
 
     /// List tools for a single server key.
