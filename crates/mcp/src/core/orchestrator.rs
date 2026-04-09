@@ -475,7 +475,10 @@ impl McpOrchestrator {
 
         for (tool_name, tool_config) in tools {
             // Check if the tool exists
-            if !self.tool_inventory.has_tool_qualified(server_key, tool_name) {
+            if !self
+                .tool_inventory
+                .has_tool_qualified(server_key, tool_name)
+            {
                 warn!(
                     "Tool config for '{}:{}' but tool not found on server",
                     server_key, tool_name
@@ -1635,7 +1638,6 @@ impl McpOrchestrator {
 
                 self.apply_tool_configs_for_server_key(&server_key, &config);
                 self.apply_builtin_response_format_for_server_key(&server_key, &config);
-
             }
             Err(e) => warn!("Failed to list tools from '{}': {}", server_key, e),
         }

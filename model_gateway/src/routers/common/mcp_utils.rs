@@ -221,8 +221,7 @@ pub async fn ensure_mcp_servers(
 
     // Add builtin tool routing servers
     for &builtin_type in builtin_types {
-        if let Some((server_name, tool_name, _, _)) =
-            orchestrator.find_builtin_server(builtin_type)
+        if let Some((server_name, tool_name, _, _)) = orchestrator.find_builtin_server(builtin_type)
         {
             debug!(
                 builtin_type = ?builtin_type,
