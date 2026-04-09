@@ -726,6 +726,25 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_legacy_config_memory_runtime_default() {
+        let config = RouterConfig::builder()
+            .regular_mode(vec!["http://worker1".to_string()])
+            .random_policy()
+            .build_unchecked();
+
+        let mut legacy_json = serde_json::to_value(&config).unwrap();
+        legacy_json
+            .as_object_mut()
+            .expect("router config should serialize to object")
+            .remove("memory_runtime");
+
+        let legacy_json_str = legacy_json.to_string();
+        let deserialized: RouterConfig = serde_json::from_str(&legacy_json_str).unwrap();
+
+        assert_eq!(deserialized.memory_runtime, MemoryRuntimeConfig::default());
+    }
+
+    #[test]
     fn test_routing_mode_is_pd_mode() {
         let regular = RoutingMode::Regular {
             worker_urls: vec!["http://worker1".to_string()],
