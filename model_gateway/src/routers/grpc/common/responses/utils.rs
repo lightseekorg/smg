@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::{http::HeaderMap, response::Response};
+use axum::response::Response;
 use openai_protocol::{
     common::Tool,
     responses::{ResponseTool, ResponsesRequest, ResponsesResponse},
@@ -35,7 +35,6 @@ use crate::{
 pub(crate) async fn ensure_mcp_connection(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: Option<&[ResponseTool]>,
-    request_headers: Option<&HeaderMap>,
 ) -> Result<(bool, Vec<McpServerBinding>), Response> {
     // Check for explicit MCP tools (must error if connection fails)
     let has_explicit_mcp_tools = tools
@@ -62,7 +61,7 @@ pub(crate) async fn ensure_mcp_connection(
     }
 
     if let Some(tools) = tools {
-        match ensure_request_mcp_client(mcp_orchestrator, tools, request_headers).await {
+        match ensure_request_mcp_client(mcp_orchestrator, tools, None).await {
             Some(mcp_servers) => {
                 return Ok((true, mcp_servers));
             }
