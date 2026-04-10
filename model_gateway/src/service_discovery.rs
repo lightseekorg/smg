@@ -29,7 +29,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     app_context::AppContext,
     observability::metrics::{metrics_labels, Metrics},
-    worker::Job,
+    workflow::Job,
 };
 
 /// Source for per-worker model_id override during Kubernetes service discovery.

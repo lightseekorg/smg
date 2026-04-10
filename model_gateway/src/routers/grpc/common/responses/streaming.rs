@@ -8,8 +8,7 @@ use openai_protocol::{
     common::{Usage, UsageInfo},
     event_types::{
         CodeInterpreterCallEvent, ContentPartEvent, FileSearchCallEvent, FunctionCallEvent,
-        ImageGenerationCallEvent, McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent,
-        WebSearchCallEvent,
+        McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent, WebSearchCallEvent,
     },
     responses::{
         ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
@@ -33,7 +32,6 @@ pub(crate) enum OutputItemType {
     WebSearchCall,
     CodeInterpreterCall,
     FileSearchCall,
-    ImageGenerationCall,
 }
 
 /// Status of an output item
@@ -122,8 +120,7 @@ impl ResponseStreamEventEmitter {
     ///
     /// After MCP tools are executed, this updates the stored output items
     /// to include the output field from the tool results.
-    /// Supports mcp_call, web_search_call, code_interpreter_call, file_search_call,
-    /// and image_generation_call item types.
+    /// Supports mcp_call, web_search_call, code_interpreter_call, and file_search_call item types.
     pub(crate) fn update_mcp_call_outputs(&mut self, tool_results: &[ToolResult]) {
         for tool_result in tool_results {
             // Find the output item with matching call_id
@@ -137,7 +134,6 @@ impl ResponseStreamEventEmitter {
                             | Some("web_search_call")
                             | Some("code_interpreter_call")
                             | Some("file_search_call")
-                            | Some("image_generation_call")
                     );
                     if is_tool_call
                         && item_data.get("call_id").and_then(|c| c.as_str())
@@ -479,7 +475,6 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::IN_PROGRESS,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::IN_PROGRESS,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::IN_PROGRESS,
-            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::IN_PROGRESS,
             ResponseFormat::Passthrough => McpEvent::CALL_IN_PROGRESS,
         };
         self.emit_tool_event(event_type, output_index, item_id)
@@ -496,7 +491,6 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
-            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
             ResponseFormat::Passthrough => return None,
         };
         Some(self.emit_tool_event(event_type, output_index, item_id))
@@ -513,7 +507,6 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::COMPLETED,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::COMPLETED,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::COMPLETED,
-            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::COMPLETED,
             ResponseFormat::Passthrough => McpEvent::CALL_COMPLETED,
         };
         self.emit_tool_event(event_type, output_index, item_id)
@@ -529,7 +522,6 @@ impl ResponseStreamEventEmitter {
             Some(ResponseFormat::WebSearchCall) => "web_search_call",
             Some(ResponseFormat::CodeInterpreterCall) => "code_interpreter_call",
             Some(ResponseFormat::FileSearchCall) => "file_search_call",
-            Some(ResponseFormat::ImageGenerationCall) => "image_generation_call",
             Some(ResponseFormat::Passthrough) => "mcp_call",
             None => "function_call",
         }
@@ -541,7 +533,6 @@ impl ResponseStreamEventEmitter {
             Some(ResponseFormat::WebSearchCall) => OutputItemType::WebSearchCall,
             Some(ResponseFormat::CodeInterpreterCall) => OutputItemType::CodeInterpreterCall,
             Some(ResponseFormat::FileSearchCall) => OutputItemType::FileSearchCall,
-            Some(ResponseFormat::ImageGenerationCall) => OutputItemType::ImageGenerationCall,
             Some(ResponseFormat::Passthrough) => OutputItemType::McpCall,
             None => OutputItemType::FunctionCall,
         }
@@ -635,7 +626,6 @@ impl ResponseStreamEventEmitter {
             OutputItemType::WebSearchCall => "ws",
             OutputItemType::CodeInterpreterCall => "ci",
             OutputItemType::FileSearchCall => "fs",
-            OutputItemType::ImageGenerationCall => "ig",
         };
 
         let id = Self::generate_item_id(id_prefix);

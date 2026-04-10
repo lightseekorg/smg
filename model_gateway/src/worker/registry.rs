@@ -29,8 +29,9 @@ use crate::{
         circuit_breaker::CircuitState,
         event::WorkerEvent,
         worker::{HealthChecker, RuntimeType, WorkerType},
-        ConnectionMode, Job, JobQueue, Worker,
+        ConnectionMode, Worker,
     },
+    workflow::{Job, JobQueue},
 };
 
 /// Number of virtual nodes per physical worker for even distribution.

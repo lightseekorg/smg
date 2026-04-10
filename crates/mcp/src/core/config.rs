@@ -292,8 +292,6 @@ pub enum BuiltinToolType {
     WebSearchPreview,
     /// Code interpreter tool (OpenAI: code_interpreter)
     CodeInterpreter,
-    /// Image generation tool (OpenAI: image_generation)
-    ImageGeneration,
     /// File search tool (OpenAI: file_search)
     FileSearch,
 }
@@ -304,7 +302,6 @@ impl BuiltinToolType {
         match self {
             BuiltinToolType::WebSearchPreview => ResponseFormatConfig::WebSearchCall,
             BuiltinToolType::CodeInterpreter => ResponseFormatConfig::CodeInterpreterCall,
-            BuiltinToolType::ImageGeneration => ResponseFormatConfig::ImageGenerationCall,
             BuiltinToolType::FileSearch => ResponseFormatConfig::FileSearchCall,
         }
     }
@@ -315,7 +312,6 @@ impl fmt::Display for BuiltinToolType {
         match self {
             BuiltinToolType::WebSearchPreview => write!(f, "web_search_preview"),
             BuiltinToolType::CodeInterpreter => write!(f, "code_interpreter"),
-            BuiltinToolType::ImageGeneration => write!(f, "image_generation"),
             BuiltinToolType::FileSearch => write!(f, "file_search"),
         }
     }
@@ -345,7 +341,6 @@ pub enum ResponseFormatConfig {
     Passthrough,
     WebSearchCall,
     CodeInterpreterCall,
-    ImageGenerationCall,
     FileSearchCall,
 }
 
@@ -1021,10 +1016,6 @@ tools:
                 ResponseFormatConfig::CodeInterpreterCall,
                 "\"code_interpreter_call\"",
             ),
-            (
-                ResponseFormatConfig::ImageGenerationCall,
-                "\"image_generation_call\"",
-            ),
             (ResponseFormatConfig::FileSearchCall, "\"file_search_call\""),
         ];
 
@@ -1191,7 +1182,6 @@ policy:
         let types = vec![
             (BuiltinToolType::WebSearchPreview, "\"web_search_preview\""),
             (BuiltinToolType::CodeInterpreter, "\"code_interpreter\""),
-            (BuiltinToolType::ImageGeneration, "\"image_generation\""),
             (BuiltinToolType::FileSearch, "\"file_search\""),
         ];
 
@@ -1213,10 +1203,6 @@ policy:
         assert_eq!(
             BuiltinToolType::CodeInterpreter.response_format(),
             ResponseFormatConfig::CodeInterpreterCall
-        );
-        assert_eq!(
-            BuiltinToolType::ImageGeneration.response_format(),
-            ResponseFormatConfig::ImageGenerationCall
         );
         assert_eq!(
             BuiltinToolType::FileSearch.response_format(),
@@ -1488,10 +1474,6 @@ servers:
         assert_eq!(
             BuiltinToolType::CodeInterpreter.to_string(),
             "code_interpreter"
-        );
-        assert_eq!(
-            BuiltinToolType::ImageGeneration.to_string(),
-            "image_generation"
         );
         assert_eq!(BuiltinToolType::FileSearch.to_string(), "file_search");
     }

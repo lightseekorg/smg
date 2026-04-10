@@ -15,17 +15,13 @@ use openai_protocol::{
         ResponsesRequest,
     },
 };
-use serde_json::Value;
 use smg_data_connector::{
     self as data_connector, ConversationId, ResponseId, ResponseStorageError,
 };
-use smg_mcp::{McpToolSession, ResponseFormat};
+use smg_mcp::McpToolSession;
 use tracing::{debug, warn};
 
-use crate::routers::{
-    error, grpc::common::responses::ResponsesContext,
-    tool_output_context::compact_tool_output_for_model_context,
-};
+use crate::routers::{error, grpc::common::responses::ResponsesContext};
 
 // ============================================================================
 // Tool Loop State
@@ -65,14 +61,9 @@ impl ToolLoopState {
         tool_name: String,
         args_json_str: String,
         output_str: String,
-        response_format: ResponseFormat,
         output_item: ResponseOutputItem,
+        _success: bool,
     ) {
-        let output_value =
-            serde_json::from_str::<Value>(&output_str).unwrap_or(Value::String(output_str));
-        let model_context_output =
-            compact_tool_output_for_model_context(&response_format, &output_value);
-
         // Add function_tool_call item with both arguments and output
         let id = call_id.clone();
         self.conversation_history
@@ -81,7 +72,7 @@ impl ToolLoopState {
                 call_id,
                 name: tool_name,
                 arguments: args_json_str,
-                output: Some(model_context_output),
+                output: Some(output_str),
                 status: Some("completed".to_string()),
             });
 

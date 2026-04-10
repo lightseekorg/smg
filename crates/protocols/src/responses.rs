@@ -36,10 +36,6 @@ pub enum ResponseTool {
     #[serde(rename = "code_interpreter")]
     CodeInterpreter(CodeInterpreterTool),
 
-    /// Built-in tool.
-    #[serde(rename = "image_generation")]
-    ImageGeneration(ImageGenerationTool),
-
     /// MCP server tool.
     #[serde(rename = "mcp")]
     Mcp(McpTool),
@@ -82,24 +78,6 @@ pub struct WebSearchPreviewTool {
 #[serde(deny_unknown_fields)]
 pub struct CodeInterpreterTool {
     pub container: Option<Value>,
-}
-
-/// Built-in image generation tool.
-///
-/// Known fields are typed for validation; unknown fields are preserved for
-/// forward compatibility via `extra`.
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
-pub struct ImageGenerationTool {
-    pub size: Option<String>,
-    pub quality: Option<String>,
-    pub background: Option<String>,
-    pub output_format: Option<String>,
-    pub output_compression: Option<u32>,
-    pub moderation: Option<String>,
-    pub model: Option<String>,
-    #[serde(flatten)]
-    pub extra: HashMap<String, Value>,
 }
 
 /// `require_approval` values.
@@ -336,25 +314,6 @@ pub enum ResponseOutputItem {
         queries: Vec<String>,
         results: Option<Vec<FileSearchResult>>,
     },
-    #[serde(rename = "image_generation_call")]
-    ImageGenerationCall {
-        id: String,
-        status: ImageGenerationCallStatus,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        result: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        revised_prompt: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        background: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        output_format: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        quality: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        size: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        action: Option<String>,
-    },
 }
 
 // ============================================================================
@@ -427,16 +386,6 @@ pub enum FileSearchCallStatus {
     Searching,
     Completed,
     Incomplete,
-    Failed,
-}
-
-/// Status for image generation tool calls.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ImageGenerationCallStatus {
-    InProgress,
-    Generating,
-    Completed,
     Failed,
 }
 
@@ -1505,82 +1454,8 @@ impl ResponseReasoningContent {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use validator::Validate;
 
     use super::*;
-
-    #[test]
-    fn deserialize_image_generation_tool_with_options() {
-        let tool: ResponseTool = serde_json::from_value(json!({
-            "type": "image_generation",
-            "size": "1024x1024",
-            "quality": "high",
-            "custom_flag": true
-        }))
-        .expect("image_generation tool should deserialize");
-
-        match tool {
-            ResponseTool::ImageGeneration(t) => {
-                assert_eq!(t.size.as_deref(), Some("1024x1024"));
-                assert_eq!(t.quality.as_deref(), Some("high"));
-                assert_eq!(t.extra.get("custom_flag"), Some(&json!(true)));
-            }
-            other => panic!("expected image_generation tool, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn validate_request_with_image_generation_allowed_tool_reference() {
-        let req: ResponsesRequest = serde_json::from_value(json!({
-            "model": "gpt-4o-mini",
-            "input": "draw a robot",
-            "tools": [
-                { "type": "image_generation", "size": "1024x1024" }
-            ],
-            "tool_choice": {
-                "type": "allowed_tools",
-                "mode": "auto",
-                "tools": [
-                    { "type": "image_generation" }
-                ]
-            }
-        }))
-        .expect("responses request should deserialize");
-
-        req.validate()
-            .expect("request with image_generation tool_choice should validate");
-
-        assert!(matches!(
-            req.tool_choice,
-            Some(ToolChoice::AllowedTools { .. })
-        ));
-    }
-
-    #[test]
-    fn deserialize_image_generation_output_item_with_extra_fields() {
-        let item: ResponseOutputItem = serde_json::from_value(json!({
-            "id": "ig_123",
-            "type": "image_generation_call",
-            "status": "completed",
-            "action": "generate",
-            "output_format": "png",
-            "size": "1024x1024",
-            "result": "ZmFrZV9pbWFnZQ==",
-            "revised_prompt": "a red panda"
-        }))
-        .expect("image_generation_call output item should deserialize");
-
-        match item {
-            ResponseOutputItem::ImageGenerationCall {
-                id, status, result, ..
-            } => {
-                assert_eq!(id, "ig_123");
-                assert_eq!(status, ImageGenerationCallStatus::Completed);
-                assert_eq!(result.as_deref(), Some("ZmFrZV9pbWFnZQ=="));
-            }
-            other => panic!("expected image_generation_call output item, got {other:?}"),
-        }
-    }
 
     #[test]
     fn test_responses_request_omitted_top_p_deserializes_to_none() {

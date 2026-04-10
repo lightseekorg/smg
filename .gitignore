@@ -160,6 +160,3 @@ clients/java/target/
 clients/java/build.sbt
 clients/java/gradle.properties
 openapitools.json
-
-# Local MCP config
-mcp.local.yaml
