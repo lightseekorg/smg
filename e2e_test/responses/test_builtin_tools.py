@@ -24,6 +24,7 @@ from infra import BRAVE_MCP_HOST, BRAVE_MCP_PORT, BRAVE_MCP_URL
 logger = logging.getLogger(__name__)
 
 WEB_SEARCH_PREVIEW_TOOL = {"type": "web_search_preview"}
+IMAGE_GENERATION_TOOL = {"type": "image_generation"}
 
 BRAVE_MCP_TOOL = {
     "type": "mcp",
@@ -37,6 +38,7 @@ WEB_SEARCH_PROMPT = (
     "Search the web for the Rust programming language. "
     "Set count to 1 to get only one result, and give a one sentence summary."
 )
+IMAGE_PROMPT = "Generate a watercolor red panda reading a book under a maple tree."
 
 
 def is_brave_server_available() -> bool:
@@ -63,7 +65,19 @@ def create_mcp_config() -> dict:
                         "response_format": "web_search_call",
                     }
                 },
-            }
+            },
+            {
+                "name": "image-builtin",
+                "protocol": "streamable",
+                "url": BRAVE_MCP_URL,
+                "builtin_type": "image_generation",
+                "builtin_tool_name": "brave_web_search",
+                "tools": {
+                    "brave_web_search": {
+                        "response_format": "image_generation_call",
+                    }
+                },
+            },
         ]
     }
 
@@ -399,6 +413,38 @@ class TestBuiltinToolRouting:
             assert "mcp" not in tool_types, (
                 f"Response tools should not show 'mcp' type, got: {tool_types}"
             )
+
+    def test_image_generation_produces_image_generation_call(self, gateway_with_mcp_config):
+        """Test that image_generation produces image_generation_call output."""
+        gateway, client = gateway_with_mcp_config
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model="gpt-4o-mini",
+            input=IMAGE_PROMPT,
+            tools=[IMAGE_GENERATION_TOOL],
+            tool_choice="required",
+            stream=False,
+        )
+
+        assert resp.error is None, f"Response error: {resp.error}"
+        assert resp.output is not None
+
+        output_types = [item.type for item in resp.output]
+        logger.info("image_generation output types: %s", output_types)
+
+        assert "image_generation_call" in output_types, (
+            "Built-in image_generation should produce image_generation_call, "
+            f"got: {output_types}"
+        )
+        assert "mcp_call" not in output_types, (
+            f"Built-in image_generation should NOT produce mcp_call, got: {output_types}"
+        )
+        assert "mcp_list_tools" not in output_types, (
+            "Built-in image_generation should NOT produce mcp_list_tools, "
+            f"got: {output_types}"
+        )
 
 
 @pytest.mark.vendor("openai")
