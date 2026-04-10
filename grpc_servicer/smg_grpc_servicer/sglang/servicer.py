@@ -35,6 +35,7 @@ from sglang.srt.disaggregation.kv_events import (
 )
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST, DisaggregationMode
 from sglang.srt.managers.io_struct import (
+    FlushCacheReqInput,
     GetLoadsReqOutput,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
@@ -598,6 +599,53 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             )
             offset = end
 
+    async def FlushCache(
+        self,
+        request: sglang_scheduler_pb2.FlushCacheRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> sglang_scheduler_pb2.FlushCacheResponse:
+        """Flush the KV cache on all scheduler processes."""
+        logger.debug("Receive flush cache request (timeout_s=%.1f)", request.timeout_s)
+        timeout_s = request.timeout_s
+        comm_timeout = max(30.0, timeout_s + 10.0)
+        try:
+            results = await self.request_manager.send_communicator_req(
+                FlushCacheReqInput(timeout_s=timeout_s),
+                "flush_cache_communicator",
+                timeout=comm_timeout,
+            )
+        except TimeoutError:
+            context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
+            context.set_details(
+                f"Flush cache timed out after {comm_timeout}s. "
+                "The scheduler may be unresponsive or under heavy load."
+            )
+            return sglang_scheduler_pb2.FlushCacheResponse(
+                success=False,
+                message=f"Flush cache timed out after {comm_timeout}s",
+            )
+        except Exception as e:
+            logger.error(f"FlushCache failed: {e}\n{get_exception_traceback()}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Flush cache failed: {e}")
+            return sglang_scheduler_pb2.FlushCacheResponse(
+                success=False, message=f"Flush cache failed: {e}"
+            )
+
+        if not results:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("No response from scheduler")
+            return sglang_scheduler_pb2.FlushCacheResponse(
+                success=False, message="No response from scheduler"
+            )
+
+        failures = [r for r in results if not r.success]
+        if failures:
+            msgs = " | ".join(r.message or "failed" for r in failures)
+            return sglang_scheduler_pb2.FlushCacheResponse(success=False, message=msgs)
+        return sglang_scheduler_pb2.FlushCacheResponse(
+            success=True, message="Cache flushed successfully"
+        )
     async def SubscribeKvEvents(
         self,
         request: common_pb2.SubscribeKvEventsRequest,
