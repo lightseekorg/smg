@@ -288,6 +288,14 @@ impl<'a> McpToolSession<'a> {
         })
     }
 
+    /// Returns true if the bound server label is internal and not builtin-routed.
+    ///
+    /// Use this helper in redaction paths so internal filtering behavior stays
+    /// consistent across response assembly code paths.
+    pub fn is_internal_non_builtin_server_label(&self, server_label: &str) -> bool {
+        self.is_internal_server_label(server_label) && !self.is_builtin_server_label(server_label)
+    }
+
     /// Returns true if the given tool resolves to an internal server.
     pub fn is_internal_tool(&self, tool_name: &str) -> bool {
         self.exposed_name_map
@@ -307,6 +315,11 @@ impl<'a> McpToolSession<'a> {
         self.exposed_name_map
             .get(tool_name)
             .is_some_and(|binding| self.is_builtin_server_key(&binding.associated_server_key))
+    }
+
+    /// Returns true if the given tool resolves to an internal, non-builtin server.
+    pub fn is_internal_non_builtin_tool(&self, tool_name: &str) -> bool {
+        self.is_internal_tool(tool_name) && !self.is_builtin_tool(tool_name)
     }
 
     fn is_internal_server_key(&self, server_key: &str) -> bool {

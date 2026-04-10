@@ -908,10 +908,7 @@ fn build_incomplete_response(
 fn is_internal_mcp_response_item(item: &Value, session: &McpToolSession<'_>) -> bool {
     item.get("server_label")
         .and_then(|value| value.as_str())
-        .is_some_and(|server_label| {
-            session.is_internal_server_label(server_label)
-                && !session.is_builtin_server_label(server_label)
-        })
+        .is_some_and(|server_label| session.is_internal_non_builtin_server_label(server_label))
 }
 
 /// Build a mcp_call output item

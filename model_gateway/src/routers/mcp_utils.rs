@@ -488,6 +488,7 @@ mod tests {
                     )])),
                     builtin_type: Some(BuiltinToolType::ImageGeneration),
                     builtin_tool_name: Some("generate_image".to_string()),
+                    internal: false,
                 },
             ],
             pool: Default::default(),

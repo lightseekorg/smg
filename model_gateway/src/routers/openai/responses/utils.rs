@@ -1,6 +1,6 @@
 //! Response patching and transformation utilities for OpenAI responses
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use openai_protocol::{
     event_types::is_response_event,
@@ -238,16 +238,8 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
     }
 }
 
-/// Restore original tools (MCP and builtin) in response for client.
-///
-/// The model receives function tools, but the response should mirror the original
-/// request's tool format (MCP tools with server_url, builtin tools like web_search_preview).
-pub(super) fn restore_original_tools(
-    resp: &mut Value,
-    original_body: &ResponsesRequest,
-    session: Option<&McpToolSession<'_>>,
-) {
-    let user_function_names: HashSet<&str> = original_body
+fn collect_user_function_names(original_body: &ResponsesRequest) -> HashSet<&str> {
+    original_body
         .tools
         .as_ref()
         .map(|tools| {
@@ -261,27 +253,68 @@ pub(super) fn restore_original_tools(
                 })
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
+/// Restore original tools (MCP and builtin) in response for client.
+///
+/// The model receives function tools, but the response should mirror the original
+/// request's tool format (MCP tools with server_url, builtin tools like web_search_preview).
+/// Also scrubs any internal-MCP artifacts that leaked into the upstream payload.
+pub(super) fn restore_original_tools(
+    resp: &mut Value,
+    original_body: &ResponsesRequest,
+    session: Option<&McpToolSession<'_>>,
+) {
+    let user_function_names = collect_user_function_names(original_body);
     strip_internal_mcp_output_items(resp, session, &user_function_names);
-    strip_internal_mcp_tools(resp, session);
+    strip_internal_mcp_tools(resp, session, &user_function_names);
+    restore_client_tool_view(resp, original_body, session, &user_function_names);
+}
 
+fn restore_client_tool_view(
+    resp: &mut Value,
+    original_body: &ResponsesRequest,
+    session: Option<&McpToolSession<'_>>,
+    user_function_names: &HashSet<&str>,
+) {
     let Some(original_tools) = original_body.tools.as_ref() else {
         return;
     };
 
+    // Pure function-tool requests: keep upstream tools/tool_choice payload as-is.
+    if original_tools
+        .iter()
+        .all(|tool| matches!(tool, ResponseTool::Function(_)))
+    {
+        return;
+    }
+
+    let upstream_by_name: HashMap<&str, &Value> = resp
+        .as_object()
+        .and_then(|obj| obj.get("tools"))
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| function_tool_name(tool).map(|name| (name, tool)))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut restored_tools: Vec<Value> = Vec::with_capacity(original_tools.len());
     for original_tool in original_tools {
         match original_tool {
-            // Preserve user-defined function tools in original order.
-            ResponseTool::Function(_) => {
-                if let Ok(value) = serde_json::to_value(original_tool) {
+            ResponseTool::Function(function_tool) => {
+                if let Some(existing) = upstream_by_name.get(function_tool.function.name.as_str()) {
+                    restored_tools.push((*existing).clone());
+                } else if let Ok(value) = serde_json::to_value(original_tool) {
                     restored_tools.push(value);
                 }
             }
             _ => {
                 if let Some(value) = response_tool_to_value(original_tool) {
-                    if !is_internal_mcp_tool_value(&value, session) {
+                    if !is_internal_mcp_tool_value(&value, session, user_function_names) {
                         restored_tools.push(value);
                     }
                 }
@@ -289,28 +322,23 @@ pub(super) fn restore_original_tools(
         }
     }
 
+    let Some(obj) = resp.as_object_mut() else {
+        return;
+    };
     if restored_tools.is_empty() {
-        let had_restorable_original_tool = original_tools
-            .iter()
-            .any(|tool| response_tool_to_value(tool).is_some());
-        let had_function_tool = original_tools
-            .iter()
-            .any(|tool| matches!(tool, ResponseTool::Function(_)));
-        if had_restorable_original_tool && !had_function_tool {
-            if let Some(obj) = resp.as_object_mut() {
-                obj.remove("tools");
-            }
-        }
+        obj.remove("tools");
         return;
     }
 
-    if let Some(obj) = resp.as_object_mut() {
-        obj.insert("tools".to_string(), Value::Array(restored_tools));
-        obj.entry("tool_choice").or_insert(json!("auto"));
-    }
+    obj.insert("tools".to_string(), Value::Array(restored_tools));
+    obj.entry("tool_choice").or_insert(json!("auto"));
 }
 
-fn strip_internal_mcp_tools(resp: &mut Value, session: Option<&McpToolSession<'_>>) {
+fn strip_internal_mcp_tools(
+    resp: &mut Value,
+    session: Option<&McpToolSession<'_>>,
+    user_function_names: &HashSet<&str>,
+) {
     let Some(obj) = resp.as_object_mut() else {
         return;
     };
@@ -319,7 +347,7 @@ fn strip_internal_mcp_tools(resp: &mut Value, session: Option<&McpToolSession<'_
         return;
     };
 
-    tools.retain(|tool| !is_internal_mcp_tool_value(tool, session));
+    tools.retain(|tool| !is_internal_mcp_tool_value(tool, session, user_function_names));
 }
 
 fn strip_internal_mcp_output_items(
@@ -338,7 +366,11 @@ fn strip_internal_mcp_output_items(
     output.retain(|item| !is_internal_mcp_output_item(item, session, user_function_names));
 }
 
-fn is_internal_mcp_tool_value(tool: &Value, session: Option<&McpToolSession<'_>>) -> bool {
+fn is_internal_mcp_tool_value(
+    tool: &Value,
+    session: Option<&McpToolSession<'_>>,
+    user_function_names: &HashSet<&str>,
+) -> bool {
     let Some(session) = session else {
         return false;
     };
@@ -348,10 +380,28 @@ fn is_internal_mcp_tool_value(tool: &Value, session: Option<&McpToolSession<'_>>
         tool.get("name").and_then(|value| value.as_str()),
         tool.get("server_label").and_then(|value| value.as_str()),
     ) {
-        (Some("function"), Some(name), _) => session.is_internal_tool(name),
+        (Some("function"), Some(name), _) => {
+            session.is_internal_tool(name) && !user_function_names.contains(name)
+        }
+        // MCP tool entries are keyed by server metadata, so function-name collision
+        // handling does not apply to this arm.
         (Some("mcp"), _, Some(server_label)) => session.is_internal_server_label(server_label),
         _ => false,
     }
+}
+
+fn function_tool_name(tool: &Value) -> Option<&str> {
+    let tool_type = tool.get("type").and_then(|value| value.as_str());
+    if tool_type != Some("function") {
+        return None;
+    }
+    tool.get("name")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            tool.get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(|value| value.as_str())
+        })
 }
 
 fn is_internal_mcp_output_item(
@@ -364,6 +414,8 @@ fn is_internal_mcp_output_item(
     };
 
     match item.get("type").and_then(|value| value.as_str()) {
+        // mcp_list_tools is gateway-synthesized metadata and should always be hidden
+        // for internal servers, even when builtin call outputs remain visible.
         Some("mcp_list_tools") => item
             .get("server_label")
             .and_then(|value| value.as_str())
@@ -372,15 +424,12 @@ fn is_internal_mcp_output_item(
             let matches_internal_name = item
                 .get("name")
                 .and_then(|value| value.as_str())
-                .is_some_and(|name| {
-                    session.is_internal_tool(name) && !session.is_builtin_tool(name)
-                });
+                .is_some_and(|name| session.is_internal_non_builtin_tool(name));
             let matches_internal_server = item
                 .get("server_label")
                 .and_then(|value| value.as_str())
                 .is_some_and(|server_label| {
-                    session.is_internal_server_label(server_label)
-                        && !session.is_builtin_server_label(server_label)
+                    session.is_internal_non_builtin_server_label(server_label)
                 });
             matches_internal_name || matches_internal_server
         }
@@ -388,13 +437,13 @@ fn is_internal_mcp_output_item(
             .get("name")
             .and_then(|value| value.as_str())
             .is_some_and(|name| {
-                session.is_internal_tool(name) && !user_function_names.contains(name)
+                session.is_internal_non_builtin_tool(name) && !user_function_names.contains(name)
             }),
         Some("function_tool_call") => item
             .get("name")
             .and_then(|value| value.as_str())
             .is_some_and(|name| {
-                session.is_internal_tool(name) && !user_function_names.contains(name)
+                session.is_internal_non_builtin_tool(name) && !user_function_names.contains(name)
             }),
         _ => false,
     }
@@ -402,7 +451,10 @@ fn is_internal_mcp_output_item(
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::responses::{ResponseInput, ResponsesRequest};
+    use openai_protocol::{
+        common::Function,
+        responses::{FunctionTool, McpTool, ResponseInput, ResponseTool, ResponsesRequest},
+    };
     use serde_json::json;
     use smg_mcp::{
         BuiltinToolType, McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig,
@@ -892,6 +944,186 @@ mod tests {
         );
         let mut response = serde_json::json!({
             "output": [
+                {
+                    "type": "mcp_call",
+                    "name": "brave_web_search",
+                    "server_label": "internal-label",
+                    "output": "{\"results\":[]}"
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "visible"}]
+                }
+            ]
+        });
+
+        restore_original_tools(&mut response, &original_body, Some(&session));
+
+        assert_eq!(
+            response["output"],
+            serde_json::json!([
+                {
+                    "type": "mcp_call",
+                    "name": "brave_web_search",
+                    "server_label": "internal-label",
+                    "output": "{\"results\":[]}"
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "visible"}]
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_original_tools_keeps_user_function_call_on_name_collision() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            tools: Some(vec![
+                ResponseTool::Function(FunctionTool {
+                    function: Function {
+                        name: "internal_search".to_string(),
+                        description: Some("user function".to_string()),
+                        parameters: json!({
+                            "type": "object",
+                            "properties": { "query": { "type": "string" } },
+                        }),
+                        strict: None,
+                    },
+                }),
+                ResponseTool::Mcp(McpTool {
+                    server_url: Some("http://localhost:3000/sse".to_string()),
+                    authorization: None,
+                    headers: None,
+                    server_label: "internal-label".to_string(),
+                    server_description: None,
+                    require_approval: None,
+                    allowed_tools: Some(vec!["internal_search".to_string()]),
+                }),
+            ]),
+            ..Default::default()
+        };
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: true,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                test_tool("internal_search"),
+            ));
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+        let mut response = serde_json::json!({
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "internal_search",
+                    "arguments": "{\"query\":\"client\"}"
+                },
+                {
+                    "type": "mcp_call",
+                    "name": "internal_search",
+                    "server_label": "internal-label"
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "visible"}]
+                }
+            ]
+        });
+
+        restore_original_tools(&mut response, &original_body, Some(&session));
+
+        assert_eq!(
+            response["output"],
+            serde_json::json!([
+                {
+                    "type": "function_call",
+                    "name": "internal_search",
+                    "arguments": "{\"query\":\"client\"}"
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "visible"}]
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_original_tools_hides_internal_list_tools_but_keeps_builtin_passthrough_call() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            ..Default::default()
+        };
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                builtin_tool_name: Some("brave_web_search".to_string()),
+                internal: true,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                test_tool("brave_web_search"),
+            ));
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+        let mut response = serde_json::json!({
+            "output": [
+                {
+                    "type": "mcp_list_tools",
+                    "server_label": "internal-label",
+                    "tools": []
+                },
                 {
                     "type": "mcp_call",
                     "name": "brave_web_search",
