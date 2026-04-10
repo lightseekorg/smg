@@ -5,6 +5,7 @@ pub use super::headers::MemoryHeaderView;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 /// Runtime feature flags that gate memory store/recall behavior.
+#[serde(default)]
 pub struct MemoryRuntimeConfig {
     pub ltm_enabled: bool,
     pub ltm_store_enabled: bool,
@@ -102,6 +103,8 @@ fn normalize(value: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::{MemoryExecutionContext, MemoryHeaderView, MemoryRuntimeConfig};
 
     #[test]
@@ -183,5 +186,14 @@ mod tests {
 
         assert!(!ctx.recall_requested);
         assert!(!ctx.recall_active);
+    }
+
+    #[test]
+    fn memory_runtime_config_deserializes_with_missing_fields_defaulted() {
+        let config: MemoryRuntimeConfig =
+            serde_json::from_value(json!({ "ltm_enabled": true })).expect("should deserialize");
+
+        assert!(config.ltm_enabled);
+        assert!(!config.ltm_store_enabled);
     }
 }
