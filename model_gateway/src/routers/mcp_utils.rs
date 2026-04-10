@@ -114,7 +114,7 @@ pub async fn connect_mcp_servers(
 
 /// Routing information for a built-in tool type.
 ///
-/// When a built-in tool type (web_search_preview, code_interpreter, image_generation, file_search)
+/// When a built-in tool type (web_search_preview, code_interpreter, file_search)
 /// is configured to route to an MCP server, this struct holds the routing details.
 #[derive(Debug, Clone)]
 pub struct BuiltinToolRouting {
@@ -130,7 +130,7 @@ pub struct BuiltinToolRouting {
 
 /// Collect routing information for built-in tools in a request.
 ///
-/// Scans request tools for built-in types (web_search_preview, code_interpreter, image_generation, file_search)
+/// Scans request tools for built-in types (web_search_preview, code_interpreter, file_search)
 /// and looks up configured MCP servers to handle them.
 ///
 /// # Arguments
@@ -154,7 +154,6 @@ pub fn collect_builtin_routing(
         let builtin_type = match tool {
             ResponseTool::WebSearchPreview(_) => BuiltinToolType::WebSearchPreview,
             ResponseTool::CodeInterpreter(_) => BuiltinToolType::CodeInterpreter,
-            ResponseTool::ImageGeneration(_) => BuiltinToolType::ImageGeneration,
             _ => continue,
         };
 
@@ -195,7 +194,6 @@ pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
         .filter_map(|t| match t {
             ResponseTool::WebSearchPreview(_) => Some(BuiltinToolType::WebSearchPreview),
             ResponseTool::CodeInterpreter(_) => Some(BuiltinToolType::CodeInterpreter),
-            ResponseTool::ImageGeneration(_) => Some(BuiltinToolType::ImageGeneration),
             _ => None,
         })
         .collect()
@@ -279,8 +277,7 @@ mod tests {
     use openai_protocol::{
         common::Function,
         responses::{
-            CodeInterpreterTool, FunctionTool, ImageGenerationTool, McpTool, ResponseTool,
-            WebSearchPreviewTool,
+            CodeInterpreterTool, FunctionTool, McpTool, ResponseTool, WebSearchPreviewTool,
         },
     };
     use serde_json::json;
@@ -466,25 +463,6 @@ mod tests {
                     builtin_type: Some(BuiltinToolType::CodeInterpreter),
                     builtin_tool_name: Some("run_code".to_string()),
                 },
-                McpServerConfig {
-                    name: "image-server".to_string(),
-                    transport: McpTransport::Streamable {
-                        url: "http://localhost:9997/image".to_string(),
-                        token: None,
-                        headers: HashMap::new(),
-                    },
-                    proxy: None,
-                    required: false,
-                    tools: Some(HashMap::from([(
-                        "generate_image".to_string(),
-                        ToolConfig {
-                            response_format: ResponseFormatConfig::ImageGenerationCall,
-                            ..Default::default()
-                        },
-                    )])),
-                    builtin_type: Some(BuiltinToolType::ImageGeneration),
-                    builtin_tool_name: Some("generate_image".to_string()),
-                },
             ],
             pool: Default::default(),
             proxy: None,
@@ -498,12 +476,11 @@ mod tests {
         let tools = vec![
             ResponseTool::WebSearchPreview(WebSearchPreviewTool::default()),
             ResponseTool::CodeInterpreter(CodeInterpreterTool::default()),
-            ResponseTool::ImageGeneration(ImageGenerationTool::default()),
         ];
 
         let routing = collect_builtin_routing(&orchestrator, Some(&tools));
 
-        assert_eq!(routing.len(), 3);
+        assert_eq!(routing.len(), 2);
 
         // Find web search routing
         let web_routing = routing
@@ -525,32 +502,6 @@ mod tests {
             code_routing.response_format,
             ResponseFormat::CodeInterpreterCall
         );
-
-        // Find image generation routing
-        let image_routing = routing
-            .iter()
-            .find(|r| r.builtin_type == BuiltinToolType::ImageGeneration)
-            .expect("Should have image generation routing");
-        assert_eq!(image_routing.server_name, "image-server");
-        assert_eq!(image_routing.tool_name, "generate_image");
-        assert_eq!(
-            image_routing.response_format,
-            ResponseFormat::ImageGenerationCall
-        );
-    }
-
-    #[test]
-    fn test_extract_builtin_types_includes_image_generation() {
-        let tools = vec![
-            ResponseTool::WebSearchPreview(WebSearchPreviewTool::default()),
-            ResponseTool::CodeInterpreter(CodeInterpreterTool::default()),
-            ResponseTool::ImageGeneration(ImageGenerationTool::default()),
-        ];
-
-        let types = extract_builtin_types(&tools);
-        assert!(types.contains(&BuiltinToolType::WebSearchPreview));
-        assert!(types.contains(&BuiltinToolType::CodeInterpreter));
-        assert!(types.contains(&BuiltinToolType::ImageGeneration));
     }
 
     // =========================================================================
