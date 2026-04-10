@@ -29,3 +29,11 @@ pip install --no-cache-dir --upgrade pip \
 cd "${SMG_SRC}/bindings/python"
 ulimit -n 65536 && maturin build --release --features vendored-openssl --out dist
 pip install --force-reinstall dist/*.whl
+
+# Install smg-grpc-proto and smg-grpc-servicer from source so the image stays
+# in sync with this repo. --force-reinstall overrides any stale version the
+# engine base image may have preinstalled (e.g. lmsysorg/sglang ships an older
+# smg-grpc-servicer pulled from PyPI at its own build time).
+pip install --no-cache-dir --force-reinstall \
+    "${SMG_SRC}/crates/grpc_client/python" \
+    "${SMG_SRC}/grpc_servicer"
