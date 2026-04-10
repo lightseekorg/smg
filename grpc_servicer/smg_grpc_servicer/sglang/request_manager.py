@@ -215,19 +215,11 @@ class GrpcRequestManager:
         self.enable_metrics = server_args.enable_metrics
         self.metrics_collector = None
         if self.enable_metrics and TokenizerMetricsCollector is not None:
-            # Derive engine_type from disaggregation_mode, matching
-            # SchedulerMetricsCollector (scheduler_metrics_mixin.py).
-            if server_args.disaggregation_mode == "prefill":
-                engine_type = "prefill"
-            elif server_args.disaggregation_mode == "decode":
-                engine_type = "decode"
-            else:
-                engine_type = "unified"
-
             labels = {
-                "model_name": server_args.served_model_name or server_args.model_path,
-                "engine_type": engine_type,
+                "model_name": server_args.served_model_name,
             }
+            if server_args.extra_metric_labels:
+                labels.update(server_args.extra_metric_labels)
             self.metrics_collector = TokenizerMetricsCollector(
                 server_args=server_args,
                 labels=labels,
@@ -236,10 +228,7 @@ class GrpcRequestManager:
                 bucket_e2e_request_latency=server_args.bucket_e2e_request_latency,
                 collect_tokens_histogram=server_args.collect_tokens_histogram,
             )
-            logger.info(
-                f"TokenizerMetricsCollector initialized for gRPC mode "
-                f"(engine_type={engine_type})"
-            )
+            logger.info("TokenizerMetricsCollector initialized for gRPC mode")
 
         # Crash dump for debugging
         self.crash_dump_request_list = []
@@ -613,15 +602,10 @@ class GrpcRequestManager:
 
             # Update timing and record per-token metrics
             # Mirrors TokenizerManager.collect_metrics() logic exactly.
-            completion_tokens = (
-                batch_out.completion_tokens[i] if batch_out.completion_tokens else 0
-            )
+            completion_tokens = batch_out.completion_tokens[i] if batch_out.completion_tokens else 0
             if state.time_stats.first_token_time == 0.0:
                 state.time_stats.set_first_token_time()
-            if (
-                not state.ttft_observed
-                and self.disaggregation_mode != DisaggregationMode.PREFILL
-            ):
+            if not state.ttft_observed and self.disaggregation_mode != DisaggregationMode.PREFILL:
                 state.ttft_observed = True
                 state.last_completion_tokens = completion_tokens
                 if self.metrics_collector is not None:
@@ -744,9 +728,7 @@ class GrpcRequestManager:
         if put_tasks:
             await asyncio.gather(*put_tasks, return_exceptions=True)
 
-    def _collect_metrics(
-        self, state: GrpcReqState, batch_out: BatchTokenIDOutput, i: int
-    ):
+    def _collect_metrics(self, state: GrpcReqState, batch_out: BatchTokenIDOutput, i: int):
         """Record serving metrics for a finished request.
 
         Mirrors TokenizerManager.collect_metrics() — records E2E latency,
@@ -758,9 +740,7 @@ class GrpcRequestManager:
             return
 
         labels = self.metrics_collector.labels
-        completion_tokens = (
-            batch_out.completion_tokens[i] if batch_out.completion_tokens else 0
-        )
+        completion_tokens = batch_out.completion_tokens[i] if batch_out.completion_tokens else 0
         prompt_tokens = batch_out.prompt_tokens[i] if batch_out.prompt_tokens else 0
         cached_tokens = batch_out.cached_tokens[i] if batch_out.cached_tokens else 0
 
@@ -772,10 +752,7 @@ class GrpcRequestManager:
         )
 
         cached_tokens_details = None
-        if (
-            hasattr(batch_out, "cached_tokens_details")
-            and batch_out.cached_tokens_details
-        ):
+        if hasattr(batch_out, "cached_tokens_details") and batch_out.cached_tokens_details:
             cached_tokens_details = batch_out.cached_tokens_details[i]
 
         self.metrics_collector.observe_one_finished_request(
