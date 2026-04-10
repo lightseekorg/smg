@@ -375,17 +375,16 @@ fn is_internal_mcp_tool_value(
         return false;
     };
 
-    match (
-        tool.get("type").and_then(|value| value.as_str()),
-        tool.get("name").and_then(|value| value.as_str()),
-        tool.get("server_label").and_then(|value| value.as_str()),
-    ) {
-        (Some("function"), Some(name), _) => {
+    match tool.get("type").and_then(|value| value.as_str()) {
+        Some("function") => function_tool_name(tool).is_some_and(|name| {
             session.is_internal_tool(name) && !user_function_names.contains(name)
-        }
+        }),
         // MCP tool entries are keyed by server metadata, so function-name collision
         // handling does not apply to this arm.
-        (Some("mcp"), _, Some(server_label)) => session.is_internal_server_label(server_label),
+        Some("mcp") => tool
+            .get("server_label")
+            .and_then(|value| value.as_str())
+            .is_some_and(|server_label| session.is_internal_server_label(server_label)),
         _ => false,
     }
 }
@@ -543,6 +542,67 @@ mod tests {
 
         assert_eq!(response["tools"], serde_json::json!([]));
         assert_eq!(response["tool_choice"], "auto");
+    }
+
+    #[tokio::test]
+    async fn restore_original_tools_strips_injected_internal_nested_function_tool_shape() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            ..Default::default()
+        };
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: true,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                test_tool("internal_search"),
+            ));
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+        let mut response = serde_json::json!({
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "internal_search",
+                    "description": "internal",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": ["query"]
+                    }
+                }
+            }]
+        });
+
+        restore_original_tools(&mut response, &original_body, Some(&session));
+
+        assert_eq!(response["tools"], serde_json::json!([]));
     }
 
     #[tokio::test]

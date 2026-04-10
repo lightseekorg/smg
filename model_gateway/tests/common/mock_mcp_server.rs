@@ -335,9 +335,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_failing_server_startup() {
+        use rmcp::{
+            model::CallToolRequestParam, transport::StreamableHttpClientTransport, ServiceExt,
+        };
+
         let mut server = MockFailingMCPServer::start("marker").await.unwrap();
         assert!(server.port() > 0);
         assert!(server.url().contains(&server.port().to_string()));
+
+        let transport = StreamableHttpClientTransport::from_uri(server.url().as_str());
+        let client = ().serve(transport).await.expect("connect failing mock server");
+
+        let err = client
+            .call_tool(CallToolRequestParam {
+                name: "brave_web_search".into(),
+                arguments: Some(
+                    serde_json::json!({
+                        "query": "smoke"
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            })
+            .await
+            .expect_err("failing mock tool call should error");
+        assert!(err.to_string().contains("marker"));
+
         server.stop().await;
     }
 }

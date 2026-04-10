@@ -12,6 +12,7 @@ use futures::stream::{self, StreamExt};
 use openai_protocol::responses::ResponseTool;
 
 use super::{
+    config::BuiltinToolType,
     orchestrator::{McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput},
     UNKNOWN_SERVER_KEY,
 };
@@ -57,6 +58,7 @@ struct ExposedToolBinding {
     associated_server_key: String,
     server_label: String,
     resolved_tool_name: String,
+    is_builtin_routed: bool,
     response_format: ResponseFormat,
 }
 
@@ -78,8 +80,6 @@ pub struct McpToolSession<'a> {
     exposed_name_by_qualified: HashMap<QualifiedToolName, String>,
     /// Internal server keys for this request snapshot.
     internal_server_keys: HashSet<String>,
-    /// Builtin server keys for this request snapshot.
-    builtin_server_keys: HashSet<String>,
 }
 
 impl<'a> McpToolSession<'a> {
@@ -123,8 +123,9 @@ impl<'a> McpToolSession<'a> {
                 }
             });
         }
+        let builtin_tool_bindings = Self::builtin_tool_bindings(orchestrator);
         let (exposed_name_map, exposed_name_by_qualified) =
-            Self::build_exposed_function_tools(&mcp_tools, &mcp_servers);
+            Self::build_exposed_function_tools(&mcp_tools, &mcp_servers, &builtin_tool_bindings);
         let configured_internal_servers = orchestrator.internal_server_names();
         let configured_builtin_servers = orchestrator.builtin_server_names();
         let internal_server_keys: HashSet<String> = mcp_servers
@@ -137,17 +138,6 @@ impl<'a> McpToolSession<'a> {
                 }
             })
             .collect();
-        let builtin_server_keys: HashSet<String> = mcp_servers
-            .iter()
-            .filter_map(|binding| {
-                if configured_builtin_servers.contains(&binding.server_key) {
-                    Some(binding.server_key.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
         // Filter out servers configured with builtin_type from the visible list.
         let visible_mcp_servers: Vec<McpServerBinding> = mcp_servers
             .iter()
@@ -164,7 +154,6 @@ impl<'a> McpToolSession<'a> {
             exposed_name_map,
             exposed_name_by_qualified,
             internal_server_keys,
-            builtin_server_keys,
         }
     }
 
@@ -293,7 +282,26 @@ impl<'a> McpToolSession<'a> {
     /// Use this helper in redaction paths so internal filtering behavior stays
     /// consistent across response assembly code paths.
     pub fn is_internal_non_builtin_server_label(&self, server_label: &str) -> bool {
-        self.is_internal_server_label(server_label) && !self.is_builtin_server_label(server_label)
+        if !self.is_internal_server_label(server_label) {
+            return false;
+        }
+
+        let mut has_exposed_binding_for_label = false;
+        for binding in self.exposed_name_map.values() {
+            if binding.server_label != server_label {
+                continue;
+            }
+
+            has_exposed_binding_for_label = true;
+            if self.is_internal_server_key(&binding.associated_server_key)
+                && !binding.is_builtin_routed
+            {
+                return true;
+            }
+        }
+
+        // If no tools are exposed under this label, treat internal labels as non-builtin.
+        !has_exposed_binding_for_label
     }
 
     /// Returns true if the given tool resolves to an internal server.
@@ -305,16 +313,16 @@ impl<'a> McpToolSession<'a> {
 
     /// Returns true if the bound server label belongs to a builtin-routed server.
     pub fn is_builtin_server_label(&self, server_label: &str) -> bool {
-        self.all_mcp_servers.iter().any(|binding| {
-            binding.label == server_label && self.is_builtin_server_key(&binding.server_key)
-        })
+        self.exposed_name_map
+            .values()
+            .any(|binding| binding.server_label == server_label && binding.is_builtin_routed)
     }
 
     /// Returns true if the given tool resolves to a builtin-routed server.
     pub fn is_builtin_tool(&self, tool_name: &str) -> bool {
         self.exposed_name_map
             .get(tool_name)
-            .is_some_and(|binding| self.is_builtin_server_key(&binding.associated_server_key))
+            .is_some_and(|binding| binding.is_builtin_routed)
     }
 
     /// Returns true if the given tool resolves to an internal, non-builtin server.
@@ -324,10 +332,6 @@ impl<'a> McpToolSession<'a> {
 
     fn is_internal_server_key(&self, server_key: &str) -> bool {
         self.internal_server_keys.contains(server_key)
-    }
-
-    fn is_builtin_server_key(&self, server_key: &str) -> bool {
-        self.builtin_server_keys.contains(server_key)
     }
 
     /// List tools for a single server key.
@@ -418,6 +422,7 @@ impl<'a> McpToolSession<'a> {
     fn build_exposed_function_tools(
         tools: &[ToolEntry],
         mcp_servers: &[McpServerBinding],
+        builtin_tool_bindings: &HashSet<QualifiedToolName>,
     ) -> (
         HashMap<String, ExposedToolBinding>,
         HashMap<QualifiedToolName, String>,
@@ -448,6 +453,7 @@ impl<'a> McpToolSession<'a> {
                 .unwrap_or(associated_server_key)
                 .to_string();
             let resolved_tool_name = entry.tool_name().to_string();
+            let is_builtin_routed = Self::builtin_binding_for_entry(entry, builtin_tool_bindings);
 
             let base_exposed_name = if name_counts.get(entry.tool_name()).copied().unwrap_or(0) <= 1
             {
@@ -481,6 +487,7 @@ impl<'a> McpToolSession<'a> {
                     associated_server_key: associated_server_key.to_string(),
                     server_label,
                     resolved_tool_name,
+                    is_builtin_routed,
                     response_format: entry.response_format.clone(),
                 },
             );
@@ -551,6 +558,31 @@ impl<'a> McpToolSession<'a> {
                 .alias_target
                 .as_ref()
                 .is_some_and(|alias| allowed.contains(alias.target.tool_name()))
+    }
+
+    fn builtin_tool_bindings(orchestrator: &McpOrchestrator) -> HashSet<QualifiedToolName> {
+        [
+            BuiltinToolType::WebSearchPreview,
+            BuiltinToolType::CodeInterpreter,
+            BuiltinToolType::ImageGeneration,
+            BuiltinToolType::FileSearch,
+        ]
+        .into_iter()
+        .filter_map(|builtin_type| orchestrator.find_builtin_server(builtin_type))
+        .map(|(server_key, tool_name, _)| QualifiedToolName::new(server_key, tool_name))
+        .collect()
+    }
+
+    fn builtin_binding_for_entry(
+        entry: &ToolEntry,
+        builtin_tool_bindings: &HashSet<QualifiedToolName>,
+    ) -> bool {
+        let target = entry
+            .alias_target
+            .as_ref()
+            .map(|alias| &alias.target)
+            .unwrap_or(&entry.qualified_name);
+        builtin_tool_bindings.contains(target)
     }
 }
 
@@ -861,6 +893,56 @@ mod tests {
 
         // all_mcp_servers() should return everything
         assert_eq!(session.all_mcp_servers().len(), 2);
+    }
+
+    #[test]
+    fn test_is_builtin_tool_scoped_to_builtin_binding_only() {
+        use crate::core::config::{BuiltinToolType, McpConfig, McpServerConfig, McpTransport};
+
+        let orchestrator = McpOrchestrator::new_test_with_config(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                builtin_tool_name: Some("brave_web_search".to_string()),
+                internal: true,
+            }],
+            ..Default::default()
+        });
+
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                create_test_tool("brave_web_search"),
+            ));
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                create_test_tool("internal_non_builtin_tool"),
+            ));
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+
+        assert!(session.is_builtin_tool("brave_web_search"));
+        assert!(!session.is_builtin_tool("internal_non_builtin_tool"));
+        assert!(session.is_internal_non_builtin_tool("internal_non_builtin_tool"));
     }
 
     #[test]
