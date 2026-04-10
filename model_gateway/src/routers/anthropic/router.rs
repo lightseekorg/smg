@@ -110,6 +110,7 @@ impl RouterTrait for AnthropicRouter {
                     url: Some(server.url.clone()),
                     authorization: server.authorization_token.clone(),
                     headers: HashMap::new(),
+                    tools: None,
                     builtin_type: None,
                     builtin_tool_name: None,
                     allowed_tools: toolset_allowed.get(&server.name).and_then(|v| v.clone()),

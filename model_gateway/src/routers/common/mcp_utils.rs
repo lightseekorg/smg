@@ -6,7 +6,7 @@ use axum::http::HeaderMap;
 use openai_protocol::responses::ResponseTool;
 use smg_mcp::{
     BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpTransport,
-    ResponseFormat,
+    ResponseFormat, ToolConfig,
 };
 use tracing::{debug, warn};
 
@@ -22,6 +22,7 @@ pub struct McpServerInput {
     pub url: Option<String>,
     pub authorization: Option<String>,
     pub headers: HashMap<String, String>,
+    pub tools: Option<HashMap<String, ToolConfig>>,
     /// Built-in routing metadata to preserve response format for dynamic connections.
     pub builtin_type: Option<BuiltinToolType>,
     pub builtin_tool_name: Option<String>,
@@ -81,7 +82,7 @@ pub async fn connect_mcp_servers(
                 transport,
                 proxy: None,
                 required: false,
-                tools: None,
+                tools: input.tools.clone(),
                 builtin_type: input.builtin_type.clone(),
                 builtin_tool_name: input.builtin_tool_name.clone(),
                 internal: false,
@@ -223,6 +224,29 @@ pub async fn ensure_mcp_servers(
     for &builtin_type in builtin_types {
         if let Some((server_name, tool_name, _, _)) = orchestrator.find_builtin_server(builtin_type)
         {
+            // If this builtin type is already connected via a dynamic URL-keyed server
+            // for this request, skip adding the static name-keyed binding to avoid
+            // exposing duplicate tool copies in one session.
+            let has_connected_dynamic_builtin = inputs
+                .iter()
+                .filter(|input| input.builtin_type == Some(builtin_type))
+                .filter_map(|input| input.url.as_deref())
+                .any(|dynamic_server_key| {
+                    mcp_servers
+                        .iter()
+                        .any(|binding| binding.server_key == dynamic_server_key)
+                });
+
+            if has_connected_dynamic_builtin {
+                debug!(
+                    builtin_type = ?builtin_type,
+                    server = %server_name,
+                    tool = %tool_name,
+                    "Skipping static builtin binding because dynamic builtin server is connected"
+                );
+                continue;
+            }
+
             debug!(
                 builtin_type = ?builtin_type,
                 server = %server_name,
@@ -268,6 +292,7 @@ pub async fn ensure_request_mcp_client(
                 url: mcp.server_url.clone(),
                 authorization: mcp.authorization.clone(),
                 headers: mcp.headers.clone().unwrap_or_default(),
+                tools: None,
                 builtin_type: None,
                 builtin_tool_name: None,
                 allowed_tools: mcp.allowed_tools.clone(),
@@ -298,6 +323,7 @@ pub async fn ensure_request_mcp_client(
                     url: Some(url),
                     authorization: token,
                     headers,
+                    tools: server_cfg.tools.clone(),
                     builtin_type: server_cfg.builtin_type.clone(),
                     builtin_tool_name: server_cfg.builtin_tool_name.clone(),
                     allowed_tools: None,
