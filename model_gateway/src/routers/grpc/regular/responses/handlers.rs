@@ -114,17 +114,16 @@ async fn route_responses_streaming(
     };
 
     // 2. Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, mcp_servers) =
-        match ensure_mcp_connection(
-            &ctx.mcp_orchestrator,
-            request.tools.as_deref(),
-            params.headers.as_ref(),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(response) => return response,
-        };
+    let (has_mcp_tools, mcp_servers) = match ensure_mcp_connection(
+        &ctx.mcp_orchestrator,
+        request.tools.as_deref(),
+        params.headers.as_ref(),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
 
     if has_mcp_tools {
         debug!("MCP tools detected in streaming mode, using streaming tool loop");

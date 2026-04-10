@@ -1541,6 +1541,11 @@ impl McpOrchestrator {
 
         // Check if already connected with same auth/tenant
         if self.connection_pool.contains(&pool_key) {
+            // Even when reusing a pooled client, apply this request's config on the
+            // URL-keyed inventory entry so response_format/arg_mapping/builtin format
+            // stay aligned with the active builtin routing configuration.
+            self.apply_tool_configs_for_server_key(&pool_key.url, &config);
+            self.apply_builtin_response_format_for_server_key(&pool_key.url, &config);
             return Ok(pool_key.url.clone());
         }
 
