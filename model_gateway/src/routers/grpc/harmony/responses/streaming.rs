@@ -2,6 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::http::HeaderMap;
 use axum::response::Response;
 use bytes::Bytes;
 use openai_protocol::responses::ResponsesRequest;
@@ -40,6 +41,7 @@ use crate::{
 pub(crate) async fn serve_harmony_responses_stream(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
+    request_headers: Option<&HeaderMap>,
 ) -> Response {
     // Load previous conversation history if previous_response_id is set
     let current_request = match load_previous_messages(ctx, request.clone()).await {
@@ -51,6 +53,7 @@ pub(crate) async fn serve_harmony_responses_stream(
     let (has_mcp_tools, mcp_servers) = match ensure_mcp_connection(
         &ctx.mcp_orchestrator,
         current_request.tools.as_deref(),
+        request_headers,
     )
     .await
     {

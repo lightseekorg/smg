@@ -5,6 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use axum::http::HeaderMap;
 use axum::response::Response;
 use openai_protocol::{
     common::{ToolCall, Usage},
@@ -51,6 +52,7 @@ use crate::{
 pub(crate) async fn serve_harmony_responses(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
+    request_headers: Option<&HeaderMap>,
 ) -> Result<ResponsesResponse, Response> {
     // Clone request for persistence
     let original_request = request.clone();
@@ -62,7 +64,7 @@ pub(crate) async fn serve_harmony_responses(
     let (has_mcp_tools, mcp_servers) = ensure_mcp_connection(
         &ctx.mcp_orchestrator,
         current_request.tools.as_deref(),
-        None,
+        request_headers,
     )
     .await?;
 

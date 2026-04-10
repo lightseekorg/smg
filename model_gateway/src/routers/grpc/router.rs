@@ -335,9 +335,9 @@ impl GrpcRouter {
             );
 
             if body.stream.unwrap_or(false) {
-                serve_harmony_responses_stream(&harmony_ctx, body.clone()).await
+                serve_harmony_responses_stream(&harmony_ctx, body.clone(), headers).await
             } else {
-                match serve_harmony_responses(&harmony_ctx, body.clone()).await {
+                match serve_harmony_responses(&harmony_ctx, body.clone(), headers).await {
                     Ok(response) => axum::Json(response).into_response(),
                     Err(error_response) => error_response,
                 }
