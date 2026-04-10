@@ -48,8 +48,12 @@ pub(super) async fn route_responses_internal(
     let modified_request = load_conversation_history(ctx, &request).await?;
 
     // 2. Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, mcp_servers) =
-        ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
+    let (has_mcp_tools, mcp_servers) = ensure_mcp_connection(
+        &ctx.mcp_orchestrator,
+        request.tools.as_deref(),
+        params.headers.as_ref(),
+    )
+    .await?;
 
     let responses_response = if has_mcp_tools {
         debug!("MCP tools detected, using tool loop");
