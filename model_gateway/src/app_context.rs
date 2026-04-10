@@ -563,7 +563,6 @@ impl AppContextBuilder {
             hook,
         };
         let bundle = create_storage_bundle(storage_config).await?;
-        validate_memory_writer_configuration(config, bundle.conversation_memory_writer.as_ref())?;
 
         self.response_storage = Some(bundle.response_storage);
         self.conversation_storage = Some(bundle.conversation_storage);

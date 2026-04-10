@@ -6,30 +6,20 @@ pub use super::headers::MemoryHeaderView;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 /// Runtime feature flags that gate memory store/recall behavior.
 pub struct MemoryRuntimeConfig {
-    /// Enables memory features at runtime.
     pub ltm_enabled: bool,
-    /// Enables long-term-memory store writes when memory is enabled.
     pub ltm_store_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// Normalized per-request memory execution context derived from headers and runtime flags.
 pub struct MemoryExecutionContext {
-    /// Whether the request asks to store LTM content (policy/header intent).
     pub store_ltm_requested: bool,
-    /// Whether store is both requested and active given runtime flags.
     pub store_ltm_active: bool,
-    /// Whether the request policy asks for recall behavior.
     pub recall_requested: bool,
-    /// Whether recall is both requested and active given runtime flags.
     pub recall_active: bool,
-    /// Subject identifier propagated from request headers.
     pub subject_id: Option<String>,
-    /// Optional recall strategy hint from request headers.
     pub recall_method: Option<String>,
-    /// Optional embedding model override from request headers.
     pub embedding_model: Option<String>,
-    /// Optional extraction model override from request headers.
     pub extraction_model: Option<String>,
 }
 

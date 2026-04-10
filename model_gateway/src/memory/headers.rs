@@ -12,17 +12,11 @@ pub const MEMORY_EXTRACTION_MODEL_HEADER: &str = "x-smg-memory-extraction-model"
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// Normalized view of memory-related request headers.
 pub struct MemoryHeaderView {
-    /// Raw policy header value (for example `store_only` or `store_and_recall`).
     pub policy: Option<String>,
-    /// Header override for store enablement intent.
     pub ltm_store_enabled: Option<String>,
-    /// Subject identifier used for memory scoping.
     pub subject_id: Option<String>,
-    /// Optional recall strategy hint.
     pub recall_method: Option<String>,
-    /// Optional embedding model override for memory operations.
     pub embedding_model: Option<String>,
-    /// Optional extraction model override for memory operations.
     pub extraction_model: Option<String>,
 }
 

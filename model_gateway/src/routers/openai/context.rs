@@ -14,72 +14,46 @@ use smg_mcp::{McpOrchestrator, McpToolSession};
 use super::provider::Provider;
 use crate::{config::RouterConfig, memory::MemoryExecutionContext, middleware, worker::Worker};
 
-/// Mutable per-request context used throughout OpenAI router handling.
 pub struct RequestContext {
-    /// Parsed request input and request metadata.
     pub input: RequestInput,
-    /// Shared components available to handlers for this request.
     pub components: ComponentRefs,
-    /// Mutable processing state populated as the pipeline advances.
     pub state: ProcessingState,
-    /// Storage hook request context extracted from HTTP headers by middleware.
     pub storage_request_context: Option<StorageRequestContext>,
     pub memory_execution_context: MemoryExecutionContext,
 }
 
-/// Immutable request input metadata captured at context creation.
 pub struct RequestInput {
-    /// Request payload variant.
     pub request_type: RequestType,
-    /// Original HTTP headers when available.
     pub headers: Option<HeaderMap>,
-    /// Optional model id override.
     pub model_id: Option<String>,
 }
 
-/// Supported OpenAI-compatible request shapes.
 pub enum RequestType {
-    /// Chat Completions request payload.
     Chat(Arc<ChatCompletionRequest>),
-    /// Responses API request payload.
     Responses(Arc<ResponsesRequest>),
 }
 
 #[derive(Clone)]
-/// Components shared by all OpenAI router request types.
 pub struct SharedComponents {
-    /// HTTP client used for worker/proxy calls.
     pub client: reqwest::Client,
-    /// Router runtime configuration.
     pub router_config: Arc<RouterConfig>,
 }
 
-/// Components required by Responses-specific flows.
 pub struct ResponsesComponents {
-    /// Shared components also used by non-responses flows.
     pub shared: Arc<SharedComponents>,
-    /// MCP orchestrator used for tool session management.
     pub mcp_orchestrator: Arc<McpOrchestrator>,
-    /// Response persistence backend.
     pub response_storage: Arc<dyn ResponseStorage>,
-    /// Conversation persistence backend.
     pub conversation_storage: Arc<dyn ConversationStorage>,
-    /// Conversation item persistence backend.
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    /// Optional memory writer for LTM store operations.
     pub conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
 }
 
-/// Union of component sets available to a request context.
 pub enum ComponentRefs {
-    /// Shared-only components (chat and other non-responses paths).
     Shared(Arc<SharedComponents>),
-    /// Full responses components with storage handles.
     Responses(Arc<ResponsesComponents>),
 }
 
 impl ComponentRefs {
-    /// Access HTTP client for outbound worker/proxy calls.
     pub fn client(&self) -> &reqwest::Client {
         match self {
             ComponentRefs::Shared(s) => &s.client,
@@ -95,7 +69,6 @@ impl ComponentRefs {
         }
     }
 
-    /// Access MCP orchestrator when responses components are present.
     pub fn mcp_orchestrator(&self) -> Option<&Arc<McpOrchestrator>> {
         match self {
             ComponentRefs::Shared(_) => None,
@@ -103,7 +76,6 @@ impl ComponentRefs {
         }
     }
 
-    /// Access response storage when responses components are present.
     pub fn response_storage(&self) -> Option<&Arc<dyn ResponseStorage>> {
         match self {
             ComponentRefs::Shared(_) => None,
@@ -111,7 +83,6 @@ impl ComponentRefs {
         }
     }
 
-    /// Access conversation storage when responses components are present.
     pub fn conversation_storage(&self) -> Option<&Arc<dyn ConversationStorage>> {
         match self {
             ComponentRefs::Shared(_) => None,
@@ -119,7 +90,6 @@ impl ComponentRefs {
         }
     }
 
-    /// Access conversation item storage when responses components are present.
     pub fn conversation_item_storage(&self) -> Option<&Arc<dyn ConversationItemStorage>> {
         match self {
             ComponentRefs::Shared(_) => None,
@@ -137,29 +107,19 @@ impl ComponentRefs {
 }
 
 #[derive(Default)]
-/// Mutable state accumulated while processing a request.
 pub struct ProcessingState {
-    /// Selected worker/provider pair once routing is resolved.
     pub worker: Option<WorkerSelection>,
-    /// Prepared outbound payload and target URL once rendered.
     pub payload: Option<PayloadState>,
 }
 
-/// Selected worker and provider binding for request execution.
 pub struct WorkerSelection {
-    /// Destination worker chosen by routing policy.
     pub worker: Arc<dyn Worker>,
-    /// Provider strategy used to render/transform payloads.
     pub provider: Arc<dyn Provider>,
 }
 
-/// Prepared outbound request payload and metadata.
 pub struct PayloadState {
-    /// Serialized outbound JSON payload.
     pub json: Value,
-    /// Destination worker URL.
     pub url: String,
-    /// Prior response id when continuing a conversation.
     pub previous_response_id: Option<String>,
 }
 
@@ -226,7 +186,6 @@ impl RequestContext {
             middleware::build_memory_execution_context(self.components.router_config(), headers);
     }
 
-    /// Return responses request reference when this context contains responses input.
     pub fn responses_request(&self) -> Option<&ResponsesRequest> {
         match &self.input.request_type {
             RequestType::Responses(req) => Some(req.as_ref()),
@@ -234,7 +193,6 @@ impl RequestContext {
         }
     }
 
-    /// Clone and return responses request when this context contains responses input.
     pub fn responses_request_arc(&self) -> Option<Arc<ResponsesRequest>> {
         match &self.input.request_type {
             RequestType::Responses(req) => Some(Arc::clone(req)),
@@ -242,7 +200,6 @@ impl RequestContext {
         }
     }
 
-    /// Whether the underlying request asks for streaming output.
     pub fn is_streaming(&self) -> bool {
         match &self.input.request_type {
             RequestType::Chat(req) => req.stream,
@@ -250,69 +207,50 @@ impl RequestContext {
         }
     }
 
-    /// Borrow request headers when present.
     pub fn headers(&self) -> Option<&HeaderMap> {
         self.input.headers.as_ref()
     }
 
-    /// Borrow model id override when present.
     pub fn model_id(&self) -> Option<&str> {
         self.input.model_id.as_deref()
     }
 
-    /// Borrow selected worker when routing has completed.
     pub fn worker(&self) -> Option<&Arc<dyn Worker>> {
         self.state.worker.as_ref().map(|w| &w.worker)
     }
 
-    /// Borrow selected provider when routing has completed.
     pub fn provider(&self) -> Option<&dyn Provider> {
         self.state.worker.as_ref().map(|w| w.provider.as_ref())
     }
 
-    /// Borrow prepared payload state when available.
     pub fn payload(&self) -> Option<&PayloadState> {
         self.state.payload.as_ref()
     }
 
-    /// Take ownership of prepared payload state, leaving `None` behind.
     pub fn take_payload(&mut self) -> Option<PayloadState> {
         self.state.payload.take()
     }
 }
 
-/// Storage handles packaged for streaming response lifecycle.
 pub struct StorageHandles {
-    /// Response persistence backend.
     pub response: Arc<dyn ResponseStorage>,
-    /// Conversation persistence backend.
     pub conversation: Arc<dyn ConversationStorage>,
-    /// Conversation item persistence backend.
     pub conversation_item: Arc<dyn ConversationItemStorage>,
     /// Optional conversation memory writer.
     pub conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
-    /// Optional hook context propagated from inbound request headers.
     pub request_context: Option<StorageRequestContext>,
-    /// Effective memory execution context for this request.
     pub memory_execution_context: MemoryExecutionContext,
 }
 
-/// Owned request state used by streaming handlers.
 pub struct OwnedStreamingContext {
-    /// Destination URL for worker call.
     pub url: String,
-    /// Serialized outbound payload.
     pub payload: Value,
-    /// Original responses request body.
     pub original_body: ResponsesRequest,
-    /// Prior response id when request continues an existing thread.
     pub previous_response_id: Option<String>,
-    /// Storage handles required for persistence updates during streaming.
     pub storage: StorageHandles,
 }
 
 impl RequestContext {
-    /// Convert request context into owned streaming context once payload is prepared.
     pub fn into_streaming_context(mut self) -> Result<OwnedStreamingContext, &'static str> {
         let payload_state = self.take_payload().ok_or("Payload not prepared")?;
         let original_body = self
@@ -352,17 +290,12 @@ impl RequestContext {
     }
 }
 
-/// Lightweight borrowed context passed to per-event streaming emitters.
 pub struct StreamingEventContext<'a> {
-    /// Original responses request.
     pub original_request: &'a ResponsesRequest,
-    /// Prior response id if the request continues a thread.
     pub previous_response_id: Option<&'a str>,
-    /// Optional MCP session borrowed during streaming callbacks.
     pub session: Option<&'a McpToolSession<'a>>,
 }
 
-/// Backward-compatible alias for streaming request context.
 pub type StreamingRequest = OwnedStreamingContext;
 
 #[cfg(test)]
