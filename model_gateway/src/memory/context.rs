@@ -127,7 +127,10 @@ mod tests {
             &MemoryRuntimeConfig::default(),
         );
 
+        assert!(!ctx.store_ltm_requested);
         assert!(!ctx.store_ltm_active);
+        assert!(!ctx.recall_requested);
+        assert!(!ctx.recall_active);
     }
 
     #[test]
