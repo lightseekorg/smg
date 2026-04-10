@@ -15,7 +15,7 @@ pub use openai_protocol::worker::{ConnectionMode, RuntimeType, WorkerType};
 use openai_protocol::{
     model_card::ModelCard,
     model_type::{Endpoint, ModelType},
-    worker::{HealthCheckConfig, ProviderType, WorkerInfo, WorkerModels, WorkerSpec},
+    worker::{HealthCheckConfig, ProviderType, WorkerInfo, WorkerModels, WorkerSpec, WorkerStatus},
 };
 use tokio::{sync::OnceCell, time};
 
@@ -971,6 +971,11 @@ pub fn worker_to_info(worker: &Arc<dyn Worker>) -> WorkerInfo {
         model_id: spec.models.primary().map(|m| m.id.clone()),
         spec,
         is_healthy: worker.is_healthy(),
+        status: Some(if worker.is_healthy() {
+            WorkerStatus::Ready
+        } else {
+            WorkerStatus::NotReady
+        }),
         load: worker.load(),
         job_status: None,
     }

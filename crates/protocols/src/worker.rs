@@ -89,6 +89,76 @@ impl std::fmt::Display for ConnectionMode {
     }
 }
 
+/// Worker lifecycle status, modeled after Kubernetes pod conditions.
+///
+/// Separates "starting up" from "can serve traffic" from "broken" to prevent
+/// premature removal of workers that haven't been locally verified.
+///
+/// Uses `#[repr(u8)]` with explicit discriminants so atomic storage
+/// (`AtomicU8`) and wire compatibility do not depend on enum ordering.
+#[repr(u8)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerStatus {
+    /// Just registered, not yet proven healthy locally.
+    /// Not routable. Health checker probes until first success.
+    #[default]
+    Pending = 0,
+
+    /// Locally verified and passing health checks. Routable.
+    Ready = 1,
+
+    /// Was Ready, now failing readiness checks. Not routable.
+    /// NOT removed — may recover. Health checker continues probing.
+    NotReady = 2,
+
+    /// Sustained liveness failure. Will be removed if `--remove-unhealthy-workers`.
+    Failed = 3,
+}
+
+impl WorkerStatus {
+    /// Try to convert a `u8` discriminant to a `WorkerStatus`.
+    /// Returns `None` for unrecognized values.
+    pub fn try_from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Pending),
+            1 => Some(Self::Ready),
+            2 => Some(Self::NotReady),
+            3 => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    /// Convert a `u8` discriminant to a `WorkerStatus`, falling back to
+    /// `Pending` for unrecognized values (with a debug assertion).
+    pub fn from_u8(value: u8) -> Self {
+        let status = Self::try_from_u8(value).unwrap_or(Self::Pending);
+        debug_assert!(
+            Self::try_from_u8(value).is_some(),
+            "invalid WorkerStatus discriminant: {value}"
+        );
+        status
+    }
+
+    /// Returns `true` if the worker is routable (only `Ready`).
+    pub fn is_routable(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+impl std::fmt::Display for WorkerStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkerStatus::Pending => write!(f, "pending"),
+            WorkerStatus::Ready => write!(f, "ready"),
+            WorkerStatus::NotReady => write!(f, "not_ready"),
+            WorkerStatus::Failed => write!(f, "failed"),
+        }
+    }
+}
+
 /// Composite key identifying a group of workers with the same characteristics.
 ///
 /// Groups workers by `(model_id, worker_type, connection_mode)` — the natural
@@ -609,6 +679,11 @@ pub struct WorkerInfo {
     /// Whether the worker is healthy.
     pub is_healthy: bool,
 
+    /// Worker lifecycle status (Pending, Ready, NotReady, Failed).
+    /// Present alongside `is_healthy` for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<WorkerStatus>,
+
     /// Current load on the worker.
     pub load: usize,
 
@@ -624,6 +699,7 @@ impl WorkerInfo {
             model_id: None,
             spec: WorkerSpec::new(url),
             is_healthy: false,
+            status: Some(WorkerStatus::Pending),
             load: 0,
             job_status,
         }
