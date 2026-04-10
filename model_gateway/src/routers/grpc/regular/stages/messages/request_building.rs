@@ -75,6 +75,14 @@ impl PipelineStage for MessageRequestBuildingStage {
             )
         })?;
 
+        // Reject multimodal for backends that don't support it, before assembling
+        if processed_messages.multimodal_intermediate.is_some() && builder_client.is_mlx() {
+            return Err(error::bad_request(
+                "multimodal_not_supported",
+                "MLX backend does not support multimodal inputs".to_string(),
+            ));
+        }
+
         // Assemble backend-specific multimodal data now that the backend is known
         let multimodal_data = processed_messages
             .multimodal_intermediate
