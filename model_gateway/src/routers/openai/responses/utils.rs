@@ -1,6 +1,6 @@
 //! Response patching and transformation utilities for OpenAI responses
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 
 use openai_protocol::{
     event_types::is_response_event,
@@ -289,31 +289,11 @@ fn restore_client_tool_view(
         return;
     }
 
-    let mut upstream_by_name: HashMap<&str, VecDeque<&Value>> = resp
-        .as_object()
-        .and_then(|obj| obj.get("tools"))
-        .and_then(Value::as_array)
-        .map(|tools| {
-            let mut by_name: HashMap<&str, VecDeque<&Value>> = HashMap::new();
-            for tool in tools {
-                if let Some(name) = function_tool_name(tool) {
-                    by_name.entry(name).or_default().push_back(tool);
-                }
-            }
-            by_name
-        })
-        .unwrap_or_default();
-
     let mut restored_tools: Vec<Value> = Vec::with_capacity(original_tools.len());
     for original_tool in original_tools {
         match original_tool {
-            ResponseTool::Function(function_tool) => {
-                if let Some(existing) = upstream_by_name
-                    .get_mut(function_tool.function.name.as_str())
-                    .and_then(|tools| tools.pop_front())
-                {
-                    restored_tools.push(existing.clone());
-                } else if let Ok(value) = serde_json::to_value(original_tool) {
+            ResponseTool::Function(_) => {
+                if let Ok(value) = serde_json::to_value(original_tool) {
                     restored_tools.push(value);
                 }
             }
