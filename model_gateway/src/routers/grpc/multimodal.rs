@@ -437,16 +437,22 @@ async fn process_multimodal_parts(
     let registry = components.image_processor_registry.clone();
     let model_id_owned = model_id.to_string();
     let model_type_owned = model_type.map(String::from);
-    let image_clones: Vec<image::DynamicImage> = images.iter().map(|f| f.image.clone()).collect();
+    let images_for_preprocess = images.clone(); // cheap Arc refcount bumps
 
     let preprocessed: PreprocessedImages = tokio::task::spawn_blocking(move || {
+        // Extract DynamicImages inside the blocking closure so the expensive
+        // clone happens off the tokio async runtime.
+        let raw_images: Vec<image::DynamicImage> = images_for_preprocess
+            .iter()
+            .map(|f| f.image.clone())
+            .collect();
         let processor = registry
             .find(&model_id_owned, model_type_owned.as_deref())
             .ok_or_else(|| {
                 anyhow::anyhow!("No image processor found for model: {model_id_owned}")
             })?;
         processor
-            .preprocess(&image_clones, &pp_config)
+            .preprocess(&raw_images, &pp_config)
             .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))
     })
     .await
