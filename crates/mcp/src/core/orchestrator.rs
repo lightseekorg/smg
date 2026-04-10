@@ -1392,11 +1392,6 @@ impl McpOrchestrator {
         request: CallToolRequestParam,
     ) -> McpResult<CallToolResult> {
         if let Some(entry) = self.static_servers.get(server_key) {
-            debug!(
-                server_key = %server_key,
-                client_path = "static",
-                "Executing MCP tool call via static client"
-            );
             return entry.client.call_tool(request).await.map_err(|e| match e {
                 // Typed detection for transport-level failures
                 ServiceError::TransportClosed | ServiceError::TransportSend(_) => {
@@ -1407,11 +1402,6 @@ impl McpOrchestrator {
         }
 
         if let Some(client) = self.connection_pool.get_by_url(server_key) {
-            debug!(
-                server_key = %server_key,
-                client_path = "dynamic_pool",
-                "Executing MCP tool call via dynamic pooled client"
-            );
             return client.call_tool(request).await.map_err(|e| match e {
                 ServiceError::TransportClosed | ServiceError::TransportSend(_) => {
                     // Note: Pooled connections trigger Disconnected but
@@ -1422,10 +1412,6 @@ impl McpOrchestrator {
             });
         }
 
-        debug!(
-            server_key = %server_key,
-            "MCP tool call failed to resolve server in static map or dynamic pool"
-        );
         Err(McpError::ServerNotFound(server_key.to_string()))
     }
 
