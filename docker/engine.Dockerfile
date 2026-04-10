@@ -64,9 +64,15 @@ RUN case "${ENGINE}" in \
     esac \
     && if [ -n "${ENGINE_REPO}" ]; then \
          bash /tmp/scripts/install-${ENGINE}.sh /opt/engine-src; \
-       fi \
-    && if [ "${ENGINE}" = "vllm" ]; then \
-         pip install --no-cache-dir smg-grpc-proto "smg-grpc-servicer[vllm]"; \
        fi
+
+# Smoke-test that the engine-specific servicer imports cleanly against the
+# installed engine. Fails the build immediately if an upstream engine refactor
+# breaks our servicer (e.g. sglang moving symbols between submodules).
+RUN case "${ENGINE}" in \
+      sglang) python -c "from smg_grpc_servicer.sglang.servicer import SGLangSchedulerServicer" ;; \
+      vllm)   python -c "from smg_grpc_servicer.vllm.servicer import VllmEngineServicer" ;; \
+      *) ;; \
+    esac
 
 ENTRYPOINT ["smg"]
