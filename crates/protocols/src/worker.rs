@@ -134,12 +134,12 @@ impl WorkerStatus {
     /// Convert a `u8` discriminant to a `WorkerStatus`, falling back to
     /// `Pending` for unrecognized values (with a debug assertion).
     pub fn from_u8(value: u8) -> Self {
-        let status = Self::try_from_u8(value).unwrap_or(Self::Pending);
+        let maybe = Self::try_from_u8(value);
         debug_assert!(
-            Self::try_from_u8(value).is_some(),
+            maybe.is_some(),
             "invalid WorkerStatus discriminant: {value}"
         );
-        status
+        maybe.unwrap_or(Self::Pending)
     }
 
     /// Returns `true` if the worker is routable (only `Ready`).

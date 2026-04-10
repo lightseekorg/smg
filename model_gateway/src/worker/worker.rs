@@ -965,13 +965,14 @@ impl Drop for HealthChecker {
 pub fn worker_to_info(worker: &Arc<dyn Worker>) -> WorkerInfo {
     let metadata = worker.metadata();
     let spec = metadata.spec.clone();
+    let is_healthy = worker.is_healthy();
 
     WorkerInfo {
         id: worker.url().to_string(),
         model_id: spec.models.primary().map(|m| m.id.clone()),
         spec,
-        is_healthy: worker.is_healthy(),
-        status: Some(if worker.is_healthy() {
+        is_healthy,
+        status: Some(if is_healthy {
             WorkerStatus::Ready
         } else {
             WorkerStatus::NotReady
