@@ -317,6 +317,33 @@ fn restore_client_tool_view(
     }
 
     obj.insert("tools".to_string(), Value::Array(restored_tools));
+
+    if let Some(tool_choice) = obj.get("tool_choice") {
+        let selected_name = tool_choice
+            .as_object()
+            .and_then(|choice| {
+                choice
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .zip(choice.get("name").and_then(Value::as_str))
+            })
+            .and_then(|(choice_type, name)| (choice_type == "function").then_some(name));
+        if let Some(name) = selected_name {
+            let has_selected_tool =
+                obj.get("tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tools| {
+                        tools
+                            .iter()
+                            .filter_map(function_tool_name)
+                            .any(|tool_name| tool_name == name)
+                    });
+            if !has_selected_tool {
+                obj.insert("tool_choice".to_string(), json!("auto"));
+            }
+        }
+    }
+
     obj.entry("tool_choice").or_insert(json!("auto"));
 }
 
