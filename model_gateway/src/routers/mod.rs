@@ -41,7 +41,6 @@ pub mod persistence_utils;
 pub mod responses;
 pub mod router_manager;
 pub mod tokenize;
-mod tool_output_context;
 pub mod worker_selection;
 
 pub use factory::RouterFactory;

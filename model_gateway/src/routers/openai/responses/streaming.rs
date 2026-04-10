@@ -19,8 +19,7 @@ use futures_util::StreamExt;
 use openai_protocol::{
     event_types::{
         is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
-        FunctionCallEvent, ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent,
-        ResponseEvent, WebSearchCallEvent,
+        FunctionCallEvent, ItemType, McpEvent, OutputItemEvent, ResponseEvent, WebSearchCallEvent,
     },
     responses::{ResponseTool, ResponsesRequest},
 };
@@ -148,9 +147,6 @@ pub(super) fn apply_event_transformations_inplace(
                             // Determine item type and ID prefix based on response_format
                             let (new_type, id_prefix) = match response_format {
                                 ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
-                                ResponseFormat::ImageGenerationCall => {
-                                    (ItemType::IMAGE_GENERATION_CALL, "ig_")
-                                }
                                 _ => (ItemType::MCP_CALL, "mcp_"),
                             };
 
@@ -433,7 +429,6 @@ fn maybe_inject_tool_in_progress(
         ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::IN_PROGRESS,
         ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::IN_PROGRESS,
         ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::IN_PROGRESS,
-        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::IN_PROGRESS,
         _ => return true, // Not a tool call item, nothing to inject
     };
 
@@ -972,7 +967,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 &tx,
                 &mut state,
                 &mut sequence_number,
-                &original_request,
+                &original_request.model,
             )
             .await
             {

@@ -9,12 +9,9 @@ use llm_tokenizer::TokenizerRegistry;
 use tracing::{debug, info, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::{
-    worker::Job,
-    workflow::{
-        data::{WorkerKind, WorkerWorkflowData},
-        TokenizerConfigRequest,
-    },
+use crate::workflow::{
+    data::{WorkerKind, WorkerWorkflowData},
+    Job, TokenizerConfigRequest,
 };
 
 /// Step: Submit tokenizer registration job for the worker's model

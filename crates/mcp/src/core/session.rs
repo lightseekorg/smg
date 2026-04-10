@@ -564,7 +564,6 @@ impl<'a> McpToolSession<'a> {
         [
             BuiltinToolType::WebSearchPreview,
             BuiltinToolType::CodeInterpreter,
-            BuiltinToolType::ImageGeneration,
             BuiltinToolType::FileSearch,
         ]
         .into_iter()

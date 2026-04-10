@@ -17,7 +17,8 @@ use tracing::warn;
 
 use crate::{
     config::RouterConfig,
-    worker::{registry::WorkerId, worker::worker_to_info, Job, JobQueue, WorkerRegistry},
+    worker::{registry::WorkerId, worker::worker_to_info, WorkerRegistry},
+    workflow::{Job, JobQueue},
 };
 
 /// Error types for worker service operations
