@@ -459,7 +459,7 @@ impl Decoder for TiktokenTokenizer {
                     ._decode_native_and_split(token_ids.to_vec())
                     .flatten()
                     .collect();
-                tracing::warn!(
+                tracing::debug!(
                     error = %err,
                     token_count = token_ids.len(),
                     "tiktoken decode failed; returning lossy UTF-8 fallback"
