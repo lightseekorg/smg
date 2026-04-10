@@ -371,16 +371,14 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
+            // MLX: caller stage rejects multimodal before reaching this path.
             Self::Mlx(client) => {
-                if multimodal_inputs.is_some() {
-                    return Err("MLX backend does not support multimodal inputs".to_string());
-                }
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
-                    tool_constraints, // MLX rejects constraints inside the builder
+                    tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
@@ -446,10 +444,8 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
+            // MLX: caller stage rejects multimodal before reaching this path.
             Self::Mlx(client) => {
-                if multimodal_inputs.is_some() {
-                    return Err("MLX backend does not support multimodal inputs".to_string());
-                }
                 let req = client.build_generate_request_from_messages(
                     request_id,
                     body,
