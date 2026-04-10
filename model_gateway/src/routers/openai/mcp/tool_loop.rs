@@ -17,7 +17,7 @@ use openai_protocol::{
         is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType, McpEvent,
         OutputItemEvent, WebSearchCallEvent,
     },
-    responses::{generate_id, ResponseInput, ResponsesRequest},
+    responses::{generate_id, ResponseInput, ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, to_value, Value};
 use smg_mcp::{
@@ -753,7 +753,7 @@ fn build_incomplete_response(
     state: ToolLoopState,
     reason: &str,
     session: &McpToolSession<'_>,
-    _original_body: &ResponsesRequest,
+    original_body: &ResponsesRequest,
 ) -> Result<Value, String> {
     let obj = response
         .as_object_mut()
@@ -769,7 +769,23 @@ fn build_incomplete_response(
 
     let mcp_servers = session.mcp_servers();
 
-    // Convert any function_call in output to mcp_call format
+    let user_function_names: std::collections::HashSet<&str> = original_body
+        .tools
+        .as_deref()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| match tool {
+                    ResponseTool::Function(function_tool) => {
+                        Some(function_tool.function.name.as_str())
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Convert MCP function_call items in output to mcp_call format.
     if let Some(output_array) = obj.get_mut("output").and_then(|v| v.as_array_mut()) {
         // Find any function_call items and convert them to mcp_call (incomplete)
         let mut incomplete_items = Vec::new();
@@ -777,6 +793,10 @@ fn build_incomplete_response(
             let item_type = item.get("type").and_then(|t| t.as_str());
             if item_type.is_some_and(is_function_call_type) {
                 let tool_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if user_function_names.contains(tool_name) {
+                    // User function calls must remain as function_call output items.
+                    continue;
+                }
                 let args = item
                     .get("arguments")
                     .and_then(|v| v.as_str())
