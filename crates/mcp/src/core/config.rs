@@ -213,7 +213,11 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builtin_tool_name: Option<String>,
 
-    /// Whether tools from this server should be hidden from client-visible output.
+    /// Whether tools from this server should be hidden from standard client-visible output.
+    ///
+    /// Limitation: `internal: true` does not currently redact or block live streaming
+    /// Server-Sent Events (SSE) tool events. Internal tool activity may still appear in
+    /// real-time streams until streaming redaction is implemented.
     #[serde(default)]
     pub internal: bool,
 }

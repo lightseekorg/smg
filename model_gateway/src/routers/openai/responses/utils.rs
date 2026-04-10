@@ -326,6 +326,7 @@ fn restore_client_tool_view(
     };
     if restored_tools.is_empty() {
         obj.remove("tools");
+        obj.remove("tool_choice");
         return;
     }
 
@@ -437,13 +438,13 @@ fn is_internal_mcp_output_item(
             .get("name")
             .and_then(|value| value.as_str())
             .is_some_and(|name| {
-                session.is_internal_non_builtin_tool(name) && !user_function_names.contains(name)
+                session.is_internal_tool(name) && !user_function_names.contains(name)
             }),
         Some("function_tool_call") => item
             .get("name")
             .and_then(|value| value.as_str())
             .is_some_and(|name| {
-                session.is_internal_non_builtin_tool(name) && !user_function_names.contains(name)
+                session.is_internal_tool(name) && !user_function_names.contains(name)
             }),
         _ => false,
     }
