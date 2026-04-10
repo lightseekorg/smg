@@ -433,6 +433,7 @@ async fn process_multimodal_parts(
 
     // Run CPU-intensive image preprocessing on a blocking thread pool so it
     // doesn't block the tokio async runtime under concurrent load.
+    // TODO: consider making the thread pool size configurable.
     let pp_config = model_config.preprocessor_config.clone();
     let registry = components.image_processor_registry.clone();
     let model_id_owned = model_id.to_string();
