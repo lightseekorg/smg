@@ -195,11 +195,54 @@ pub enum ContentPart {
     VideoUrl { video_url: VideoUrl },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct ImageUrl {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>, // "auto", "low", or "high"
+    pub detail: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ImageUrl {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de;
+
+        struct ImageUrlVisitor;
+
+        impl<'de> de::Visitor<'de> for ImageUrlVisitor {
+            type Value = ImageUrl;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string URL or an object with url field")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<ImageUrl, E> {
+                Ok(ImageUrl {
+                    url: v.to_string(),
+                    detail: None,
+                })
+            }
+
+            fn visit_map<M: de::MapAccess<'de>>(self, mut map: M) -> Result<ImageUrl, M::Error> {
+                let mut url = None;
+                let mut detail = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "url" => url = Some(map.next_value()?),
+                        "detail" => detail = map.next_value()?,
+                        _ => {
+                            let _ = map.next_value::<de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(ImageUrl {
+                    url: url.ok_or_else(|| de::Error::missing_field("url"))?,
+                    detail,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(ImageUrlVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
@@ -748,5 +791,60 @@ mod tests {
     fn test_deserialize_null_as_false_rejects_non_bool() {
         let result = serde_json::from_value::<NullableBoolTest>(json!({"field": "yes"}));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_image_url_from_object() {
+        let img: ImageUrl = serde_json::from_value(json!({"url": "https://example.com/img.png"}))
+            .expect("object form");
+        assert_eq!(img.url, "https://example.com/img.png");
+        assert_eq!(img.detail, None);
+    }
+
+    #[test]
+    fn test_image_url_from_object_with_detail() {
+        let img: ImageUrl =
+            serde_json::from_value(json!({"url": "https://example.com/img.png", "detail": "high"}))
+                .expect("object with detail");
+        assert_eq!(img.url, "https://example.com/img.png");
+        assert_eq!(img.detail, Some("high".to_string()));
+    }
+
+    #[test]
+    fn test_image_url_from_bare_string() {
+        let img: ImageUrl =
+            serde_json::from_value(json!("https://example.com/img.png")).expect("bare string");
+        assert_eq!(img.url, "https://example.com/img.png");
+        assert_eq!(img.detail, None);
+    }
+
+    #[test]
+    fn test_image_url_missing_url_field() {
+        let result = serde_json::from_value::<ImageUrl>(json!({"detail": "high"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_image_url_roundtrip() {
+        let img = ImageUrl {
+            url: "https://example.com/img.png".to_string(),
+            detail: Some("low".to_string()),
+        };
+        let json = serde_json::to_value(&img).expect("serialize");
+        assert_eq!(
+            json,
+            json!({"url": "https://example.com/img.png", "detail": "low"})
+        );
+    }
+
+    #[test]
+    fn test_image_url_serialize_skips_none_detail() {
+        let img = ImageUrl {
+            url: "https://example.com/img.png".to_string(),
+            detail: None,
+        };
+        let json = serde_json::to_value(&img).expect("serialize");
+        assert_eq!(json, json!({"url": "https://example.com/img.png"}));
+        assert!(!json.as_object().expect("obj").contains_key("detail"));
     }
 }
