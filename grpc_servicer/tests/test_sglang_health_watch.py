@@ -90,16 +90,24 @@ async def test_watch_exits_on_shutdown(servicer, request_msg, grpc_context):
 
 @pytest.mark.asyncio
 async def test_watch_handles_client_cancel(servicer, request_msg, grpc_context):
-    """Client disconnection must not raise unhandled exceptions."""
+    """Task cancellation (real client disconnect) must not raise unexpected errors."""
     servicer.set_serving()
     request_msg.service = ""
 
-    async def consume_with_cancel():
-        gen = servicer.Watch(request_msg, grpc_context)
-        await gen.__anext__()
-        await gen.aclose()
+    async def consume_forever():
+        async for _ in servicer.Watch(request_msg, grpc_context):
+            pass
 
-    await consume_with_cancel()
+    task = asyncio.create_task(consume_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    # Watch() catches CancelledError internally. The task may complete
+    # normally or propagate cancellation depending on asyncio internals.
+    # Either outcome is correct -- verify no unexpected exception.
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 @pytest.mark.asyncio
