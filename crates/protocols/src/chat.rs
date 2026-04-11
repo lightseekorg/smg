@@ -11,6 +11,7 @@ use super::{
         StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference,
         Usage,
     },
+    messages::ThinkingConfig,
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
 use crate::{
@@ -201,6 +202,10 @@ pub struct ChatCompletionRequest {
 
     /// Effort level for reasoning models (low, medium, high)
     pub reasoning_effort: Option<String>,
+
+    /// Configuration for extended thinking (Anthropic-style).
+    /// Maps to chat_template_kwargs for thinking-capable models.
+    pub thinking: Option<ThinkingConfig>,
 
     /// An object specifying the format that the model must output
     pub response_format: Option<ResponseFormat>,
@@ -566,6 +571,21 @@ impl Normalizable for ChatCompletionRequest {
                 },
             });
             self.function_call = None; // Clear deprecated field
+        }
+
+        // Migrate thinking → chat_template_kwargs
+        if let Some(ref thinking) = self.thinking {
+            let kwargs = self.chat_template_kwargs.get_or_insert_with(HashMap::new);
+            match thinking {
+                ThinkingConfig::Enabled { .. } => {
+                    kwargs.entry("enable_thinking".to_string()).or_insert(Value::Bool(true));
+                    kwargs.entry("thinking".to_string()).or_insert(Value::Bool(true));
+                }
+                ThinkingConfig::Disabled => {
+                    kwargs.entry("enable_thinking".to_string()).or_insert(Value::Bool(false));
+                    kwargs.entry("thinking".to_string()).or_insert(Value::Bool(false));
+                }
+            }
         }
 
         // Apply tool_choice defaults

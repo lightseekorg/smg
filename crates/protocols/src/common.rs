@@ -195,11 +195,61 @@ pub enum ContentPart {
     VideoUrl { video_url: VideoUrl },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct ImageUrl {
     pub url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>, // "auto", "low", or "high"
+}
+
+impl Serialize for ImageUrl {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let field_count = 1 + self.detail.is_some() as usize;
+        let mut state = serializer.serialize_struct("ImageUrl", field_count)?;
+        state.serialize_field("url", &self.url)?;
+        if let Some(ref detail) = self.detail {
+            state.serialize_field("detail", detail)?;
+        }
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageUrl {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de;
+
+        struct ImageUrlVisitor;
+
+        impl<'de> de::Visitor<'de> for ImageUrlVisitor {
+            type Value = ImageUrl;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string URL or an object with url field")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<ImageUrl, E> {
+                Ok(ImageUrl { url: v.to_string(), detail: None })
+            }
+
+            fn visit_map<M: de::MapAccess<'de>>(self, mut map: M) -> Result<ImageUrl, M::Error> {
+                let mut url = None;
+                let mut detail = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "url" => url = Some(map.next_value()?),
+                        "detail" => detail = map.next_value()?,
+                        _ => { let _ = map.next_value::<de::IgnoredAny>()?; }
+                    }
+                }
+                Ok(ImageUrl {
+                    url: url.ok_or_else(|| de::Error::missing_field("url"))?,
+                    detail,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(ImageUrlVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
