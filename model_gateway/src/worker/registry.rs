@@ -28,7 +28,8 @@ use crate::{
     worker::{
         circuit_breaker::CircuitState,
         event::WorkerEvent,
-        worker::{HealthChecker, RuntimeType, WorkerType},
+        health_checker::HealthChecker,
+        traits::{RuntimeType, WorkerType},
         ConnectionMode, Worker,
     },
     workflow::{Job, JobQueue},

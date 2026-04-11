@@ -11,7 +11,7 @@ use wfaas::{
 use crate::{
     observability::metrics::Metrics,
     worker::{
-        worker::{ConnectionModeExt, WorkerTypeExt},
+        traits::{ConnectionModeExt, WorkerTypeExt},
         WorkerGroupKey, WorkerRegistry,
     },
     workflow::data::WorkerRegistrationData,

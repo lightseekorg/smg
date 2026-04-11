@@ -66,7 +66,7 @@ use crate::{
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
-    worker::{manager::WorkerManager, worker::WorkerType},
+    worker::{manager::WorkerManager, WorkerType},
     workflow::{
         job_queue::{JobQueue, JobQueueConfig},
         Job, TokenizerConfigRequest, WorkflowEngines,

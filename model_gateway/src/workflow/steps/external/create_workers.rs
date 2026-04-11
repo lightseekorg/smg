@@ -8,11 +8,9 @@ use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, Wo
 
 use crate::{
     worker::{
-        circuit_breaker::CircuitBreakerConfig,
-        http_client::build_worker_http_client,
-        resilience::resolve_resilience,
-        worker::{RuntimeType, WorkerType},
-        BasicWorkerBuilder, ConnectionMode, Worker,
+        circuit_breaker::CircuitBreakerConfig, http_client::build_worker_http_client,
+        resilience::resolve_resilience, BasicWorkerBuilder, ConnectionMode, RuntimeType, Worker,
+        WorkerType,
     },
     workflow::data::{WorkerKind, WorkerList, WorkerWorkflowData},
 };

@@ -9,7 +9,7 @@ use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowRe
 use crate::{
     observability::metrics::Metrics,
     worker::{
-        worker::{ConnectionModeExt, WorkerTypeExt},
+        traits::{ConnectionModeExt, WorkerTypeExt},
         WorkerGroupKey,
     },
     workflow::data::WorkerRemovalWorkflowData,

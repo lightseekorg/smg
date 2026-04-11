@@ -16,7 +16,7 @@ use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowRe
 
 use super::util::{http_base_url, try_grpc_reachable, try_http_reachable};
 use crate::{
-    worker::worker::RuntimeType,
+    worker::RuntimeType,
     workflow::data::{WorkerKind, WorkerWorkflowData},
 };
 

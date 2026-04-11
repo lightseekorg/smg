@@ -7,12 +7,11 @@ use openai_protocol::{
 };
 
 use super::{
+    basic::{BasicWorker, DEFAULT_WORKER_HTTP_TIMEOUT_SECS},
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
+    metadata::{WorkerMetadata, WorkerRoutingKeyLoad},
     resilience::ResolvedResilience,
-    worker::{
-        BasicWorker, ConnectionMode, RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad, WorkerType,
-        DEFAULT_WORKER_HTTP_TIMEOUT_SECS,
-    },
+    traits::{ConnectionMode, RuntimeType, WorkerType},
 };
 use crate::{observability::metrics::Metrics, routers::grpc::client::GrpcClient};
 
@@ -318,7 +317,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::worker::worker::Worker;
+    use crate::worker::traits::Worker;
 
     #[test]
     fn test_basic_worker_builder_minimal() {
