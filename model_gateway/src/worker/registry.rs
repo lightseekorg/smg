@@ -372,7 +372,8 @@ impl WorkerRegistry {
         }
 
         let _ = self.event_tx.send(WorkerEvent::Registered {
-            url: worker.url().to_string(),
+            worker_id: worker_id.clone(),
+            worker: worker.clone(),
         });
 
         Some(worker_id)
@@ -520,8 +521,10 @@ impl WorkerRegistry {
             }
         }
 
-        let _ = self.event_tx.send(WorkerEvent::Registered {
-            url: new_worker.url().to_string(),
+        let _ = self.event_tx.send(WorkerEvent::Replaced {
+            worker_id: worker_id.clone(),
+            old: old_worker,
+            new: new_worker,
         });
 
         true
@@ -636,7 +639,8 @@ impl WorkerRegistry {
             }
 
             let _ = self.event_tx.send(WorkerEvent::Removed {
-                url: worker.url().to_string(),
+                worker_id: worker_id.clone(),
+                worker: worker.clone(),
             });
 
             Some(worker)
@@ -1588,8 +1592,8 @@ mod tests {
         // Should receive Registered event
         let event = rx.try_recv().unwrap();
         match event {
-            WorkerEvent::Registered { url } => {
-                assert_eq!(url, "http://event-worker:8080");
+            WorkerEvent::Registered { worker, .. } => {
+                assert_eq!(worker.url(), "http://event-worker:8080");
             }
             other => panic!("Expected Registered event, got: {other:?}"),
         }
@@ -1600,8 +1604,8 @@ mod tests {
         // Should receive Removed event
         let event = rx.try_recv().unwrap();
         match event {
-            WorkerEvent::Removed { url } => {
-                assert_eq!(url, "http://event-worker:8080");
+            WorkerEvent::Removed { worker, .. } => {
+                assert_eq!(worker.url(), "http://event-worker:8080");
             }
             other => panic!("Expected Removed event, got: {other:?}"),
         }

@@ -110,7 +110,7 @@ fn spawn_worker_collector(
                             debug!("worker event: {event:?}");
                             publish_workers(&context, &registry);
                             // Only publish models on membership changes, not health
-                            if matches!(event, WorkerEvent::Registered { .. } | WorkerEvent::Removed { .. }) {
+                            if matches!(event, WorkerEvent::Registered { .. } | WorkerEvent::Removed { .. } | WorkerEvent::Replaced { .. }) {
                                 publish_models(&context, &registry);
                             }
                         }
