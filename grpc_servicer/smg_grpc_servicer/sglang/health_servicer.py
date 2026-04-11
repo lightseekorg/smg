@@ -34,6 +34,8 @@ class SGLangHealthServicer(HealthWatchMixin, health_pb2_grpc.HealthServicer):
     - SERVING: Model loaded and ready to serve requests
     """
 
+    SCHEDULER_RESPONSIVENESS_TIMEOUT_S = 30
+
     # Service names we support
     OVERALL_SERVER = ""  # Empty string for overall server health
     SGLANG_SERVICE = "sglang.grpc.scheduler.SglangScheduler"
@@ -120,11 +122,7 @@ class SGLangHealthServicer(HealthWatchMixin, health_pb2_grpc.HealthServicer):
             time_since_last_receive = time.time() - self.request_manager.last_receive_tstamp
 
             # If no recent activity and we have active requests, might be stuck
-            # NOTE: 30s timeout is hardcoded. This is more conservative than
-            # HEALTH_CHECK_TIMEOUT (20s) used for custom HealthCheck RPC.
-            # Consider making this configurable via environment variable in the future
-            # if different workloads need different responsiveness thresholds.
-            if time_since_last_receive > 30 and len(self.request_manager.rid_to_state) > 0:
+            if time_since_last_receive > self.SCHEDULER_RESPONSIVENESS_TIMEOUT_S and len(self.request_manager.rid_to_state) > 0:
                 logger.warning(
                     f"Service health check: Scheduler not responsive "
                     f"({time_since_last_receive:.1f}s since last receive, "
@@ -164,7 +162,7 @@ class SGLangHealthServicer(HealthWatchMixin, health_pb2_grpc.HealthServicer):
             if base_status != SERVING:
                 return base_status
             time_since = time.time() - self.request_manager.last_receive_tstamp
-            if time_since > 30 and len(self.request_manager.rid_to_state) > 0:
+            if time_since > self.SCHEDULER_RESPONSIVENESS_TIMEOUT_S and len(self.request_manager.rid_to_state) > 0:
                 logger.warning(
                     "Scheduler not responsive (%.1fs, %d pending)",
                     time_since,

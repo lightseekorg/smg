@@ -2,6 +2,7 @@
 """Shared Watch() continuous streaming for gRPC health servicers."""
 
 import asyncio
+import inspect
 import logging
 from collections.abc import AsyncIterator
 
@@ -64,7 +65,7 @@ class HealthWatchMixin:
     async def _resolve_watch_status(self, service_name: str) -> int:
         """Call _compute_watch_status, handling both sync and async impls."""
         result = self._compute_watch_status(service_name)
-        if asyncio.iscoroutine(result):
+        if inspect.isawaitable(result):
             return await result
         return result
 
@@ -108,7 +109,7 @@ class HealthWatchMixin:
                         self._watch_shutdown_event.wait(),
                         timeout=self.WATCH_POLL_INTERVAL_S,
                     )
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     pass
 
         except asyncio.CancelledError:

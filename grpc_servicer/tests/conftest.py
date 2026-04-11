@@ -11,6 +11,10 @@ from grpc_health.v1 import health_pb2
 # This must run before any smg_grpc_servicer imports are resolved.
 _VLLM_STUBS = [
     "vllm",
+    "vllm.engine",
+    "vllm.engine.protocol",
+    "vllm.inputs",
+    "vllm.inputs.engine",
     "vllm.logger",
     "vllm.logprobs",
     "vllm.multimodal",
@@ -32,18 +36,25 @@ for _name in _VLLM_STUBS:
 _SGLANG_STUBS = [
     "sglang",
     "sglang.srt",
+    "sglang.srt.configs",
+    "sglang.srt.configs.model_config",
     "sglang.srt.disaggregation",
     "sglang.srt.disaggregation.kv_events",
     "sglang.srt.disaggregation.utils",
     "sglang.srt.managers",
+    "sglang.srt.managers.data_parallel_controller",
+    "sglang.srt.managers.disagg_service",
     "sglang.srt.managers.io_struct",
     "sglang.srt.managers.schedule_batch",
+    "sglang.srt.managers.scheduler",
     "sglang.srt.observability",
     "sglang.srt.observability.req_time_stats",
     "sglang.srt.sampling",
     "sglang.srt.sampling.sampling_params",
     "sglang.srt.server_args",
     "sglang.srt.utils",
+    "sglang.srt.utils.network",
+    "sglang.srt.utils.torch_memory_saver_adapter",
     "sglang.utils",
 ]
 for _name in _SGLANG_STUBS:
