@@ -40,8 +40,7 @@ concurrency:
 jobs:
   e2e-mlx:
     name: E2E (MLX on Apple Silicon)
-    # macos-14 and later are Apple Silicon (arm64) — required for MLX
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -87,11 +86,13 @@ jobs:
       - name: Install grpc_servicer with MLX extra (mlx + mlx-lm)
         run: pip install -e "./grpc_servicer[mlx]"
 
-      - name: Install SMG Python bindings (maturin develop)
+      - name: Install SMG Python bindings (maturin develop, debug)
         working-directory: bindings/python
         run: |
           pip install maturin
-          maturin develop --release
+          # Debug build — correctness test, not performance test.
+          # Saves ~5 min per run vs --release.
+          maturin develop
 
       - name: Generate Python client types (required by e2e_test/conftest.py)
         run: make generate-python-types
