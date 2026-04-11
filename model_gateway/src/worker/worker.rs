@@ -1,7 +1,7 @@
 use std::{
     fmt,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
         Arc, LazyLock,
     },
     time::Duration,
@@ -141,11 +141,35 @@ pub trait Worker: Send + Sync + fmt::Debug {
         self.metadata().spec.bootstrap_port
     }
 
-    /// Check if the worker is currently healthy
-    fn is_healthy(&self) -> bool;
+    /// Get the worker's lifecycle status.
+    fn status(&self) -> WorkerStatus;
 
-    /// Set the worker's health status
-    fn set_healthy(&self, healthy: bool);
+    /// Set the worker's lifecycle status.
+    fn set_status(&self, status: WorkerStatus);
+
+    /// Check if the worker is currently healthy (status == Ready).
+    ///
+    /// This is a routing predicate — returns true only for `Ready` workers.
+    /// A `Pending` worker is not "unhealthy", just unverified.
+    fn is_healthy(&self) -> bool {
+        self.status() == WorkerStatus::Ready
+    }
+
+    /// Set the worker's health status (compatibility shim).
+    ///
+    /// Maps `true` → `Ready`, `false` → `NotReady`.
+    /// Prefer `set_status()` for explicit state transitions.
+    fn set_healthy(&self, healthy: bool) {
+        if healthy {
+            self.set_status(WorkerStatus::Ready);
+        } else {
+            // Only transition to NotReady if currently Ready.
+            // Don't transition Pending→NotReady (hasn't proven itself).
+            if self.status() == WorkerStatus::Ready {
+                self.set_status(WorkerStatus::NotReady);
+            }
+        }
+    }
 
     /// Perform an async health check on the worker
     async fn check_health_async(&self) -> WorkerResult<()>;
@@ -500,7 +524,7 @@ pub struct BasicWorker {
     pub load_counter: Arc<AtomicUsize>,
     pub worker_routing_key_load: Arc<WorkerRoutingKeyLoad>,
     pub processed_counter: Arc<AtomicUsize>,
-    pub healthy: Arc<AtomicBool>,
+    pub status: Arc<AtomicU8>,
     pub consecutive_failures: Arc<AtomicUsize>,
     pub consecutive_successes: Arc<AtomicUsize>,
     pub circuit_breaker: CircuitBreaker,
@@ -521,7 +545,10 @@ impl fmt::Debug for BasicWorker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BasicWorker")
             .field("metadata", &self.metadata)
-            .field("healthy", &self.healthy.load(Ordering::Relaxed))
+            .field(
+                "status",
+                &WorkerStatus::from_u8(self.status.load(Ordering::Relaxed)),
+            )
             .field("circuit_breaker", &self.circuit_breaker)
             .field("grpc_client", &"<OnceCell>")
             .finish()
@@ -553,13 +580,13 @@ impl Worker for BasicWorker {
         &self.metadata.spec.connection_mode
     }
 
-    fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Acquire)
+    fn status(&self) -> WorkerStatus {
+        WorkerStatus::from_u8(self.status.load(Ordering::Acquire))
     }
 
-    fn set_healthy(&self, healthy: bool) {
-        self.healthy.store(healthy, Ordering::Release);
-        Metrics::set_worker_health(self.url(), healthy);
+    fn set_status(&self, status: WorkerStatus) {
+        self.status.store(status as u8, Ordering::Release);
+        Metrics::set_worker_health(self.url(), status == WorkerStatus::Ready);
     }
 
     async fn check_health_async(&self) -> WorkerResult<()> {

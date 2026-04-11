@@ -10,7 +10,7 @@ use std::{
     os::raw::c_char,
     ptr,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use llm_tokenizer::{create_tokenizer_from_file, traits::Tokenizer};
 use openai_protocol::{
     chat::ChatCompletionRequest,
-    worker::{HealthCheckConfig, WorkerSpec},
+    worker::{HealthCheckConfig, WorkerSpec, WorkerStatus},
 };
 use smg::{
     policies::{
@@ -54,7 +54,7 @@ use super::{
 pub struct GrpcWorker {
     pub(crate) client: Arc<SglangSchedulerClient>,
     pub(crate) endpoint: String,
-    pub(crate) healthy: AtomicBool,
+    pub(crate) status: AtomicU8,
     pub(crate) load: AtomicUsize,
     pub(crate) processed: AtomicUsize,
     pub(crate) circuit_breaker: CircuitBreaker,
@@ -80,7 +80,7 @@ impl GrpcWorker {
             client,
             routing_key_load: WorkerRoutingKeyLoad::new(&endpoint),
             endpoint,
-            healthy: AtomicBool::new(true),
+            status: AtomicU8::new(WorkerStatus::Ready as u8),
             load: AtomicUsize::new(0),
             processed: AtomicUsize::new(0),
             circuit_breaker: CircuitBreaker::new(),
@@ -96,7 +96,10 @@ impl std::fmt::Debug for GrpcWorker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GrpcWorker")
             .field("endpoint", &self.endpoint)
-            .field("healthy", &self.healthy.load(Ordering::Relaxed))
+            .field(
+                "status",
+                &WorkerStatus::from_u8(self.status.load(Ordering::Relaxed)),
+            )
             .finish()
     }
 }
@@ -119,12 +122,12 @@ impl Worker for GrpcWorker {
         &self.metadata.spec.connection_mode
     }
 
-    fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Relaxed)
+    fn status(&self) -> WorkerStatus {
+        WorkerStatus::from_u8(self.status.load(Ordering::Relaxed))
     }
 
-    fn set_healthy(&self, healthy: bool) {
-        self.healthy.store(healthy, Ordering::Relaxed);
+    fn set_status(&self, status: WorkerStatus) {
+        self.status.store(status as u8, Ordering::Relaxed);
     }
 
     async fn check_health_async(&self) -> WorkerResult<()> {
@@ -178,11 +181,11 @@ impl Worker for GrpcWorker {
     }
 
     async fn grpc_health_check(&self) -> WorkerResult<bool> {
-        Ok(self.healthy.load(Ordering::Relaxed))
+        Ok(self.is_healthy())
     }
 
     async fn http_health_check(&self) -> WorkerResult<bool> {
-        Ok(self.healthy.load(Ordering::Relaxed))
+        Ok(self.is_healthy())
     }
 }
 
@@ -377,7 +380,7 @@ pub unsafe extern "C" fn sgl_multi_client_healthy_count(
     (*handle)
         .grpc_workers
         .iter()
-        .filter(|w| w.healthy.load(Ordering::Relaxed))
+        .filter(|w| w.is_healthy())
         .count()
 }
 
@@ -398,9 +401,7 @@ pub unsafe extern "C" fn sgl_multi_client_set_worker_health(
     if worker_index >= client.grpc_workers.len() {
         return SglErrorCode::InvalidArgument;
     }
-    client.grpc_workers[worker_index]
-        .healthy
-        .store(healthy, Ordering::Relaxed);
+    client.grpc_workers[worker_index].set_healthy(healthy);
     SglErrorCode::Success
 }
 

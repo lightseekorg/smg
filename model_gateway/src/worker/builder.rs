@@ -207,7 +207,7 @@ impl BasicWorkerBuilder {
     /// Build the BasicWorker instance
     pub fn build(mut self) -> BasicWorker {
         use std::sync::{
-            atomic::{AtomicBool, AtomicUsize},
+            atomic::{AtomicU8, AtomicUsize},
             Arc,
         };
 
@@ -239,8 +239,10 @@ impl BasicWorkerBuilder {
             None => OnceCell::new(),
         });
 
-        let healthy = true;
-        Metrics::set_worker_health(&metadata.spec.url, healthy);
+        // Workers start Ready (routable). PR 6b will change this to Pending
+        // for health-checked workers.
+        let initial_status = openai_protocol::worker::WorkerStatus::Ready;
+        Metrics::set_worker_health(&metadata.spec.url, true);
 
         let http_client = self.http_client.unwrap_or_else(|| {
             reqwest::Client::builder()
@@ -258,7 +260,7 @@ impl BasicWorkerBuilder {
             load_counter: Arc::new(AtomicUsize::new(0)),
             worker_routing_key_load: Arc::new(WorkerRoutingKeyLoad::new(&metadata.spec.url)),
             processed_counter: Arc::new(AtomicUsize::new(0)),
-            healthy: Arc::new(AtomicBool::new(healthy)),
+            status: Arc::new(AtomicU8::new(initial_status as u8)),
             consecutive_failures: Arc::new(AtomicUsize::new(0)),
             consecutive_successes: Arc::new(AtomicUsize::new(0)),
             circuit_breaker: CircuitBreaker::with_config_and_label(
