@@ -8,6 +8,9 @@ on:
       - 'docs/**'
       - '*.lock'
       - 'mkdocs.yml'
+  # Allow maintainers to trigger Claude review for fork PRs via 'ci-approved' label.
+  pull_request_target:
+    types: [labeled, synchronize]
   issue_comment:
     types: [created]
   pull_request_review_comment:
@@ -24,10 +27,12 @@ jobs:
   review:
     name: Claude PR Review
     if: >-
-      github.event_name == 'pull_request'
-      && github.repository == 'lightseekorg/smg'
+      github.repository == 'lightseekorg/smg'
       && github.actor != 'dependabot[bot]'
-      && !github.event.pull_request.head.repo.fork
+      && (
+        (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork)
+        || (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'ci-approved'))
+      )
     runs-on: k8s-runner-cpu
     timeout-minutes: 30
     concurrency:
@@ -37,6 +42,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Export API key from pod env

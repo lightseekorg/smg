@@ -14,14 +14,20 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "*.md"
+  # Allow maintainers to trigger CI for fork PRs by adding the 'ci-approved' label.
+  # pull_request_target runs in the base branch context, bypassing the fork approval gate.
+  # 'synchronize' re-runs CI on subsequent pushes while the label is present.
+  pull_request_target:
+    branches: [ main ]
+    types: [labeled, synchronize]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: gateway-tests-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: gateway-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   RUSTC_WRAPPER: sccache
@@ -29,12 +35,25 @@ env:
   GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.4
 
 jobs:
+  # Gate job: for pull_request_target, only proceed if 'ci-approved' label is present.
+  # All other triggers (push, pull_request, workflow_dispatch) pass through unconditionally.
+  ci-gate:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      contains(github.event.pull_request.labels.*.name, 'ci-approved')
+    steps:
+      - run: echo "CI gate passed"
+
   pre-commit:
+    needs: [ci-gate]
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -50,11 +69,14 @@ jobs:
         run: pre-commit run --all-files --show-diff-on-failure
 
   python-lint:
+    needs: [ci-gate]
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -77,11 +99,14 @@ jobs:
         run: mypy bindings/python/ --config-file mypy.ini
 
   grpc-proto-build-check:
+    needs: [ci-gate]
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -103,11 +128,14 @@ jobs:
           python -c "from smg_grpc_proto import sglang_scheduler_pb2; print('OK')"
 
   build-wheel:
+    needs: [ci-gate]
     runs-on: k8s-runner-gpu
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Cache wheel and Go FFI artifacts
         id: cache-wheel
@@ -233,11 +261,14 @@ jobs:
           pytest -q tests --cov=smg --cov-config=.coveragerc --cov-report=term-missing --cov-fail-under=80
 
   unit-tests:
+    needs: [ci-gate]
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -359,8 +390,9 @@ jobs:
           retention-days: 7
 
   detect-changes:
+    needs: [ci-gate]
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
     permissions:
       contents: read
       pull-requests: read
