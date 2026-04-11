@@ -6,9 +6,8 @@ BatchGenerator. The MLX backend only supports gRPC mode.
 Run locally with:
     E2E_RUNTIME=mlx pytest e2e_test/chat_completions/test_mlx_backend.py -v
 
-CI runs on macos-latest with the smallest Qwen3 model (~400 MB):
-    pytest -m "engine and not slow" --override-ini="addopts=" \\
-        e2e_test/chat_completions/test_mlx_backend.py
+CI runs on macos-14 (Apple Silicon) with the smallest Qwen3 model (~400 MB).
+See .github/workflows/pr-test-mlx.yml.
 """
 
 from __future__ import annotations
