@@ -41,12 +41,12 @@ service VllmEngine {
 // Sampling parameters for text generation
 message SamplingParams {
   optional float temperature = 1;
-  float top_p = 2;
-  uint32 top_k = 3;
-  float min_p = 4;
-  float frequency_penalty = 5;
-  float presence_penalty = 6;
-  float repetition_penalty = 7;
+  optional float top_p = 2;
+  optional uint32 top_k = 3;
+  optional float min_p = 4;
+  optional float frequency_penalty = 5;
+  optional float presence_penalty = 6;
+  optional float repetition_penalty = 7;
 
   optional uint32 max_tokens = 8;
   uint32 min_tokens = 9;

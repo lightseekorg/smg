@@ -74,7 +74,31 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         self.engine = async_llm
         self.start_time = start_time
-        logger.info("VllmEngineServicer initialized")
+
+        # Load model's default sampling params (respects --generation-config)
+        mc = async_llm.model_config
+        self.default_sampling_params: dict = mc.get_diff_sampling_param()
+
+        # max_tokens override — same logic as chat_completion/serving.py
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
+
+        # Harmony model stop tokens — same as chat_completion/serving.py
+        if mc.hf_config.model_type == "gpt_oss":
+            from vllm.entrypoints.openai.parser.harmony_utils import (
+                get_stop_tokens_for_assistant_actions,
+            )
+            if "stop_token_ids" not in self.default_sampling_params:
+                self.default_sampling_params["stop_token_ids"] = []
+            self.default_sampling_params["stop_token_ids"].extend(
+                get_stop_tokens_for_assistant_actions()
+            )
+
+        logger.info("VllmEngineServicer initialized (default_sampling_params=%s)",
+                     self.default_sampling_params)
 
     async def Generate(
         self,
@@ -124,13 +148,18 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             else:
                 prompt = request.text
 
-            # Build sampling params with detokenize=False
+            # Build sampling params with model defaults from --generation-config
+            input_length = len(request.tokenized.input_ids) if input_type == "tokenized" else 0
             sampling_params = self._sampling_params_from_proto(
                 request.sampling_params,
                 stream=request.stream,
                 kv_transfer_params=request.kv_transfer_params
                 if request.HasField("kv_transfer_params")
                 else None,
+                default_sampling_params=self.default_sampling_params,
+                max_model_len=self.engine.model_config.max_model_len,
+                input_length=input_length,
+                override_max_tokens=self.override_max_tokens,
             )
             tokenization_kwargs = self._tokenization_kwargs_from_proto(request.sampling_params)
 
@@ -518,21 +547,39 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         params: vllm_engine_pb2.SamplingParams,
         stream: bool = True,
         kv_transfer_params: vllm_engine_pb2.KvTransferParams | None = None,
+        default_sampling_params: dict | None = None,
+        max_model_len: int | None = None,
+        input_length: int = 0,
+        override_max_tokens: int | None = None,
     ) -> SamplingParams:
         """
         Convert protobuf SamplingParams to vLLM SamplingParams.
+
+        Uses model defaults from --generation-config when proto fields are unset,
+        matching the HTTP path's behavior (chat_completion/serving.py).
 
         Args:
             params: Protobuf SamplingParams message
             stream: Whether streaming is enabled
             kv_transfer_params: KV transfer params proto for Mooncake PD
+            default_sampling_params: Model defaults from get_diff_sampling_param()
+            max_model_len: Maximum model context length (for max_tokens clamping)
+            input_length: Number of input tokens (for max_tokens clamping)
+            override_max_tokens: Override from custom generation_config path
 
         Returns:
-            vLLM SamplingParams with detokenize=False and structured_outputs
+            vLLM SamplingParams with model defaults applied for unset fields
         """
+        defaults = default_sampling_params or {}
+
         # Build stop sequences
         stop = list(params.stop) if params.stop else None
+
+        # Merge stop_token_ids: request + model defaults
         stop_token_ids = list(params.stop_token_ids) if params.stop_token_ids else None
+        default_stop_ids = defaults.get("stop_token_ids")
+        if default_stop_ids:
+            stop_token_ids = list(set(stop_token_ids or []) | set(default_stop_ids))
 
         # Handle structured outputs constraints
         structured_outputs = None
@@ -572,19 +619,37 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 }
             }
 
-        # Create SamplingParams
+        # max_tokens: apply model default + clamp to remaining context
+        # Same logic as vllm/entrypoints/utils.py:get_max_tokens()
+        raw_max_tokens = (
+            params.max_tokens if params.HasField("max_tokens")
+            else defaults.get("max_tokens")
+        )
+        if max_model_len is not None and input_length > 0:
+            model_max = max_model_len - input_length
+            candidates = [v for v in (model_max, raw_max_tokens, override_max_tokens) if v is not None]
+            max_tokens = min(candidates) if candidates else None
+        else:
+            max_tokens = raw_max_tokens
+
+        # Create SamplingParams with model defaults for unset fields
         # output_kind=DELTA: Return only new tokens in each chunk (for streaming)
         return SamplingParams(
-            temperature=params.temperature if params.HasField("temperature") else 1.0,
-            top_p=params.top_p if params.top_p != 0.0 else 1.0,
-            top_k=params.top_k,
-            min_p=params.min_p,
-            frequency_penalty=params.frequency_penalty,
-            presence_penalty=params.presence_penalty,
-            repetition_penalty=params.repetition_penalty
-            if params.repetition_penalty != 0.0
-            else 1.0,
-            max_tokens=params.max_tokens if params.HasField("max_tokens") else None,
+            temperature=params.temperature if params.HasField("temperature")
+            else defaults.get("temperature", 1.0),
+            top_p=params.top_p if params.HasField("top_p")
+            else defaults.get("top_p", 1.0),
+            top_k=params.top_k if params.HasField("top_k")
+            else defaults.get("top_k", 0),
+            min_p=params.min_p if params.HasField("min_p")
+            else defaults.get("min_p", 0.0),
+            frequency_penalty=params.frequency_penalty if params.HasField("frequency_penalty")
+            else defaults.get("frequency_penalty", 0.0),
+            presence_penalty=params.presence_penalty if params.HasField("presence_penalty")
+            else defaults.get("presence_penalty", 0.0),
+            repetition_penalty=params.repetition_penalty if params.HasField("repetition_penalty")
+            else defaults.get("repetition_penalty", 1.0),
+            max_tokens=max_tokens,
             min_tokens=params.min_tokens,
             stop=stop,
             stop_token_ids=stop_token_ids,
