@@ -76,27 +76,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         self.start_time = start_time
 
         # Load model's default sampling params (respects --generation-config)
-        mc = async_llm.model_config
-        self.default_sampling_params: dict = dict(mc.get_diff_sampling_param())
-
-        # max_tokens override — same logic as chat_completion/serving.py
-        self.override_max_tokens = (
-            self.default_sampling_params.get("max_tokens")
-            if mc.generation_config not in ("auto", "vllm")
-            else (getattr(mc, "override_generation_config", None) or {}).get("max_new_tokens")
-        )
-
-        # Harmony model stop tokens — same as chat_completion/serving.py
-        if mc.hf_config.model_type == "gpt_oss":
-            from vllm.entrypoints.openai.parser.harmony_utils import (
-                get_stop_tokens_for_assistant_actions,
-            )
-
-            if "stop_token_ids" not in self.default_sampling_params:
-                self.default_sampling_params["stop_token_ids"] = []
-            self.default_sampling_params["stop_token_ids"].extend(
-                get_stop_tokens_for_assistant_actions()
-            )
+        # Same logic as HTTP path: https://github.com/vllm-project/vllm/blob/148a5c1226/vllm/entrypoints/openai/chat_completion/serving.py#L141
+        model_config = async_llm.model_config
+        self.default_sampling_params: dict = dict(model_config.get_diff_sampling_param())
 
         logger.info(
             "VllmEngineServicer initialized (default_sampling_params=%s)",
@@ -151,8 +133,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             else:
                 prompt = request.text
 
-            # Build sampling params with model defaults from --generation-config
-            input_length = len(request.tokenized.input_ids) if input_type == "tokenized" else 0
+            # Build sampling params with generation-config defaults from --generation-config
             sampling_params = self._sampling_params_from_proto(
                 request.sampling_params,
                 stream=request.stream,
@@ -160,9 +141,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 if request.HasField("kv_transfer_params")
                 else None,
                 default_sampling_params=self.default_sampling_params,
-                max_model_len=self.engine.model_config.max_model_len,
-                input_length=input_length,
-                override_max_tokens=self.override_max_tokens,
             )
             tokenization_kwargs = self._tokenization_kwargs_from_proto(request.sampling_params)
 
@@ -551,9 +529,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         stream: bool = True,
         kv_transfer_params: vllm_engine_pb2.KvTransferParams | None = None,
         default_sampling_params: dict | None = None,
-        max_model_len: int | None = None,
-        input_length: int = 0,
-        override_max_tokens: int | None = None,
     ) -> SamplingParams:
         """
         Convert protobuf SamplingParams to vLLM SamplingParams.
@@ -566,9 +541,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             stream: Whether streaming is enabled
             kv_transfer_params: KV transfer params proto for Mooncake PD
             default_sampling_params: Model defaults from get_diff_sampling_param()
-            max_model_len: Maximum model context length (for max_tokens clamping)
-            input_length: Number of input tokens (for max_tokens clamping)
-            override_max_tokens: Override from custom generation_config path
 
         Returns:
             vLLM SamplingParams with model defaults applied for unset fields
@@ -622,29 +594,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 }
             }
 
-        # max_tokens: apply model default + clamp to remaining context
-        # Same logic as vllm/entrypoints/utils.py:get_max_tokens()
-        raw_max_tokens = (
+        max_tokens = (
             params.max_tokens if params.HasField("max_tokens") else defaults.get("max_tokens")
         )
-        if max_model_len is not None:
-            if input_length > 0:
-                model_max = max_model_len - input_length
-                if model_max < 0:
-                    raise ValueError(
-                        f"Input length ({input_length}) exceeds model's maximum "
-                        f"context length ({max_model_len})."
-                    )
-            else:
-                # Text input or empty tokenized: cap to full context length
-                model_max = max_model_len
-            candidates = [
-                v for v in (model_max, raw_max_tokens, override_max_tokens) if v is not None
-            ]
-            max_tokens = min(candidates) if candidates else None
-        else:
-            candidates = [v for v in (raw_max_tokens, override_max_tokens) if v is not None]
-            max_tokens = min(candidates) if candidates else None
 
         # Create SamplingParams with model defaults for unset fields
         # output_kind=DELTA: Return only new tokens in each chunk (for streaming)
