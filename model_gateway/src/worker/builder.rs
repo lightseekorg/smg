@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use arc_swap::ArcSwap;
 use openai_protocol::{
     model_card::ModelCard,
-    worker::{HealthCheckConfig, WorkerModels, WorkerSpec},
+    worker::{HealthCheckConfig, WorkerModels, WorkerSpec, WorkerStatus},
 };
 
 use super::{
@@ -32,6 +32,11 @@ pub struct BasicWorkerBuilder {
     http_client: Option<reqwest::Client>,
     /// Resolved resilience config (if not set, defaults are used).
     resilience: Option<ResolvedResilience>,
+    /// Initial lifecycle status. If unset, defaults to `Pending` for
+    /// health-checked workers and `Ready` for `disable_health_check == true`.
+    /// Callers replacing an existing worker (e.g. metadata updates) should
+    /// pass the old worker's status to avoid kicking it back to Pending.
+    initial_status: Option<WorkerStatus>,
 }
 
 impl BasicWorkerBuilder {
@@ -45,6 +50,7 @@ impl BasicWorkerBuilder {
             grpc_client: None,
             http_client: None,
             resilience: None,
+            initial_status: None,
         }
     }
 
@@ -58,6 +64,7 @@ impl BasicWorkerBuilder {
             grpc_client: None,
             http_client: None,
             resilience: None,
+            initial_status: None,
         }
     }
 
@@ -73,6 +80,7 @@ impl BasicWorkerBuilder {
             grpc_client: None,
             http_client: None,
             resilience: None,
+            initial_status: None,
         }
     }
 
@@ -124,6 +132,19 @@ impl BasicWorkerBuilder {
     /// stored on `WorkerMetadata` for runtime use.
     pub fn health_config(mut self, config: HealthCheckConfig) -> Self {
         self.health_config = Some(config);
+        self
+    }
+
+    /// Override the initial lifecycle status.
+    ///
+    /// By default, `build()` chooses `Pending` for health-checked workers and
+    /// `Ready` for workers with `disable_health_check == true`. Callers that
+    /// replace an existing worker (e.g. metadata-only updates via
+    /// `register_or_replace`) should pass the old worker's status here to
+    /// avoid kicking a healthy worker back to Pending and causing avoidable
+    /// 503s while it re-proves itself.
+    pub fn status(mut self, status: WorkerStatus) -> Self {
+        self.initial_status = Some(status);
         self
     }
 
@@ -239,18 +260,19 @@ impl BasicWorkerBuilder {
             None => OnceCell::new(),
         });
 
-        // Workers with health checks disabled start Ready (immediately routable).
-        // Workers with health checks enabled start Pending (not routable until
-        // the health checker promotes them after success_threshold passes).
-        let initial_status = if metadata.health_config.disable_health_check {
-            openai_protocol::worker::WorkerStatus::Ready
-        } else {
-            openai_protocol::worker::WorkerStatus::Pending
-        };
-        Metrics::set_worker_health(
-            &metadata.spec.url,
-            initial_status == openai_protocol::worker::WorkerStatus::Ready,
-        );
+        // Caller can override the initial status (e.g. when replacing an
+        // existing worker, to preserve its prior status). Otherwise:
+        // - workers with health checks disabled start Ready (routable)
+        // - workers with health checks enabled start Pending (not routable
+        //   until the health checker promotes them after success_threshold)
+        let initial_status = self.initial_status.unwrap_or_else(|| {
+            if metadata.health_config.disable_health_check {
+                WorkerStatus::Ready
+            } else {
+                WorkerStatus::Pending
+            }
+        });
+        Metrics::set_worker_health(&metadata.spec.url, initial_status == WorkerStatus::Ready);
 
         let http_client = self.http_client.unwrap_or_else(|| {
             reqwest::Client::builder()
@@ -340,10 +362,7 @@ mod tests {
         assert_eq!(worker.connection_mode(), &ConnectionMode::Http);
         // Health-checked workers start Pending (not routable until health checker promotes)
         assert!(!worker.is_healthy());
-        assert_eq!(
-            worker.status(),
-            openai_protocol::worker::WorkerStatus::Pending
-        );
+        assert_eq!(worker.status(), WorkerStatus::Pending);
     }
 
     #[test]

@@ -465,13 +465,6 @@ impl WorkerRegistry {
             return false;
         }
 
-        // Preserve runtime status across replace. A metadata-only update
-        // (labels, priority, etc.) must not kick a healthy worker back to
-        // Pending and cause avoidable 503s while it re-proves itself.
-        // The builder always starts health-checked workers as Pending, so
-        // we copy the old status forward here.
-        new_worker.set_status(old_worker.status());
-
         // Overwrite worker object atomically
         self.workers.insert(worker_id.clone(), new_worker.clone());
 
@@ -1430,10 +1423,11 @@ mod tests {
     }
 
     #[test]
-    fn test_replace_preserves_status() {
-        // Regression test: metadata updates (via register_or_replace) must not
-        // kick a healthy worker back to Pending, or it would become unroutable
-        // and cause 503s while re-proving itself through the health checker.
+    fn test_builder_status_override_on_replace() {
+        // Regression test: metadata-only updates must not kick a healthy
+        // worker back to Pending. The builder exposes a `.status()` setter
+        // so callers (e.g. UpdateWorkerPropertiesStep) can pass the old
+        // worker's status when constructing the replacement.
         let registry = WorkerRegistry::new();
 
         // First worker starts Pending (health checks enabled by default),
@@ -1453,27 +1447,38 @@ mod tests {
             WorkerStatus::Ready
         );
 
-        // A metadata-only update: same URL, different priority.
-        // The new builder would produce a Pending worker, but replace must
-        // preserve the existing Ready status to avoid avoidable 503s.
+        // Caller (e.g. UpdateWorkerPropertiesStep) reads the old status and
+        // passes it to the builder. The builder honors the override instead
+        // of defaulting to Pending.
+        let preserved_status = first.status();
         let second: Arc<dyn Worker> = Arc::new(
             BasicWorkerBuilder::new("http://worker:8080")
                 .worker_type(WorkerType::Regular)
                 .model(ModelCard::new("llama-3"))
                 .priority(99)
+                .status(preserved_status)
                 .build(),
         );
-        assert_eq!(second.status(), WorkerStatus::Pending);
+        assert_eq!(
+            second.status(),
+            WorkerStatus::Ready,
+            "builder must honor explicit status override"
+        );
 
         assert!(registry.replace(&first_id, second));
 
         let after = registry.get(&first_id).unwrap();
-        assert_eq!(
-            after.status(),
-            WorkerStatus::Ready,
-            "replace() must preserve the old worker's status"
-        );
+        assert_eq!(after.status(), WorkerStatus::Ready);
         assert_eq!(after.priority(), 99, "new priority should be applied");
+    }
+
+    #[test]
+    fn test_builder_default_status_is_pending() {
+        // Without an explicit override, health-checked workers start Pending.
+        let worker = BasicWorkerBuilder::new("http://worker:8080")
+            .worker_type(WorkerType::Regular)
+            .build();
+        assert_eq!(worker.status(), WorkerStatus::Pending);
     }
 
     #[test]

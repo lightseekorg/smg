@@ -71,8 +71,11 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
                 .clone()
                 .or_else(|| worker.metadata().spec.api_key.clone());
 
-            // Create a new worker with updated properties
-            // Use base_url() so DP workers start from the un-suffixed URL
+            // Create a new worker with updated properties.
+            // Use base_url() so DP workers start from the un-suffixed URL.
+            // Preserve the old worker's status: this is a metadata-only
+            // update, not a fresh registration, so a healthy worker should
+            // stay healthy and not flip back to Pending.
             let mut builder = BasicWorkerBuilder::new(worker.base_url())
                 .worker_type(*worker.worker_type())
                 .connection_mode(*worker.connection_mode())
@@ -84,7 +87,8 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
                 .http_client(worker.http_client().clone())
                 .resilience(worker.resilience().clone())
                 .priority(updated_priority)
-                .cost(updated_cost);
+                .cost(updated_cost)
+                .status(worker.status());
 
             if let Some(ref api_key) = updated_api_key {
                 builder = builder.api_key(api_key.clone());
