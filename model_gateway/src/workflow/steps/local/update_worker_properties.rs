@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use openai_protocol::worker::WorkerStatus;
 use tracing::{debug, info, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
@@ -73,9 +74,24 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
 
             // Create a new worker with updated properties.
             // Use base_url() so DP workers start from the un-suffixed URL.
-            // Preserve the old worker's status: this is a metadata-only
-            // update, not a fresh registration, so a healthy worker should
-            // stay healthy and not flip back to Pending.
+            //
+            // Compute the right initial status for the replacement:
+            //   1. If the new config has `disable_health_check == true`,
+            //      the new worker is immediately Ready — the health checker
+            //      won't probe it, so we can't rely on Pending→Ready promotion.
+            //   2. If the old worker was Failed, give the replacement a
+            //      fresh start at Pending (or Ready if checks are disabled).
+            //      Failed is otherwise terminal, but a metadata update is
+            //      effectively a re-registration of the same URL.
+            //   3. Otherwise preserve the old status — a healthy worker
+            //      stays healthy through metadata-only updates, no 503s.
+            let next_status = if updated_health_config.disable_health_check {
+                WorkerStatus::Ready
+            } else if worker.status() == WorkerStatus::Failed {
+                WorkerStatus::Pending
+            } else {
+                worker.status()
+            };
             let mut builder = BasicWorkerBuilder::new(worker.base_url())
                 .worker_type(*worker.worker_type())
                 .connection_mode(*worker.connection_mode())
@@ -88,7 +104,7 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
                 .resilience(worker.resilience().clone())
                 .priority(updated_priority)
                 .cost(updated_cost)
-                .status(worker.status());
+                .status(next_status);
 
             if let Some(ref api_key) = updated_api_key {
                 builder = builder.api_key(api_key.clone());

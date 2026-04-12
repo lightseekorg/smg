@@ -644,8 +644,9 @@ impl Worker for BasicWorker {
             Metrics::record_worker_health_check(worker_type_str, metrics_labels::CB_SUCCESS);
 
             // Pending → Ready or NotReady → Ready on success_threshold.
-            // Failed is terminal — workers that reached Failed must be explicitly
-            // replaced (via register_or_replace or removal + re-registration).
+            // Failed is terminal — workers that reached Failed must be removed
+            // and re-registered. (replace() preserves the old status, so a
+            // metadata update on a Failed worker would not recover it.)
             if matches!(
                 current_status,
                 WorkerStatus::Pending | WorkerStatus::NotReady
@@ -655,6 +656,16 @@ impl Worker for BasicWorker {
                 self.consecutive_successes.store(0, Ordering::Release);
                 // Reset pending probe counter on successful promotion
                 self.total_pending_probes.store(0, Ordering::Relaxed);
+            } else if current_status == WorkerStatus::Pending {
+                // Even on a successful probe, enforce the Pending cap. A
+                // worker that flaps F,S,F,S,... never reaches success_threshold
+                // and would otherwise grow `total_pending_probes` without bound.
+                let max_pending = health_config.failure_threshold as usize * 10;
+                if self.total_pending_probes.load(Ordering::Relaxed) >= max_pending {
+                    self.set_status(WorkerStatus::Failed);
+                    self.consecutive_successes.store(0, Ordering::Release);
+                    self.consecutive_failures.store(0, Ordering::Release);
+                }
             }
             Ok(())
         } else {
@@ -1053,22 +1064,24 @@ impl Drop for HealthChecker {
     }
 }
 
-/// Helper to convert Worker trait object to WorkerInfo struct
+/// Helper to convert Worker trait object to WorkerInfo struct.
+///
+/// Both `is_healthy` and `status` are derived from the same atomic snapshot
+/// to avoid TOCTOU between the two fields. The `status` field exposes the
+/// real lifecycle state (Pending/Ready/NotReady/Failed) so API consumers
+/// can distinguish "starting up" from "broken" — `is_healthy` collapses
+/// everything to a routability bool for backwards compatibility.
 pub fn worker_to_info(worker: &Arc<dyn Worker>) -> WorkerInfo {
     let metadata = worker.metadata();
     let spec = metadata.spec.clone();
-    let is_healthy = worker.is_healthy();
+    let status = worker.status();
 
     WorkerInfo {
         id: worker.url().to_string(),
         model_id: spec.models.primary().map(|m| m.id.clone()),
         spec,
-        is_healthy,
-        status: Some(if is_healthy {
-            WorkerStatus::Ready
-        } else {
-            WorkerStatus::NotReady
-        }),
+        is_healthy: status == WorkerStatus::Ready,
+        status: Some(status),
         load: worker.load(),
         job_status: None,
     }
