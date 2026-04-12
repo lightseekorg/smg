@@ -630,9 +630,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         if max_model_len is not None:
             if input_length > 0:
                 model_max = max_model_len - input_length
-                if model_max <= 0:
+                if model_max < 0:
                     raise ValueError(
-                        f"Input length ({input_length}) exceeds max model length ({max_model_len})"
+                        f"Input length ({input_length}) exceeds model's maximum "
+                        f"context length ({max_model_len})."
                     )
             else:
                 # Text input or empty tokenized: cap to full context length
