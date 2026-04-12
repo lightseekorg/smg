@@ -198,8 +198,17 @@ impl LoadBalancingPolicy for ConsistentHashingPolicy {
 mod tests {
     use std::collections::HashMap;
 
+    use openai_protocol::worker::HealthCheckConfig;
+
     use super::*;
     use crate::worker::{BasicWorkerBuilder, HashRing, WorkerType};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     fn headers_with_routing_key(key: &str) -> http::HeaderMap {
         let mut headers = http::HeaderMap::new();
@@ -219,6 +228,7 @@ mod tests {
                 Arc::new(
                     BasicWorkerBuilder::new(*url)
                         .worker_type(WorkerType::Regular)
+                        .health_config(no_health_check())
                         .build(),
                 ) as Arc<dyn Worker>
             })

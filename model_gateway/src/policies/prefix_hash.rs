@@ -239,6 +239,8 @@ impl LoadBalancingPolicy for PrefixHashPolicy {
 
 #[cfg(test)]
 mod tests {
+    use openai_protocol::worker::HealthCheckConfig;
+
     use super::*;
     use crate::worker::{BasicWorkerBuilder, HashRing, WorkerType};
 
@@ -248,6 +250,10 @@ mod tests {
                 Arc::new(
                     BasicWorkerBuilder::new(*url)
                         .worker_type(WorkerType::Regular)
+                        .health_config(HealthCheckConfig {
+                            disable_health_check: true,
+                            ..Default::default()
+                        })
                         .build(),
                 ) as Arc<dyn Worker>
             })

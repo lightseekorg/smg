@@ -203,6 +203,9 @@ impl AppTestContext {
         mut config: RouterConfig,
         worker_configs: Vec<MockWorkerConfig>,
     ) -> Pin<Box<dyn Future<Output = Self> + Send>> {
+        // Test workers don't need health checks — start Ready immediately
+        config.health_check.disable_health_check = true;
+
         Box::pin(async move {
             let mut workers = Vec::new();
             let mut worker_urls = Vec::new();
@@ -410,6 +413,10 @@ pub fn create_test_context(
                         .worker_type(WorkerType::Regular)
                         .runtime_type(RuntimeType::External)
                         .models(models)
+                        .health_config(openai_protocol::worker::HealthCheckConfig {
+                            disable_health_check: true,
+                            ..Default::default()
+                        })
                         .build(),
                 );
                 app_context.worker_registry.register(worker);
@@ -545,6 +552,10 @@ pub fn create_test_context_with_parsers(
                         .worker_type(WorkerType::Regular)
                         .runtime_type(RuntimeType::External)
                         .models(models)
+                        .health_config(openai_protocol::worker::HealthCheckConfig {
+                            disable_health_check: true,
+                            ..Default::default()
+                        })
                         .build(),
                 );
                 app_context.worker_registry.register(worker);
@@ -679,6 +690,10 @@ pub fn create_test_context_with_mcp_config(
                         .worker_type(WorkerType::Regular)
                         .runtime_type(RuntimeType::External)
                         .models(models)
+                        .health_config(openai_protocol::worker::HealthCheckConfig {
+                            disable_health_check: true,
+                            ..Default::default()
+                        })
                         .build(),
                 );
                 app_context.worker_registry.register(worker);

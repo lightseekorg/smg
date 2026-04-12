@@ -783,8 +783,17 @@ impl RouterTrait for Router {
 
 #[cfg(test)]
 mod tests {
+    use openai_protocol::worker::HealthCheckConfig;
+
     use super::*;
     use crate::{config::types::PolicyConfig, worker::BasicWorkerBuilder};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     fn create_test_regular_router() -> Router {
         // Create registries
@@ -794,9 +803,11 @@ mod tests {
         // Register test workers
         let worker1 = BasicWorkerBuilder::new("http://worker1:8080")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         let worker2 = BasicWorkerBuilder::new("http://worker2:8080")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         worker_registry.register_or_replace(Arc::new(worker1));
         worker_registry.register_or_replace(Arc::new(worker2));

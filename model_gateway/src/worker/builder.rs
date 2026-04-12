@@ -239,10 +239,18 @@ impl BasicWorkerBuilder {
             None => OnceCell::new(),
         });
 
-        // Workers start Ready (routable). PR 6b will change this to Pending
-        // for health-checked workers.
-        let initial_status = openai_protocol::worker::WorkerStatus::Ready;
-        Metrics::set_worker_health(&metadata.spec.url, true);
+        // Workers with health checks disabled start Ready (immediately routable).
+        // Workers with health checks enabled start Pending (not routable until
+        // the health checker promotes them after success_threshold passes).
+        let initial_status = if metadata.health_config.disable_health_check {
+            openai_protocol::worker::WorkerStatus::Ready
+        } else {
+            openai_protocol::worker::WorkerStatus::Pending
+        };
+        Metrics::set_worker_health(
+            &metadata.spec.url,
+            initial_status == openai_protocol::worker::WorkerStatus::Ready,
+        );
 
         let http_client = self.http_client.unwrap_or_else(|| {
             reqwest::Client::builder()
@@ -263,6 +271,7 @@ impl BasicWorkerBuilder {
             status: Arc::new(AtomicU8::new(initial_status as u8)),
             consecutive_failures: Arc::new(AtomicUsize::new(0)),
             consecutive_successes: Arc::new(AtomicUsize::new(0)),
+            total_pending_probes: Arc::new(AtomicUsize::new(0)),
             circuit_breaker: CircuitBreaker::with_config_and_label(
                 self.circuit_breaker_config,
                 metadata.spec.url.clone(),
@@ -329,7 +338,12 @@ mod tests {
         assert_eq!(worker.url(), "http://localhost:8080");
         assert_eq!(worker.worker_type(), &WorkerType::Regular);
         assert_eq!(worker.connection_mode(), &ConnectionMode::Http);
-        assert!(worker.is_healthy());
+        // Health-checked workers start Pending (not routable until health checker promotes)
+        assert!(!worker.is_healthy());
+        assert_eq!(
+            worker.status(),
+            openai_protocol::worker::WorkerStatus::Pending
+        );
     }
 
     #[test]
@@ -341,7 +355,7 @@ mod tests {
         assert_eq!(worker.url(), "http://localhost:8080");
         assert_eq!(worker.worker_type(), &WorkerType::Decode);
         assert_eq!(worker.connection_mode(), &ConnectionMode::Http);
-        assert!(worker.is_healthy());
+        assert!(!worker.is_healthy());
     }
 
     #[test]

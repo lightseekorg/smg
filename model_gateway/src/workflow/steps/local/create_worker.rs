@@ -169,9 +169,8 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
                     builder = builder.kv_role(r);
                 }
 
-                let worker = Arc::new(builder.build()) as Arc<dyn Worker>;
-                worker.set_healthy(health_config.disable_health_check);
-                worker
+                // Builder sets initial status: Pending if health-checked, Ready if not.
+                Arc::new(builder.build()) as Arc<dyn Worker>
             })
             .collect();
 

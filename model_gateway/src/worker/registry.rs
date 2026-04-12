@@ -17,6 +17,7 @@ use std::{
 };
 
 use dashmap::{mapref::entry::Entry, DashMap};
+use openai_protocol::worker::WorkerStatus;
 use parking_lot::RwLock;
 use smg_mesh::OptionalMeshSyncManager;
 use tokio::sync::broadcast;
@@ -991,13 +992,12 @@ impl WorkerRegistry {
                         .collect();
                     let checked_workers = futures::future::join_all(futs).await;
 
-                    // Only remove workers whose health check actually failed
-                    // this tick. Workers that are unhealthy but passing checks
-                    // (e.g. mesh-synced, pre-activation) are recovering — leave
-                    // them alone until they either become healthy or truly fail.
+                    // Only remove Failed workers — not Pending (still starting)
+                    // or NotReady (may recover). This prevents premature removal
+                    // of workers that are transiently unhealthy.
                     if let Some(ref job_queue) = job_queue {
                         for (worker, failed) in &checked_workers {
-                            if !worker.is_healthy() && *failed {
+                            if worker.status() == WorkerStatus::Failed && *failed {
                                 let url = worker.url().to_string();
                                 tracing::warn!(
                                     worker_url = %url,

@@ -839,6 +839,10 @@ async fn test_openai_router_models_from_registry() {
             .models(vec![openai_protocol::model_card::ModelCard::new(
                 "gpt-3.5-turbo",
             )])
+            .health_config(openai_protocol::worker::HealthCheckConfig {
+                disable_health_check: true,
+                ..Default::default()
+            })
             .build(),
     );
     ctx.worker_registry.register(worker);

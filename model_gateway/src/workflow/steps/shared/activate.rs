@@ -8,10 +8,11 @@ use wfaas::{
 
 use crate::workflow::data::WorkerRegistrationData;
 
-/// Unified step to activate workers by marking them as healthy.
+/// Unified step to activate workers that have health checks disabled.
 ///
-/// This is the final step in any worker registration workflow.
-/// Works with any workflow data type that implements `WorkerRegistrationData`.
+/// Workers with `disable_health_check == true` are set to Ready immediately.
+/// Workers with health checks enabled remain in Pending — the health checker
+/// will promote them to Ready after `success_threshold` consecutive passes.
 pub struct ActivateWorkersStep;
 
 #[async_trait]
@@ -22,11 +23,19 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for ActivateWorke
             .get_actual_workers()
             .ok_or_else(|| WorkflowError::ContextValueNotFound("workers".to_string()))?;
 
+        let mut activated = 0;
         for worker in workers {
-            worker.set_healthy(true);
+            if worker.metadata().health_config.disable_health_check {
+                worker.set_healthy(true);
+                activated += 1;
+            }
+            // Health-checked workers stay in Pending — the health checker promotes them.
         }
 
-        info!("Activated {} worker(s) (marked as healthy)", workers.len());
+        info!(
+            "Activated {activated}/{} worker(s) (health-check-disabled only)",
+            workers.len()
+        );
 
         Ok(StepResult::Success)
     }

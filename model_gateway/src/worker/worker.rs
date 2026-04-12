@@ -527,6 +527,10 @@ pub struct BasicWorker {
     pub status: Arc<AtomicU8>,
     pub consecutive_failures: Arc<AtomicUsize>,
     pub consecutive_successes: Arc<AtomicUsize>,
+    /// Total health check probes attempted while in Pending state.
+    /// Unlike consecutive counters, this counts ALL attempts (not just consecutive).
+    /// Used to detect misconfigured workers stuck in Pending.
+    pub total_pending_probes: Arc<AtomicUsize>,
     pub circuit_breaker: CircuitBreaker,
     /// Lazily initialized gRPC client for gRPC workers.
     /// Uses OnceCell for lock-free reads after initialization.
@@ -591,10 +595,19 @@ impl Worker for BasicWorker {
 
     async fn check_health_async(&self) -> WorkerResult<()> {
         if self.metadata.health_config.disable_health_check {
-            if !self.is_healthy() {
-                self.set_healthy(true);
+            if self.status() != WorkerStatus::Ready {
+                self.set_status(WorkerStatus::Ready);
             }
             return Ok(());
+        }
+
+        let current_status = self.status();
+        let health_config = &self.metadata.health_config;
+        let worker_type_str = self.metadata.spec.worker_type.as_metric_label();
+
+        // Track total probes in Pending for startup timeout detection
+        if current_status == WorkerStatus::Pending {
+            self.total_pending_probes.fetch_add(1, Ordering::Relaxed);
         }
 
         let health_result = match &self.metadata.spec.connection_mode {
@@ -602,35 +615,53 @@ impl Worker for BasicWorker {
             ConnectionMode::Grpc => self.grpc_health_check().await?,
         };
 
-        // Get worker type label for metrics
-        let worker_type_str = self.metadata.spec.worker_type.as_metric_label();
-
         if health_result {
             self.consecutive_failures.store(0, Ordering::Release);
             let successes = self.consecutive_successes.fetch_add(1, Ordering::AcqRel) + 1;
-
-            // Record health check success metric
             Metrics::record_worker_health_check(worker_type_str, metrics_labels::CB_SUCCESS);
 
-            if !self.is_healthy()
-                && successes >= self.metadata.health_config.success_threshold as usize
+            // Pending → Ready or NotReady → Ready on success_threshold
+            if current_status != WorkerStatus::Ready
+                && successes >= health_config.success_threshold as usize
             {
-                self.set_healthy(true);
+                self.set_status(WorkerStatus::Ready);
                 self.consecutive_successes.store(0, Ordering::Release);
+                // Reset pending probe counter on successful promotion
+                self.total_pending_probes.store(0, Ordering::Relaxed);
             }
             Ok(())
         } else {
             self.consecutive_successes.store(0, Ordering::Release);
             let failures = self.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1;
-
-            // Record health check failure metric
             Metrics::record_worker_health_check(worker_type_str, metrics_labels::CB_FAILURE);
 
-            if self.is_healthy()
-                && failures >= self.metadata.health_config.failure_threshold as usize
-            {
-                self.set_healthy(false);
-                self.consecutive_failures.store(0, Ordering::Release);
+            match current_status {
+                WorkerStatus::Ready => {
+                    // Ready → NotReady on failure_threshold
+                    if failures >= health_config.failure_threshold as usize {
+                        self.set_status(WorkerStatus::NotReady);
+                        self.consecutive_failures.store(0, Ordering::Release);
+                    }
+                }
+                WorkerStatus::NotReady => {
+                    // NotReady → Failed on liveness_failure_threshold (3× failure_threshold)
+                    let liveness_threshold = health_config.failure_threshold as usize * 3;
+                    if failures >= liveness_threshold {
+                        self.set_status(WorkerStatus::Failed);
+                        self.consecutive_failures.store(0, Ordering::Release);
+                    }
+                }
+                WorkerStatus::Pending => {
+                    // Pending → Failed on max_pending_probes (10× failure_threshold)
+                    let max_pending = health_config.failure_threshold as usize * 10;
+                    let total = self.total_pending_probes.load(Ordering::Relaxed);
+                    if total >= max_pending {
+                        self.set_status(WorkerStatus::Failed);
+                    }
+                }
+                WorkerStatus::Failed => {
+                    // Already failed — no further transitions
+                }
             }
 
             Err(WorkerError::HealthCheckFailed {
@@ -1013,11 +1044,22 @@ pub fn worker_to_info(worker: &Arc<dyn Worker>) -> WorkerInfo {
 mod tests {
     use std::{thread, time::Duration};
 
+    use openai_protocol::worker::HealthCheckConfig;
+
     use super::*;
     use crate::worker::{
         circuit_breaker::{CircuitBreakerConfig, CircuitState},
         BasicWorkerBuilder,
     };
+
+    /// Health config that skips health checks — workers start Ready immediately.
+    /// Use in tests that don't test the health check lifecycle.
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..HealthCheckConfig::default()
+        }
+    }
 
     #[test]
     fn test_worker_type_display() {
@@ -1070,9 +1112,9 @@ mod tests {
 
     #[test]
     fn test_basic_worker_creation() {
-        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         assert_eq!(worker.url(), "http://test:8080");
         assert_eq!(worker.worker_type(), &WorkerType::Regular);
@@ -1151,17 +1193,41 @@ mod tests {
 
     #[test]
     fn test_health_status() {
-        use crate::worker::BasicWorkerBuilder;
+        let worker = BasicWorkerBuilder::new("http://test:8080")
+            .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
+            .build();
+
+        assert!(worker.is_healthy());
+        assert_eq!(worker.status(), WorkerStatus::Ready);
+
+        worker.set_healthy(false);
+        assert!(!worker.is_healthy());
+        assert_eq!(worker.status(), WorkerStatus::NotReady);
+
+        worker.set_healthy(true);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.status(), WorkerStatus::Ready);
+    }
+
+    #[test]
+    fn test_pending_worker_not_routable() {
+        // Default health config: health checks enabled → starts Pending
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
             .build();
 
-        assert!(worker.is_healthy());
+        assert_eq!(worker.status(), WorkerStatus::Pending);
+        assert!(!worker.is_healthy()); // Pending is not routable
+        assert!(!worker.is_available()); // Pending is not available
 
+        // set_healthy(false) on Pending is a no-op (hasn't proven itself)
         worker.set_healthy(false);
-        assert!(!worker.is_healthy());
+        assert_eq!(worker.status(), WorkerStatus::Pending);
 
+        // set_healthy(true) promotes Pending → Ready
         worker.set_healthy(true);
+        assert_eq!(worker.status(), WorkerStatus::Ready);
         assert!(worker.is_healthy());
     }
 
@@ -1483,6 +1549,7 @@ mod tests {
         let dp_worker = BasicWorkerBuilder::new("http://worker1:8080")
             .dp_config(0, 2)
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
 
         assert!(dp_worker.is_healthy());
@@ -1502,9 +1569,9 @@ mod tests {
 
     #[test]
     fn test_worker_circuit_breaker() {
-        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
 
         assert!(worker.is_available());
@@ -1533,10 +1600,10 @@ mod tests {
             window_duration: Duration::from_secs(60),
         };
 
-        use crate::worker::BasicWorkerBuilder;
         let worker = BasicWorkerBuilder::new("http://test:8080")
             .worker_type(WorkerType::Regular)
             .circuit_breaker_config(config)
+            .health_config(no_health_check())
             .build();
 
         worker.record_outcome(503);
@@ -1558,6 +1625,7 @@ mod tests {
         let dp_worker = BasicWorkerBuilder::new("http://worker:8080")
             .dp_config(0, 2)
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
 
         assert!(dp_worker.is_available());
@@ -1572,27 +1640,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_mixed_worker_types() {
-        use crate::worker::BasicWorkerBuilder;
+        let hc = no_health_check();
         let regular: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://regular:8080")
                 .worker_type(WorkerType::Regular)
+                .health_config(hc.clone())
                 .build(),
         );
         let prefill: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://prefill:8080")
                 .worker_type(WorkerType::Prefill)
                 .bootstrap_port(Some(9090))
+                .health_config(hc.clone())
                 .build(),
         );
         let decode: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://decode:8080")
                 .worker_type(WorkerType::Decode)
+                .health_config(hc.clone())
                 .build(),
         );
         let dp_aware_regular: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://dp:8080")
                 .dp_config(0, 2)
                 .worker_type(WorkerType::Regular)
+                .health_config(hc.clone())
                 .api_key("test_api_key")
                 .build(),
         );
@@ -1600,6 +1672,7 @@ mod tests {
             BasicWorkerBuilder::new("http://dp-prefill:8080")
                 .dp_config(1, 2)
                 .worker_type(WorkerType::Prefill)
+                .health_config(hc.clone())
                 .api_key("test_api_key")
                 .build(),
         );
@@ -1607,6 +1680,7 @@ mod tests {
             BasicWorkerBuilder::new("http://dp-decode:8080")
                 .dp_config(0, 4)
                 .worker_type(WorkerType::Decode)
+                .health_config(hc.clone())
                 .api_key("test_api_key")
                 .build(),
         );

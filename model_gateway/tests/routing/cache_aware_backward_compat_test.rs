@@ -1,9 +1,19 @@
 use std::{collections::HashMap, sync::Arc};
 
+use openai_protocol::worker::HealthCheckConfig;
 use smg::{
     policies::{CacheAwareConfig, CacheAwarePolicy, LoadBalancingPolicy, SelectWorkerInfo},
     worker::{BasicWorkerBuilder, Worker, WorkerType},
 };
+
+/// Test helper: health check config that skips health checks.
+/// Workers built with this config start Ready (routable) immediately.
+fn no_health_check() -> HealthCheckConfig {
+    HealthCheckConfig {
+        disable_health_check: true,
+        ..Default::default()
+    }
+}
 
 #[test]
 fn test_backward_compatibility_with_empty_model_id() {
@@ -22,6 +32,7 @@ fn test_backward_compatibility_with_empty_model_id() {
     let worker1 = BasicWorkerBuilder::new("http://worker1:8080")
         .worker_type(WorkerType::Regular)
         .api_key("test_api_key")
+        .health_config(no_health_check())
         .build();
     // No model_id label - should default to "unknown"
 
@@ -31,6 +42,7 @@ fn test_backward_compatibility_with_empty_model_id() {
         .worker_type(WorkerType::Regular)
         .api_key("test_api_key")
         .labels(labels2)
+        .health_config(no_health_check())
         .build();
 
     // Add workers - should both go to "default" tree
@@ -72,6 +84,7 @@ fn test_mixed_model_ids() {
     let worker1 = BasicWorkerBuilder::new("http://worker1:8080")
         .worker_type(WorkerType::Regular)
         .api_key("test_api_key")
+        .health_config(no_health_check())
         .build();
     // No model_id label - defaults to "unknown" which goes to "default" tree
 
@@ -81,6 +94,7 @@ fn test_mixed_model_ids() {
         .worker_type(WorkerType::Regular)
         .labels(labels2)
         .api_key("test_api_key")
+        .health_config(no_health_check())
         .build();
 
     let mut labels3 = HashMap::new();
@@ -88,6 +102,7 @@ fn test_mixed_model_ids() {
     let worker3 = BasicWorkerBuilder::new("http://worker3:8080")
         .worker_type(WorkerType::Regular)
         .labels(labels3)
+        .health_config(no_health_check())
         .build();
 
     let mut labels4 = HashMap::new();
@@ -95,6 +110,7 @@ fn test_mixed_model_ids() {
     let worker4 = BasicWorkerBuilder::new("http://worker4:8080")
         .worker_type(WorkerType::Regular)
         .labels(labels4)
+        .health_config(no_health_check())
         .build();
 
     // Add all workers
@@ -139,11 +155,13 @@ fn test_remove_worker_by_url_backward_compat() {
         .worker_type(WorkerType::Regular)
         .labels(labels1)
         .api_key("test_api_key")
+        .health_config(no_health_check())
         .build();
 
     let worker2 = BasicWorkerBuilder::new("http://worker2:8080")
         .worker_type(WorkerType::Regular)
         .api_key("test_api_key")
+        .health_config(no_health_check())
         .build();
     // No model_id label - defaults to "unknown"
 

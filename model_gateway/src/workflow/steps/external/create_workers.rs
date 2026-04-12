@@ -120,12 +120,8 @@ impl StepExecutor<WorkerWorkflowData> for CreateExternalWorkersStep {
                 builder = builder.labels(labels.clone());
             }
 
+            // Builder sets initial status: Pending if health-checked, Ready if not.
             let worker = Arc::new(builder.build()) as Arc<dyn Worker>;
-            if health_config.disable_health_check {
-                worker.set_healthy(true);
-            } else {
-                worker.set_healthy(false);
-            }
 
             info!(
                 "Created wildcard worker at {} (accepts any model, user auth forwarded)",
@@ -161,12 +157,8 @@ impl StepExecutor<WorkerWorkflowData> for CreateExternalWorkersStep {
                 builder = builder.labels(labels.clone());
             }
 
+            // Builder sets initial status: Pending if health-checked, Ready if not.
             let worker = Arc::new(builder.build()) as Arc<dyn Worker>;
-            if health_config.disable_health_check {
-                worker.set_healthy(true);
-            } else {
-                worker.set_healthy(false);
-            }
 
             info!(
                 "Created external worker at {} with {} discovered models",
