@@ -77,13 +77,13 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
         # Load model's default sampling params (respects --generation-config)
         mc = async_llm.model_config
-        self.default_sampling_params: dict = mc.get_diff_sampling_param()
+        self.default_sampling_params: dict = dict(mc.get_diff_sampling_param())
 
         # max_tokens override — same logic as chat_completion/serving.py
         self.override_max_tokens = (
             self.default_sampling_params.get("max_tokens")
             if mc.generation_config not in ("auto", "vllm")
-            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+            else (getattr(mc, "override_generation_config", None) or {}).get("max_new_tokens")
         )
 
         # Harmony model stop tokens — same as chat_completion/serving.py
@@ -91,14 +91,17 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             from vllm.entrypoints.openai.parser.harmony_utils import (
                 get_stop_tokens_for_assistant_actions,
             )
+
             if "stop_token_ids" not in self.default_sampling_params:
                 self.default_sampling_params["stop_token_ids"] = []
             self.default_sampling_params["stop_token_ids"].extend(
                 get_stop_tokens_for_assistant_actions()
             )
 
-        logger.info("VllmEngineServicer initialized (default_sampling_params=%s)",
-                     self.default_sampling_params)
+        logger.info(
+            "VllmEngineServicer initialized (default_sampling_params=%s)",
+            self.default_sampling_params,
+        )
 
     async def Generate(
         self,
@@ -622,33 +625,43 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # max_tokens: apply model default + clamp to remaining context
         # Same logic as vllm/entrypoints/utils.py:get_max_tokens()
         raw_max_tokens = (
-            params.max_tokens if params.HasField("max_tokens")
-            else defaults.get("max_tokens")
+            params.max_tokens if params.HasField("max_tokens") else defaults.get("max_tokens")
         )
-        if max_model_len is not None and input_length > 0:
-            model_max = max_model_len - input_length
-            candidates = [v for v in (model_max, raw_max_tokens, override_max_tokens) if v is not None]
+        if max_model_len is not None:
+            if input_length > 0:
+                model_max = max_model_len - input_length
+                if model_max <= 0:
+                    raise ValueError(
+                        f"Input length ({input_length}) exceeds max model length ({max_model_len})"
+                    )
+            else:
+                # Text input or empty tokenized: cap to full context length
+                model_max = max_model_len
+            candidates = [
+                v for v in (model_max, raw_max_tokens, override_max_tokens) if v is not None
+            ]
             max_tokens = min(candidates) if candidates else None
         else:
             candidates = [v for v in (raw_max_tokens, override_max_tokens) if v is not None]
-            max_tokens = min(candidates) if candidates else raw_max_tokens
+            max_tokens = min(candidates) if candidates else None
 
         # Create SamplingParams with model defaults for unset fields
         # output_kind=DELTA: Return only new tokens in each chunk (for streaming)
         return SamplingParams(
-            temperature=params.temperature if params.HasField("temperature")
+            temperature=params.temperature
+            if params.HasField("temperature")
             else defaults.get("temperature", 1.0),
-            top_p=params.top_p if params.HasField("top_p")
-            else defaults.get("top_p", 1.0),
-            top_k=params.top_k if params.HasField("top_k")
-            else defaults.get("top_k", 0),
-            min_p=params.min_p if params.HasField("min_p")
-            else defaults.get("min_p", 0.0),
-            frequency_penalty=params.frequency_penalty if params.HasField("frequency_penalty")
+            top_p=params.top_p if params.HasField("top_p") else defaults.get("top_p", 1.0),
+            top_k=params.top_k if params.HasField("top_k") else defaults.get("top_k", 0),
+            min_p=params.min_p if params.HasField("min_p") else defaults.get("min_p", 0.0),
+            frequency_penalty=params.frequency_penalty
+            if params.HasField("frequency_penalty")
             else defaults.get("frequency_penalty", 0.0),
-            presence_penalty=params.presence_penalty if params.HasField("presence_penalty")
+            presence_penalty=params.presence_penalty
+            if params.HasField("presence_penalty")
             else defaults.get("presence_penalty", 0.0),
-            repetition_penalty=params.repetition_penalty if params.HasField("repetition_penalty")
+            repetition_penalty=params.repetition_penalty
+            if params.HasField("repetition_penalty")
             else defaults.get("repetition_penalty", 1.0),
             max_tokens=max_tokens,
             min_tokens=params.min_tokens,

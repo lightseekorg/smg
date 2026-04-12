@@ -37,12 +37,14 @@ class TestGenerationConfigDefaults:
         """
         _, model_path, _, _ = setup_backend
 
-        # Request WITHOUT temperature — model default should apply
+        # Smoke test: omit temperature so the model default applies.
+        # We verify the request succeeds (servicer doesn't crash loading
+        # defaults) — statistical temperature verification is intentionally
+        # omitted because it's flaky in CI.
         response = api_client.chat.completions.create(
             model=model_path,
             messages=[{"role": "user", "content": "Say hello"}],
             max_tokens=10,
-            # No temperature specified — model default should apply
         )
         assert response.choices[0].message.content is not None
         assert len(response.choices[0].message.content) > 0
