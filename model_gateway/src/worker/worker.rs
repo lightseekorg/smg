@@ -610,19 +610,27 @@ impl Worker for BasicWorker {
             self.total_pending_probes.fetch_add(1, Ordering::Relaxed);
         }
 
-        let health_result = match &self.metadata.spec.connection_mode {
-            ConnectionMode::Http => self.http_health_check().await?,
-            ConnectionMode::Grpc => self.grpc_health_check().await?,
+        // Transport-level errors (e.g. gRPC connect failure) are treated as
+        // failed probes rather than short-circuiting, so the Pending timeout
+        // and NotReady→Failed paths can observe them.
+        let probe_result = match &self.metadata.spec.connection_mode {
+            ConnectionMode::Http => self.http_health_check().await,
+            ConnectionMode::Grpc => self.grpc_health_check().await,
         };
+        let health_result = probe_result.unwrap_or(false);
 
         if health_result {
             self.consecutive_failures.store(0, Ordering::Release);
             let successes = self.consecutive_successes.fetch_add(1, Ordering::AcqRel) + 1;
             Metrics::record_worker_health_check(worker_type_str, metrics_labels::CB_SUCCESS);
 
-            // Pending → Ready or NotReady → Ready on success_threshold
-            if current_status != WorkerStatus::Ready
-                && successes >= health_config.success_threshold as usize
+            // Pending → Ready or NotReady → Ready on success_threshold.
+            // Failed is terminal — workers that reached Failed must be explicitly
+            // replaced (via register_or_replace or removal + re-registration).
+            if matches!(
+                current_status,
+                WorkerStatus::Pending | WorkerStatus::NotReady
+            ) && successes >= health_config.success_threshold as usize
             {
                 self.set_status(WorkerStatus::Ready);
                 self.consecutive_successes.store(0, Ordering::Release);
@@ -652,11 +660,18 @@ impl Worker for BasicWorker {
                     }
                 }
                 WorkerStatus::Pending => {
-                    // Pending → Failed on max_pending_probes (10× failure_threshold)
+                    // Pending → Failed on max_pending_probes (10× failure_threshold).
+                    // Note: this uses `total_pending_probes` (total attempts), not
+                    // `consecutive_failures`, because a worker flapping between
+                    // success/failure in Pending without reaching success_threshold
+                    // is also suspect. Reset consecutive_failures for consistency
+                    // with other failure-path transitions (Failed is terminal, but
+                    // this keeps counter state clean).
                     let max_pending = health_config.failure_threshold as usize * 10;
                     let total = self.total_pending_probes.load(Ordering::Relaxed);
                     if total >= max_pending {
                         self.set_status(WorkerStatus::Failed);
+                        self.consecutive_failures.store(0, Ordering::Release);
                     }
                 }
                 WorkerStatus::Failed => {

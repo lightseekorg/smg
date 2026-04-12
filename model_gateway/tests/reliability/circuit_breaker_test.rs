@@ -75,7 +75,7 @@ mod circuit_breaker_tests {
     /// Test circuit breaker with disabled flag
     #[tokio::test]
     async fn test_circuit_breaker_disabled() {
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .round_robin_policy()
             .host("127.0.0.1")
@@ -89,6 +89,7 @@ mod circuit_breaker_tests {
             .disable_circuit_breaker()
             .disable_retries()
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,
@@ -182,7 +183,7 @@ mod circuit_breaker_tests {
     /// Test circuit breaker with retries enabled
     #[tokio::test]
     async fn test_circuit_breaker_with_retries() {
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .round_robin_policy()
             .host("127.0.0.1")
@@ -206,6 +207,7 @@ mod circuit_breaker_tests {
                 window_duration_secs: 10,
             })
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,

@@ -177,7 +177,7 @@ impl AppTestContext {
         worker_configs: Vec<MockWorkerConfig>,
     ) -> Pin<Box<dyn Future<Output = Self> + Send>> {
         Box::pin(async move {
-            let config = RouterConfig::builder()
+            let mut config = RouterConfig::builder()
                 .regular_mode(vec![])
                 .random_policy()
                 .host("127.0.0.1")
@@ -189,6 +189,10 @@ impl AppTestContext {
                 .max_concurrent_requests(64)
                 .queue_timeout_secs(60)
                 .build_unchecked();
+            // Test mock workers don't need health checks — start Ready immediately.
+            // Tests that need to exercise Pending/Failed semantics should use
+            // `new_with_config()` with an explicit config.
+            config.health_check.disable_health_check = true;
 
             Self::new_with_config(config, worker_configs).await
         })
@@ -203,9 +207,6 @@ impl AppTestContext {
         mut config: RouterConfig,
         worker_configs: Vec<MockWorkerConfig>,
     ) -> Pin<Box<dyn Future<Output = Self> + Send>> {
-        // Test workers don't need health checks — start Ready immediately
-        config.health_check.disable_health_check = true;
-
         Box::pin(async move {
             let mut workers = Vec::new();
             let mut worker_urls = Vec::new();

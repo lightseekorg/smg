@@ -141,7 +141,7 @@ mod power_of_two_tests {
             window_duration_secs: 10,
         };
 
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .power_of_two_policy(1)
             .host("127.0.0.1")
@@ -155,6 +155,7 @@ mod power_of_two_tests {
             .retry_config(retry_config)
             .circuit_breaker_config(circuit_breaker)
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,

@@ -23,7 +23,7 @@ mod service_discovery_tests {
     /// Test service discovery endpoint responds correctly
     #[tokio::test]
     async fn test_service_discovery_endpoint() {
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .round_robin_policy()
             .host("127.0.0.1")
@@ -35,6 +35,7 @@ mod service_discovery_tests {
             .max_concurrent_requests(64)
             .queue_timeout_secs(60)
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,
@@ -71,7 +72,7 @@ mod service_discovery_tests {
     /// Test worker registration via discovery shim
     #[tokio::test]
     async fn test_worker_registration() {
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .round_robin_policy()
             .host("127.0.0.1")
@@ -83,6 +84,7 @@ mod service_discovery_tests {
             .max_concurrent_requests(64)
             .queue_timeout_secs(60)
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,
@@ -129,7 +131,7 @@ mod service_discovery_tests {
     /// Test worker deregistration via discovery shim
     #[tokio::test]
     async fn test_worker_deregistration() {
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .round_robin_policy()
             .host("127.0.0.1")
@@ -141,6 +143,7 @@ mod service_discovery_tests {
             .max_concurrent_requests(64)
             .queue_timeout_secs(60)
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,
@@ -214,7 +217,7 @@ mod service_discovery_tests {
     /// Test health status reporting for discovery
     #[tokio::test]
     async fn test_health_status_endpoint() {
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .round_robin_policy()
             .host("127.0.0.1")
@@ -226,6 +229,7 @@ mod service_discovery_tests {
             .max_concurrent_requests(64)
             .queue_timeout_secs(60)
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,

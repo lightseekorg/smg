@@ -65,7 +65,7 @@ mod retry_tests {
     /// Test that retries are disabled when configured
     #[tokio::test]
     async fn test_retries_disabled() {
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .round_robin_policy()
             .host("127.0.0.1")
@@ -78,6 +78,7 @@ mod retry_tests {
             .queue_timeout_secs(60)
             .disable_retries()
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,

@@ -66,7 +66,7 @@ mod header_forwarding_tests {
     /// Test custom request ID headers
     #[tokio::test]
     async fn test_custom_request_id_headers() {
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .random_policy()
             .host("127.0.0.1")
@@ -82,6 +82,7 @@ mod header_forwarding_tests {
                 "x-correlation-id".to_string(),
             ])
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,

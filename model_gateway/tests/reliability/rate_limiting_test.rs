@@ -81,7 +81,7 @@ mod rate_limiting_tests {
     /// Test rate limit tokens per second
     #[tokio::test]
     async fn test_rate_limit_tokens() {
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .random_policy()
             .host("127.0.0.1")
@@ -94,6 +94,7 @@ mod rate_limiting_tests {
             .rate_limit_tokens_per_second(50) // 50 tokens/sec
             .queue_timeout_secs(60)
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx =
             AppTestContext::new_with_config(config, vec![TestWorkerConfig::healthy(19301)]).await;
@@ -189,7 +190,7 @@ mod rate_limiting_tests {
     #[tokio::test]
     #[expect(clippy::disallowed_methods)]
     async fn test_queue_behavior() {
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .random_policy()
             .host("127.0.0.1")
@@ -202,6 +203,7 @@ mod rate_limiting_tests {
             .queue_size(5) // Small queue
             .queue_timeout_secs(1) // Short timeout
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,

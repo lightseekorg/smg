@@ -465,6 +465,13 @@ impl WorkerRegistry {
             return false;
         }
 
+        // Preserve runtime status across replace. A metadata-only update
+        // (labels, priority, etc.) must not kick a healthy worker back to
+        // Pending and cause avoidable 503s while it re-proves itself.
+        // The builder always starts health-checked workers as Pending, so
+        // we copy the old status forward here.
+        new_worker.set_status(old_worker.status());
+
         // Overwrite worker object atomically
         self.workers.insert(worker_id.clone(), new_worker.clone());
 
@@ -993,11 +1000,12 @@ impl WorkerRegistry {
                     let checked_workers = futures::future::join_all(futs).await;
 
                     // Only remove Failed workers — not Pending (still starting)
-                    // or NotReady (may recover). This prevents premature removal
-                    // of workers that are transiently unhealthy.
+                    // or NotReady (may recover). Failed is terminal, so we
+                    // don't gate on *failed (a worker can reach Failed via
+                    // max_pending_probes on a probe that returned Ok(false)).
                     if let Some(ref job_queue) = job_queue {
-                        for (worker, failed) in &checked_workers {
-                            if worker.status() == WorkerStatus::Failed && *failed {
+                        for (worker, _failed) in &checked_workers {
+                            if worker.status() == WorkerStatus::Failed {
                                 let url = worker.url().to_string();
                                 tracing::warn!(
                                     worker_url = %url,
@@ -1419,6 +1427,53 @@ mod tests {
         assert!(registry.get_by_model("gpt-4o").is_empty());
         assert_eq!(registry.get_by_model("o3").len(), 1);
         assert_eq!(registry.get_by_model("o4-mini").len(), 1);
+    }
+
+    #[test]
+    fn test_replace_preserves_status() {
+        // Regression test: metadata updates (via register_or_replace) must not
+        // kick a healthy worker back to Pending, or it would become unroutable
+        // and cause 503s while re-proving itself through the health checker.
+        let registry = WorkerRegistry::new();
+
+        // First worker starts Pending (health checks enabled by default),
+        // then gets promoted to Ready (simulating what the health checker does).
+        let first: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://worker:8080")
+                .worker_type(WorkerType::Regular)
+                .model(ModelCard::new("llama-3"))
+                .build(),
+        );
+        assert_eq!(first.status(), WorkerStatus::Pending);
+        first.set_status(WorkerStatus::Ready);
+
+        let first_id = registry.register(first.clone()).unwrap();
+        assert_eq!(
+            registry.get(&first_id).unwrap().status(),
+            WorkerStatus::Ready
+        );
+
+        // A metadata-only update: same URL, different priority.
+        // The new builder would produce a Pending worker, but replace must
+        // preserve the existing Ready status to avoid avoidable 503s.
+        let second: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://worker:8080")
+                .worker_type(WorkerType::Regular)
+                .model(ModelCard::new("llama-3"))
+                .priority(99)
+                .build(),
+        );
+        assert_eq!(second.status(), WorkerStatus::Pending);
+
+        assert!(registry.replace(&first_id, second));
+
+        let after = registry.get(&first_id).unwrap();
+        assert_eq!(
+            after.status(),
+            WorkerStatus::Ready,
+            "replace() must preserve the old worker's status"
+        );
+        assert_eq!(after.priority(), 99, "new priority should be applied");
     }
 
     #[test]

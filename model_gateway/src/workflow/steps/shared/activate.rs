@@ -26,7 +26,12 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for ActivateWorke
         let mut activated = 0;
         for worker in workers {
             if worker.metadata().health_config.disable_health_check {
-                worker.set_healthy(true);
+                // Builder already sets these workers Ready. Guard against
+                // redundant mutation to avoid extra state churn and keep
+                // future status-change hooks quiet.
+                if !worker.is_healthy() {
+                    worker.set_healthy(true);
+                }
                 activated += 1;
             }
             // Health-checked workers stay in Pending — the health checker promotes them.
