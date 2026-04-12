@@ -35,10 +35,10 @@ class TestGenerationConfigDefaults:
         were loaded at init. This is a regression test — if the servicer stops
         reading generation_config.json, this test structure catches it.
         """
-        _, model_path, client, _ = setup_backend
+        _, model_path, _, _ = setup_backend
 
         # Request WITHOUT temperature — model default should apply
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model_path,
             messages=[{"role": "user", "content": "Say hello"}],
             max_tokens=10,
@@ -50,17 +50,17 @@ class TestGenerationConfigDefaults:
 
     def test_explicit_temperature_overrides_default(self, setup_backend, api_client):
         """When temperature is explicitly set, it should override the model default."""
-        _, model_path, client, _ = setup_backend
+        _, model_path, _, _ = setup_backend
 
         # Request WITH explicit temperature=0 — should produce deterministic output
-        resp1 = client.chat.completions.create(
+        resp1 = api_client.chat.completions.create(
             model=model_path,
             messages=[{"role": "user", "content": "What is 1+1?"}],
             max_tokens=10,
             temperature=0,
             seed=42,
         )
-        resp2 = client.chat.completions.create(
+        resp2 = api_client.chat.completions.create(
             model=model_path,
             messages=[{"role": "user", "content": "What is 1+1?"}],
             max_tokens=10,
@@ -72,9 +72,9 @@ class TestGenerationConfigDefaults:
 
     def test_explicit_max_tokens_respected(self, setup_backend, api_client):
         """When max_tokens is explicitly set, it should be used (not model default)."""
-        _, model_path, client, _ = setup_backend
+        _, model_path, _, _ = setup_backend
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model_path,
             messages=[{"role": "user", "content": "Tell me a long story"}],
             max_tokens=5,
@@ -86,9 +86,9 @@ class TestGenerationConfigDefaults:
 
     def test_omitted_max_tokens_uses_default(self, setup_backend, api_client):
         """When max_tokens is omitted, model default or engine limit should apply."""
-        _, model_path, client, _ = setup_backend
+        _, model_path, _, _ = setup_backend
 
-        response = client.chat.completions.create(
+        response = api_client.chat.completions.create(
             model=model_path,
             messages=[{"role": "user", "content": "Hi"}],
             temperature=0,
