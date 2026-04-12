@@ -605,6 +605,16 @@ impl Worker for BasicWorker {
         let health_config = &self.metadata.health_config;
         let worker_type_str = self.metadata.spec.worker_type.as_metric_label();
 
+        // Failed is terminal — skip the probe entirely. The health checker
+        // loop will eventually remove the worker (if --remove-unhealthy-workers
+        // is set) or it stays Failed until explicit re-registration.
+        if current_status == WorkerStatus::Failed {
+            return Err(WorkerError::HealthCheckFailed {
+                url: self.metadata.spec.url.clone(),
+                reason: "worker is in Failed state".to_string(),
+            });
+        }
+
         // Track total probes in Pending for startup timeout detection
         if current_status == WorkerStatus::Pending {
             self.total_pending_probes.fetch_add(1, Ordering::Relaxed);

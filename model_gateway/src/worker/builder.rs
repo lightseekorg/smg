@@ -265,13 +265,13 @@ impl BasicWorkerBuilder {
         // - workers with health checks disabled start Ready (routable)
         // - workers with health checks enabled start Pending (not routable
         //   until the health checker promotes them after success_threshold)
-        let initial_status = self.initial_status.unwrap_or_else(|| {
-            if metadata.health_config.disable_health_check {
-                WorkerStatus::Ready
-            } else {
-                WorkerStatus::Pending
-            }
-        });
+        let initial_status =
+            self.initial_status
+                .unwrap_or(if metadata.health_config.disable_health_check {
+                    WorkerStatus::Ready
+                } else {
+                    WorkerStatus::Pending
+                });
         Metrics::set_worker_health(&metadata.spec.url, initial_status == WorkerStatus::Ready);
 
         let http_client = self.http_client.unwrap_or_else(|| {
