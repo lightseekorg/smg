@@ -491,10 +491,10 @@ impl VllmEngineClient {
         Ok(proto::SamplingParams {
             temperature: request.temperature,
             top_p: request.top_p,
-            top_k: None,   // ResponsesRequest doesn't expose top_k
-            min_p: None,   // ResponsesRequest doesn't expose min_p
-            frequency_penalty: None, // ResponsesRequest doesn't expose frequency_penalty
-            presence_penalty: None,  // ResponsesRequest doesn't expose presence_penalty
+            top_k: None,              // ResponsesRequest doesn't expose top_k
+            min_p: None,              // ResponsesRequest doesn't expose min_p
+            frequency_penalty: None,  // ResponsesRequest doesn't expose frequency_penalty
+            presence_penalty: None,   // ResponsesRequest doesn't expose presence_penalty
             repetition_penalty: None, // ResponsesRequest doesn't expose repetition_penalty
             max_tokens,
             stop: vec![],               // No stop sequences in Responses API
