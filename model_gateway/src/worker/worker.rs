@@ -610,14 +610,23 @@ impl Worker for BasicWorker {
             self.total_pending_probes.fetch_add(1, Ordering::Relaxed);
         }
 
-        // Transport-level errors (e.g. gRPC connect failure) are treated as
-        // failed probes rather than short-circuiting, so the Pending timeout
-        // and NotReady→Failed paths can observe them.
-        let probe_result = match &self.metadata.spec.connection_mode {
+        // Transport-level errors (e.g. gRPC connect failure, TLS handshake
+        // failure, DNS resolution failure) are treated as failed probes
+        // rather than short-circuiting, so the Pending timeout and
+        // NotReady→Failed paths can observe them. The error is logged with
+        // the worker URL so operators can debug why a worker won't come Ready.
+        let health_result = match &self.metadata.spec.connection_mode {
             ConnectionMode::Http => self.http_health_check().await,
             ConnectionMode::Grpc => self.grpc_health_check().await,
-        };
-        let health_result = probe_result.unwrap_or(false);
+        }
+        .unwrap_or_else(|err| {
+            tracing::warn!(
+                worker_url = %self.metadata.spec.url,
+                error = %err,
+                "Health check probe transport error (treating as failed probe)"
+            );
+            false
+        });
 
         if health_result {
             self.consecutive_failures.store(0, Ordering::Release);
@@ -744,6 +753,14 @@ impl Worker for BasicWorker {
         &self.http_client
     }
 
+    fn supports_model(&self, model_id: &str) -> bool {
+        let overridden = self.models_override.load();
+        if !overridden.is_wildcard() {
+            return overridden.supports(model_id);
+        }
+        self.metadata.supports_model(model_id)
+    }
+
     fn models(&self) -> Vec<ModelCard> {
         let overridden = self.models_override.load();
         let source = if overridden.is_wildcard() {
@@ -752,14 +769,6 @@ impl Worker for BasicWorker {
             overridden.all()
         };
         source.to_vec()
-    }
-
-    fn supports_model(&self, model_id: &str) -> bool {
-        let overridden = self.models_override.load();
-        if !overridden.is_wildcard() {
-            return overridden.supports(model_id);
-        }
-        self.metadata.supports_model(model_id)
     }
 
     fn set_models(&self, models: Vec<ModelCard>) {
