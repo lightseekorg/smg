@@ -550,11 +550,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # Build stop sequences
         stop = list(params.stop) if params.stop else None
 
-        # Merge stop_token_ids: request + model defaults
         stop_token_ids = list(params.stop_token_ids) if params.stop_token_ids else None
-        default_stop_ids = defaults.get("stop_token_ids")
-        if default_stop_ids:
-            stop_token_ids = list(set(stop_token_ids or []) | set(default_stop_ids))
 
         # Handle structured outputs constraints
         structured_outputs = None
