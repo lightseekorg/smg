@@ -580,7 +580,7 @@ impl VllmEngineClient {
         Ok(proto::SamplingParams {
             temperature: request.temperature.map(|v| v as f32),
             top_p: request.top_p.map(|v| v as f32),
-            top_k: request.top_k,
+            top_k: request.top_k.and_then(|v| u32::try_from(v).ok()),
             min_p: None,
             frequency_penalty: None,
             presence_penalty: None,

@@ -630,7 +630,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             candidates = [v for v in (model_max, raw_max_tokens, override_max_tokens) if v is not None]
             max_tokens = min(candidates) if candidates else None
         else:
-            max_tokens = raw_max_tokens
+            candidates = [v for v in (raw_max_tokens, override_max_tokens) if v is not None]
+            max_tokens = min(candidates) if candidates else raw_max_tokens
 
         # Create SamplingParams with model defaults for unset fields
         # output_kind=DELTA: Return only new tokens in each chunk (for streaming)
