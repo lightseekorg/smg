@@ -1,5 +1,6 @@
 use std::{
     any::Any,
+    collections::HashSet,
     fmt,
     sync::{
         atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
@@ -397,6 +398,14 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
             .and_then(|m| m.chat_template.as_deref())
     }
 
+    /// Resolve the canonical model ID for a request.
+    ///
+    /// If the requested model matches a `ModelCard` alias, this returns the
+    /// card's primary `id`; otherwise it returns the requested model unchanged.
+    fn canonical_model_id<'a>(&'a self, model_id: &'a str) -> &'a str {
+        self.metadata().canonical_model_id(model_id)
+    }
+
     /// Get the default provider type for this worker.
     /// `None` means native/passthrough.
     fn default_provider(&self) -> Option<&ProviderType> {
@@ -535,6 +544,13 @@ impl WorkerMetadata {
     /// Find a model card by ID (including aliases)
     pub fn find_model(&self, model_id: &str) -> Option<&ModelCard> {
         self.spec.models.find(model_id)
+    }
+
+    /// Resolve the canonical model ID for a request.
+    pub fn canonical_model_id<'a>(&'a self, model_id: &'a str) -> &'a str {
+        self.find_model(model_id)
+            .map(|model| model.id.as_str())
+            .unwrap_or(model_id)
     }
 
     /// Check if this worker can serve a given model.
@@ -685,6 +701,46 @@ impl BasicWorker {
         if other_cb.config() == existing_cb.config() {
             self.circuit_breaker.store(other_cb);
         }
+    }
+
+    fn merge_model_card(primary: &mut ModelCard, fallback: &ModelCard) {
+        let mut seen_aliases: HashSet<String> = primary.aliases.iter().cloned().collect();
+        for alias in &fallback.aliases {
+            if seen_aliases.insert(alias.clone()) {
+                primary.aliases.push(alias.clone());
+            }
+        }
+
+        if primary.provider.is_none() {
+            primary.provider = fallback.provider.clone();
+        }
+    }
+
+    fn effective_models(&self) -> Vec<ModelCard> {
+        let overridden = self.models_override.load();
+        let metadata_models = self.metadata.spec.models.all();
+
+        if overridden.is_wildcard() {
+            return metadata_models.to_vec();
+        }
+
+        if self.metadata.spec.models.is_wildcard() {
+            return overridden.all().to_vec();
+        }
+
+        let mut merged_models = overridden.all().to_vec();
+        for metadata_model in metadata_models {
+            if let Some(existing) = merged_models
+                .iter_mut()
+                .find(|model| model.id == metadata_model.id)
+            {
+                Self::merge_model_card(existing, metadata_model);
+            } else {
+                merged_models.push(metadata_model.clone());
+            }
+        }
+
+        merged_models
     }
 }
 
@@ -903,20 +959,17 @@ impl Worker for BasicWorker {
 
     fn supports_model(&self, model_id: &str) -> bool {
         let overridden = self.models_override.load();
-        if !overridden.is_wildcard() {
-            return overridden.supports(model_id);
+        if overridden.is_wildcard() && self.metadata.spec.models.is_wildcard() {
+            return true;
         }
-        self.metadata.supports_model(model_id)
+
+        self.effective_models()
+            .into_iter()
+            .any(|model| model.matches(model_id))
     }
 
     fn models(&self) -> Vec<ModelCard> {
-        let overridden = self.models_override.load();
-        let source = if overridden.is_wildcard() {
-            self.metadata.spec.models.all()
-        } else {
-            overridden.all()
-        };
-        source.to_vec()
+        self.effective_models()
     }
 
     fn set_models(&self, models: Vec<ModelCard>) {
@@ -1150,7 +1203,8 @@ impl<T: Send + Unpin + 'static> http_body::Body for AttachedBody<T> {
 /// everything to a routability bool for backwards compatibility.
 pub fn worker_to_info(worker: &Arc<dyn Worker>) -> WorkerInfo {
     let metadata = worker.metadata();
-    let spec = metadata.spec.clone();
+    let mut spec = metadata.spec.clone();
+    spec.models = WorkerModels::from(worker.models());
     let status = worker.status();
 
     WorkerInfo {
@@ -1885,6 +1939,28 @@ mod tests {
     }
 
     #[test]
+    fn test_worker_metadata_canonical_model_id() {
+        use super::ModelCard;
+
+        let model = ModelCard::new("grok-4-0709").with_alias("grok-4");
+
+        let mut spec = WorkerSpec::new("http://test:8080");
+        spec.models = WorkerModels::from(vec![model]);
+        let metadata = WorkerMetadata {
+            spec,
+            health_config: HealthCheckConfig::default(),
+            health_endpoint: "/health".to_string(),
+        };
+
+        assert_eq!(metadata.canonical_model_id("grok-4"), "grok-4-0709");
+        assert_eq!(metadata.canonical_model_id("grok-4-0709"), "grok-4-0709");
+        assert_eq!(
+            metadata.canonical_model_id("unknown-model"),
+            "unknown-model"
+        );
+    }
+
+    #[test]
     fn test_worker_routing_key_load_increment_decrement() {
         let load = WorkerRoutingKeyLoad::new("http://test:8000");
         assert_eq!(load.value(), 0);
@@ -2055,5 +2131,23 @@ mod tests {
         assert!(worker.supports_model("text-embedding-3-small"));
         assert!(!worker.supports_model("non-existent-model"));
         assert!(worker.has_models_discovered());
+    }
+
+    #[test]
+    fn test_lazy_discovered_models_preserve_static_aliases() {
+        let worker = BasicWorkerBuilder::new("http://test:8080")
+            .model(ModelCard::new("grok-4-0709").with_alias("grok-4"))
+            .build();
+
+        worker.set_models(vec![ModelCard::new("grok-4-0709")]);
+
+        assert!(worker.supports_model("grok-4"));
+
+        let grok_model = worker
+            .models()
+            .into_iter()
+            .find(|model| model.id == "grok-4-0709")
+            .expect("grok-4-0709 should still be present");
+        assert_eq!(grok_model.aliases, vec!["grok-4".to_string()]);
     }
 }

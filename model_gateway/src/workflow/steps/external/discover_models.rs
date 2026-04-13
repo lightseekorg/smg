@@ -33,6 +33,14 @@ static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
 static DATE_SUFFIX_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"-\d{4}-\d{2}(-\d{2})?$").expect("Invalid date regex"));
 
+// xAI Grok revision suffixes commonly look like -MMDD (for example grok-4-0709).
+#[expect(
+    clippy::expect_used,
+    reason = "Lazy static initialization — compile-time constant regex pattern cannot fail"
+)]
+static XAI_REVISION_SUFFIX_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(grok-\d+)-(\d{4})$").expect("Invalid xAI revision regex"));
+
 /// OpenAI /v1/models response format.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelsResponse {
@@ -53,29 +61,83 @@ pub struct ModelInfo {
     pub owned_by: Option<String>,
 }
 
-/// Group models by base name (stripping date suffixes) and create ModelCards with aliases.
+fn alias_group_key(id: &str) -> String {
+    if let Some(captures) = XAI_REVISION_SUFFIX_PATTERN.captures(id) {
+        if let Some(base) = captures.get(1) {
+            return base.as_str().to_string();
+        }
+    }
+
+    DATE_SUFFIX_PATTERN.replace(id, "").to_string()
+}
+
+fn xai_revision_rank(id: &str) -> Option<u16> {
+    XAI_REVISION_SUFFIX_PATTERN
+        .captures(id)
+        .and_then(|captures| captures.get(2))
+        .and_then(|suffix| suffix.as_str().parse::<u16>().ok())
+}
+
+fn select_primary_and_aliases(group_key: &str, variants: Vec<ModelInfo>) -> (String, Vec<String>) {
+    let primary_id = if variants.iter().any(|variant| variant.id == group_key) {
+        group_key.to_string()
+    } else if variants
+        .iter()
+        .all(|variant| xai_revision_rank(&variant.id).is_some())
+    {
+        variants
+            .iter()
+            .max_by_key(|variant| {
+                (
+                    variant.created.unwrap_or(0),
+                    xai_revision_rank(&variant.id).unwrap_or(0),
+                    variant.id.as_str(),
+                )
+            })
+            .map(|variant| variant.id.clone())
+            .unwrap_or_else(|| group_key.to_string())
+    } else {
+        variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .min_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| group_key.to_string())
+    };
+
+    let mut aliases: Vec<String> = variants
+        .iter()
+        .filter_map(|variant| (variant.id != primary_id).then(|| variant.id.clone()))
+        .collect();
+
+    if group_key != primary_id && !aliases.iter().any(|alias| alias == group_key) {
+        aliases.push(group_key.to_string());
+    }
+
+    aliases.sort();
+    aliases.dedup();
+
+    (primary_id, aliases)
+}
+
+/// Group models by base name and create ModelCards with aliases.
 ///
 /// # Example
 /// Input:  `["gpt-4o", "gpt-4o-2024-05-13", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20"]`
 /// Output: `ModelCard { id: "gpt-4o", aliases: ["gpt-4o-2024-05-13", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20"] }`
 pub fn group_models_into_cards(models: Vec<ModelInfo>) -> Vec<ModelCard> {
-    // Group model IDs by base name (with date stripped)
-    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
-    for model in &models {
-        let base = DATE_SUFFIX_PATTERN.replace(&model.id, "").to_string();
-        groups.entry(base).or_default().push(model.id.clone());
+    // Group model IDs by alias family key.
+    let mut groups: HashMap<String, Vec<ModelInfo>> = HashMap::new();
+    for model in models {
+        let base = alias_group_key(&model.id);
+        groups.entry(base).or_default().push(model);
     }
 
     // Create ModelCard for each group
     groups
-        .into_values()
-        .map(|mut variants| {
-            // Sort: shortest first (base name), then alphabetically
-            variants.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-
-            let primary_id = variants.remove(0); // shortest = primary ID
-            let aliases = variants; // rest = aliases
-
+        .into_iter()
+        .map(|(group_key, variants)| {
+            let (primary_id, aliases) = select_primary_and_aliases(&group_key, variants);
             let model_type = infer_model_type_from_id(&primary_id);
             let provider = infer_provider_from_id(&primary_id);
 
@@ -90,6 +152,64 @@ pub fn group_models_into_cards(models: Vec<ModelInfo>) -> Vec<ModelCard> {
             card
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{group_models_into_cards, ModelInfo};
+
+    fn model(id: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            object: "model".to_string(),
+            created: None,
+            owned_by: None,
+        }
+    }
+
+    #[test]
+    fn groups_openai_date_variants_under_stable_name() {
+        let cards = group_models_into_cards(vec![
+            model("gpt-4o"),
+            model("gpt-4o-2024-08-06"),
+            model("gpt-4o-2024-11-20"),
+        ]);
+
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, "gpt-4o");
+        assert!(cards[0]
+            .aliases
+            .iter()
+            .any(|alias| alias == "gpt-4o-2024-08-06"));
+        assert!(cards[0]
+            .aliases
+            .iter()
+            .any(|alias| alias == "gpt-4o-2024-11-20"));
+    }
+
+    #[test]
+    fn groups_xai_revisioned_model_under_family_alias() {
+        let cards = group_models_into_cards(vec![model("grok-4-0709")]);
+
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, "grok-4-0709");
+        assert!(cards[0].aliases.iter().any(|alias| alias == "grok-4"));
+    }
+
+    #[test]
+    fn picks_latest_xai_revision_as_primary_model() {
+        let mut older = model("grok-4-0709");
+        older.created = Some(100);
+        let mut newer = model("grok-4-0812");
+        newer.created = Some(200);
+
+        let cards = group_models_into_cards(vec![older, newer]);
+
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, "grok-4-0812");
+        assert!(cards[0].aliases.iter().any(|alias| alias == "grok-4"));
+        assert!(cards[0].aliases.iter().any(|alias| alias == "grok-4-0709"));
+    }
 }
 
 /// Infer ModelType from model ID string.

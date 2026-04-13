@@ -2,7 +2,7 @@
 //!
 //! Single public API: [`WorkerSelector::select_worker`].
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use axum::{
     http::{HeaderMap, HeaderValue},
@@ -114,7 +114,7 @@ impl<'a> WorkerSelector<'a> {
         let candidates: Vec<_> = workers.into_iter().filter(|w| w.is_available()).collect();
 
         match &req.provider {
-            Some(provider) => filter_by_provider(candidates, provider),
+            Some(provider) => filter_by_provider(candidates, provider, req.model_id),
             None => candidates,
         }
     }
@@ -137,7 +137,7 @@ impl<'a> WorkerSelector<'a> {
             true, // healthy only — model exists even if circuit-broken
         );
         let candidates = match &req.provider {
-            Some(p) => filter_by_provider(workers, p),
+            Some(p) => filter_by_provider(workers, p, req.model_id),
             None => workers,
         };
         candidates.iter().any(|w| w.supports_model(req.model_id))
@@ -160,7 +160,7 @@ impl<'a> WorkerSelector<'a> {
         // Only refresh workers matching the request's provider to avoid sending
         // e.g. an OpenAI key to Anthropic workers during model discovery.
         if let Some(p) = provider {
-            external_workers.retain(|w| matches!(w.default_provider(), Some(wp) if wp == p));
+            external_workers.retain(|w| worker_matches_provider(w, p, None));
         }
 
         if external_workers.is_empty() {
@@ -189,27 +189,52 @@ impl<'a> WorkerSelector<'a> {
 fn filter_by_provider(
     workers: Vec<Arc<dyn Worker>>,
     target: &ProviderType,
+    model_id: &str,
 ) -> Vec<Arc<dyn Worker>> {
-    let mut first_provider: Option<Option<ProviderType>> = None;
-    let has_multiple_providers = workers.iter().any(|w| {
-        let provider = w.default_provider().cloned();
-        match first_provider {
-            None => {
-                first_provider = Some(provider);
-                false
-            }
-            Some(ref first) => *first != provider,
-        }
-    });
+    let providers: HashSet<_> = workers
+        .iter()
+        .filter_map(|worker| worker_provider_hint(worker))
+        .collect();
+    let has_multiple_providers = providers.len() > 1;
 
     if has_multiple_providers {
         workers
             .into_iter()
-            .filter(|w| matches!(w.default_provider(), Some(p) if p == target))
+            .filter(|worker| worker_matches_provider(worker, target, Some(model_id)))
             .collect()
     } else {
         workers
     }
+}
+
+fn worker_provider_hint(worker: &Arc<dyn Worker>) -> Option<ProviderType> {
+    worker
+        .default_provider()
+        .cloned()
+        .or_else(|| worker.models().into_iter().find_map(|model| model.provider))
+        .or_else(|| ProviderType::from_url(worker.url()))
+}
+
+fn worker_provider_for_request(worker: &Arc<dyn Worker>, model_id: &str) -> Option<ProviderType> {
+    worker
+        .models()
+        .into_iter()
+        .find(|model| model.matches(model_id))
+        .and_then(|model| model.provider)
+        .or_else(|| worker.provider_for_model(model_id).cloned())
+        .or_else(|| ProviderType::from_model_name(model_id))
+        .or_else(|| worker_provider_hint(worker))
+}
+
+fn worker_matches_provider(
+    worker: &Arc<dyn Worker>,
+    target: &ProviderType,
+    model_id: Option<&str>,
+) -> bool {
+    model_id
+        .and_then(|requested_model| worker_provider_for_request(worker, requested_model))
+        .or_else(|| worker_provider_hint(worker))
+        .is_some_and(|provider| provider == *target)
 }
 
 /// Refresh a single worker's model list by calling its `/v1/models` endpoint.

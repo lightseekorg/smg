@@ -298,12 +298,19 @@ impl WorkerRegistry {
 
     pub fn worker_model_ids(worker: &Arc<dyn Worker>) -> Vec<String> {
         let mut seen = HashSet::new();
-        let mut model_ids: Vec<String> = worker
-            .models()
-            .into_iter()
-            .map(|model| model.id)
-            .filter(|model_id| seen.insert(model_id.clone()))
-            .collect();
+        let mut model_ids = Vec::new();
+
+        for model in worker.models() {
+            if seen.insert(model.id.clone()) {
+                model_ids.push(model.id.clone());
+            }
+
+            for alias in model.aliases {
+                if seen.insert(alias.clone()) {
+                    model_ids.push(alias);
+                }
+            }
+        }
 
         if model_ids.is_empty() {
             model_ids.push(worker.model_id().to_string());
@@ -1417,6 +1424,33 @@ mod tests {
         let stats = registry.stats();
         assert_eq!(stats.total_workers, 1);
         assert_eq!(stats.total_models, 2);
+    }
+
+    #[test]
+    fn test_worker_registry_indexes_aliases() {
+        let registry = WorkerRegistry::new();
+
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("https://cloud9.api.x.ai")
+                .worker_type(WorkerType::Regular)
+                .models(vec![ModelCard::new("grok-4-0709")
+                    .with_alias("grok-4")
+                    .with_provider(openai_protocol::worker::ProviderType::XAI)])
+                .circuit_breaker_config(CircuitBreakerConfig::default())
+                .build(),
+        );
+
+        registry.register(worker).unwrap();
+
+        assert_eq!(registry.get_by_model("grok-4-0709").len(), 1);
+        assert_eq!(registry.get_by_model("grok-4").len(), 1);
+
+        let mut models = registry.get_models();
+        models.sort();
+        assert_eq!(
+            models,
+            vec!["grok-4".to_string(), "grok-4-0709".to_string()]
+        );
     }
 
     #[test]

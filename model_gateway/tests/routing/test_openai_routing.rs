@@ -21,7 +21,9 @@ use openai_protocol::{
     common::StringOrArray,
     completion::CompletionRequest,
     generate::GenerateRequest,
+    model_card::ModelCard,
     responses::{ResponseInput, ResponsesRequest},
+    worker::ProviderType,
 };
 use serde_json::json;
 use smg::{
@@ -41,7 +43,9 @@ use tower::ServiceExt;
 
 use crate::common::{
     mock_openai_server::MockOpenAIServer,
-    test_app::{create_test_app_context, register_external_worker},
+    test_app::{
+        create_test_app_context, register_external_worker, register_external_worker_with_card,
+    },
 };
 
 /// Helper function to create a minimal chat completion request for testing
@@ -689,6 +693,45 @@ async fn test_openai_router_chat_completion_with_mock() {
     assert!(!chat_response["choices"].as_array().unwrap().is_empty());
 }
 
+/// Test that alias requests are rewritten to the canonical discovered model ID
+/// before being forwarded upstream for chat completions.
+#[tokio::test]
+async fn test_openai_router_chat_rewrites_alias_to_canonical_model() {
+    let mock_server = MockOpenAIServer::new().await;
+    let base_url = mock_server.base_url();
+
+    let ctx = create_test_app_context().await;
+    register_external_worker_with_card(
+        &ctx,
+        &base_url,
+        ModelCard::new("grok-4-0709")
+            .with_alias("grok-4")
+            .with_provider(ProviderType::XAI),
+    );
+    let router = OpenAIRouter::new(&ctx).await.unwrap();
+
+    let val = json!({
+        "model": "grok-4",
+        "messages": [
+            {"role": "user", "content": "Hello"}
+        ],
+        "max_tokens": 20
+    });
+    let chat_request: ChatCompletionRequest = serde_json::from_value(val).unwrap();
+
+    let response = router
+        .route_chat(None, &chat_request, &chat_request.model)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let (_, body) = response.into_parts();
+    let body_bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+    let chat_response: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+
+    assert_eq!(chat_response["model"], "grok-4-0709");
+}
+
 /// Test full E2E flow with Axum server
 #[tokio::test]
 async fn test_openai_e2e_with_server() {
@@ -801,6 +844,77 @@ async fn test_openai_router_chat_streaming_with_mock() {
     assert!(text.contains("[DONE]"));
 }
 
+/// Test that alias requests are rewritten to the canonical discovered model ID
+/// before being forwarded upstream for responses requests.
+#[expect(clippy::disallowed_methods, reason = "test infrastructure")]
+#[tokio::test]
+async fn test_openai_router_responses_rewrite_alias_to_canonical_model() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let app = Router::new().route(
+        "/v1/responses",
+        post(|Json(request): Json<serde_json::Value>| async move {
+            let model = request
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            Json(json!({
+                "id": "resp_alias_test",
+                "object": "response",
+                "created_at": 1_700_000_000,
+                "status": "completed",
+                "model": model,
+                "output": [{
+                    "type": "message",
+                    "id": "msg_alias_test",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "ok",
+                        "annotations": []
+                    }]
+                }],
+                "metadata": {}
+            }))
+        }),
+    );
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let base_url = format!("http://{addr}");
+    let ctx = create_test_app_context().await;
+    register_external_worker_with_card(
+        &ctx,
+        &base_url,
+        ModelCard::new("grok-4-0709")
+            .with_alias("grok-4")
+            .with_provider(ProviderType::XAI),
+    );
+    let router = OpenAIRouter::new(&ctx).await.unwrap();
+
+    let request = ResponsesRequest {
+        model: "grok-4".to_string(),
+        input: ResponseInput::Text("Say hi".to_string()),
+        store: Some(false),
+        ..Default::default()
+    };
+
+    let response = router.route_responses(None, &request, &request.model).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body["model"], "grok-4-0709");
+
+    server.abort();
+}
+
 /// Test circuit breaker functionality
 #[tokio::test]
 async fn test_openai_router_circuit_breaker() {
@@ -836,9 +950,7 @@ async fn test_openai_router_models_from_registry() {
         BasicWorkerBuilder::new("http://localhost:8000")
             .worker_type(WorkerType::Regular)
             .runtime_type(RuntimeType::Sglang)
-            .models(vec![openai_protocol::model_card::ModelCard::new(
-                "gpt-3.5-turbo",
-            )])
+            .models(vec![ModelCard::new("gpt-3.5-turbo")])
             .health_config(openai_protocol::worker::HealthCheckConfig {
                 disable_health_check: true,
                 ..Default::default()

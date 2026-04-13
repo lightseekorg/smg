@@ -16,7 +16,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use super::{
     context::{ComponentRefs, PayloadState, RequestContext, SharedComponents, WorkerSelection},
     provider::ProviderRegistry,
-    router::resolve_provider,
+    router::{request_provider, resolve_effective_model, resolve_provider},
 };
 use crate::{
     config::types::RetryConfig,
@@ -26,7 +26,7 @@ use crate::{
         header_utils::{apply_provider_headers, extract_auth_header},
         worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
-    worker::{is_retryable_status, Endpoint, ProviderType, RetryExecutor, WorkerRegistry},
+    worker::{is_retryable_status, Endpoint, RetryExecutor, WorkerRegistry},
 };
 
 /// Shared context passed to chat routing functions.
@@ -62,7 +62,7 @@ pub(super) async fn route_chat(
         .select_worker(&SelectWorkerRequest {
             model_id: model,
             headers,
-            provider: Some(ProviderType::OpenAI),
+            provider: Some(request_provider(model)),
             ..Default::default()
         })
         .await
@@ -80,6 +80,7 @@ pub(super) async fn route_chat(
             return response;
         }
     };
+    let effective_model = resolve_effective_model(worker.as_ref(), model);
 
     let mut payload = match to_value(body) {
         Ok(v) => v,
@@ -100,9 +101,9 @@ pub(super) async fn route_chat(
     };
 
     // Patch the serialized payload to use the effective model consistently.
-    payload["model"] = serde_json::Value::String(model.to_owned());
+    payload["model"] = serde_json::Value::String(effective_model.clone());
 
-    let provider = resolve_provider(deps.provider_registry, worker.as_ref(), model);
+    let provider = resolve_provider(deps.provider_registry, worker.as_ref(), &effective_model);
     if let Err(e) = provider.transform_request(&mut payload, Endpoint::Chat) {
         Metrics::record_router_error(
             metrics_labels::ROUTER_OPENAI,

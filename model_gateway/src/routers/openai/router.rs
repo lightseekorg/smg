@@ -36,11 +36,33 @@ use crate::{
 ///
 /// Checks (in order): worker's per-model provider, model name heuristic,
 /// then falls back to the default provider.
+pub(super) fn request_provider(model: &str) -> ProviderType {
+    ProviderType::from_model_name(model).unwrap_or(ProviderType::OpenAI)
+}
+
+/// Resolve the canonical upstream model ID from the worker's live model view.
+pub(super) fn resolve_effective_model(worker: &dyn Worker, model: &str) -> String {
+    worker
+        .models()
+        .into_iter()
+        .find(|candidate| candidate.matches(model))
+        .map(|candidate| candidate.id)
+        .unwrap_or_else(|| worker.canonical_model_id(model).to_string())
+}
+
 pub(super) fn resolve_provider(
     registry: &ProviderRegistry,
     worker: &dyn Worker,
     model: &str,
 ) -> Arc<dyn super::provider::Provider> {
+    if let Some(pt) = worker
+        .models()
+        .into_iter()
+        .find(|candidate| candidate.matches(model))
+        .and_then(|candidate| candidate.provider)
+    {
+        return registry.get_arc(&pt);
+    }
     if let Some(pt) = worker.provider_for_model(model) {
         return registry.get_arc(pt);
     }
@@ -117,7 +139,7 @@ impl OpenAIRouter {
             .select_worker(&SelectWorkerRequest {
                 model_id,
                 headers,
-                provider: Some(ProviderType::OpenAI),
+                provider: Some(request_provider(model_id)),
                 ..Default::default()
             })
             .await

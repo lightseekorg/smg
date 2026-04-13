@@ -16,7 +16,7 @@ use super::{
             ComponentRefs, PayloadState, RequestContext, ResponsesComponents, WorkerSelection,
         },
         provider::ProviderRegistry,
-        router::resolve_provider,
+        router::{request_provider, resolve_effective_model, resolve_provider},
     },
     handle_non_streaming_response, handle_streaming_response,
 };
@@ -26,7 +26,7 @@ use crate::{
         error,
         worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
-    worker::{Endpoint, ProviderType, WorkerRegistry},
+    worker::{Endpoint, WorkerRegistry},
 };
 
 /// Shared context passed to responses routing functions.
@@ -63,7 +63,7 @@ pub(in crate::routers::openai) async fn route_responses(
     .select_worker(&SelectWorkerRequest {
         model_id: model,
         headers,
-        provider: Some(ProviderType::OpenAI),
+        provider: Some(request_provider(model)),
         ..Default::default()
     })
     .await
@@ -81,6 +81,7 @@ pub(in crate::routers::openai) async fn route_responses(
             return response;
         }
     };
+    let effective_model = resolve_effective_model(worker.as_ref(), model);
 
     // Validate mutual exclusivity of conversation and previous_response_id
     // Treat empty strings as unset to match other metadata paths
@@ -105,7 +106,7 @@ pub(in crate::routers::openai) async fn route_responses(
     }
 
     let mut request_body = body.clone();
-    request_body.model = model_id.to_string();
+    request_body.model = effective_model.clone();
     request_body.conversation = None;
 
     let original_previous_response_id = match super::history::load_input_history(
@@ -143,7 +144,7 @@ pub(in crate::routers::openai) async fn route_responses(
         }
     };
 
-    let provider = resolve_provider(deps.provider_registry, worker.as_ref(), model);
+    let provider = resolve_provider(deps.provider_registry, worker.as_ref(), &effective_model);
     if let Err(e) = provider.transform_request(&mut payload, Endpoint::Responses) {
         Metrics::record_router_error(
             metrics_labels::ROUTER_OPENAI,
