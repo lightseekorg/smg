@@ -13,7 +13,8 @@ use serde_json::to_value;
 use super::{
     super::{
         context::{
-            ComponentRefs, PayloadState, RequestContext, ResponsesComponents, WorkerSelection,
+            ComponentRefs, PayloadState, RequestContext, ResponsesComponents,
+            ResponsesPayloadState, WorkerSelection,
         },
         provider::ProviderRegistry,
         router::resolve_provider,
@@ -172,6 +173,8 @@ pub(in crate::routers::openai) async fn route_responses(
     ctx.state.payload = Some(PayloadState {
         json: payload,
         url: format!("{}/v1/responses", worker.url()),
+    });
+    ctx.state.responses_payload = Some(ResponsesPayloadState {
         previous_response_id: loaded_history.previous_response_id,
         existing_mcp_list_tools_labels: loaded_history.existing_mcp_list_tools_labels,
     });

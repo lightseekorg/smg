@@ -134,8 +134,6 @@ pub(super) async fn route_chat(
     ctx.state.payload = Some(PayloadState {
         json: payload,
         url: url.clone(),
-        previous_response_id: None,
-        existing_mcp_list_tools_labels: Vec::new(),
     });
 
     // Wrap values in Arc to avoid cloning large objects on each retry attempt
