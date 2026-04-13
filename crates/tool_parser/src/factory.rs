@@ -248,13 +248,6 @@ impl ParserRegistry {
             .map(|(_, parser_name)| parser_name.clone())
     }
 
-    /// Resolve effective parser name: use configured override if set, else model mapping.
-    pub fn resolve_parser_name(&self, configured: Option<&str>, model: &str) -> Option<String> {
-        configured
-            .map(|s| s.to_string())
-            .or_else(|| self.resolve_model_to_parser(model))
-    }
-
     /// Check if a parser can be created for a specific model without actually creating it.
     pub fn has_parser_for_model(&self, model: &str) -> bool {
         self.resolve_model_to_parser(model)
