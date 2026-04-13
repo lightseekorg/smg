@@ -365,22 +365,10 @@ impl WorkerRegistry {
 
     /// Return every prefill worker, regardless of which model they serve.
     ///
-    /// Performs an O(N) scan over all registered workers and filters by
-    /// `WorkerType::Prefill`. Returned as an immutable shared slice.
+    /// Thin wrapper over [`Self::get_by_type`] with `WorkerType::Prefill`.
     /// Read-only, lock-free. Emits no events.
     pub fn get_prefill_workers(&self) -> Arc<[Arc<dyn Worker>]> {
-        let workers: Vec<Arc<dyn Worker>> = self
-            .workers
-            .iter()
-            .filter_map(|entry| {
-                let worker = entry.value();
-                match worker.worker_type() {
-                    WorkerType::Prefill => Some(worker.clone()),
-                    _ => None,
-                }
-            })
-            .collect();
-        Arc::from(workers.into_boxed_slice())
+        self.get_by_type(WorkerType::Prefill)
     }
 
     /// Return every decode worker, regardless of which model they serve.
@@ -1089,12 +1077,16 @@ impl WorkerRegistry {
     /// a `WorkerId`. Returns `None` if no worker is registered at this
     /// URL. Emits [`WorkerEvent::Removed`] on success via the underlying
     /// `remove()` call.
+    ///
+    /// Only *reads* the `url_to_id` mapping here — the actual removal is
+    /// performed inside `remove()` while the per-worker mutation lock is
+    /// held. Pre-removing the mapping would open a race where a
+    /// concurrent `register()` could reclaim the URL under a new
+    /// `WorkerId` before `remove()` takes the lock, and the subsequent
+    /// teardown would then delete the new mapping.
     pub fn remove_by_url(&self, url: &str) -> Option<Arc<dyn Worker>> {
-        if let Some((_, worker_id)) = self.url_to_id.remove(url) {
-            self.remove(&worker_id)
-        } else {
-            None
-        }
+        let worker_id = self.url_to_id.get(url).map(|entry| entry.clone())?;
+        self.remove(&worker_id)
     }
 
     // ───────────────────────────────────────────────────────────────────
