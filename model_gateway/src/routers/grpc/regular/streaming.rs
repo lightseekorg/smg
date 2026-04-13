@@ -251,13 +251,10 @@ impl StreamingProcessor {
         let think_in_prefill = tokenizer.think_in_prefill();
 
         // Check if JSON schema constraint was used (specific function or required mode)
-        let resolved_parser = self
+        let has_structural_tag = self
             .tool_parser_factory
             .registry()
-            .resolve_parser_name(self.configured_tool_parser.as_deref(), model);
-        let has_structural_tag = resolved_parser
-            .as_deref()
-            .is_some_and(|p| self.tool_parser_factory.registry().has_structural_tag(p));
+            .has_structural_tag_for_parser(self.configured_tool_parser.as_deref());
         let used_json_schema = if has_structural_tag {
             false
         } else {
@@ -1636,13 +1633,10 @@ impl StreamingProcessor {
                 model,
             );
 
-        let resolved_parser = self
+        let has_structural_tag = self
             .tool_parser_factory
             .registry()
-            .resolve_parser_name(self.configured_tool_parser.as_deref(), model);
-        let has_structural_tag = resolved_parser
-            .as_deref()
-            .is_some_and(|p| self.tool_parser_factory.registry().has_structural_tag(p));
+            .has_structural_tag_for_parser(self.configured_tool_parser.as_deref());
         let used_json_schema = !has_structural_tag
             && matches!(
                 &original_request.tool_choice,

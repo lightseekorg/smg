@@ -141,13 +141,10 @@ impl ResponseProcessor {
 
         if tool_choice_enabled && original_request.tools.is_some() {
             // Check if JSON schema constraint was used (specific function or required mode)
-            let resolved_parser = self.tool_parser_factory.registry().resolve_parser_name(
-                self.configured_tool_parser.as_deref(),
-                &original_request.model,
-            );
-            let has_structural_tag = resolved_parser
-                .as_deref()
-                .is_some_and(|p| self.tool_parser_factory.registry().has_structural_tag(p));
+            let has_structural_tag = self
+                .tool_parser_factory
+                .registry()
+                .has_structural_tag_for_parser(self.configured_tool_parser.as_deref());
             let used_json_schema = if has_structural_tag {
                 false
             } else {
@@ -627,13 +624,10 @@ impl ResponseProcessor {
 
         if tool_choice_enabled && messages_request.tools.is_some() {
             // Check if JSON schema constraint was used (specific tool or any/required mode)
-            let resolved_parser = self.tool_parser_factory.registry().resolve_parser_name(
-                self.configured_tool_parser.as_deref(),
-                &messages_request.model,
-            );
-            let has_structural_tag = resolved_parser
-                .as_deref()
-                .is_some_and(|p| self.tool_parser_factory.registry().has_structural_tag(p));
+            let has_structural_tag = self
+                .tool_parser_factory
+                .registry()
+                .has_structural_tag_for_parser(self.configured_tool_parser.as_deref());
             let used_json_schema = !has_structural_tag
                 && matches!(
                     &messages_request.tool_choice,

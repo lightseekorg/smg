@@ -175,6 +175,13 @@ impl ParserRegistry {
             .is_some_and(|e| e.build_structural_tag.is_some())
     }
 
+    /// Check if the configured parser supports structural tags.
+    /// Returns false if no parser is configured (structural tags require explicit opt-in
+    /// via `--tool-call-parser`).
+    pub fn has_structural_tag_for_parser(&self, configured: Option<&str>) -> bool {
+        configured.is_some_and(|p| self.has_structural_tag(p))
+    }
+
     /// Generate tool call constraint.
     ///
     /// If `configured_parser` supports structural tags → `StructuralTag(json)`.
