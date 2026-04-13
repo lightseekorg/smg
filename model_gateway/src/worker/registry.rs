@@ -234,7 +234,14 @@ pub struct WorkerRegistry {
 }
 
 impl WorkerRegistry {
-    /// Create a new worker registry
+    // ───────────────────────────────────────────────────────────────────
+    // 1. Construction & subscription
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Create an empty worker registry.
+    ///
+    /// Initialises all indexes and a broadcast channel with capacity 64
+    /// for `WorkerEvent` delivery. Holds no locks. Emits no events.
     pub fn new() -> Self {
         Self {
             workers: Arc::new(DashMap::new()),
@@ -250,115 +257,433 @@ impl WorkerRegistry {
         }
     }
 
-    /// Subscribe to worker state change events.
+    /// Subscribe to the `WorkerEvent` broadcast stream.
+    ///
+    /// Returns a `broadcast::Receiver` that observes every future mutation
+    /// event emitted by `register` / `replace` / `remove` / `transition_status`.
+    /// Late subscribers miss past events — callers that need historical
+    /// state should combine this with [`Self::reconcile_snapshot`] on startup
+    /// and on `RecvError::Lagged`. Holds no locks. Emits no events.
     pub fn subscribe_events(&self) -> broadcast::Receiver<WorkerEvent> {
         self.event_tx.subscribe()
     }
 
-    /// Rebuild the hash ring for a model based on current workers in the model index
-    fn rebuild_hash_ring(&self, model_id: &str) {
-        if let Some(workers) = self.model_index.get(model_id) {
-            let ring = HashRing::new(&workers);
-            self.hash_rings.insert(model_id.to_string(), Arc::new(ring));
-        } else {
-            // No workers for this model, remove the ring
-            self.hash_rings.remove(model_id);
-        }
+    // ───────────────────────────────────────────────────────────────────
+    // 2. Read — single worker
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Look up a worker by its ID.
+    ///
+    /// Returns `Some(worker)` when the ID exists, `None` otherwise.
+    /// Read-only, lock-free. Emits no events.
+    pub fn get(&self, worker_id: &WorkerId) -> Option<Arc<dyn Worker>> {
+        self.workers.get(worker_id).map(|entry| entry.clone())
     }
 
-    /// Get the hash ring for a model (O(1) lookup)
+    /// Look up a worker by its URL.
+    ///
+    /// Returns `Some(worker)` when a worker with this URL is registered,
+    /// `None` otherwise. Read-only, lock-free. Emits no events.
+    pub fn get_by_url(&self, url: &str) -> Option<Arc<dyn Worker>> {
+        self.url_to_id.get(url).and_then(|id| self.get(&id))
+    }
+
+    /// Reverse-lookup the URL for a given worker ID.
+    ///
+    /// Prefers the URL stored on the live worker object; falls back to
+    /// scanning `url_to_id` so pre-reserved IDs (from
+    /// [`Self::reserve_id_for_url`]) can still be resolved before a worker
+    /// is installed. Read-only, lock-free. Emits no events.
+    pub fn get_url_by_id(&self, worker_id: &WorkerId) -> Option<String> {
+        if let Some(worker) = self.get(worker_id) {
+            return Some(worker.url().to_string());
+        }
+        self.url_to_id
+            .iter()
+            .find_map(|entry| (entry.value() == worker_id).then(|| entry.key().clone()))
+    }
+
+    /// Get the consistent hash ring for a model (O(1) lookup).
+    ///
+    /// Returns `Some(ring)` if any workers are registered for this model,
+    /// `None` otherwise. The ring is pre-built and updated on worker add
+    /// or remove, so reads are allocation-free apart from the Arc clone.
+    /// Read-only, lock-free. Emits no events.
     pub fn get_hash_ring(&self, model_id: &str) -> Option<Arc<HashRing>> {
         self.hash_rings.get(model_id).map(|r| Arc::clone(&r))
     }
 
-    /// Set mesh sync manager (thread-safe, can be called after initialization)
-    pub fn set_mesh_sync(&self, mesh_sync: OptionalMeshSyncManager) {
-        let mut guard = self.mesh_sync.write();
-        *guard = mesh_sync;
+    // ───────────────────────────────────────────────────────────────────
+    // 3. Read — collections
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Empty worker slice constant returned when a lookup has no matches.
+    const EMPTY_WORKERS: &'static [Arc<dyn Worker>] = &[];
+
+    /// Return all workers serving a model as an immutable shared slice.
+    ///
+    /// This is the fastest possible read path: the model index already
+    /// stores the slice as an `Arc<[_]>`, so the return value is just an
+    /// atomic refcount bump with zero contention. Returns an empty shared
+    /// slice when the model is unknown. Read-only, lock-free. Emits no
+    /// events.
+    pub fn get_by_model(&self, model_id: &str) -> Arc<[Arc<dyn Worker>]> {
+        self.model_index
+            .get(model_id)
+            .map(|workers| Arc::clone(&workers))
+            .unwrap_or_else(|| Arc::from(Self::EMPTY_WORKERS))
     }
 
-    /// Get the retry config for a model, if a worker group override exists.
-    /// When retries are disabled for the group, max_retries will be 1.
+    /// Return all workers of a given type as an immutable shared slice.
+    ///
+    /// Unified with [`Self::get_by_model`] on `Arc<[_]>` so callers can
+    /// treat all worker collections uniformly. Builds a fresh slice per
+    /// call (one boxed-slice allocation). Read-only, lock-free. Emits no
+    /// events.
+    pub fn get_by_type(&self, worker_type: WorkerType) -> Arc<[Arc<dyn Worker>]> {
+        let workers: Vec<Arc<dyn Worker>> = self
+            .type_workers
+            .get(&worker_type)
+            .map(|ids| ids.iter().filter_map(|id| self.get(id)).collect())
+            .unwrap_or_default();
+        Arc::from(workers.into_boxed_slice())
+    }
+
+    /// Return all workers using a given connection mode (HTTP or gRPC).
+    ///
+    /// Returned as an immutable shared slice for uniformity with the other
+    /// collection getters. Builds a fresh slice per call. Read-only,
+    /// lock-free. Emits no events.
+    pub fn get_by_connection(&self, connection_mode: ConnectionMode) -> Arc<[Arc<dyn Worker>]> {
+        let workers: Vec<Arc<dyn Worker>> = self
+            .connection_workers
+            .get(&connection_mode)
+            .map(|ids| ids.iter().filter_map(|id| self.get(id)).collect())
+            .unwrap_or_default();
+        Arc::from(workers.into_boxed_slice())
+    }
+
+    /// Return every prefill worker, regardless of which model they serve.
+    ///
+    /// Performs an O(N) scan over all registered workers and filters by
+    /// `WorkerType::Prefill`. Returned as an immutable shared slice.
+    /// Read-only, lock-free. Emits no events.
+    pub fn get_prefill_workers(&self) -> Arc<[Arc<dyn Worker>]> {
+        let workers: Vec<Arc<dyn Worker>> = self
+            .workers
+            .iter()
+            .filter_map(|entry| {
+                let worker = entry.value();
+                match worker.worker_type() {
+                    WorkerType::Prefill => Some(worker.clone()),
+                    _ => None,
+                }
+            })
+            .collect();
+        Arc::from(workers.into_boxed_slice())
+    }
+
+    /// Return every decode worker, regardless of which model they serve.
+    ///
+    /// Thin wrapper over [`Self::get_by_type`] with `WorkerType::Decode`.
+    /// Read-only, lock-free. Emits no events.
+    pub fn get_decode_workers(&self) -> Arc<[Arc<dyn Worker>]> {
+        self.get_by_type(WorkerType::Decode)
+    }
+
+    /// Return workers matching every supplied filter.
+    ///
+    /// Filters:
+    /// - `model_id`: scope to a single model (uses the O(1) model index)
+    /// - `worker_type`: `Regular` / `Prefill` / `Decode`
+    /// - `connection_mode`: `Http` / `Grpc`
+    /// - `runtime_type`: `Sglang` / `Vllm` / `External` / …
+    /// - `healthy_only`: skip workers whose `is_healthy()` is false
+    ///
+    /// **Cost note on `runtime_type`:** the registry keeps no runtime-type
+    /// index. This filter is applied in-memory after fetching by model or
+    /// iterating all workers, so the whole candidate set is cloned before
+    /// filtering. Callers on hot paths should prefer pre-filtering by
+    /// model or type when possible.
+    ///
+    /// Always returns an owned `Vec` because each call applies a unique
+    /// filter combination. Read-only, lock-free. Emits no events.
+    pub fn get_workers_filtered(
+        &self,
+        model_id: Option<&str>,
+        worker_type: Option<WorkerType>,
+        connection_mode: Option<ConnectionMode>,
+        runtime_type: Option<RuntimeType>,
+        healthy_only: bool,
+    ) -> Vec<Arc<dyn Worker>> {
+        // Start with the most efficient collection based on filters
+        // Use model index when possible as it's O(1) lookup
+        let workers: Vec<Arc<dyn Worker>> = if let Some(model) = model_id {
+            self.get_by_model(model).to_vec()
+        } else {
+            self.get_all()
+        };
+
+        // Apply remaining filters
+        workers
+            .into_iter()
+            .filter(|w| {
+                // Check worker_type if specified
+                if let Some(ref wtype) = worker_type {
+                    if *w.worker_type() != *wtype {
+                        return false;
+                    }
+                }
+
+                // Check connection_mode if specified
+                if let Some(ref conn) = connection_mode {
+                    if w.connection_mode() != conn {
+                        return false;
+                    }
+                }
+
+                // Check runtime_type if specified
+                if let Some(ref rt) = runtime_type {
+                    if w.metadata().spec.runtime_type != *rt {
+                        return false;
+                    }
+                }
+
+                // Check health if required
+                if healthy_only && !w.is_healthy() {
+                    return false;
+                }
+
+                true
+            })
+            .collect()
+    }
+
+    /// Return an owned snapshot of every registered worker.
+    ///
+    /// Allocates a fresh `Vec` by cloning each Arc. Intended for cold
+    /// paths (admin endpoints, diagnostics). Hot routing paths should
+    /// prefer [`Self::get_by_model`]. Read-only, lock-free. Emits no
+    /// events.
+    pub fn get_all(&self) -> Vec<Arc<dyn Worker>> {
+        self.workers
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// Return every worker paired with its ID.
+    ///
+    /// Used by bootstrap/reconcile paths that need to correlate workers
+    /// with their IDs. Read-only, lock-free. Emits no events.
+    pub fn get_all_with_ids(&self) -> Vec<(WorkerId, Arc<dyn Worker>)> {
+        self.workers
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect()
+    }
+
+    /// Return every worker's URL as a freshly allocated `Vec`.
+    ///
+    /// Used by admin endpoints and tests. Read-only, lock-free. Emits no
+    /// events.
+    pub fn get_all_urls(&self) -> Vec<String> {
+        self.workers
+            .iter()
+            .map(|entry| entry.value().url().to_string())
+            .collect()
+    }
+
+    /// Return every worker's URL paired with its optional API key.
+    ///
+    /// Used by the gateway when proxying to upstream workers that require
+    /// per-worker credentials. Read-only, lock-free. Emits no events.
+    pub fn get_all_urls_with_api_key(&self) -> Vec<(String, Option<String>)> {
+        self.workers
+            .iter()
+            .map(|entry| {
+                (
+                    entry.value().url().to_string(),
+                    entry.value().api_key().cloned(),
+                )
+            })
+            .collect()
+    }
+
+    /// Return a side-effect-free descriptor snapshot for reconcile paths.
+    ///
+    /// Each `WorkerDescriptor` captures the fields a subscriber needs to
+    /// rebuild its in-memory state from scratch (e.g. health scheduling
+    /// after `RecvError::Lagged`) without re-reading the worker objects.
+    /// Read-only, lock-free. Emits no events.
+    pub fn reconcile_snapshot(&self) -> Vec<WorkerDescriptor> {
+        self.workers
+            .iter()
+            .map(|entry| {
+                let worker = entry.value();
+                WorkerDescriptor {
+                    worker_id: entry.key().clone(),
+                    status: worker.status(),
+                    disable_health_check: worker.metadata().health_config.disable_health_check,
+                    check_interval_secs: worker.metadata().health_config.check_interval_secs,
+                }
+            })
+            .collect()
+    }
+
+    /// Return the set of model IDs that currently have at least one
+    /// worker serving them.
+    ///
+    /// Skips model entries whose worker slice has become empty (those are
+    /// eventually evicted by the removal path). Read-only, lock-free.
+    /// Emits no events.
+    pub fn get_models(&self) -> Vec<String> {
+        self.model_index
+            .iter()
+            .filter(|entry| !entry.value().is_empty())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Return the number of registered workers.
+    ///
+    /// Read-only, lock-free. Emits no events.
+    pub fn len(&self) -> usize {
+        self.workers.len()
+    }
+
+    /// Return `true` when no workers are registered.
+    ///
+    /// Read-only, lock-free. Emits no events.
+    pub fn is_empty(&self) -> bool {
+        self.workers.is_empty()
+    }
+
+    /// Return a consolidated snapshot of registry statistics.
+    ///
+    /// Iterates the `workers` map once, counting totals per worker type,
+    /// connection mode, circuit-breaker state, and health status. Used by
+    /// `/v1/stats` and monitoring dashboards. Read-only, lock-free.
+    /// Emits no events.
+    pub fn stats(&self) -> WorkerRegistryStats {
+        let total_workers = self.workers.len();
+        // Count models directly instead of allocating Vec via get_models() (lock-free)
+        let total_models = self
+            .model_index
+            .iter()
+            .filter(|entry| !entry.value().is_empty())
+            .count();
+
+        let mut healthy_count = 0;
+        let mut total_load = 0;
+        let mut regular_count = 0;
+        let mut prefill_count = 0;
+        let mut decode_count = 0;
+        let mut http_count = 0;
+        let mut grpc_count = 0;
+        let mut cb_open_count = 0;
+        let mut cb_half_open_count = 0;
+
+        // Iterate DashMap directly to avoid cloning all workers via get_all()
+        for entry in self.workers.iter() {
+            let worker = entry.value();
+            if worker.is_healthy() {
+                healthy_count += 1;
+            }
+            total_load += worker.load();
+
+            match worker.worker_type() {
+                WorkerType::Regular => regular_count += 1,
+                WorkerType::Prefill => prefill_count += 1,
+                WorkerType::Decode => decode_count += 1,
+            }
+
+            match worker.connection_mode() {
+                ConnectionMode::Http => http_count += 1,
+                ConnectionMode::Grpc => grpc_count += 1,
+            }
+
+            match worker.circuit_breaker_state() {
+                CircuitState::Open => cb_open_count += 1,
+                CircuitState::HalfOpen => cb_half_open_count += 1,
+                CircuitState::Closed => {}
+            }
+        }
+
+        WorkerRegistryStats {
+            total_workers,
+            total_models,
+            healthy_workers: healthy_count,
+            unhealthy_workers: total_workers.saturating_sub(healthy_count),
+            total_load,
+            regular_workers: regular_count,
+            prefill_workers: prefill_count,
+            decode_workers: decode_count,
+            http_workers: http_count,
+            grpc_workers: grpc_count,
+            circuit_breaker_open: cb_open_count,
+            circuit_breaker_half_open: cb_half_open_count,
+        }
+    }
+
+    /// Return `(regular_count, pd_count)` using the type index directly.
+    ///
+    /// Avoids allocating the full worker list the way [`Self::stats`] does.
+    /// `pd_count` is any worker that is not `Regular`. Read-only, lock-free.
+    /// Emits no events.
+    pub fn get_worker_distribution(&self) -> (usize, usize) {
+        // Use the existing type_workers index for O(1) lookup
+        let regular_count = self
+            .type_workers
+            .get(&WorkerType::Regular)
+            .map(|v| v.len())
+            .unwrap_or(0);
+
+        // Get total workers count efficiently from DashMap
+        let total_workers = self.workers.len();
+
+        // PD workers are any workers that are not Regular
+        let pd_count = total_workers.saturating_sub(regular_count);
+
+        (regular_count, pd_count)
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // 4. Read — config
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Get the per-model retry config override, if any.
+    ///
+    /// Returns `None` when no worker in this model group set a retry
+    /// override. When retries are disabled for the group, the stored
+    /// `max_retries` is always 1. Read-only, lock-free. Emits no events.
     pub fn get_retry_config(&self, model_id: &str) -> Option<RetryConfig> {
         self.model_retry_configs
             .get(model_id)
             .map(|entry| entry.value().clone())
     }
 
-    /// Update the retry config for a model group (last write wins).
-    /// Called during worker registration when the worker has non-empty retry overrides.
-    /// If retries are disabled, max_retries is set to 1 before storing.
-    pub fn set_model_retry_config(&self, model_id: &str, mut config: RetryConfig, enabled: bool) {
-        if !enabled {
-            config.max_retries = 1;
-        }
-        self.model_retry_configs
-            .insert(model_id.to_string(), config);
-    }
-
-    pub fn worker_model_ids(worker: &Arc<dyn Worker>) -> Vec<String> {
-        let mut seen = HashSet::new();
-        let mut model_ids: Vec<String> = worker
-            .models()
-            .into_iter()
-            .map(|model| model.id)
-            .filter(|model_id| seen.insert(model_id.clone()))
-            .collect();
-
-        if model_ids.is_empty() {
-            model_ids.push(worker.model_id().to_string());
-        }
-
-        model_ids
-    }
-
-    fn add_worker_to_model_index(&self, model_id: &str, worker: Arc<dyn Worker>) {
-        self.model_index
-            .entry(model_id.to_string())
-            .and_modify(|existing| {
-                let mut new_workers: Vec<Arc<dyn Worker>> = existing
-                    .iter()
-                    .filter(|w| w.url() != worker.url())
-                    .cloned()
-                    .collect();
-                new_workers.push(worker.clone());
-                *existing = Arc::from(new_workers.into_boxed_slice());
-            })
-            .or_insert_with(|| Arc::from(vec![worker].into_boxed_slice()));
-    }
-
-    fn remove_worker_from_model_index(&self, model_id: &str, worker_url: &str) {
-        let mut should_remove_entry = false;
-
-        if let Some(mut entry) = self.model_index.get_mut(model_id) {
-            let new_workers: Vec<Arc<dyn Worker>> = entry
-                .iter()
-                .filter(|w| w.url() != worker_url)
-                .cloned()
-                .collect();
-
-            if new_workers.is_empty() {
-                *entry = Arc::from(Vec::<Arc<dyn Worker>>::new().into_boxed_slice());
-                should_remove_entry = true;
-            } else {
-                *entry = Arc::from(new_workers.into_boxed_slice());
-            }
-        }
-
-        if should_remove_entry {
-            self.model_index
-                .remove_if(model_id, |_, workers| workers.is_empty());
-        }
-
-        self.rebuild_hash_ring(model_id);
-    }
+    // ───────────────────────────────────────────────────────────────────
+    // 5. Write — mutation primitives
+    //
+    // Every method in this section holds the per-worker mutation lock
+    // (`worker_mutation_locks`) and emits exactly one `WorkerEvent` before
+    // releasing the lock. New mutation methods MUST follow this pattern.
+    // Manual publish at each call site is intentional — there are only a
+    // handful of mutation methods, and the simplicity beats a generic
+    // helper layer.
+    // ───────────────────────────────────────────────────────────────────
 
     /// Register a new worker (create-only).
     ///
     /// Returns the new `WorkerId` on success, or `None` if a worker with
     /// the same URL is already registered and active. A URL that was
-    /// pre-reserved via `reserve_id_for_url()` but has no worker yet is
-    /// treated as a new registration (reuses the reserved ID).
+    /// pre-reserved via [`Self::reserve_id_for_url`] but has no worker yet
+    /// is treated as a new registration (reuses the reserved ID).
+    ///
+    /// Emits [`WorkerEvent::Registered`] on success. Holds the per-worker
+    /// mutation lock for the index update + event broadcast via
+    /// `register_inner`.
     pub fn register(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
         let worker_id = self.register_inner(worker.clone())?;
 
@@ -385,53 +710,47 @@ impl WorkerRegistry {
         Some(worker_id)
     }
 
-    /// Core registration logic shared by local and mesh paths.
-    /// Does NOT sync to mesh — callers that need mesh sync do it themselves.
-    fn register_inner(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
-        // Atomic check-and-insert via entry API to avoid TOCTOU races.
-        // If URL already has an ID AND a worker object, it's a duplicate.
-        // If URL has a reserved ID but no worker, it's a pre-reserved slot.
-        // Atomic check-and-insert: reject if URL already has an active worker.
-        // A pre-reserved ID (from reserve_id_for_url) with no worker is allowed.
-        let worker_id = match self.url_to_id.entry(worker.url().to_string()) {
-            Entry::Occupied(entry) => {
-                let existing_id = entry.get().clone();
-                if self.workers.contains_key(&existing_id) {
-                    // URL has an active worker — reject
-                    return None;
-                }
-                // Pre-reserved ID with no worker yet — use it
-                existing_id
-            }
-            Entry::Vacant(entry) => {
-                let new_id = WorkerId::new();
-                entry.insert(new_id.clone());
-                new_id
-            }
-        };
-
-        // Store worker
-        self.workers.insert(worker_id.clone(), worker.clone());
-
-        // Update model index for O(1) lookups using copy-on-write.
-        for model_id in Self::worker_model_ids(&worker) {
-            self.add_worker_to_model_index(&model_id, worker.clone());
-            self.rebuild_hash_ring(&model_id);
+    /// Register or replace a worker (upsert).
+    ///
+    /// Returns the resulting `WorkerId`. Used by internal callers (K8s
+    /// discovery, startup) that need idempotent registration. If the URL
+    /// is new (or pre-reserved), behaves like [`Self::register`] and emits
+    /// [`WorkerEvent::Registered`]. If the URL already has an active
+    /// worker, delegates to [`Self::replace`] and emits
+    /// [`WorkerEvent::Replaced`].
+    ///
+    /// Holds the per-worker mutation lock for the duration of the
+    /// underlying `register` or `replace` call.
+    pub fn register_or_replace(&self, worker: Arc<dyn Worker>) -> WorkerId {
+        // Try to create first — succeeds for fresh URLs and pre-reserved IDs
+        // (where url_to_id has an entry but workers does not).
+        if let Some(id) = self.register(worker.clone()) {
+            return id;
         }
 
-        // Update type index (clone needed for DashMap key ownership)
-        self.type_workers
-            .entry(*worker.worker_type())
-            .or_default()
-            .push(worker_id.clone());
+        // URL exists with an active worker — replace it
+        if let Some(existing_id) = self.url_to_id.get(worker.url()).map(|e| e.clone()) {
+            if !self.replace(&existing_id, worker) {
+                // replace() returned false — worker was removed concurrently.
+                // The mutation lock prevents stale indexes, so this is safe to ignore.
+                tracing::warn!(
+                    "register_or_replace: worker {} was removed during replace",
+                    existing_id.as_str()
+                );
+            }
+            return existing_id;
+        }
 
-        // Update connection mode index (clone needed for DashMap key ownership)
-        self.connection_workers
-            .entry(*worker.connection_mode())
-            .or_default()
-            .push(worker_id.clone());
-
-        Some(worker_id)
+        // Should not reach here: register() returned None means URL is in url_to_id.
+        // Recover by clearing the stale entry and retrying full registration.
+        tracing::error!(
+            "register_or_replace: inconsistent state for URL {}, clearing stale entry",
+            worker.url()
+        );
+        self.url_to_id.remove(worker.url());
+        // register() will now succeed since we cleared the entry.
+        // If it still fails, something is deeply wrong — return a default ID.
+        self.register(worker).unwrap_or_default()
     }
 
     /// Replace an existing worker with a new one (overwrite-then-diff).
@@ -441,7 +760,12 @@ impl WorkerRegistry {
     /// diffs the model index to avoid a transient gap where the worker is
     /// missing from indexes.
     ///
-    /// Returns `true` if the worker was replaced, `false` if the ID was not found.
+    /// Returns `true` if the worker was replaced, `false` if the ID was
+    /// not found or the URL would change (URL changes require
+    /// remove + register instead).
+    ///
+    /// Emits [`WorkerEvent::Replaced`] on success. Holds the per-worker
+    /// mutation lock for the entire diff + broadcast sequence.
     pub fn replace(&self, worker_id: &WorkerId, new_worker: Arc<dyn Worker>) -> bool {
         // Serialize concurrent replacements for the same worker ID.
         // Lock is held only during the in-memory diff (no I/O, microseconds).
@@ -544,41 +868,120 @@ impl WorkerRegistry {
         true
     }
 
-    /// Register or replace a worker (upsert).
+    /// Atomically transition a worker's lifecycle status and emit a
+    /// `StatusChanged` event if it actually changed.
     ///
-    /// Used by internal callers (K8s discovery, startup) that need idempotent
-    /// registration. If the URL already exists, replaces the worker via
-    /// overwrite-then-diff. Otherwise, creates a new worker.
-    pub fn register_or_replace(&self, worker: Arc<dyn Worker>) -> WorkerId {
-        // Try to create first — succeeds for fresh URLs and pre-reserved IDs
-        // (where url_to_id has an entry but workers does not).
-        if let Some(id) = self.register(worker.clone()) {
-            return id;
+    /// This is a pure mutation primitive — the registry has no opinion on
+    /// when a worker should transition. The caller (typically
+    /// `WorkerManager`) owns the state machine logic.
+    ///
+    /// The per-worker mutation lock guarantees:
+    ///   1. The status read, write, and event emission are atomic per
+    ///      worker.
+    ///   2. Two concurrent calls cannot interleave to publish events out
+    ///      of order for the same worker.
+    ///
+    /// Returns `Some((old, new))` if the status changed, `None` if the
+    /// worker is gone or the status was already `new_status`.
+    ///
+    /// Emits [`WorkerEvent::StatusChanged`] on transition.
+    pub fn transition_status(
+        &self,
+        worker_id: &WorkerId,
+        new_status: WorkerStatus,
+    ) -> Option<(WorkerStatus, WorkerStatus)> {
+        self.transition_status_inner(worker_id, None, new_status)
+    }
+
+    /// Same as [`Self::transition_status`], but becomes a no-op if the
+    /// currently installed worker revision no longer matches
+    /// `expected_revision`.
+    ///
+    /// Used by health probes that must discard stale probe outcomes
+    /// after a same-URL `replace()`.
+    ///
+    /// Emits [`WorkerEvent::StatusChanged`] on transition. Holds the
+    /// per-worker mutation lock.
+    pub fn transition_status_if_revision(
+        &self,
+        worker_id: &WorkerId,
+        expected_revision: u64,
+        new_status: WorkerStatus,
+    ) -> Option<(WorkerStatus, WorkerStatus)> {
+        self.transition_status_inner(worker_id, Some(expected_revision), new_status)
+    }
+
+    /// Apply a worker-local mutation while holding the per-worker lock
+    /// and optionally emit a `StatusChanged` event under the same lock.
+    ///
+    /// Used by `WorkerManager` so counter mutation and revision-checked
+    /// status transitions cannot race a same-URL `replace()`. The closure
+    /// returns `(result, Option<new_status>)`; a transition is emitted
+    /// only when the candidate status differs from the current one.
+    ///
+    /// Returns `None` when the worker is gone or the revision no longer
+    /// matches. Otherwise returns `Some((result, transition))` where
+    /// `transition` is `Some((old, new))` if a `StatusChanged` event was
+    /// emitted.
+    ///
+    /// Emits [`WorkerEvent::StatusChanged`] only when the candidate
+    /// status differs. Holds the per-worker mutation lock for the whole
+    /// closure.
+    pub fn apply_if_revision<T, F>(
+        &self,
+        worker_id: &WorkerId,
+        expected_revision: u64,
+        f: F,
+    ) -> Option<(T, Option<(WorkerStatus, WorkerStatus)>)>
+    where
+        F: FnOnce(&Arc<dyn Worker>) -> (T, Option<WorkerStatus>),
+    {
+        let lock = self
+            .worker_mutation_locks
+            .entry(worker_id.clone())
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
+
+        let worker = self.workers.get(worker_id)?.clone();
+        if worker.revision() != expected_revision {
+            return None;
         }
 
-        // URL exists with an active worker — replace it
-        if let Some(existing_id) = self.url_to_id.get(worker.url()).map(|e| e.clone()) {
-            if !self.replace(&existing_id, worker) {
-                // replace() returned false — worker was removed concurrently.
-                // The mutation lock prevents stale indexes, so this is safe to ignore.
-                tracing::warn!(
-                    "register_or_replace: worker {} was removed during replace",
-                    existing_id.as_str()
-                );
+        let old_status = worker.status();
+        let (result, candidate_status) = f(&worker);
+        let transition = match candidate_status {
+            Some(new_status) if new_status != old_status => {
+                worker.set_status(new_status);
+                let _ = self.event_tx.send(WorkerEvent::StatusChanged {
+                    worker_id: worker_id.clone(),
+                    worker: worker.clone(),
+                    old_status,
+                    new_status,
+                });
+                Some((old_status, new_status))
             }
-            return existing_id;
-        }
+            _ => None,
+        };
 
-        // Should not reach here: register() returned None means URL is in url_to_id.
-        // Recover by clearing the stale entry and retrying full registration.
-        tracing::error!(
-            "register_or_replace: inconsistent state for URL {}, clearing stale entry",
-            worker.url()
-        );
-        self.url_to_id.remove(worker.url());
-        // register() will now succeed since we cleared the entry.
-        // If it still fails, something is deeply wrong — return a default ID.
-        self.register(worker).unwrap_or_default()
+        Some((result, transition))
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // 6. Update — config (no event)
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Update the retry config for a model group (last write wins).
+    ///
+    /// Called during worker registration when the worker carries non-empty
+    /// retry overrides. If `enabled` is false, `max_retries` is normalised
+    /// to 1 before storage. Holds no registry locks. Emits no events.
+    pub fn set_model_retry_config(&self, model_id: &str, mut config: RetryConfig, enabled: bool) {
+        if !enabled {
+            config.max_retries = 1;
+        }
+        self.model_retry_configs
+            .insert(model_id.to_string(), config);
     }
 
     /// Reserve (or retrieve) a stable UUID for a worker URL.
@@ -586,22 +989,39 @@ impl WorkerRegistry {
     /// Used by `WorkerService::create_worker()` to return a worker ID in
     /// the 202 response before the async workflow runs. The workflow's
     /// `register_or_replace()` call will find the pre-reserved entry and
-    /// create the worker under this ID.
+    /// create the worker under this ID. Idempotent — repeated calls for
+    /// the same URL return the same ID. Emits no events.
     pub fn reserve_id_for_url(&self, url: &str) -> WorkerId {
         self.url_to_id.entry(url.to_string()).or_default().clone()
     }
 
-    /// Best-effort lookup of the URL for a given worker ID.
-    pub fn get_url_by_id(&self, worker_id: &WorkerId) -> Option<String> {
-        if let Some(worker) = self.get(worker_id) {
-            return Some(worker.url().to_string());
-        }
-        self.url_to_id
-            .iter()
-            .find_map(|entry| (entry.value() == worker_id).then(|| entry.key().clone()))
+    /// Set (or clear) the mesh sync manager after initialisation.
+    ///
+    /// Thread-safe via an internal `RwLock`. The registry forwards worker
+    /// add/replace/remove events to the manager when one is installed.
+    /// Scheduled for removal when `WorkerSyncAdapter` (mesh v2) replaces
+    /// this hook; the registry will then have zero mesh awareness. Emits
+    /// no events.
+    pub fn set_mesh_sync(&self, mesh_sync: OptionalMeshSyncManager) {
+        let mut guard = self.mesh_sync.write();
+        *guard = mesh_sync;
     }
 
-    /// Remove a worker by ID
+    // ───────────────────────────────────────────────────────────────────
+    // 7. Remove
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Remove a worker by ID and clean up every index entry.
+    ///
+    /// Returns `Some(worker)` if the ID existed, `None` otherwise. Tears
+    /// down the URL mapping, per-worker mutation lock, model/type/
+    /// connection indexes, and per-model retry config when the last
+    /// worker for a model is removed. Also forwards the removal to mesh
+    /// sync and clears per-worker Prometheus metrics.
+    ///
+    /// Emits [`WorkerEvent::Removed`] on success. Holds the per-worker
+    /// mutation lock for the whole teardown so it cannot race a
+    /// concurrent `replace()`.
     pub fn remove(&self, worker_id: &WorkerId) -> Option<Arc<dyn Worker>> {
         // Acquire the same per-worker lock used by replace() to prevent
         // remove racing with a concurrent replace that has already snapshot
@@ -663,7 +1083,12 @@ impl WorkerRegistry {
         }
     }
 
-    /// Remove a worker by URL
+    /// Remove a worker by URL.
+    ///
+    /// Thin wrapper over [`Self::remove`] that first resolves the URL to
+    /// a `WorkerId`. Returns `None` if no worker is registered at this
+    /// URL. Emits [`WorkerEvent::Removed`] on success via the underlying
+    /// `remove()` call.
     pub fn remove_by_url(&self, url: &str) -> Option<Arc<dyn Worker>> {
         if let Some((_, worker_id)) = self.url_to_id.remove(url) {
             self.remove(&worker_id)
@@ -672,353 +1097,142 @@ impl WorkerRegistry {
         }
     }
 
-    /// Get a worker by ID
-    pub fn get(&self, worker_id: &WorkerId) -> Option<Arc<dyn Worker>> {
-        self.workers.get(worker_id).map(|entry| entry.clone())
-    }
+    // ───────────────────────────────────────────────────────────────────
+    // 8. Internal helpers
+    // ───────────────────────────────────────────────────────────────────
 
-    /// Get a worker by URL
-    pub fn get_by_url(&self, url: &str) -> Option<Arc<dyn Worker>> {
-        self.url_to_id.get(url).and_then(|id| self.get(&id))
-    }
-
-    /// Empty worker slice constant for returning when no workers found
-    const EMPTY_WORKERS: &'static [Arc<dyn Worker>] = &[];
-
-    /// Get all workers for a model (O(1) optimized, lock-free)
-    /// Returns an Arc to the immutable worker slice - just an atomic refcount bump.
-    /// This is the fastest possible read path with zero contention.
-    pub fn get_by_model(&self, model_id: &str) -> Arc<[Arc<dyn Worker>]> {
-        self.model_index
-            .get(model_id)
-            .map(|workers| Arc::clone(&workers))
-            .unwrap_or_else(|| Arc::from(Self::EMPTY_WORKERS))
-    }
-
-    /// Get all workers by worker type
-    pub fn get_by_type(&self, worker_type: WorkerType) -> Vec<Arc<dyn Worker>> {
-        self.type_workers
-            .get(&worker_type)
-            .map(|ids| ids.iter().filter_map(|id| self.get(id)).collect())
-            .unwrap_or_default()
-    }
-
-    /// Get all prefill workers (regardless of bootstrap_port)
-    pub fn get_prefill_workers(&self) -> Vec<Arc<dyn Worker>> {
-        self.workers
-            .iter()
-            .filter_map(|entry| {
-                let worker = entry.value();
-                match worker.worker_type() {
-                    WorkerType::Prefill => Some(worker.clone()),
-                    _ => None,
-                }
-            })
-            .collect()
-    }
-
-    /// Get all decode workers
-    pub fn get_decode_workers(&self) -> Vec<Arc<dyn Worker>> {
-        self.get_by_type(WorkerType::Decode)
-    }
-
-    /// Get all workers by connection mode
-    pub fn get_by_connection(&self, connection_mode: ConnectionMode) -> Vec<Arc<dyn Worker>> {
-        self.connection_workers
-            .get(&connection_mode)
-            .map(|ids| ids.iter().filter_map(|id| self.get(id)).collect())
-            .unwrap_or_default()
-    }
-
-    /// Get the number of workers in the registry
-    pub fn len(&self) -> usize {
-        self.workers.len()
-    }
-
-    /// Check if the registry is empty
-    pub fn is_empty(&self) -> bool {
-        self.workers.is_empty()
-    }
-
-    /// Get all workers
-    pub fn get_all(&self) -> Vec<Arc<dyn Worker>> {
-        self.workers
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect()
-    }
-
-    /// Get all workers with their IDs
-    pub fn get_all_with_ids(&self) -> Vec<(WorkerId, Arc<dyn Worker>)> {
-        self.workers
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect()
-    }
-
-    /// Get a side-effect-free snapshot for startup reconcile or lag recovery.
-    pub fn reconcile_snapshot(&self) -> Vec<WorkerDescriptor> {
-        self.workers
-            .iter()
-            .map(|entry| {
-                let worker = entry.value();
-                WorkerDescriptor {
-                    worker_id: entry.key().clone(),
-                    status: worker.status(),
-                    disable_health_check: worker.metadata().health_config.disable_health_check,
-                    check_interval_secs: worker.metadata().health_config.check_interval_secs,
-                }
-            })
-            .collect()
-    }
-
-    /// Get all worker URLs
-    pub fn get_all_urls(&self) -> Vec<String> {
-        self.workers
-            .iter()
-            .map(|entry| entry.value().url().to_string())
-            .collect()
-    }
-
-    pub fn get_all_urls_with_api_key(&self) -> Vec<(String, Option<String>)> {
-        self.workers
-            .iter()
-            .map(|entry| {
-                (
-                    entry.value().url().to_string(),
-                    entry.value().api_key().cloned(),
-                )
-            })
-            .collect()
-    }
-
-    /// Get all model IDs with workers (lock-free)
-    pub fn get_models(&self) -> Vec<String> {
-        self.model_index
-            .iter()
-            .filter(|entry| !entry.value().is_empty())
-            .map(|entry| entry.key().clone())
-            .collect()
-    }
-
-    /// Get workers filtered by multiple criteria
+    /// Collect the unique model IDs advertised by a worker.
     ///
-    /// This method allows flexible filtering of workers based on:
-    /// - model_id: Filter by specific model
-    /// - worker_type: Filter by worker type (Regular, Prefill, Decode)
-    /// - connection_mode: Filter by connection mode (Http, Grpc)
-    /// - runtime_type: Filter by runtime type (Sglang, Vllm, External)
-    /// - healthy_only: Only return healthy workers
-    pub fn get_workers_filtered(
-        &self,
-        model_id: Option<&str>,
-        worker_type: Option<WorkerType>,
-        connection_mode: Option<ConnectionMode>,
-        runtime_type: Option<RuntimeType>,
-        healthy_only: bool,
-    ) -> Vec<Arc<dyn Worker>> {
-        // Start with the most efficient collection based on filters
-        // Use model index when possible as it's O(1) lookup
-        let workers: Vec<Arc<dyn Worker>> = if let Some(model) = model_id {
-            self.get_by_model(model).to_vec()
-        } else {
-            self.get_all()
-        };
-
-        // Apply remaining filters
-        workers
+    /// Public so workflow steps can share the same de-duplication rule
+    /// the registry uses internally when building the model index. Falls
+    /// back to the worker's primary `model_id()` if the richer
+    /// `models()` list is empty. Does not touch the registry; emits no
+    /// events.
+    pub fn worker_model_ids(worker: &Arc<dyn Worker>) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut model_ids: Vec<String> = worker
+            .models()
             .into_iter()
-            .filter(|w| {
-                // Check worker_type if specified
-                if let Some(ref wtype) = worker_type {
-                    if *w.worker_type() != *wtype {
-                        return false;
-                    }
-                }
+            .map(|model| model.id)
+            .filter(|model_id| seen.insert(model_id.clone()))
+            .collect();
 
-                // Check connection_mode if specified
-                if let Some(ref conn) = connection_mode {
-                    if w.connection_mode() != conn {
-                        return false;
-                    }
-                }
-
-                // Check runtime_type if specified
-                if let Some(ref rt) = runtime_type {
-                    if w.metadata().spec.runtime_type != *rt {
-                        return false;
-                    }
-                }
-
-                // Check health if required
-                if healthy_only && !w.is_healthy() {
-                    return false;
-                }
-
-                true
-            })
-            .collect()
-    }
-
-    /// Get worker statistics (lock-free)
-    pub fn stats(&self) -> WorkerRegistryStats {
-        let total_workers = self.workers.len();
-        // Count models directly instead of allocating Vec via get_models() (lock-free)
-        let total_models = self
-            .model_index
-            .iter()
-            .filter(|entry| !entry.value().is_empty())
-            .count();
-
-        let mut healthy_count = 0;
-        let mut total_load = 0;
-        let mut regular_count = 0;
-        let mut prefill_count = 0;
-        let mut decode_count = 0;
-        let mut http_count = 0;
-        let mut grpc_count = 0;
-        let mut cb_open_count = 0;
-        let mut cb_half_open_count = 0;
-
-        // Iterate DashMap directly to avoid cloning all workers via get_all()
-        for entry in self.workers.iter() {
-            let worker = entry.value();
-            if worker.is_healthy() {
-                healthy_count += 1;
-            }
-            total_load += worker.load();
-
-            match worker.worker_type() {
-                WorkerType::Regular => regular_count += 1,
-                WorkerType::Prefill => prefill_count += 1,
-                WorkerType::Decode => decode_count += 1,
-            }
-
-            match worker.connection_mode() {
-                ConnectionMode::Http => http_count += 1,
-                ConnectionMode::Grpc => grpc_count += 1,
-            }
-
-            match worker.circuit_breaker_state() {
-                CircuitState::Open => cb_open_count += 1,
-                CircuitState::HalfOpen => cb_half_open_count += 1,
-                CircuitState::Closed => {}
-            }
+        if model_ids.is_empty() {
+            model_ids.push(worker.model_id().to_string());
         }
 
-        WorkerRegistryStats {
-            total_workers,
-            total_models,
-            healthy_workers: healthy_count,
-            unhealthy_workers: total_workers.saturating_sub(healthy_count),
-            total_load,
-            regular_workers: regular_count,
-            prefill_workers: prefill_count,
-            decode_workers: decode_count,
-            http_workers: http_count,
-            grpc_workers: grpc_count,
-            circuit_breaker_open: cb_open_count,
-            circuit_breaker_half_open: cb_half_open_count,
-        }
+        model_ids
     }
 
-    /// Get counts of regular and PD workers efficiently (O(1))
-    /// This avoids the overhead of get_all() which allocates memory and iterates all workers
-    pub fn get_worker_distribution(&self) -> (usize, usize) {
-        // Use the existing type_workers index for O(1) lookup
-        let regular_count = self
-            .type_workers
-            .get(&WorkerType::Regular)
-            .map(|v| v.len())
-            .unwrap_or(0);
-
-        // Get total workers count efficiently from DashMap
-        let total_workers = self.workers.len();
-
-        // PD workers are any workers that are not Regular
-        let pd_count = total_workers.saturating_sub(regular_count);
-
-        (regular_count, pd_count)
-    }
-
-    /// Atomically transition a worker's lifecycle status and emit a
-    /// `StatusChanged` event if it actually changed.
-    ///
-    /// This is a pure mutation primitive — the registry has no opinion on
-    /// when a worker should transition. The caller (typically `WorkerManager`)
-    /// owns the state machine logic.
-    ///
-    /// The per-worker mutation lock guarantees:
-    ///   1. The status read + write + event emit are atomic per worker.
-    ///   2. Two concurrent calls cannot interleave to publish events out of
-    ///      order for the same worker.
-    ///
-    /// Returns `Some((old, new))` if the status changed, `None` if the worker
-    /// is gone or the status was already `new_status`.
-    pub fn transition_status(
-        &self,
-        worker_id: &WorkerId,
-        new_status: WorkerStatus,
-    ) -> Option<(WorkerStatus, WorkerStatus)> {
-        self.transition_status_inner(worker_id, None, new_status)
-    }
-
-    /// Same as `transition_status()`, but becomes a no-op if the currently
-    /// installed worker revision no longer matches `expected_revision`.
-    pub fn transition_status_if_revision(
-        &self,
-        worker_id: &WorkerId,
-        expected_revision: u64,
-        new_status: WorkerStatus,
-    ) -> Option<(WorkerStatus, WorkerStatus)> {
-        self.transition_status_inner(worker_id, Some(expected_revision), new_status)
-    }
-
-    /// Apply a worker-local mutation while holding the per-worker lock and
-    /// optionally emit a `StatusChanged` event under the same lock.
-    ///
-    /// Used by `WorkerManager` so counter mutation and revision-checked status
-    /// transitions cannot race a same-URL `replace()`.
-    pub fn apply_if_revision<T, F>(
-        &self,
-        worker_id: &WorkerId,
-        expected_revision: u64,
-        f: F,
-    ) -> Option<(T, Option<(WorkerStatus, WorkerStatus)>)>
-    where
-        F: FnOnce(&Arc<dyn Worker>) -> (T, Option<WorkerStatus>),
-    {
-        let lock = self
-            .worker_mutation_locks
-            .entry(worker_id.clone())
-            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
-            .clone();
-        let _guard = lock.lock();
-
-        let worker = self.workers.get(worker_id)?.clone();
-        if worker.revision() != expected_revision {
-            return None;
-        }
-
-        let old_status = worker.status();
-        let (result, candidate_status) = f(&worker);
-        let transition = match candidate_status {
-            Some(new_status) if new_status != old_status => {
-                worker.set_status(new_status);
-                let _ = self.event_tx.send(WorkerEvent::StatusChanged {
-                    worker_id: worker_id.clone(),
-                    worker: worker.clone(),
-                    old_status,
-                    new_status,
-                });
-                Some((old_status, new_status))
+    /// Core registration logic shared by local and mesh paths.
+    /// Does NOT sync to mesh — callers that need mesh sync do it themselves.
+    fn register_inner(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
+        // Atomic check-and-insert via entry API to avoid TOCTOU races.
+        // If URL already has an ID AND a worker object, it's a duplicate.
+        // If URL has a reserved ID but no worker, it's a pre-reserved slot.
+        // Atomic check-and-insert: reject if URL already has an active worker.
+        // A pre-reserved ID (from reserve_id_for_url) with no worker is allowed.
+        let worker_id = match self.url_to_id.entry(worker.url().to_string()) {
+            Entry::Occupied(entry) => {
+                let existing_id = entry.get().clone();
+                if self.workers.contains_key(&existing_id) {
+                    // URL has an active worker — reject
+                    return None;
+                }
+                // Pre-reserved ID with no worker yet — use it
+                existing_id
             }
-            _ => None,
+            Entry::Vacant(entry) => {
+                let new_id = WorkerId::new();
+                entry.insert(new_id.clone());
+                new_id
+            }
         };
 
-        Some((result, transition))
+        // Store worker
+        self.workers.insert(worker_id.clone(), worker.clone());
+
+        // Update model index for O(1) lookups using copy-on-write.
+        for model_id in Self::worker_model_ids(&worker) {
+            self.add_worker_to_model_index(&model_id, worker.clone());
+            self.rebuild_hash_ring(&model_id);
+        }
+
+        // Update type index (clone needed for DashMap key ownership)
+        self.type_workers
+            .entry(*worker.worker_type())
+            .or_default()
+            .push(worker_id.clone());
+
+        // Update connection mode index (clone needed for DashMap key ownership)
+        self.connection_workers
+            .entry(*worker.connection_mode())
+            .or_default()
+            .push(worker_id.clone());
+
+        Some(worker_id)
     }
 
+    /// Rebuild the hash ring for a model based on current workers in the model index.
+    fn rebuild_hash_ring(&self, model_id: &str) {
+        if let Some(workers) = self.model_index.get(model_id) {
+            let ring = HashRing::new(&workers);
+            self.hash_rings.insert(model_id.to_string(), Arc::new(ring));
+        } else {
+            // No workers for this model, remove the ring
+            self.hash_rings.remove(model_id);
+        }
+    }
+
+    /// Append `worker` to the copy-on-write model index slice for `model_id`.
+    /// Replaces any existing entry with the same URL so updates via replace()
+    /// do not leave duplicate rows.
+    fn add_worker_to_model_index(&self, model_id: &str, worker: Arc<dyn Worker>) {
+        self.model_index
+            .entry(model_id.to_string())
+            .and_modify(|existing| {
+                let mut new_workers: Vec<Arc<dyn Worker>> = existing
+                    .iter()
+                    .filter(|w| w.url() != worker.url())
+                    .cloned()
+                    .collect();
+                new_workers.push(worker.clone());
+                *existing = Arc::from(new_workers.into_boxed_slice());
+            })
+            .or_insert_with(|| Arc::from(vec![worker].into_boxed_slice()));
+    }
+
+    /// Drop `worker_url` from the copy-on-write model index slice for `model_id`
+    /// and rebuild the hash ring. Evicts the whole model entry when empty.
+    fn remove_worker_from_model_index(&self, model_id: &str, worker_url: &str) {
+        let mut should_remove_entry = false;
+
+        if let Some(mut entry) = self.model_index.get_mut(model_id) {
+            let new_workers: Vec<Arc<dyn Worker>> = entry
+                .iter()
+                .filter(|w| w.url() != worker_url)
+                .cloned()
+                .collect();
+
+            if new_workers.is_empty() {
+                *entry = Arc::from(Vec::<Arc<dyn Worker>>::new().into_boxed_slice());
+                should_remove_entry = true;
+            } else {
+                *entry = Arc::from(new_workers.into_boxed_slice());
+            }
+        }
+
+        if should_remove_entry {
+            self.model_index
+                .remove_if(model_id, |_, workers| workers.is_empty());
+        }
+
+        self.rebuild_hash_ring(model_id);
+    }
+
+    /// Shared backend for [`Self::transition_status`] and
+    /// [`Self::transition_status_if_revision`]. Holds the per-worker
+    /// mutation lock for the full read-modify-emit sequence.
     fn transition_status_inner(
         &self,
         worker_id: &WorkerId,
@@ -1055,6 +1269,10 @@ impl WorkerRegistry {
     }
 }
 
+// `Default` delegates to `new()` so there is a single source of truth.
+// We cannot `#[derive(Default)]` on `WorkerRegistry` because
+// `broadcast::Sender` has no `Default` impl — it needs an explicit
+// capacity.
 impl Default for WorkerRegistry {
     fn default() -> Self {
         Self::new()

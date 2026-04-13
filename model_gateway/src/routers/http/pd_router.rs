@@ -765,7 +765,7 @@ impl PDRouter {
                 .collect();
             if by_model.is_empty() && is_unknown_model {
                 // "auto" means pick any — fall back to all prefill workers
-                self.worker_registry.get_prefill_workers()
+                self.worker_registry.get_prefill_workers().to_vec()
             } else {
                 by_model
             }
@@ -781,7 +781,7 @@ impl PDRouter {
                 .collect();
             if by_model.is_empty() && is_unknown_model {
                 // Only fall back to all workers when model is "unknown" (wildcard)
-                self.worker_registry.get_decode_workers()
+                self.worker_registry.get_decode_workers().to_vec()
             } else {
                 by_model
             }
