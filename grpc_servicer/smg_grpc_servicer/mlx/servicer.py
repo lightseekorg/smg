@@ -26,17 +26,32 @@ logger = logging.getLogger(__name__)
 class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
     """gRPC servicer implementing the MlxEngine service for MLX backends.
 
-    TODO(mlx-threadsafety): mlx-lm's BatchGenerator is accessed from two
-    threads — the asyncio event loop (insert/remove via Generate and Abort)
-    and the background generation thread (next/remove). In practice the
-    current E2E tests pass because next() is always active so insert/remove
-    from the event loop naturally interleave with next()'s own internal
-    state transitions, but this is not guaranteed. A follow-up should either:
-      1. Upstream a thread-safety contract into mlx-lm's BatchGenerator, or
-      2. Serialize insert/next/remove through a single dedicated thread using
-         a request queue (so the event loop only enqueues work).
-    A naive lock around next() would block prefill and crush throughput, so
-    don't add one without thinking through the contention model first.
+    Thread-safety model
+    -------------------
+    mlx-lm's ``BatchGenerator`` is not thread-safe: ``next()`` mutates
+    ``_prompt_batch`` / ``_generation_batch`` / ``_unprocessed_sequences``
+    while running mlx kernels (which release the GIL), and ``remove()``
+    rebuilds those same structures. This servicer runs ``next()`` on a
+    background thread and services ``insert()`` / ``remove()`` from the
+    asyncio event loop, so we need synchronization.
+
+    ``self._gen_lock`` is acquired by:
+      * the gen thread for the whole ``next() + dispatch + finished-remove``
+        block (one critical section per loop iteration — keeps the batch
+        snapshot consistent);
+      * the event loop around ``insert() + _uid_queues[uid] = queue`` in
+        ``Generate`` (fast path, also closes the register-queue-before-first-
+        response race);
+      * the event loop around ``remove()`` in ``Abort`` (rare).
+
+    ``insert()`` itself only appends to a ``deque`` and increments a counter
+    (both atomic under the GIL), but the lock still wraps it so the uid
+    can't become visible to the gen thread before its queue is registered.
+
+    Cost model: the event loop can block up to one ``next()`` step
+    (~10-50 ms on M-series) while the gen thread holds the lock. Acceptable
+    for single-worker Mac inference; if you need 1000+ concurrent reqs/s,
+    refactor to a command-queue / actor model (see vLLM's AsyncLLMEngine).
     """
 
     def __init__(
@@ -54,6 +69,9 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         self._shutdown_event = threading.Event()
         self._loop = None
         self._gen_thread = None
+        # Protects mlx-lm BatchGenerator state + self._uid_queues against
+        # the background gen thread. See class docstring.
+        self._gen_lock = threading.Lock()
         logger.info("MlxEngineServicer initialized for model %s", model_path)
 
     @staticmethod
@@ -268,26 +286,34 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
 
     def _generation_loop(self):
         while not self._shutdown_event.is_set():
+            prompt_responses: list = []
+            gen_responses: list = []
             try:
-                with mx.stream(generation_stream):
-                    prompt_responses, gen_responses = self.batch_generator.next()
+                # Single critical section: next() + dispatch + finished-remove.
+                # Holding the lock across dispatch keeps the batch snapshot
+                # consistent with the responses we just produced; event-loop
+                # insert/remove serializes naturally against this block.
+                with self._gen_lock:
+                    with mx.stream(generation_stream):
+                        prompt_responses, gen_responses = self.batch_generator.next()
+
+                    for r in gen_responses:
+                        queue = self._uid_queues.get(r.uid)
+                        if queue is not None:
+                            self._loop.call_soon_threadsafe(queue.put_nowait, r)
+                        if r.finish_reason is not None:
+                            try:
+                                self.batch_generator.remove([r.uid])
+                            except Exception:
+                                logger.exception("Error removing uid %d", r.uid)
             except Exception:
                 logger.exception("Error in generation loop")
                 continue
 
             if not prompt_responses and not gen_responses:
+                # Idle — release the lock and briefly sleep so the event
+                # loop can slot in insert/remove work without contention.
                 time.sleep(0.001)
-                continue
-
-            for r in gen_responses:
-                queue = self._uid_queues.get(r.uid)
-                if queue is not None:
-                    self._loop.call_soon_threadsafe(queue.put_nowait, r)
-                if r.finish_reason is not None:
-                    try:
-                        self.batch_generator.remove([r.uid])
-                    except Exception:
-                        logger.exception("Error removing uid %d", r.uid)
 
     async def Generate(self, request, context):
         request_id = request.request_id
@@ -308,18 +334,21 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
             if sp.HasField("seed"):
                 mx.random.seed(sp.seed)
 
-            uids = self.batch_generator.insert(
-                prompts=[token_ids],
-                max_tokens=[max_tokens],
-                samplers=[sampler],
-                logits_processors=[logits_processors],
-                state_machines=[state_machine],
-            )
-            uid = uids[0]
+            queue: asyncio.Queue = asyncio.Queue()
+            # Insert + queue registration must be atomic against the gen
+            # thread's next()+remove block so a one-step completion can't
+            # be dispatched and removed before its queue is visible.
+            with self._gen_lock:
+                uids = self.batch_generator.insert(
+                    prompts=[token_ids],
+                    max_tokens=[max_tokens],
+                    samplers=[sampler],
+                    logits_processors=[logits_processors],
+                    state_machines=[state_machine],
+                )
+                uid = uids[0]
+                self._uid_queues[uid] = queue
             self._request_uid_map[request_id] = uid
-
-            queue = asyncio.Queue()
-            self._uid_queues[uid] = queue
             self._active_requests += 1
             prompt_tokens = len(token_ids)
 
@@ -433,10 +462,13 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                 # exit cleanly instead of hanging until transport cancellation.
                 if queue is not None:
                     queue.put_nowait(None)
-                try:
-                    self.batch_generator.remove([uid])
-                except Exception:
-                    logger.warning("Failed to remove uid %d for request %s", uid, request_id)
+                # remove() races with the gen thread's next() without the
+                # lock — see class docstring.
+                with self._gen_lock:
+                    try:
+                        self.batch_generator.remove([uid])
+                    except Exception:
+                        logger.warning("Failed to remove uid %d for request %s", uid, request_id)
         return mlx_engine_pb2.AbortResponse()
 
     async def HealthCheck(self, request, context):
