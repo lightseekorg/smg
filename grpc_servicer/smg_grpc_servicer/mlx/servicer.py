@@ -338,12 +338,27 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
             state_machine = self._build_state_machine(sp, self._eos_token_ids)
             # When max_tokens is unset, cap at remaining context (matches
             # vLLM/SGLang semantics: unbounded within model limits, not a
-            # silent 256-token truncation).
+            # silent 256-token truncation). Different model configs use
+            # different keys for the context length; fall back to 256 if
+            # none are present so we don't end up with max_tokens=1.
             if sp.HasField("max_tokens"):
                 max_tokens = sp.max_tokens
             else:
-                ctx_limit = self.model_config.get("max_position_embeddings", 0) or 0
-                max_tokens = max(ctx_limit - len(token_ids), 1)
+                ctx_limit = 0
+                for key in (
+                    "max_position_embeddings",
+                    "max_seq_len",
+                    "n_positions",
+                    "seq_length",
+                ):
+                    val = self.model_config.get(key)
+                    if isinstance(val, int) and val > 0:
+                        ctx_limit = val
+                        break
+                if ctx_limit > 0:
+                    max_tokens = max(ctx_limit - len(token_ids), 1)
+                else:
+                    max_tokens = 256
             num_logprobs = sp.logprobs if sp.HasField("logprobs") else None
 
             if sp.HasField("seed"):
