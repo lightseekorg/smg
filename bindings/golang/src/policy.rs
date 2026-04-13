@@ -32,7 +32,7 @@ use smg::{
         utils::{generate_tool_constraints, process_chat_messages},
     },
     worker::{
-        circuit_breaker::CircuitBreaker,
+        circuit_breaker::{CircuitBreaker, CircuitState},
         resilience::ResolvedResilience,
         worker::{RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad},
         ConnectionMode, Worker, WorkerResult, WorkerType,
@@ -198,7 +198,7 @@ impl Worker for GrpcWorker {
         &self.metadata
     }
 
-    fn circuit_breaker_state(&self) -> smg::worker::circuit_breaker::CircuitState {
+    fn circuit_breaker_state(&self) -> CircuitState {
         self.circuit_breaker.state()
     }
 
