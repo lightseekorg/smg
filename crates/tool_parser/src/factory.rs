@@ -223,106 +223,51 @@ impl ParserRegistry {
         }
     }
 
-    /// Check if a parser can be created for a specific model without actually creating it.
-    /// Returns true if a parser is available (registered) for this model.
-    pub fn has_parser_for_model(&self, model: &str) -> bool {
-        // Try exact match first
-        {
-            let mapping = self.model_mapping.read();
-            if let Some(parser_name) = mapping.get(model) {
-                let entries = self.entries.read();
-                if entries.contains_key(parser_name) {
-                    return true;
-                }
-            }
+    /// Resolve model name to parser name via model mappings.
+    /// Returns None if no mapping matches (caller decides fallback).
+    pub fn resolve_model_to_parser(&self, model: &str) -> Option<String> {
+        let mapping = self.model_mapping.read();
+        // Try exact match
+        if let Some(parser_name) = mapping.get(model) {
+            return Some(parser_name.clone());
         }
-
-        // Try prefix matching
-        let model_mapping = self.model_mapping.read();
-        let best_match = model_mapping
+        // Try prefix matching (longest pattern wins)
+        mapping
             .iter()
             .filter(|(pattern, _)| {
                 pattern.ends_with('*') && model.starts_with(&pattern[..pattern.len() - 1])
             })
-            .max_by_key(|(pattern, _)| pattern.len());
+            .max_by_key(|(pattern, _)| pattern.len())
+            .map(|(_, parser_name)| parser_name.clone())
+    }
 
-        if let Some((_, parser_name)) = best_match {
-            let entries = self.entries.read();
-            if entries.contains_key(parser_name) {
-                return true;
-            }
-        }
+    /// Resolve effective parser name: use configured override if set, else model mapping.
+    pub fn resolve_parser_name(&self, configured: Option<&str>, model: &str) -> Option<String> {
+        configured
+            .map(|s| s.to_string())
+            .or_else(|| self.resolve_model_to_parser(model))
+    }
 
-        // Return false if no specific parser found for this model
-        // (get_pooled will still fall back to default parser)
-        false
+    /// Check if a parser can be created for a specific model without actually creating it.
+    pub fn has_parser_for_model(&self, model: &str) -> bool {
+        self.resolve_model_to_parser(model)
+            .is_some_and(|name| self.has_parser(&name))
     }
 
     /// Create a fresh (non-pooled) parser instance for a specific model.
-    /// Returns a new parser instance for each call - useful for streaming where state isolation is needed.
     pub fn create_for_model(&self, model: &str) -> Option<Box<dyn ToolParser>> {
-        // Try exact match first
-        {
-            let mapping = self.model_mapping.read();
-            if let Some(parser_name) = mapping.get(model) {
-                if let Some(parser) = self.create_parser(parser_name) {
-                    return Some(parser);
-                }
-            }
-        }
-
-        // Try prefix matching with more specific patterns first
-        let model_mapping = self.model_mapping.read();
-        let best_match = model_mapping
-            .iter()
-            .filter(|(pattern, _)| {
-                pattern.ends_with('*') && model.starts_with(&pattern[..pattern.len() - 1])
-            })
-            .max_by_key(|(pattern, _)| pattern.len());
-
-        // Return the best matching parser
-        if let Some((_, parser_name)) = best_match {
-            if let Some(parser) = self.create_parser(parser_name) {
-                return Some(parser);
-            }
-        }
-
-        // Fall back to default parser
-        let default = self.default_parser.read().clone();
-        self.create_parser(&default)
+        let parser_name = self
+            .resolve_model_to_parser(model)
+            .unwrap_or_else(|| self.default_parser.read().clone());
+        self.create_parser(&parser_name)
     }
 
     /// Get parser for a specific model
     pub fn get_pooled_for_model(&self, model: &str) -> Option<PooledParser> {
-        // Try exact match first
-        {
-            let mapping = self.model_mapping.read();
-            if let Some(parser_name) = mapping.get(model) {
-                if let Some(parser) = self.get_pooled_parser(parser_name) {
-                    return Some(parser);
-                }
-            }
-        }
-
-        // Try prefix matching with more specific patterns first
-        let model_mapping = self.model_mapping.read();
-        let best_match = model_mapping
-            .iter()
-            .filter(|(pattern, _)| {
-                pattern.ends_with('*') && model.starts_with(&pattern[..pattern.len() - 1])
-            })
-            .max_by_key(|(pattern, _)| pattern.len());
-
-        // Return the best matching parser
-        if let Some((_, parser_name)) = best_match {
-            if let Some(parser) = self.get_pooled_parser(parser_name) {
-                return Some(parser);
-            }
-        }
-
-        // Fall back to default parser
-        let default = self.default_parser.read().clone();
-        self.get_pooled_parser(&default)
+        let parser_name = self
+            .resolve_model_to_parser(model)
+            .unwrap_or_else(|| self.default_parser.read().clone());
+        self.get_pooled_parser(&parser_name)
     }
 
     /// Clear the parser pool, forcing new instances to be created.
@@ -490,32 +435,10 @@ impl ParserFactory {
     /// Get a non-pooled parser for the given model ID (creates a fresh instance each time).
     /// This is useful for benchmarks and testing where you want independent parser instances.
     pub fn get_parser(&self, model_id: &str) -> Option<Arc<dyn ToolParser>> {
-        // Determine which parser type to use
-        let parser_type = {
-            let mapping = self.registry.model_mapping.read();
-
-            // Try exact match first
-            if let Some(parser_name) = mapping.get(model_id) {
-                parser_name.clone()
-            } else {
-                // Try prefix matching
-                let best_match = mapping
-                    .iter()
-                    .filter(|(pattern, _)| {
-                        pattern.ends_with('*')
-                            && model_id.starts_with(&pattern[..pattern.len() - 1])
-                    })
-                    .max_by_key(|(pattern, _)| pattern.len());
-
-                if let Some((_, parser_name)) = best_match {
-                    parser_name.clone()
-                } else {
-                    // Fall back to default
-                    self.registry.default_parser.read().clone()
-                }
-            }
-        };
-
+        let parser_type = self
+            .registry
+            .resolve_model_to_parser(model_id)
+            .unwrap_or_else(|| self.registry.default_parser.read().clone());
         let entries = self.registry.entries.read();
         entries.get(&parser_type).map(|entry| {
             let boxed_parser = (entry.creator)();
