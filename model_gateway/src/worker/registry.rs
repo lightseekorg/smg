@@ -1092,8 +1092,20 @@ impl smg_mesh::WorkerStateSubscriber for WorkerRegistry {
 
         worker.set_healthy(state.health);
 
-        // register_inner skips mesh sync to avoid version-bump loop.
-        if let Some(id) = self.register_inner(Arc::new(worker)) {
+        // register_inner skips OUTGOING mesh sync to avoid a version-bump
+        // loop on the CRDT. We still publish the local `Registered` event
+        // so in-process subscribers (WorkerManager's health scheduler)
+        // pick up mesh-imported workers via the same event path as any
+        // other registration. Without this, mesh-synced workers would
+        // never enter the health schedule and `--remove-unhealthy-workers`
+        // could not reach them. The event is a local broadcast only; it
+        // does not re-enter the mesh.
+        let worker: Arc<dyn Worker> = Arc::new(worker);
+        if let Some(id) = self.register_inner(worker.clone()) {
+            let _ = self.event_tx.send(WorkerEvent::Registered {
+                worker_id: id.clone(),
+                worker: worker.clone(),
+            });
             tracing::info!(
                 worker_id = %id.as_str(),
                 url = %state.url,
@@ -1732,6 +1744,86 @@ mod tests {
         assert_eq!(
             w.metadata().spec.labels.get("source"),
             Some(&"k8s".to_string())
+        );
+    }
+
+    #[test]
+    fn test_mesh_imported_worker_emits_registered_event() {
+        use smg_mesh::{WorkerState, WorkerStateSubscriber};
+
+        // Mesh-imported workers must emit `WorkerEvent::Registered` so
+        // event-driven subscribers (WorkerManager's health scheduler)
+        // pick them up via the same path as any other registration.
+        // Without this event, a mesh worker would be routable but never
+        // probed locally, and `--remove-unhealthy-workers` could not
+        // reach it.
+        let registry = WorkerRegistry::new();
+        let mut rx = registry.subscribe_events();
+
+        let state = WorkerState {
+            worker_id: "mesh-w1".into(),
+            model_id: "llama-3".into(),
+            url: "http://mesh-worker-event:8080".into(),
+            health: true,
+            load: 0.5,
+            version: 1,
+            spec: vec![],
+        };
+
+        registry.on_remote_worker_state(&state);
+
+        let event = rx
+            .try_recv()
+            .expect("mesh import must broadcast a Registered event");
+        match event {
+            WorkerEvent::Registered { worker, .. } => {
+                assert_eq!(worker.url(), "http://mesh-worker-event:8080");
+                assert_eq!(worker.model_id(), "llama-3");
+            }
+            other => panic!("Expected Registered event from mesh import, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mesh_worker_state_update_is_silent_on_existing_worker() {
+        use smg_mesh::{WorkerState, WorkerStateSubscriber};
+
+        // Health updates for an already-registered worker go through the
+        // compat shim (set_healthy) without emitting an event — the
+        // existing worker is already on WorkerManager's schedule, and
+        // local probes will reconcile the state on the next tick. We
+        // verify the no-event behavior so a future regression (e.g. adding
+        // a StatusChanged emit here) is caught.
+        let registry = WorkerRegistry::new();
+
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://mesh-existing:8080")
+                .model(ModelCard::new("llama-3"))
+                .health_config(openai_protocol::worker::HealthCheckConfig {
+                    disable_health_check: true,
+                    ..Default::default()
+                })
+                .build(),
+        );
+        registry.register(worker).unwrap();
+
+        let mut rx = registry.subscribe_events();
+
+        let state = WorkerState {
+            worker_id: "mesh-w1".into(),
+            model_id: "llama-3".into(),
+            url: "http://mesh-existing:8080".into(),
+            health: false,
+            load: 0.0,
+            version: 2,
+            spec: vec![],
+        };
+        registry.on_remote_worker_state(&state);
+
+        // No event is expected on the update path.
+        assert!(
+            rx.try_recv().is_err(),
+            "existing-worker update path should not broadcast an event"
         );
     }
 

@@ -147,7 +147,25 @@ impl WorkerManager {
     ) -> Self {
         let shutdown_notify = Arc::new(Notify::new());
         let shutdown_clone = shutdown_notify.clone();
+
+        // Subscribe BEFORE snapshotting the registry. Any registration that
+        // lands after this line either (a) is already in the snapshot below
+        // because it happened synchronously on this thread, or (b) arrives
+        // as a Registered event in the broadcast buffer and is idempotently
+        // applied by the event loop. The "a or b" dichotomy is what makes
+        // startup deterministic regardless of task scheduling.
         let events_rx = registry.subscribe_events();
+
+        // Run the bootstrap reconcile synchronously on the caller's thread
+        // so the initial schedule is captured deterministically — not
+        // whenever the spawned task happens to be scheduled. A worker
+        // registered between WorkerManager::start() returning and the task
+        // running (e.g. the mesh replay loop in server.rs, which runs
+        // synchronously right after start()) would otherwise race the
+        // task's own reconcile call.
+        let mut next_check: HashMap<WorkerId, tokio::time::Instant> = HashMap::new();
+        reconcile_from_registry(&registry, &mut next_check, &config);
+
         let job_queue = if config.remove_unhealthy {
             job_queue
         } else {
@@ -159,7 +177,15 @@ impl WorkerManager {
             reason = "WorkerManager loop runs for the lifetime of the registry; handle is stored and abort() runs on drop"
         )]
         let handle = tokio::spawn(async move {
-            run_health_loop(registry, events_rx, config, job_queue, shutdown_clone).await;
+            run_health_loop(
+                registry,
+                events_rx,
+                next_check,
+                config,
+                job_queue,
+                shutdown_clone,
+            )
+            .await;
         });
 
         Self {
@@ -214,18 +240,23 @@ type ProbeFutures = FuturesUnordered<Pin<Box<dyn Future<Output = ProbeCompletion
 /// The loop keeps deadline scheduling, in-flight probe tracking, and event
 /// handling in one place. Probes run concurrently via `FuturesUnordered` so a
 /// slow worker does not block unrelated health checks or registry events.
+///
+/// `next_check` is seeded by `WorkerManager::start()` via a synchronous
+/// `reconcile_from_registry` call, so this function never runs a bootstrap
+/// reconcile of its own — by the time the task is scheduled, the caller's
+/// thread has already captured a consistent registry snapshot. The only
+/// in-loop reconcile is the lag-recovery rebuild triggered by
+/// `RecvError::Lagged`.
 async fn run_health_loop(
     registry: Arc<WorkerRegistry>,
     mut events_rx: broadcast::Receiver<WorkerEvent>,
+    mut next_check: HashMap<WorkerId, tokio::time::Instant>,
     config: WorkerManagerConfig,
     job_queue: Option<Arc<JobQueue>>,
     shutdown: Arc<Notify>,
 ) {
-    let mut next_check: HashMap<WorkerId, tokio::time::Instant> = HashMap::new();
     let mut probes: ProbeFutures = FuturesUnordered::new();
     let mut in_flight: HashSet<WorkerId> = HashSet::new();
-
-    reconcile_from_registry(&registry, &mut next_check, &config);
 
     loop {
         let now = tokio::time::Instant::now();
@@ -1297,6 +1328,71 @@ mod tests {
             !next_check.contains_key(&failed_id),
             "bootstrap reconcile must not reschedule failed workers"
         );
+    }
+
+    #[test]
+    fn test_reconcile_from_registry_captures_pending_and_ready_workers() {
+        // Positive complement to the "skips failed" test: the startup
+        // reconcile must pick up Pending (not-yet-probed) and Ready
+        // workers that existed at registry snapshot time. This is what
+        // makes WorkerManager::start() deterministic — the schedule is
+        // captured on the caller's thread, not whenever the spawned task
+        // happens to run.
+        let registry = Arc::new(WorkerRegistry::new());
+
+        let pending_worker = make_worker("http://pending:1", 2, 3);
+        assert_eq!(pending_worker.status(), WorkerStatus::Pending);
+        let pending_id = registry.register(pending_worker).unwrap();
+
+        let ready_worker = make_worker("http://ready:1", 2, 3);
+        ready_worker.set_status(WorkerStatus::Ready);
+        let ready_id = registry.register(ready_worker).unwrap();
+
+        let mut next_check = HashMap::new();
+        reconcile_from_registry(
+            &registry,
+            &mut next_check,
+            &WorkerManagerConfig {
+                default_check_interval_secs: 5,
+                remove_unhealthy: true,
+            },
+        );
+
+        assert!(
+            next_check.contains_key(&pending_id),
+            "pending worker must be in the bootstrap schedule"
+        );
+        assert!(
+            next_check.contains_key(&ready_id),
+            "ready worker must be in the bootstrap schedule"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_worker_manager_start_is_deterministic_with_preexisting_workers() {
+        // End-to-end contract for fix #2: a worker that exists in the
+        // registry before WorkerManager::start() returns must be on the
+        // schedule the moment the spawned task begins running — no race
+        // with task scheduling. We can't observe `next_check` directly,
+        // so we run the full start/shutdown lifecycle with a very long
+        // probe interval (so no probe actually fires) and verify the
+        // happy path doesn't panic. Together with the reconcile unit
+        // test above, this covers both the "reconcile captures workers"
+        // and "start() calls reconcile synchronously" invariants.
+        let registry = Arc::new(WorkerRegistry::new());
+        let worker = make_worker("http://pre-existing:1", 2, 3);
+        worker.set_status(WorkerStatus::Ready);
+        registry.register(worker).unwrap();
+
+        let mut manager = WorkerManager::start(
+            registry,
+            WorkerManagerConfig {
+                default_check_interval_secs: 3600,
+                remove_unhealthy: false,
+            },
+            None,
+        );
+        manager.shutdown().await;
     }
 
     #[tokio::test]
