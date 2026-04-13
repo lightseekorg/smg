@@ -133,6 +133,7 @@ async def serve_grpc(
         model_info=model_info,
         scheduler_info=scheduler_info,
         health_servicer=health_servicer,
+        model_config=model_config,
     )
     sglang_scheduler_pb2_grpc.add_SglangSchedulerServicer_to_server(servicer, server)
 

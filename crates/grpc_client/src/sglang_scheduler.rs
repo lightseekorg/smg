@@ -446,14 +446,18 @@ impl SglangSchedulerClient {
         // Detokenization happens on the SMG Rust side (StopDecoder/Sequence).
         let skip_special_tokens = true;
 
+        // The 7 optional sampling fields pass Option<T> through to proto `optional`,
+        // letting the servicer's HasField-based cascade resolve defaults from
+        // generation_config. Deploy note: update the servicer before the gateway
+        // so HasField logic is in place when None (wire-absent) values arrive.
         Ok(proto::SamplingParams {
-            temperature: request.temperature.unwrap_or(1.0),
-            top_p: request.top_p.unwrap_or(1.0),
-            top_k: request.top_k.unwrap_or(-1),
-            min_p: request.min_p.unwrap_or(0.0),
-            frequency_penalty: request.frequency_penalty.unwrap_or(0.0),
-            presence_penalty: request.presence_penalty.unwrap_or(0.0),
-            repetition_penalty: request.repetition_penalty.unwrap_or(1.0),
+            temperature: request.temperature,
+            top_p: request.top_p,
+            top_k: request.top_k,
+            min_p: request.min_p,
+            frequency_penalty: request.frequency_penalty,
+            presence_penalty: request.presence_penalty,
+            repetition_penalty: request.repetition_penalty,
             max_new_tokens,
             stop: stop_sequences,
             stop_token_ids: request.stop_token_ids.clone().unwrap_or_default(),
@@ -551,14 +555,17 @@ impl SglangSchedulerClient {
 
         let max_new_tokens = request.max_output_tokens;
 
+        // top_k, min_p, repetition_penalty are non-Option on ResponsesRequest
+        // (can't distinguish user-set from default). Pass None to let the
+        // engine apply its own defaults, same as unset params via HTTP.
         Ok(proto::SamplingParams {
-            temperature: request.temperature.unwrap_or(1.0),
-            top_p: request.top_p.unwrap_or(1.0),
-            top_k: -1,               // ResponsesRequest doesn't expose top_k
-            min_p: 0.0,              // ResponsesRequest doesn't expose min_p
-            frequency_penalty: 0.0,  // ResponsesRequest doesn't expose frequency_penalty
-            presence_penalty: 0.0,   // ResponsesRequest doesn't expose presence_penalty
-            repetition_penalty: 1.0, // ResponsesRequest doesn't expose repetition_penalty
+            temperature: request.temperature,
+            top_p: request.top_p,
+            top_k: None,
+            min_p: None,
+            frequency_penalty: request.frequency_penalty,
+            presence_penalty: request.presence_penalty,
+            repetition_penalty: None,
             max_new_tokens,
             stop: vec![],               // No stop sequences in Responses API
             stop_token_ids: vec![],     // Handled by Harmony stop tokens
@@ -645,13 +652,13 @@ impl SglangSchedulerClient {
         let skip_special_tokens = true;
 
         Ok(proto::SamplingParams {
-            temperature: request.temperature.unwrap_or(1.0) as f32,
-            top_p: request.top_p.unwrap_or(1.0) as f32,
-            top_k: request.top_k.map(|v| v as i32).unwrap_or(-1),
-            min_p: 0.0,
-            frequency_penalty: 0.0,
-            presence_penalty: 0.0,
-            repetition_penalty: 1.0,
+            temperature: request.temperature.map(|v| v as f32),
+            top_p: request.top_p.map(|v| v as f32),
+            top_k: request.top_k.map(|v| v as i32),
+            min_p: None,              // Messages API doesn't expose min_p
+            frequency_penalty: None,  // Messages API doesn't expose frequency_penalty
+            presence_penalty: None,   // Messages API doesn't expose presence_penalty
+            repetition_penalty: None, // Messages API doesn't expose repetition_penalty
             max_new_tokens: Some(request.max_tokens),
             stop: stop_sequences,
             stop_token_ids: vec![],
@@ -710,13 +717,13 @@ impl SglangSchedulerClient {
         let constraint = Self::build_single_constraint_from_completion(request)?;
 
         Ok(proto::SamplingParams {
-            temperature: request.temperature.unwrap_or(1.0),
-            top_p: request.top_p.unwrap_or(1.0),
-            top_k: request.top_k.unwrap_or(-1),
-            min_p: request.min_p.unwrap_or(0.0),
-            frequency_penalty: request.frequency_penalty.unwrap_or(0.0),
-            presence_penalty: request.presence_penalty.unwrap_or(0.0),
-            repetition_penalty: request.repetition_penalty.unwrap_or(1.0),
+            temperature: request.temperature,
+            top_p: request.top_p,
+            top_k: request.top_k,
+            min_p: request.min_p,
+            frequency_penalty: request.frequency_penalty,
+            presence_penalty: request.presence_penalty,
+            repetition_penalty: request.repetition_penalty,
             max_new_tokens: request.max_tokens,
             min_new_tokens: request.min_tokens.unwrap_or(0),
             stop: stop_sequences,
@@ -785,10 +792,6 @@ impl SglangSchedulerClient {
         params: Option<&GenerateSamplingParams>,
     ) -> Result<proto::SamplingParams, String> {
         let mut sampling = proto::SamplingParams {
-            temperature: 1.0,
-            top_p: 1.0,
-            top_k: -1,
-            repetition_penalty: 1.0,
             n: 1,
             skip_special_tokens: true,
             spaces_between_special_tokens: true,
@@ -799,8 +802,17 @@ impl SglangSchedulerClient {
             return Ok(sampling);
         };
 
-        // Simple field mappings using a macro
-        macro_rules! map_field {
+        // Pass optional sampling fields through directly (Option → Option)
+        sampling.temperature = p.temperature;
+        sampling.top_p = p.top_p;
+        sampling.top_k = p.top_k;
+        sampling.frequency_penalty = p.frequency_penalty;
+        sampling.presence_penalty = p.presence_penalty;
+        sampling.repetition_penalty = p.repetition_penalty;
+        sampling.min_p = p.min_p;
+
+        // Bool fields: unwrap Option<bool> into proto bool
+        macro_rules! map_bool_field {
             ($field:ident) => {
                 if let Some(val) = p.$field {
                     sampling.$field = val;
@@ -808,16 +820,9 @@ impl SglangSchedulerClient {
             };
         }
 
-        map_field!(temperature);
-        map_field!(top_p);
-        map_field!(top_k);
-        map_field!(frequency_penalty);
-        map_field!(presence_penalty);
-        map_field!(repetition_penalty);
-        map_field!(min_p);
-        map_field!(ignore_eos);
-        map_field!(skip_special_tokens);
-        map_field!(no_stop_trim);
+        map_bool_field!(ignore_eos);
+        map_bool_field!(skip_special_tokens);
+        map_bool_field!(no_stop_trim);
 
         // Handle stop sequences
         if let Some(stop) = &p.stop {
@@ -897,10 +902,10 @@ mod tests {
     #[test]
     fn test_generate_request_construction() {
         let sampling_params = proto::SamplingParams {
-            temperature: 0.7,
+            temperature: Some(0.7),
             max_new_tokens: Some(128),
-            top_p: 0.9,
-            top_k: 50,
+            top_p: Some(0.9),
+            top_k: Some(50),
             stop: vec!["</s>".to_string()],
             ..Default::default()
         };
@@ -926,7 +931,7 @@ mod tests {
         assert_eq!(gen_req.top_logprobs_num, 5);
 
         let params = gen_req.sampling_params.unwrap();
-        assert_eq!(params.temperature, 0.7);
+        assert_eq!(params.temperature, Some(0.7));
         assert_eq!(params.max_new_tokens, Some(128));
         assert_eq!(params.stop, vec!["</s>"]);
     }
@@ -950,11 +955,15 @@ mod tests {
     #[test]
     fn test_sampling_params_defaults() {
         let params = proto::SamplingParams::default();
-        // Numeric fields have proto defaults (0)
-        assert_eq!(params.temperature, 0.0);
-        assert_eq!(params.top_p, 0.0);
-        assert_eq!(params.top_k, 0);
-        assert_eq!(params.repetition_penalty, 0.0);
+        // Optional sampling fields default to None (unset)
+        assert_eq!(params.temperature, None);
+        assert_eq!(params.top_p, None);
+        assert_eq!(params.top_k, None);
+        assert_eq!(params.min_p, None);
+        assert_eq!(params.frequency_penalty, None);
+        assert_eq!(params.presence_penalty, None);
+        assert_eq!(params.repetition_penalty, None);
+        // Non-optional numeric fields have proto defaults (0)
         assert_eq!(params.n, 0);
         // Bool fields have proto defaults (false)
         assert!(!params.skip_special_tokens);
@@ -964,11 +973,39 @@ mod tests {
         // Optional int fields should be None
         assert_eq!(params.max_new_tokens, None);
         assert_eq!(params.stream_interval, None);
-        // Other non-optional fields
-        assert_eq!(params.min_p, 0.0);
-        assert_eq!(params.frequency_penalty, 0.0);
-        assert_eq!(params.presence_penalty, 0.0);
         assert!(params.stop.is_empty());
+    }
+
+    #[test]
+    fn test_optional_sampling_params_set_vs_unset() {
+        // Verify that optional fields distinguish "set to 0" from "not set"
+        let unset = proto::SamplingParams::default();
+        assert_eq!(unset.temperature, None);
+
+        let set_to_zero = proto::SamplingParams {
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(set_to_zero.temperature, Some(0.0));
+
+        // Both serialize differently — the servicer uses HasField() to distinguish
+        let set_to_value = proto::SamplingParams {
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            top_k: Some(50),
+            min_p: Some(0.1),
+            frequency_penalty: Some(0.5),
+            presence_penalty: Some(0.3),
+            repetition_penalty: Some(1.2),
+            ..Default::default()
+        };
+        assert_eq!(set_to_value.temperature, Some(0.7));
+        assert_eq!(set_to_value.top_p, Some(0.9));
+        assert_eq!(set_to_value.top_k, Some(50));
+        assert_eq!(set_to_value.min_p, Some(0.1));
+        assert_eq!(set_to_value.frequency_penalty, Some(0.5));
+        assert_eq!(set_to_value.presence_penalty, Some(0.3));
+        assert_eq!(set_to_value.repetition_penalty, Some(1.2));
     }
 
     #[test]
