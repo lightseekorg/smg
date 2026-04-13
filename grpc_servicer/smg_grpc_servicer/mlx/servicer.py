@@ -15,7 +15,8 @@ import time
 import zipfile
 
 import grpc
-from mlx_lm.generate import SequenceStateMachine
+import mlx.core as mx
+from mlx_lm.generate import SequenceStateMachine, generation_stream
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 from smg_grpc_proto import mlx_engine_pb2, mlx_engine_pb2_grpc
 
@@ -110,8 +111,6 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         # entire vocabulary — guard explicitly.
         if num_logprobs is None or num_logprobs <= 0:
             return None
-
-        import mlx.core as mx
 
         token_logprob = logprobs_array[token_id].item()
 
@@ -268,22 +267,9 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         logger.info("Generation loop stopped")
 
     def _generation_loop(self):
-        _stream_ctx = None
-        try:
-            import mlx.core as _mx
-            from mlx_lm.generate import generation_stream
-
-            def _stream_ctx():
-                return _mx.stream(generation_stream)
-        except ImportError:
-            pass
-
         while not self._shutdown_event.is_set():
             try:
-                if _stream_ctx is not None:
-                    with _stream_ctx():
-                        prompt_responses, gen_responses = self.batch_generator.next()
-                else:
+                with mx.stream(generation_stream):
                     prompt_responses, gen_responses = self.batch_generator.next()
             except Exception:
                 logger.exception("Error in generation loop")
@@ -320,8 +306,6 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
             num_logprobs = sp.logprobs if sp.HasField("logprobs") else None
 
             if sp.HasField("seed"):
-                import mlx.core as mx
-
                 mx.random.seed(sp.seed)
 
             uids = self.batch_generator.insert(
