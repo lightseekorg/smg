@@ -427,7 +427,9 @@ async fn test_previous_response_id_does_not_repeat_mcp_list_tools_for_existing_b
         conversation: None,
     };
 
-    let resp1 = router.route_responses(None, &req1, req1.model.as_str()).await;
+    let resp1 = router
+        .route_responses(None, &req1, req1.model.as_str())
+        .await;
     assert_eq!(resp1.status(), StatusCode::OK);
 
     let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
@@ -474,7 +476,9 @@ async fn test_previous_response_id_does_not_repeat_mcp_list_tools_for_existing_b
         conversation: None,
     };
 
-    let resp2 = router.route_responses(None, &req2, req2.model.as_str()).await;
+    let resp2 = router
+        .route_responses(None, &req2, req2.model.as_str())
+        .await;
     assert_eq!(resp2.status(), StatusCode::OK);
 
     let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
