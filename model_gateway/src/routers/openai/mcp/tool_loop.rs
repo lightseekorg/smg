@@ -54,10 +54,9 @@ pub(crate) struct ToolLoopState {
 
 impl ToolLoopState {
     pub fn new(original_input: ResponseInput, prior_mcp_list_tools_labels: Vec<String>) -> Self {
-        let mut known_labels = prior_mcp_list_tools_labels
+        let known_labels = prior_mcp_list_tools_labels
             .into_iter()
             .collect::<HashSet<_>>();
-        known_labels.extend(existing_mcp_list_tools_labels(&original_input));
 
         Self {
             iteration: 0,
@@ -529,28 +528,6 @@ fn non_streaming_tool_item_id_source(item_id: &str, response_format: &ResponseFo
             .unwrap_or(item_id)
             .to_string(),
     }
-}
-
-fn existing_mcp_list_tools_labels(input: &ResponseInput) -> HashSet<String> {
-    let ResponseInput::Items(items) = input else {
-        return HashSet::new();
-    };
-
-    let Ok(items_value) = to_value(items) else {
-        return HashSet::new();
-    };
-
-    items_value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| {
-            (item.get("type").and_then(|t| t.as_str()) == Some(ItemType::MCP_LIST_TOOLS))
-                .then(|| item.get("server_label").and_then(|v| v.as_str()))
-                .flatten()
-                .map(ToOwned::to_owned)
-        })
-        .collect()
 }
 
 pub(crate) fn mcp_list_tools_bindings_to_emit(
