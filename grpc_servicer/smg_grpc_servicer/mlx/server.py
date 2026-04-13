@@ -170,9 +170,12 @@ async def serve_grpc(args):
     finally:
         logger.info("Shutting down...")
         health_servicer.set_not_serving()
+        # Stop accepting new RPCs first so in-flight requests can still
+        # drain against the running generation thread. Stopping the gen
+        # loop first would leave new/in-flight RPCs stranded.
+        await server.stop(5.0)
         servicer.stop_generation_loop()
         batch_generator.close()
-        await server.stop(5.0)
         logger.info("Server stopped")
 
 

@@ -200,17 +200,25 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         "tokenizer_config.json",
         "special_tokens_map.json",
         "tokenizer.model",
+        "tiktoken.model",
         "merges.txt",
         "vocab.json",
         "added_tokens.json",
     }
+    # Additional extension-based matches for tiktoken-style BPE artifacts
+    # (e.g. `cl100k_base.tiktoken`). The router-side Rust tokenizer loader
+    # accepts these as valid directory tokenizers.
+    _TOKENIZER_SUFFIXES = (".tiktoken",)
 
     @staticmethod
     def _build_tokenizer_zip(model_dir):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for filename in sorted(os.listdir(model_dir)):
-                if filename in MlxEngineServicer._TOKENIZER_FILES:
+                matched = filename in MlxEngineServicer._TOKENIZER_FILES or filename.endswith(
+                    MlxEngineServicer._TOKENIZER_SUFFIXES
+                )
+                if matched:
                     filepath = os.path.join(model_dir, filename)
                     if os.path.isfile(filepath):
                         zf.write(filepath, filename)
@@ -328,7 +336,14 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
             sampler = self._build_sampler(sp)
             logits_processors = self._build_logits_processors(sp)
             state_machine = self._build_state_machine(sp, self._eos_token_ids)
-            max_tokens = sp.max_tokens if sp.HasField("max_tokens") else 256
+            # When max_tokens is unset, cap at remaining context (matches
+            # vLLM/SGLang semantics: unbounded within model limits, not a
+            # silent 256-token truncation).
+            if sp.HasField("max_tokens"):
+                max_tokens = sp.max_tokens
+            else:
+                ctx_limit = self.model_config.get("max_position_embeddings", 0) or 0
+                max_tokens = max(ctx_limit - len(token_ids), 1)
             num_logprobs = sp.logprobs if sp.HasField("logprobs") else None
 
             if sp.HasField("seed"):
