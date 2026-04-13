@@ -37,7 +37,11 @@ from sglang.srt.managers.io_struct import (
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
 )
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.schedule_batch import (
+    Modality,
+    MultimodalDataItem,
+    MultimodalInputs,
+)
 from sglang.srt.sampling.sampling_params import SamplingParams as SGLSamplingParams
 from sglang.srt.server_args import ServerArgs
 from sglang.utils import get_exception_traceback
@@ -351,7 +355,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                 rid=rid,
                 input_text="",
                 input_ids=[0],
-                image_inputs={"mm_items": []},
+                image_inputs=None,
                 token_type_ids=[0],
                 sampling_params=sampling_params,
             )
@@ -768,8 +772,8 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         arr = np.frombuffer(tensor_data.data, dtype=np_dtype).reshape(shape)
         return torch.from_numpy(arr)
 
-    def _parse_mm_inputs(self, mm_proto) -> dict:
-        """Parse proto MultimodalInputs into the mm_inputs dict expected by scheduler."""
+    def _parse_mm_inputs(self, mm_proto) -> MultimodalInputs:
+        """Parse proto MultimodalInputs into the mm_inputs expected by scheduler."""
         # Decode pixel_values from typed TensorData field
         pixel_values = self._decode_tensor_data(mm_proto.pixel_values)
 
@@ -795,10 +799,10 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             offsets=offsets,
         )
 
-        result = {"mm_items": [mm_item]}
+        result = MultimodalInputs(mm_items=[mm_item])
 
         if mm_proto.HasField("im_token_id"):
-            result["im_token_id"] = mm_proto.im_token_id
+            result.im_token_id = mm_proto.im_token_id
 
         return result
 
@@ -827,7 +831,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             rid=grpc_req.request_id,
             input_text=input_text,
             input_ids=input_ids,
-            image_inputs={"mm_items": []},
+            image_inputs=None,
             token_type_ids=list(grpc_req.token_type_ids),
             sampling_params=sampling_params,
         )

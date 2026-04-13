@@ -286,6 +286,7 @@ mod tests {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         }
     }
 
@@ -337,6 +338,7 @@ mod tests {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         };
         let key_with_token = PoolKey::from_config(&config_with_token, None);
         assert_eq!(key_with_token.url, "http://localhost:3000");
@@ -361,6 +363,7 @@ mod tests {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         };
         let config2 = McpServerConfig {
             name: "test".to_string(),
@@ -374,6 +377,7 @@ mod tests {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         };
 
         let key1 = PoolKey::from_config(&config1, None);
@@ -405,6 +409,7 @@ mod tests {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         };
         let config2 = McpServerConfig {
             name: "test".to_string(),
@@ -418,6 +423,7 @@ mod tests {
             tools: None,
             builtin_type: None,
             builtin_tool_name: None,
+            internal: false,
         };
 
         let key1 = PoolKey::from_config(&config1, None);

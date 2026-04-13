@@ -12,11 +12,11 @@ use futures_util::future::join_all;
 use openai_protocol::models::ListModelsResponse;
 
 use crate::{
-    core::{ConnectionMode, ProviderType, RuntimeType, Worker, WorkerRegistry, WorkerType},
     routers::{
         error,
         header_utils::{apply_provider_headers, extract_auth_header},
     },
+    worker::{ConnectionMode, ProviderType, RuntimeType, Worker, WorkerRegistry, WorkerType},
 };
 
 /// Holds references to shared infrastructure needed for worker selection.

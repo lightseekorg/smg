@@ -19,9 +19,9 @@ use serde_json::json;
 use serial_test::serial;
 use smg::{
     config::{RouterConfig, TraceConfig},
-    core::Job,
     observability::{logging, otel_trace},
     routers::RouterFactory,
+    workflow::Job,
 };
 use tokio::sync::oneshot;
 use tonic::{metadata::MetadataMap, transport::Server, Request as TonicRequest, Response, Status};
@@ -120,7 +120,7 @@ async fn test_router_with_tracing() {
     println!("Mock worker started on: {worker_url}");
 
     // 3. create router config and enable tracing
-    let router_config = RouterConfig::builder()
+    let mut router_config = RouterConfig::builder()
         .regular_mode(vec![worker_url.clone()])
         .random_policy()
         .host("0.0.0.0")
@@ -133,6 +133,7 @@ async fn test_router_with_tracing() {
         .queue_timeout_secs(60)
         .enable_trace(&collector_endpoint)
         .build_unchecked();
+    router_config.health_check.disable_health_check = true;
 
     // 4. Initialize the OTLP client (check if already initialized by another test)
     let otel_initialized_by_this_test = if otel_trace::is_otel_enabled() {

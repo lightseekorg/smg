@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rand::Rng;
 
 use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
-use crate::core::Worker;
+use crate::worker::Worker;
 
 /// Random selection policy
 ///
@@ -50,8 +50,17 @@ impl LoadBalancingPolicy for RandomPolicy {
 mod tests {
     use std::collections::HashMap;
 
+    use openai_protocol::worker::HealthCheckConfig;
+
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_random_selection() {
@@ -60,16 +69,19 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w3:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -93,11 +105,13 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -120,6 +134,7 @@ mod tests {
         let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
             BasicWorkerBuilder::new("http://w1:8000")
                 .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
                 .build(),
         )];
 

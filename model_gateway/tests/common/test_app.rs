@@ -6,13 +6,13 @@ use reqwest::Client;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
-    core::{
-        BasicWorkerBuilder, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry, WorkerType,
-    },
     middleware::{AuthConfig, TokenBucket},
     policies::PolicyRegistry,
     routers::RouterTrait,
     server::{build_app, AppState},
+    worker::{
+        BasicWorkerBuilder, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry, WorkerType,
+    },
 };
 use smg_data_connector::{
     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
@@ -239,6 +239,10 @@ pub fn register_external_worker(ctx: &Arc<AppContext>, url: &str, models: Option
             .worker_type(WorkerType::Regular)
             .runtime_type(RuntimeType::External)
             .models(model_list)
+            .health_config(openai_protocol::worker::HealthCheckConfig {
+                disable_health_check: true,
+                ..Default::default()
+            })
             .build(),
     );
 
@@ -257,6 +261,10 @@ pub fn register_external_worker_with_card(ctx: &Arc<AppContext>, url: &str, mode
             .worker_type(WorkerType::Regular)
             .runtime_type(RuntimeType::External)
             .model(model_card)
+            .health_config(openai_protocol::worker::HealthCheckConfig {
+                disable_health_check: true,
+                ..Default::default()
+            })
             .build(),
     );
 

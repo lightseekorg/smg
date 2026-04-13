@@ -7,8 +7,8 @@ use openai_protocol::{
     messages::CreateMessageRequest, worker::WorkerLoadResponse,
 };
 use smg_grpc_client::{
-    tokenizer_bundle, tokenizer_bundle::StreamBundle, SglangSchedulerClient, TrtllmServiceClient,
-    VllmEngineClient,
+    tokenizer_bundle, tokenizer_bundle::StreamBundle, MlxEngineClient, SglangSchedulerClient,
+    TrtllmServiceClient, VllmEngineClient,
 };
 
 use crate::routers::grpc::{
@@ -23,12 +23,13 @@ pub struct HealthCheckResponse {
     pub message: String,
 }
 
-/// Polymorphic gRPC client that wraps SGLang, vLLM, or TensorRT-LLM
+/// Polymorphic gRPC client that wraps SGLang, vLLM, TensorRT-LLM, or MLX
 #[derive(Clone)]
 pub enum GrpcClient {
     Sglang(SglangSchedulerClient),
     Vllm(VllmEngineClient),
     Trtllm(TrtllmServiceClient),
+    Mlx(MlxEngineClient),
 }
 
 impl GrpcClient {
@@ -110,6 +111,32 @@ impl GrpcClient {
         matches!(self, Self::Trtllm(_))
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_mlx() check"
+    )]
+    pub fn as_mlx(&self) -> &MlxEngineClient {
+        match self {
+            Self::Mlx(client) => client,
+            _ => panic!("Expected MLX client"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_mlx() check"
+    )]
+    pub fn as_mlx_mut(&mut self) -> &mut MlxEngineClient {
+        match self {
+            Self::Mlx(client) => client,
+            _ => panic!("Expected MLX client"),
+        }
+    }
+
+    pub fn is_mlx(&self) -> bool {
+        matches!(self, Self::Mlx(_))
+    }
+
     pub async fn connect(
         url: &str,
         runtime_type: &str,
@@ -118,6 +145,7 @@ impl GrpcClient {
             "sglang" => Ok(Self::Sglang(SglangSchedulerClient::connect(url).await?)),
             "vllm" => Ok(Self::Vllm(VllmEngineClient::connect(url).await?)),
             "trtllm" | "tensorrt-llm" => Ok(Self::Trtllm(TrtllmServiceClient::connect(url).await?)),
+            "mlx" => Ok(Self::Mlx(MlxEngineClient::connect(url).await?)),
             _ => Err(format!("Unknown runtime type: {runtime_type}").into()),
         }
     }
@@ -147,6 +175,13 @@ impl GrpcClient {
                     message: resp.status,
                 })
             }
+            Self::Mlx(client) => {
+                let resp = client.health_check().await?;
+                Ok(HealthCheckResponse {
+                    healthy: resp.healthy,
+                    message: resp.message,
+                })
+            }
         }
     }
 
@@ -155,6 +190,7 @@ impl GrpcClient {
             Self::Sglang(client) => Ok(ModelInfo::Sglang(Box::new(client.get_model_info().await?))),
             Self::Vllm(client) => Ok(ModelInfo::Vllm(client.get_model_info().await?)),
             Self::Trtllm(client) => Ok(ModelInfo::Trtllm(client.get_model_info().await?)),
+            Self::Mlx(client) => Ok(ModelInfo::Mlx(client.get_model_info().await?)),
         }
     }
 
@@ -181,6 +217,9 @@ impl GrpcClient {
             Self::Sglang(client) => client.subscribe_kv_events(start_seq).await,
             Self::Vllm(client) => client.subscribe_kv_events(start_seq).await,
             Self::Trtllm(client) => client.subscribe_kv_events(start_seq).await,
+            Self::Mlx(_) => Err(tonic::Status::unimplemented(
+                "SubscribeKvEvents RPC not supported for MLX backend",
+            )),
         }
     }
 
@@ -191,6 +230,7 @@ impl GrpcClient {
             ))),
             Self::Vllm(client) => Ok(ServerInfo::Vllm(client.get_server_info().await?)),
             Self::Trtllm(client) => Ok(ServerInfo::Trtllm(client.get_server_info().await?)),
+            Self::Mlx(client) => Ok(ServerInfo::Mlx(client.get_server_info().await?)),
         }
     }
 
@@ -202,6 +242,7 @@ impl GrpcClient {
             Self::Sglang(client) => client.get_tokenizer().await,
             Self::Vllm(client) => client.get_tokenizer().await,
             Self::Trtllm(client) => client.get_tokenizer().await,
+            Self::Mlx(client) => client.get_tokenizer().await,
         }?;
 
         tokenizer_bundle::validate_bundle_sha256(&bundle).map_err(|e| {
@@ -235,6 +276,10 @@ impl GrpcClient {
                 let stream = client.generate(*boxed_req).await?;
                 Ok(ProtoStream::Trtllm(stream))
             }
+            (Self::Mlx(client), ProtoGenerateRequest::Mlx(boxed_req)) => {
+                let stream = client.generate(*boxed_req).await?;
+                Ok(ProtoStream::Mlx(stream))
+            }
             #[expect(
                 clippy::panic,
                 reason = "client and request types are always matched by construction in the pipeline"
@@ -256,6 +301,9 @@ impl GrpcClient {
                 let resp = client.embed(*boxed_req).await?;
                 Ok(ProtoEmbedComplete::Vllm(resp))
             }
+            (Self::Mlx(_), _) => Err(tonic::Status::unimplemented(
+                "MLX backend does not support embedding",
+            )),
             #[expect(
                 clippy::panic,
                 reason = "client and request types are always matched by construction in the pipeline"
@@ -323,6 +371,17 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
+            // MLX: caller stage rejects multimodal before reaching this path.
+            Self::Mlx(client) => {
+                let req = client.build_generate_request_from_chat(
+                    request_id,
+                    body,
+                    processed_text,
+                    token_ids,
+                    tool_constraints,
+                )?;
+                Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
+            }
         }
     }
 
@@ -385,6 +444,17 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
+            // MLX: caller stage rejects multimodal before reaching this path.
+            Self::Mlx(client) => {
+                let req = client.build_generate_request_from_messages(
+                    request_id,
+                    body,
+                    processed_text,
+                    token_ids,
+                    tool_constraints,
+                )?;
+                Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
+            }
         }
     }
 
@@ -422,6 +492,15 @@ impl GrpcClient {
                     token_ids,
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
+            }
+            Self::Mlx(client) => {
+                let req = client.build_generate_request_from_completion(
+                    request_id,
+                    body,
+                    original_text,
+                    token_ids,
+                )?;
+                Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
         }
     }
@@ -461,6 +540,15 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
+            Self::Mlx(client) => {
+                let req = client.build_plain_generate_request(
+                    request_id,
+                    body,
+                    original_text,
+                    token_ids,
+                )?;
+                Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
+            }
         }
     }
 }
@@ -473,12 +561,14 @@ pub enum ModelInfo {
     Sglang(Box<smg_grpc_client::sglang_proto::GetModelInfoResponse>),
     Vllm(smg_grpc_client::vllm_proto::GetModelInfoResponse),
     Trtllm(smg_grpc_client::trtllm_proto::GetModelInfoResponse),
+    Mlx(smg_grpc_client::mlx_proto::GetModelInfoResponse),
 }
 
 pub enum ServerInfo {
     Sglang(Box<smg_grpc_client::sglang_proto::GetServerInfoResponse>),
     Vllm(smg_grpc_client::vllm_proto::GetServerInfoResponse),
     Trtllm(smg_grpc_client::trtllm_proto::GetServerInfoResponse),
+    Mlx(smg_grpc_client::mlx_proto::GetServerInfoResponse),
 }
 
 impl ModelInfo {
@@ -487,6 +577,7 @@ impl ModelInfo {
             ModelInfo::Sglang(info) => flat_labels(info),
             ModelInfo::Vllm(info) => flat_labels(info),
             ModelInfo::Trtllm(info) => flat_labels(info),
+            ModelInfo::Mlx(info) => flat_labels(info),
         }
     }
 }
@@ -508,6 +599,7 @@ impl ServerInfo {
             }
             ServerInfo::Vllm(info) => flat_labels(info),
             ServerInfo::Trtllm(info) => flat_labels(info),
+            ServerInfo::Mlx(info) => flat_labels(info),
         }
     }
 }

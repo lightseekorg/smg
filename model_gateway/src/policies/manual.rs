@@ -23,8 +23,8 @@ use super::{
     get_healthy_worker_indices, utils::PeriodicTask, LoadBalancingPolicy, SelectWorkerInfo,
 };
 use crate::{
-    config::ManualAssignmentMode, core::Worker, observability::metrics::Metrics,
-    routers::header_utils::extract_routing_key,
+    config::ManualAssignmentMode, observability::metrics::Metrics,
+    routers::header_utils::extract_routing_key, worker::Worker,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,17 +292,24 @@ fn min_load_select(workers: &[Arc<dyn Worker>], healthy_indices: &[usize]) -> us
 }
 
 fn min_group_select(workers: &[Arc<dyn Worker>], healthy_indices: &[usize]) -> usize {
-    select_min_by(healthy_indices, |idx| {
-        workers[idx].worker_routing_key_load().value()
-    })
+    select_min_by(healthy_indices, |idx| workers[idx].routing_key_load())
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
+    use openai_protocol::worker::HealthCheckConfig;
+
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     fn create_workers(urls: &[&str]) -> Vec<Arc<dyn Worker>> {
         urls.iter()
@@ -310,6 +317,7 @@ mod tests {
                 Arc::new(
                     BasicWorkerBuilder::new(*url)
                         .worker_type(WorkerType::Regular)
+                        .health_config(no_health_check())
                         .build(),
                 ) as Arc<dyn Worker>
             })
@@ -783,9 +791,7 @@ mod tests {
             assert_eq!(branch, ExecutionBranch::Vacant);
 
             let selected_idx = result.unwrap();
-            workers[selected_idx]
-                .worker_routing_key_load()
-                .increment(&routing_key);
+            workers[selected_idx].increment_routing_key_load(&routing_key);
         }
 
         let distribution: HashMap<_, usize> = policy
@@ -812,13 +818,13 @@ mod tests {
         let policy = ManualPolicy::with_config(config);
         let workers = create_workers(&["http://w1:8000", "http://w2:8000", "http://w3:8000"]);
 
-        workers[0].worker_routing_key_load().increment("existing-1");
-        workers[0].worker_routing_key_load().increment("existing-2");
-        workers[1].worker_routing_key_load().increment("existing-3");
+        workers[0].increment_routing_key_load("existing-1");
+        workers[0].increment_routing_key_load("existing-2");
+        workers[1].increment_routing_key_load("existing-3");
 
-        assert_eq!(workers[0].worker_routing_key_load().value(), 2);
-        assert_eq!(workers[1].worker_routing_key_load().value(), 1);
-        assert_eq!(workers[2].worker_routing_key_load().value(), 0);
+        assert_eq!(workers[0].routing_key_load(), 2);
+        assert_eq!(workers[1].routing_key_load(), 1);
+        assert_eq!(workers[2].routing_key_load(), 0);
 
         let headers = headers_with_routing_key("new-key");
         let info = SelectWorkerInfo {
@@ -868,9 +874,9 @@ mod tests {
         let policy = ManualPolicy::with_config(config);
         let workers = create_workers(&["http://w1:8000", "http://w2:8000"]);
 
-        workers[0].worker_routing_key_load().increment("key-0");
-        workers[1].worker_routing_key_load().increment("key-1");
-        workers[1].worker_routing_key_load().increment("key-2");
+        workers[0].increment_routing_key_load("key-0");
+        workers[1].increment_routing_key_load("key-1");
+        workers[1].increment_routing_key_load("key-2");
 
         let headers = headers_with_routing_key("new-key");
         let info = SelectWorkerInfo {
@@ -906,9 +912,9 @@ mod tests {
         let policy = ManualPolicy::with_config(config);
         let workers = create_workers(&["http://w1:8000", "http://w2:8000"]);
 
-        workers[0].worker_routing_key_load().increment("key-1");
-        workers[0].worker_routing_key_load().increment("key-2");
-        workers[0].worker_routing_key_load().increment("key-3");
+        workers[0].increment_routing_key_load("key-1");
+        workers[0].increment_routing_key_load("key-2");
+        workers[0].increment_routing_key_load("key-3");
 
         let mut selected_worker_0 = false;
         for i in 0..50 {

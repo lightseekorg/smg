@@ -26,7 +26,7 @@ use super::{
     multimodal::MultimodalComponents,
     proto_wrapper::{ProtoEmbedComplete, ProtoRequest, ProtoStream},
 };
-use crate::core::{RuntimeType, Worker, WorkerLoadGuard};
+use crate::worker::{RuntimeType, Worker, WorkerLoadGuard};
 
 /// Main request processing context
 ///

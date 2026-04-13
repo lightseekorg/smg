@@ -11,7 +11,7 @@ use tokio::{sync::broadcast::error::RecvError, task::JoinHandle};
 use tracing::{debug, warn};
 
 use super::{registry::WatchRegistry, types::Topic};
-use crate::{app_context::AppContext, core::worker_event::WorkerEvent};
+use crate::{app_context::AppContext, worker::event::WorkerEvent};
 
 /// Configuration for collector intervals.
 pub struct CollectorConfig {
@@ -39,6 +39,9 @@ impl Default for CollectorConfig {
 }
 
 /// Start all collector tasks. Returns join handles (caller keeps them alive).
+///
+/// Covers 5 of 7 topics. Cluster and mesh topics are deferred — they require
+/// `MeshServerHandler` access (cross-crate) and change infrequently.
 pub fn start_collectors(
     context: Arc<AppContext>,
     registry: Arc<WatchRegistry>,
@@ -107,7 +110,7 @@ fn spawn_worker_collector(
                             debug!("worker event: {event:?}");
                             publish_workers(&context, &registry);
                             // Only publish models on membership changes, not health
-                            if matches!(event, WorkerEvent::Registered { .. } | WorkerEvent::Removed { .. }) {
+                            if matches!(event, WorkerEvent::Registered { .. } | WorkerEvent::Removed { .. } | WorkerEvent::Replaced { .. }) {
                                 publish_models(&context, &registry);
                             }
                         }
@@ -203,7 +206,7 @@ fn collect_workers(context: &AppContext) -> Value {
                 "is_healthy": w.is_healthy(),
                 "load": w.load(),
                 "processed_requests": w.processed_requests(),
-                "circuit_breaker": w.circuit_breaker().state().to_string(),
+                "circuit_breaker": w.circuit_breaker_state().to_string(),
             })
         })
         .collect();

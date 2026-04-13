@@ -14,14 +14,20 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "*.md"
+  # Allow maintainers to trigger CI for fork PRs by adding the 'ci-approved' label.
+  # pull_request_target runs in the base branch context, bypassing the fork approval gate.
+  # 'synchronize' re-runs CI on subsequent pushes while the label is present.
+  pull_request_target:
+    branches: [ main ]
+    types: [labeled, synchronize]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: gateway-tests-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: gateway-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   RUSTC_WRAPPER: sccache
@@ -29,12 +35,25 @@ env:
   GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.4
 
 jobs:
+  # Gate job: for pull_request_target, only proceed if 'ci-approved' label is present.
+  # All other triggers (push, pull_request, workflow_dispatch) pass through unconditionally.
+  ci-gate:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      contains(github.event.pull_request.labels.*.name, 'ci-approved')
+    steps:
+      - run: echo "CI gate passed"
+
   pre-commit:
+    needs: [ci-gate]
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -50,11 +69,14 @@ jobs:
         run: pre-commit run --all-files --show-diff-on-failure
 
   python-lint:
+    needs: [ci-gate]
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -77,11 +99,14 @@ jobs:
         run: mypy bindings/python/ --config-file mypy.ini
 
   grpc-proto-build-check:
+    needs: [ci-gate]
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -103,11 +128,14 @@ jobs:
           python -c "from smg_grpc_proto import sglang_scheduler_pb2; print('OK')"
 
   build-wheel:
+    needs: [ci-gate]
     runs-on: k8s-runner-gpu
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Cache wheel and Go FFI artifacts
         id: cache-wheel
@@ -233,11 +261,14 @@ jobs:
           pytest -q tests --cov=smg --cov-config=.coveragerc --cov-report=term-missing --cov-fail-under=80
 
   unit-tests:
+    needs: [ci-gate]
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -359,8 +390,9 @@ jobs:
           retention-days: 7
 
   detect-changes:
+    needs: [ci-gate]
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
     permissions:
       contents: read
       pull-requests: read
@@ -428,6 +460,7 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
+          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.chat-completions == 'true')))
@@ -459,6 +492,7 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
+          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.embeddings == 'true')))
@@ -489,6 +523,7 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
+          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.chat-completions == 'true')))
@@ -542,6 +577,7 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
+          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.agentic == 'true')))
@@ -563,6 +599,7 @@ jobs:
       && !cancelled()
       && needs.e2e-1gpu-gateway.result == 'success'
       && (github.event_name != 'pull_request'
+          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.chat-completions == 'true')))
@@ -631,6 +668,7 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
+          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.agentic == 'true')))
@@ -778,6 +816,7 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
+          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.go-bindings == 'true')))
@@ -832,7 +871,21 @@ jobs:
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
           export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/models" \
+          E2E_LOG_DIR=e2e-logs \
             pytest --reruns 2 --reruns-delay 5 e2e_test/bindings_go -s -vv
+
+      - name: Worker failure diagnostics
+        if: failure() || cancelled()
+        run: bash scripts/ci_dump_worker_logs.sh e2e-logs "e2e-worker-logs-go-bindings"
+
+      - name: Upload worker logs
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-worker-logs-go-bindings
+          path: e2e-logs/
+          retention-days: 7
+          if-no-files-found: ignore
 
   go-bindings-benchmark:
     name: go-bindings-benchmark

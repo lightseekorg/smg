@@ -19,7 +19,6 @@ use llm_tokenizer::TokenizerRegistry;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
-    core::{LoadMonitor, WorkerRegistry},
     policies::PolicyRegistry,
     routers::RouterFactory,
     server::{build_app, AppState},
@@ -31,6 +30,7 @@ use smg::{
         },
         module_manager::WasmModuleManager,
     },
+    worker::{LoadMonitor, WorkerRegistry},
 };
 use smg_data_connector::{
     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
@@ -98,14 +98,15 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
 
     // Initialize JobQueue after AppContext is created
     let weak_context = Arc::downgrade(&app_context);
-    let job_queue = smg::core::JobQueue::new(smg::core::JobQueueConfig::default(), weak_context);
+    let job_queue =
+        smg::workflow::JobQueue::new(smg::workflow::JobQueueConfig::default(), weak_context);
     app_context
         .worker_job_queue
         .set(job_queue)
         .expect("JobQueue should only be initialized once");
 
     // Initialize WorkflowEngines
-    use smg::core::steps::WorkflowEngines;
+    use smg::workflow::WorkflowEngines;
     let engines = WorkflowEngines::new(&config);
     app_context
         .workflow_engines
@@ -662,7 +663,7 @@ async fn test_wasm_module_execution() {
         .expect("Workflow engines should be initialized");
 
     // Create workflow context for registration
-    use smg::core::steps::{WasmModuleConfigRequest, WasmRegistrationWorkflowData};
+    use smg::workflow::{WasmModuleConfigRequest, WasmRegistrationWorkflowData};
     use wfaas::WorkflowId;
 
     let descriptor = WasmModuleDescriptor {

@@ -12,7 +12,7 @@ use smg_data_connector::{
 use smg_mcp::{McpOrchestrator, McpToolSession};
 
 use super::provider::Provider;
-use crate::core::Worker;
+use crate::worker::Worker;
 
 pub struct RequestContext {
     pub input: RequestInput,

@@ -27,13 +27,13 @@ use serde_json::json;
 use smg::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
-    core::{
-        BasicWorkerBuilder, Job, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry,
-        WorkerType,
-    },
     middleware::TokenBucket,
     policies::PolicyRegistry,
     routers::{router_manager::RouterManager, RouterFactory, RouterTrait},
+    worker::{
+        BasicWorkerBuilder, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry, WorkerType,
+    },
+    workflow::Job,
 };
 use smg_data_connector::{
     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
@@ -177,7 +177,7 @@ impl AppTestContext {
         worker_configs: Vec<MockWorkerConfig>,
     ) -> Pin<Box<dyn Future<Output = Self> + Send>> {
         Box::pin(async move {
-            let config = RouterConfig::builder()
+            let mut config = RouterConfig::builder()
                 .regular_mode(vec![])
                 .random_policy()
                 .host("127.0.0.1")
@@ -189,6 +189,10 @@ impl AppTestContext {
                 .max_concurrent_requests(64)
                 .queue_timeout_secs(60)
                 .build_unchecked();
+            // Test mock workers don't need health checks — start Ready immediately.
+            // Tests that need to exercise Pending/Failed semantics should use
+            // `new_with_config()` with an explicit config.
+            config.health_check.disable_health_check = true;
 
             Self::new_with_config(config, worker_configs).await
         })
@@ -382,14 +386,14 @@ pub fn create_test_context(
         // Initialize JobQueue after AppContext is created
         let weak_context = Arc::downgrade(&app_context);
         let job_queue =
-            smg::core::JobQueue::new(smg::core::JobQueueConfig::default(), weak_context);
+            smg::workflow::JobQueue::new(smg::workflow::JobQueueConfig::default(), weak_context);
         app_context
             .worker_job_queue
             .set(job_queue)
             .expect("JobQueue should only be initialized once");
 
         // Initialize typed workflow engines
-        use smg::core::steps::WorkflowEngines;
+        use smg::workflow::WorkflowEngines;
         let engines = WorkflowEngines::new(&config);
         app_context
             .workflow_engines
@@ -410,6 +414,10 @@ pub fn create_test_context(
                         .worker_type(WorkerType::Regular)
                         .runtime_type(RuntimeType::External)
                         .models(models)
+                        .health_config(openai_protocol::worker::HealthCheckConfig {
+                            disable_health_check: true,
+                            ..Default::default()
+                        })
                         .build(),
                 );
                 app_context.worker_registry.register(worker);
@@ -517,14 +525,14 @@ pub fn create_test_context_with_parsers(
         // Initialize JobQueue after AppContext is created
         let weak_context = Arc::downgrade(&app_context);
         let job_queue =
-            smg::core::JobQueue::new(smg::core::JobQueueConfig::default(), weak_context);
+            smg::workflow::JobQueue::new(smg::workflow::JobQueueConfig::default(), weak_context);
         app_context
             .worker_job_queue
             .set(job_queue)
             .expect("JobQueue should only be initialized once");
 
         // Initialize typed workflow engines
-        use smg::core::steps::WorkflowEngines;
+        use smg::workflow::WorkflowEngines;
         let engines = WorkflowEngines::new(&config);
         app_context
             .workflow_engines
@@ -545,6 +553,10 @@ pub fn create_test_context_with_parsers(
                         .worker_type(WorkerType::Regular)
                         .runtime_type(RuntimeType::External)
                         .models(models)
+                        .health_config(openai_protocol::worker::HealthCheckConfig {
+                            disable_health_check: true,
+                            ..Default::default()
+                        })
                         .build(),
                 );
                 app_context.worker_registry.register(worker);
@@ -651,14 +663,14 @@ pub fn create_test_context_with_mcp_config(
         // Initialize JobQueue after AppContext is created
         let weak_context = Arc::downgrade(&app_context);
         let job_queue =
-            smg::core::JobQueue::new(smg::core::JobQueueConfig::default(), weak_context);
+            smg::workflow::JobQueue::new(smg::workflow::JobQueueConfig::default(), weak_context);
         app_context
             .worker_job_queue
             .set(job_queue)
             .expect("JobQueue should only be initialized once");
 
         // Initialize typed workflow engines
-        use smg::core::steps::WorkflowEngines;
+        use smg::workflow::WorkflowEngines;
         let engines = WorkflowEngines::new(&config);
         app_context
             .workflow_engines
@@ -679,6 +691,10 @@ pub fn create_test_context_with_mcp_config(
                         .worker_type(WorkerType::Regular)
                         .runtime_type(RuntimeType::External)
                         .models(models)
+                        .health_config(openai_protocol::worker::HealthCheckConfig {
+                            disable_health_check: true,
+                            ..Default::default()
+                        })
                         .build(),
                 );
                 app_context.worker_registry.register(worker);

@@ -4,6 +4,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/sglang_scheduler.proto");
     println!("cargo:rerun-if-changed=proto/vllm_engine.proto");
     println!("cargo:rerun-if-changed=proto/trtllm_service.proto");
+    println!("cargo:rerun-if-changed=proto/mlx_engine.proto");
 
     // Pass 1: compile shared message types (no gRPC service generation)
     tonic_prost_build::configure()
@@ -28,12 +29,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "trtllm.GetServerInfoResponse",
             "#[derive(serde::Serialize)]",
         )
+        .type_attribute(
+            "mlx.grpc.engine.GetServerInfoResponse",
+            "#[derive(serde::Serialize)]",
+        )
         .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(
             &[
                 "proto/sglang_scheduler.proto",
                 "proto/vllm_engine.proto",
                 "proto/trtllm_service.proto",
+                "proto/mlx_engine.proto",
             ],
             &["proto"],
         )?;

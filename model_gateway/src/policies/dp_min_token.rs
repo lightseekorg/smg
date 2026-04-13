@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use super::DPRankLoadPolicy;
-use crate::core::{Worker, WorkerLoadManager};
+use crate::worker::{Worker, WorkerLoadManager};
 
 #[derive(Debug)]
 pub struct MinimumTokensPolicy {

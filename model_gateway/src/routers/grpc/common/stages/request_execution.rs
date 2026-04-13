@@ -6,7 +6,6 @@ use tracing::{debug, error, info_span, Instrument};
 
 use super::PipelineStage;
 use crate::{
-    core::{RuntimeType, DEFAULT_BOOTSTRAP_PORT, MOONCAKE_CONNECTOR},
     routers::{
         error,
         grpc::{
@@ -17,6 +16,7 @@ use crate::{
             utils::tonic_ext::{TonicResultExt, TonicStatusExt},
         },
     },
+    worker::{RuntimeType, DEFAULT_BOOTSTRAP_PORT, MOONCAKE_CONNECTOR},
 };
 
 type StreamResult = Result<ProtoStream, tonic::Status>;
@@ -113,6 +113,7 @@ impl PipelineStage for RequestExecutionStage {
                                 self.execute_dual_dispatch(req, clients, workers).await
                             }
                             Some(RuntimeType::Trtllm)
+                            | Some(RuntimeType::Mlx)
                             | Some(RuntimeType::External)
                             | Some(RuntimeType::Unspecified) => {
                                 error!(

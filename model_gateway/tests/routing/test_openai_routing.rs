@@ -26,11 +26,11 @@ use openai_protocol::{
 use serde_json::json;
 use smg::{
     config::{ConfigError, HistoryBackend, OracleConfig, PolicyConfig, RouterConfig, RoutingMode},
-    core::{BasicWorkerBuilder, RuntimeType, Worker, WorkerType},
     routers::{
         factory::router_ids, openai::OpenAIRouter, router_manager::RouterManager, RouterFactory,
         RouterTrait,
     },
+    worker::{BasicWorkerBuilder, RuntimeType, Worker, WorkerType},
 };
 use smg_data_connector::{ResponseId, StoredResponse};
 use tokio::{
@@ -839,6 +839,10 @@ async fn test_openai_router_models_from_registry() {
             .models(vec![openai_protocol::model_card::ModelCard::new(
                 "gpt-3.5-turbo",
             )])
+            .health_config(openai_protocol::worker::HealthCheckConfig {
+                disable_health_check: true,
+                ..Default::default()
+            })
             .build(),
     );
     ctx.worker_registry.register(worker);

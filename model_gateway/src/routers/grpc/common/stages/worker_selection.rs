@@ -8,13 +8,13 @@ use tracing::{error, warn};
 
 use super::PipelineStage;
 use crate::{
-    core::{ConnectionMode, RuntimeType, Worker, WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID},
     observability::metrics::{metrics_labels, Metrics},
     policies::{PolicyRegistry, SelectWorkerInfo},
     routers::{
         error,
         grpc::context::{RequestContext, WorkerSelection},
     },
+    worker::{ConnectionMode, RuntimeType, Worker, WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID},
 };
 
 /// Result type for PD worker pair selection: (prefill, decode, runtime_type)

@@ -44,7 +44,7 @@ def _make_image_content(image_source: str) -> dict:
 # =============================================================================
 
 
-@pytest.mark.engine("vllm")
+@pytest.mark.engine("vllm", "sglang")
 @pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.model("Qwen/Qwen3-VL-8B-Instruct")
@@ -170,7 +170,7 @@ class TestMultimodalQwen3VL:
 # =============================================================================
 
 
-@pytest.mark.engine("vllm")
+@pytest.mark.engine("vllm", "sglang")
 @pytest.mark.gpu(4)
 @pytest.mark.e2e
 @pytest.mark.model("meta-llama/Llama-4-Scout-17B-16E-Instruct")

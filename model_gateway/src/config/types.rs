@@ -8,7 +8,7 @@ pub use smg_data_connector::{
 };
 
 use super::{validation::ConfigValidator, ConfigResult};
-use crate::core::ConnectionMode;
+use crate::worker::ConnectionMode;
 
 /// Main router configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -887,7 +887,7 @@ mod responses_endpoint_tests {
     async fn test_v1_responses_input_items() {
         // This test uses OpenAI mode because the input_items endpoint
         // is only implemented in OpenAIRouter and reads from storage (no workers needed)
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .openai_mode(vec!["http://dummy.local".to_string()]) // Dummy URL (won't be called)
             .random_policy()
             .host("127.0.0.1")
@@ -900,6 +900,7 @@ mod responses_endpoint_tests {
             .queue_size(0)
             .queue_timeout_secs(60)
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,
@@ -1010,7 +1011,7 @@ mod responses_endpoint_tests {
 
     async fn create_openai_ctx(port: u16) -> AppTestContext {
         use smg::config::RouterConfig;
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .openai_mode(vec![])
             .random_policy()
             .host("127.0.0.1")
@@ -1023,6 +1024,7 @@ mod responses_endpoint_tests {
             .queue_size(0)
             .queue_timeout_secs(60)
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         AppTestContext::new_with_config(
             config,
@@ -1276,7 +1278,7 @@ mod error_tests {
     #[tokio::test]
     async fn test_payload_too_large() {
         // Create context with small payload limit
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .random_policy()
             .host("127.0.0.1")
@@ -1288,6 +1290,7 @@ mod error_tests {
             .max_concurrent_requests(64)
             .queue_timeout_secs(60)
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,
@@ -1576,7 +1579,7 @@ mod pd_mode_tests {
             .and_then(|p| p.trim_end_matches('/').parse::<u16>().ok())
             .unwrap_or(9000);
 
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .prefill_decode_mode(vec![(prefill_url, Some(prefill_port))], vec![decode_url])
             .random_policy()
             .host("127.0.0.1")
@@ -1588,6 +1591,7 @@ mod pd_mode_tests {
             .max_concurrent_requests(64)
             .queue_timeout_secs(60)
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         // Create app context
         let app_context = crate::common::create_test_context(config).await;
@@ -1713,7 +1717,7 @@ mod request_id_tests {
     #[tokio::test]
     async fn test_request_id_with_custom_headers() {
         // Create config with custom request ID headers
-        let config = RouterConfig::builder()
+        let mut config = RouterConfig::builder()
             .regular_mode(vec![])
             .random_policy()
             .host("127.0.0.1")
@@ -1726,6 +1730,7 @@ mod request_id_tests {
             .max_concurrent_requests(64)
             .queue_timeout_secs(60)
             .build_unchecked();
+        config.health_check.disable_health_check = true;
 
         let ctx = AppTestContext::new_with_config(
             config,

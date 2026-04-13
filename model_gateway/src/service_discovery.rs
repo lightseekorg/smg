@@ -28,8 +28,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     app_context::AppContext,
-    core::Job,
     observability::metrics::{metrics_labels, Metrics},
+    workflow::Job,
 };
 
 /// Source for per-worker model_id override during Kubernetes service discovery.
@@ -640,6 +640,7 @@ async fn handle_pod_event(
             );
             let job = Job::RemoveWorker {
                 url: old_url.clone(),
+                expected_revision: None,
             };
             if let Some(job_queue) = app_context.worker_job_queue.get() {
                 if let Err(e) = job_queue.submit(job).await {
@@ -789,6 +790,7 @@ async fn handle_pod_deletion(
 
         let job = Job::RemoveWorker {
             url: worker_url.clone(),
+            expected_revision: None,
         };
 
         if let Some(job_queue) = app_context.worker_job_queue.get() {
@@ -930,6 +932,7 @@ async fn reconcile_pods(
         );
         let job = Job::RemoveWorker {
             url: worker_url.clone(),
+            expected_revision: None,
         };
         if let Some(job_queue) = app_context.worker_job_queue.get() {
             match job_queue.submit(job).await {
@@ -1234,16 +1237,16 @@ mod tests {
 
     fn create_test_app_context() -> Arc<AppContext> {
         use crate::{
-            config::RouterConfig, core::WorkerService, middleware::TokenBucket,
+            config::RouterConfig, middleware::TokenBucket,
             observability::inflight_tracker::InFlightRequestTracker,
-            routers::openai::realtime::RealtimeRegistry,
+            routers::openai::realtime::RealtimeRegistry, worker::WorkerService,
         };
 
         let router_config = RouterConfig::builder()
             .worker_startup_timeout_secs(1)
             .build_unchecked();
 
-        let worker_registry = Arc::new(crate::core::WorkerRegistry::new());
+        let worker_registry = Arc::new(crate::worker::WorkerRegistry::new());
         let worker_job_queue = Arc::new(std::sync::OnceLock::new());
 
         // Note: Using uninitialized queue for tests to avoid spawning background workers

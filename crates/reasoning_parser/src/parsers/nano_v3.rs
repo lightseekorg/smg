@@ -1,16 +1,19 @@
-// NanoV3 specific reasoning parser.
-// Uses the same format as DeepSeek-R1 (<think>...</think>) with always_in_reasoning=true.
+// NanoV3 / Nemotron reasoning parser.
+//
+// The Nemotron chat template supports an `enable_thinking` toggle that injects
+// `<think>\n` in the prefill when ON and `<think></think>` when OFF.
+// See: https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8?chat_template=default
+//
+// Uses `always_in_reasoning=false` because the thinking toggle is detected at
+// runtime via `ThinkingToggle::DefaultOn` + `think_in_prefill=true`, and
+// `mark_reasoning_started()` is called when thinking is effectively ON.
 
 use crate::{
     parsers::BaseReasoningParser,
     traits::{ParseError, ParserConfig, ParserResult, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
 };
 
-/// NanoV3 reasoning parser.
-///
-/// Uses the same reasoning format as DeepSeek-R1: `<think>...</think>`.
-/// Starts with `always_in_reasoning=true`, assuming all output is reasoning
-/// until a `</think>` token is encountered.
+/// NanoV3 / Nemotron reasoning parser.
 pub struct NanoV3Parser {
     base: BaseReasoningParser,
 }
@@ -23,7 +26,7 @@ impl NanoV3Parser {
             think_end_token: "</think>".to_string(),
             stream_reasoning: true,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            always_in_reasoning: true,
+            always_in_reasoning: false,
         };
 
         Self {
@@ -79,18 +82,20 @@ mod tests {
     fn test_nano_v3_initial_state() {
         let mut parser = NanoV3Parser::new();
 
-        // Should treat text as reasoning even without start token
+        // Without mark_reasoning_started(), text without <think> is normal content
         let result = parser
-            .detect_and_parse_reasoning("This is reasoning content")
+            .detect_and_parse_reasoning("This is normal content")
             .unwrap();
-        assert_eq!(result.normal_text, "");
-        assert_eq!(result.reasoning_text, "This is reasoning content");
+        assert_eq!(result.normal_text, "This is normal content");
+        assert_eq!(result.reasoning_text, "");
     }
 
     #[test]
-    fn test_nano_v3_with_end_token() {
+    fn test_nano_v3_with_mark_reasoning_started() {
         let mut parser = NanoV3Parser::new();
+        parser.mark_reasoning_started();
 
+        // After mark_reasoning_started(), text is treated as reasoning
         let result = parser
             .detect_and_parse_reasoning("reasoning content</think>answer")
             .unwrap();
@@ -112,6 +117,7 @@ mod tests {
     #[test]
     fn test_nano_v3_streaming() {
         let mut parser = NanoV3Parser::new();
+        parser.mark_reasoning_started();
 
         let result1 = parser
             .parse_reasoning_streaming_incremental("reasoning text ")

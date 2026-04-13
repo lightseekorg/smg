@@ -720,7 +720,7 @@ impl ConfigValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::ConnectionMode;
+    use crate::worker::ConnectionMode;
 
     #[test]
     fn test_validate_regular_mode() {

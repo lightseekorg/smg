@@ -26,10 +26,6 @@ use tracing::error;
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
-    core::{
-        is_retryable_status, AttachedBody, ConnectionMode, RetryExecutor, Worker, WorkerLoadGuard,
-        WorkerRegistry, WorkerType,
-    },
     observability::{
         events::{self, Event},
         metrics::{bool_to_static_str, metrics_labels, Metrics},
@@ -40,6 +36,10 @@ use crate::{
         error::{self, extract_error_code_from_response},
         grpc::utils::{error_type_from_status, route_to_endpoint},
         header_utils, RouterTrait,
+    },
+    worker::{
+        is_retryable_status, AttachedBody, ConnectionMode, RetryExecutor, Worker, WorkerLoadGuard,
+        WorkerRegistry, WorkerType,
     },
 };
 
@@ -138,7 +138,7 @@ impl Router {
         headers: Option<&HeaderMap>,
     ) -> Option<Arc<dyn Worker>> {
         // UNKNOWN_MODEL_ID means caller didn't specify a model — find any available worker
-        let model_filter = if model_id == crate::core::UNKNOWN_MODEL_ID {
+        let model_filter = if model_id == crate::worker::UNKNOWN_MODEL_ID {
             None
         } else {
             Some(model_id)
@@ -285,7 +285,7 @@ impl Router {
             Some(w) => w,
             None => {
                 // Distinguish "no workers for this model" from "workers exist but unavailable"
-                let model_filter = if model_id == crate::core::UNKNOWN_MODEL_ID {
+                let model_filter = if model_id == crate::worker::UNKNOWN_MODEL_ID {
                     None
                 } else {
                     Some(model_id)
@@ -783,8 +783,17 @@ impl RouterTrait for Router {
 
 #[cfg(test)]
 mod tests {
+    use openai_protocol::worker::HealthCheckConfig;
+
     use super::*;
-    use crate::{config::types::PolicyConfig, core::BasicWorkerBuilder};
+    use crate::{config::types::PolicyConfig, worker::BasicWorkerBuilder};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     fn create_test_regular_router() -> Router {
         // Create registries
@@ -794,9 +803,11 @@ mod tests {
         // Register test workers
         let worker1 = BasicWorkerBuilder::new("http://worker1:8080")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         let worker2 = BasicWorkerBuilder::new("http://worker2:8080")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         worker_registry.register_or_replace(Arc::new(worker1));
         worker_registry.register_or_replace(Arc::new(worker2));

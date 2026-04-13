@@ -8,7 +8,6 @@ use tracing::error;
 
 use super::PipelineStage;
 use crate::{
-    core::Worker,
     routers::{
         error,
         grpc::{
@@ -16,6 +15,7 @@ use crate::{
             context::{ClientSelection, RequestContext, WorkerSelection},
         },
     },
+    worker::Worker,
 };
 
 /// Client acquisition stage: Get gRPC clients from selected workers

@@ -94,6 +94,8 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
                 return error::internal_error("upstream_error", err);
             }
         }
+
+        restore_original_tools(&mut response_json, original_body, Some(&session));
     } else {
         let mut request_builder = ctx.components.client().post(&url).json(&payload);
         let provider = ApiProvider::from_url(&url);
@@ -136,9 +138,9 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
                 );
             }
         };
-    }
 
-    restore_original_tools(&mut response_json, original_body);
+        restore_original_tools(&mut response_json, original_body, None);
+    }
     patch_response_with_request_metadata(
         &mut response_json,
         original_body,

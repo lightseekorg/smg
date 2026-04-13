@@ -16,15 +16,13 @@ use tracing::debug;
 
 use crate::{
     config::RouterConfig,
-    core::{
-        steps::WorkflowEngines, JobQueue, KvEventMonitor, LoadMonitor, WorkerRegistry,
-        WorkerService,
-    },
     middleware::TokenBucket,
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
     routers::{openai::realtime::RealtimeRegistry, router_manager::RouterManager},
     wasm::{config::WasmRuntimeConfig, module_manager::WasmModuleManager},
+    worker::{KvEventMonitor, LoadMonitor, WorkerRegistry, WorkerService},
+    workflow::{JobQueue, WorkflowEngines},
 };
 
 /// Error type for AppContext builder

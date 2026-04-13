@@ -5,7 +5,6 @@
 use axum::response::Response;
 
 use crate::{
-    core::ProviderType,
     routers::{
         error,
         gemini::{
@@ -14,6 +13,7 @@ use crate::{
         },
         worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
+    worker::ProviderType,
 };
 
 /// Select a healthy upstream worker for the requested model.

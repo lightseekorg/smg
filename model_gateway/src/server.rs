@@ -44,18 +44,13 @@ use wfaas::LoggingSubscriber;
 use crate::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
-    core::{
-        job_queue::{JobQueue, JobQueueConfig},
-        steps::{TokenizerConfigRequest, WorkflowEngines},
-        worker::WorkerType,
-        worker_manager::WorkerManager,
-        Job,
-    },
     middleware::{self, AuthConfig, QueuedRequest},
     observability::{
         logging::{self, LoggingConfig},
         metrics::{self, PrometheusConfig},
-        metrics_server, otel_trace,
+        metrics_server,
+        metrics_ws::{collectors, registry::WatchRegistry},
+        otel_trace,
     },
     routers::{
         conversations,
@@ -71,6 +66,14 @@ use crate::{
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
+    worker::{
+        manager::{WorkerManager, WorkerManagerConfig},
+        worker::WorkerType,
+    },
+    workflow::{
+        job_queue::{JobQueue, JobQueueConfig},
+        Job, TokenizerConfigRequest, WorkflowEngines,
+    },
 };
 #[derive(Clone)]
 pub struct AppState {
@@ -878,21 +881,24 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         ))
     };
 
-    // Fire-and-forget: the metrics server runs for the process lifetime.
-    // Graceful shutdown with close frames will be added when the WS endpoint lands.
-    let _metrics_server_handle = if let Some(prometheus_config) = &config.prometheus_config {
-        let handle = metrics::start_prometheus(prometheus_config.clone());
-        Some(
-            metrics_server::start_metrics_server(
-                handle,
+    // Start metrics server and collectors.
+    // Metrics server binds the port now; collectors start after AppContext is built.
+    let (prometheus_handle, watch_registry) =
+        if let Some(prometheus_config) = &config.prometheus_config {
+            let handle = metrics::start_prometheus(prometheus_config.clone());
+            let registry = Arc::new(WatchRegistry::new());
+            let _server_handle = metrics_server::start_metrics_server(
+                handle.clone(),
                 prometheus_config.host.clone(),
                 prometheus_config.port,
+                registry.clone(),
+                metrics_server::DEFAULT_MAX_WS_CONNECTIONS,
             )
-            .await,
-        )
-    } else {
-        None
-    };
+            .await;
+            (Some(handle), Some(registry))
+        } else {
+            (None, None)
+        };
 
     // Initialize mesh server if configured, it will return a handler for mesh management
     let mesh_handler = if let Some(mesh_server_config) = &config.mesh_server_config {
@@ -939,6 +945,17 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     if config.prometheus_config.is_some() {
         app_context.inflight_tracker.start_sampler(20);
     }
+
+    // Start WS metrics collectors now that AppContext is available.
+    let _collector_handles = match (&prometheus_handle, &watch_registry) {
+        (Some(handle), Some(registry)) => Some(collectors::start_collectors(
+            app_context.clone(),
+            registry.clone(),
+            collectors::CollectorConfig::default(),
+            handle.clone(),
+        )),
+        _ => None,
+    };
 
     let weak_context = Arc::downgrade(&app_context);
     let worker_job_queue = JobQueue::new(JobQueueConfig::default(), weak_context);
@@ -1061,23 +1078,26 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let router_manager = RouterManager::from_config(&config, &app_context).await?;
     let router: Arc<dyn RouterTrait> = router_manager.clone();
 
-    // Health checker handle must outlive the server to keep the background task alive.
-    // HealthChecker aborts its task on Drop, so binding it here keeps it alive until
-    // the server shuts down.
-    let _health_checker = if config.router_config.health_check.disable_health_check {
-        info!("Global health checks disabled via CLI/config; skipping health checker");
+    // WorkerManager owns the background health check loop. Its handle must
+    // outlive the server to keep the task alive — bind it here so its Drop
+    // (which aborts the task) runs at server shutdown.
+    let _worker_manager = if config.router_config.health_check.disable_health_check {
+        info!("Global health checks disabled via CLI/config; skipping WorkerManager");
         None
     } else {
-        let hc = app_context.worker_registry.start_health_checker(
-            config.router_config.health_check.check_interval_secs,
-            config.router_config.health_check.remove_unhealthy_workers,
+        let manager = WorkerManager::start(
+            app_context.worker_registry.clone(),
+            WorkerManagerConfig {
+                default_check_interval_secs: config.router_config.health_check.check_interval_secs,
+                remove_unhealthy: config.router_config.health_check.remove_unhealthy_workers,
+            },
             app_context.worker_job_queue.get().cloned(),
         );
         debug!(
-            "Started health checker for workers with {}s interval",
+            "Started WorkerManager health check loop with {}s default interval",
             config.router_config.health_check.check_interval_secs
         );
-        Some(hc)
+        Some(manager)
     };
 
     // LoadMonitor groups are started dynamically when workers are registered.
