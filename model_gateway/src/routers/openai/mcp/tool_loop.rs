@@ -85,7 +85,68 @@ impl ToolLoopState {
         self.conversation_history.push(output_item);
 
         self.mcp_call_items.push(transformed_item);
+
+        let openai_output_items = extract_openai_response_output_items(&output_str);
+        if !openai_output_items.is_empty() {
+            debug!(
+                call_id = %call_id,
+                extracted_items = openai_output_items.len(),
+                "Extracted intermediary OpenAI response items from MCP tool output"
+            );
+            self.mcp_call_items.extend(openai_output_items);
+        }
     }
+}
+
+fn extract_openai_response_output_items(output_str: &str) -> Vec<Value> {
+    let text_blocks = match serde_json::from_str::<Value>(output_str) {
+        Ok(Value::Array(items)) => items,
+        _ => return Vec::new(),
+    };
+
+    text_blocks
+        .iter()
+        .filter_map(extract_openai_response_from_text_block)
+        .filter_map(build_message_from_openai_response)
+        .collect()
+}
+
+fn extract_openai_response_from_text_block(text_block: &Value) -> Option<Value> {
+    let obj = text_block.as_object()?;
+    if obj.get("type").and_then(Value::as_str) != Some("text") {
+        return None;
+    }
+
+    let text_payload = obj.get("text").and_then(Value::as_str)?;
+    let parsed_payload = serde_json::from_str::<Value>(text_payload).ok()?;
+    parsed_payload
+        .get("openai_response")
+        .filter(|value| !value.is_null())
+        .cloned()
+}
+
+fn build_message_from_openai_response(openai_response: Value) -> Option<Value> {
+    let obj = openai_response.as_object()?;
+
+    let content_value = obj.get("content")?;
+
+    let content = match content_value {
+        Value::Array(items) => items.clone(),
+        Value::Object(_) => vec![content_value.clone()],
+        _ => return None,
+    };
+
+    if content.is_empty() {
+        return None;
+    }
+
+    Some(json!({
+        "id": generate_id("msg"),
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": content
+    }))
 }
 
 /// Execute detected tool calls and send completion events to client
@@ -906,4 +967,58 @@ fn extract_function_calls(resp: &Value) -> Vec<ExtractedFunctionCall> {
     }
 
     calls
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn extract_openai_response_output_items_from_embedded_text_json() {
+        let output = r#"[{"type":"text","text":"{\"execution_id\":\"abc\",\"openai_response\":{\"content\":{\"type\":\"output_text\",\"annotations\":[],\"logprobs\":[],\"text\":\"intermediate summary\"}}}"}]"#;
+
+        let extracted = extract_openai_response_output_items(output);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0]["type"], "message");
+        assert_eq!(extracted[0]["role"], "assistant");
+        assert_eq!(extracted[0]["content"][0]["type"], "output_text");
+        assert_eq!(extracted[0]["content"][0]["text"], "intermediate summary");
+    }
+
+    #[test]
+    fn record_call_appends_openai_response_output_after_tool_item() {
+        let mut state = ToolLoopState::new(ResponseInput::Text("hello".to_string()));
+        let transformed = json!({
+            "type": "web_search_call",
+            "id": "ws_test",
+            "status": "completed",
+            "action": {"type": "search"}
+        });
+        let output = r#"[{"type":"text","text":"{\"openai_response\":{\"content\":{\"type\":\"output_text\",\"annotations\":[],\"logprobs\":[],\"text\":\"intermediate\"}}}"}]"#;
+
+        state.record_call(
+            "call_123".to_string(),
+            "search_web".to_string(),
+            "{\"query\":\"x\"}".to_string(),
+            output.to_string(),
+            transformed,
+        );
+
+        assert_eq!(state.mcp_call_items.len(), 2);
+        assert_eq!(state.mcp_call_items[0]["type"], "web_search_call");
+        assert_eq!(state.mcp_call_items[1]["type"], "message");
+        assert_eq!(
+            state.mcp_call_items[1]["content"][0]["text"],
+            "intermediate"
+        );
+    }
+
+    #[test]
+    fn extract_openai_response_output_items_ignores_null_openai_response() {
+        let output = r#"[{"type":"text","text":"{\"openai_response\":null}"}]"#;
+        let extracted = extract_openai_response_output_items(output);
+        assert!(extracted.is_empty());
+    }
 }
