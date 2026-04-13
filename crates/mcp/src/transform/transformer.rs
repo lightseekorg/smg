@@ -4,6 +4,7 @@ use openai_protocol::responses::{
     CodeInterpreterCallStatus, CodeInterpreterOutput, FileSearchCallStatus, FileSearchResult,
     ResponseOutputItem, WebSearchAction, WebSearchCallStatus, WebSearchSource,
 };
+use tracing::warn;
 
 use super::ResponseFormat;
 
@@ -24,6 +25,32 @@ pub fn mcp_response_item_id(source_id: &str) -> String {
     }
 
     format!("mcp_{source_id}")
+}
+
+/// Extract non-null `openai_response` objects from embedded MCP text-block payloads.
+pub fn extract_embedded_openai_responses(result: &serde_json::Value) -> Vec<serde_json::Value> {
+    let text_blocks = result.as_array().map(|items| items.as_slice()).unwrap_or_else(|| {
+        warn!("Expected MCP result to be an array of text blocks");
+        &[]
+    });
+
+    let mut openai_responses = Vec::new();
+
+    for item in text_blocks {
+        let Some(payload) = parse_text_block_payload(item) else {
+            continue;
+        };
+
+        let Some(openai_response) = payload.get("openai_response") else {
+            continue;
+        };
+
+        if !openai_response.is_null() {
+            openai_responses.push(openai_response.clone());
+        }
+    }
+
+    openai_responses
 }
 
 /// Transforms MCP CallToolResult to OpenAI Responses API output items.
@@ -208,20 +235,49 @@ impl ResponseTransformer {
 
     /// Extract web sources from MCP result.
     fn extract_web_sources(result: &serde_json::Value) -> Vec<WebSearchSource> {
-        let text_blocks = match result {
-            serde_json::Value::Array(items) => items,
-            _ => return Vec::new(),
-        };
+        let mut sources = Vec::new();
 
-        text_blocks
-            .iter()
-            .filter_map(Self::parse_text_block_payload)
-            .filter_map(|payload| payload.get("openai_response").cloned())
-            .filter_map(|response| response.get("sources").cloned())
-            .filter_map(|sources| sources.as_array().cloned())
-            .flat_map(|items| items.into_iter())
-            .filter_map(|item| Self::parse_web_source(&item))
-            .collect()
+        if result.is_array() {
+            for openai_response in extract_embedded_openai_responses(result) {
+                let Some(raw_sources) = openai_response.get("sources") else {
+                    continue;
+                };
+
+                let source_items = raw_sources
+                    .as_array()
+                    .map(|items| items.as_slice())
+                    .unwrap_or_else(|| {
+                        warn!("Expected openai_response.sources to be an array");
+                        &[]
+                    });
+
+                for source_item in source_items {
+                    match Self::parse_web_source(source_item) {
+                        Some(source) => sources.push(source),
+                        None => warn!("Skipping malformed web source item"),
+                    }
+                }
+            }
+
+            if !sources.is_empty() {
+                return sources;
+            }
+        }
+
+        let fallback_items = result
+            .as_array()
+            .or_else(|| result.as_object()?.get("results")?.as_array())
+            .map(|items| items.as_slice())
+            .unwrap_or_default();
+
+        for source_item in fallback_items {
+            match Self::parse_web_source(source_item) {
+                Some(source) => sources.push(source),
+                None => warn!("Skipping malformed web source item"),
+            }
+        }
+
+        sources
     }
 
     /// Parse a single web source from JSON.
@@ -237,19 +293,49 @@ impl ResponseTransformer {
 
     /// Extract queries from MCP result.
     fn extract_queries(result: &serde_json::Value) -> Vec<String> {
-        let text_blocks = match result {
-            serde_json::Value::Array(items) => items,
-            _ => return Vec::new(),
-        };
+        let mut queries = Vec::new();
 
-        text_blocks
-            .iter()
-            .filter_map(Self::parse_text_block_payload)
-            .filter_map(|payload| payload.get("queries").cloned())
-            .filter_map(|queries| queries.as_array().cloned())
-            .flat_map(|items| items.into_iter())
-            .filter_map(|query| query.as_str().map(String::from))
-            .collect()
+        if let Some(text_blocks) = result.as_array() {
+            for item in text_blocks {
+                let Some(payload) = parse_text_block_payload(item) else {
+                    continue;
+                };
+
+                let Some(raw_queries) = payload.get("queries") else {
+                    continue;
+                };
+
+                let query_items = raw_queries
+                    .as_array()
+                    .map(|items| items.as_slice())
+                    .unwrap_or_else(|| {
+                        warn!("Expected queries to be an array");
+                        &[]
+                    });
+
+                queries.extend(
+                    query_items
+                        .iter()
+                        .filter_map(|query| query.as_str().map(String::from)),
+                );
+            }
+
+            if !queries.is_empty() {
+                return queries;
+            }
+        }
+
+        result
+            .as_object()
+            .and_then(|obj| obj.get("queries"))
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|query| query.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or(queries)
     }
 
     fn extract_query_from_arguments(arguments: &str) -> Option<String> {
@@ -259,16 +345,6 @@ impl ResponseTransformer {
             .and_then(|obj| obj.get("query"))
             .and_then(|v| v.as_str())
             .map(ToString::to_string)
-    }
-
-    fn parse_text_block_payload(item: &serde_json::Value) -> Option<serde_json::Value> {
-        let obj = item.as_object()?;
-        if obj.get("type").and_then(|v| v.as_str()) != Some("text") {
-            return None;
-        }
-
-        let text = obj.get("text").and_then(|v| v.as_str())?;
-        serde_json::from_str::<serde_json::Value>(text).ok()
     }
 
     /// Extract code interpreter outputs from MCP result.
@@ -344,6 +420,30 @@ impl ResponseTransformer {
             score,
             attributes: None,
         })
+    }
+}
+
+fn parse_text_block_payload(item: &serde_json::Value) -> Option<serde_json::Value> {
+    let Some(obj) = item.as_object() else {
+        warn!("Expected MCP result item to be an object");
+        return None;
+    };
+
+    if obj.get("type").and_then(|v| v.as_str()) != Some("text") {
+        return None;
+    }
+
+    let Some(text) = obj.get("text").and_then(|v| v.as_str()) else {
+        warn!("MCP text block is missing a text field");
+        return None;
+    };
+
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(payload) => Some(payload),
+        Err(error) => {
+            warn!("Failed to parse embedded MCP text block payload: {error}");
+            None
+        }
     }
 }
 
@@ -659,6 +759,43 @@ mod tests {
     }
 
     #[test]
+    fn test_web_search_transform_falls_back_to_results_sources() {
+        let result = json!({
+            "results": [
+                {"type": "url", "url": "https://example.com/legacy-a"},
+                {"type": "url", "url": "https://example.com/legacy-b"}
+            ]
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::WebSearchCall,
+            "req-legacy",
+            "server",
+            "web_search",
+            r#"{"query":"legacy search"}"#,
+        );
+
+        match transformed {
+            ResponseOutputItem::WebSearchCall { action, .. } => match action {
+                WebSearchAction::Search {
+                    query,
+                    queries,
+                    sources,
+                } => {
+                    assert_eq!(query, Some("legacy search".to_string()));
+                    assert!(queries.is_empty());
+                    assert_eq!(sources.len(), 2);
+                    assert_eq!(sources[0].url, "https://example.com/legacy-a");
+                    assert_eq!(sources[1].url, "https://example.com/legacy-b");
+                }
+                _ => panic!("Expected Search action"),
+            },
+            _ => panic!("Expected WebSearchCall"),
+        }
+    }
+
+    #[test]
     fn test_code_interpreter_transform() {
         let result = json!({
             "code": "print('hello')",
@@ -726,6 +863,42 @@ mod tests {
                 assert_eq!(results.len(), 2);
                 assert_eq!(results[0].file_id, "file_1");
                 assert_eq!(results[0].score, Some(0.95));
+            }
+            _ => panic!("Expected FileSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_file_search_transform_preserves_top_level_queries_array() {
+        let result = json!({
+            "queries": ["async patterns", "rust futures"],
+            "results": [
+                {"file_id": "file_1", "filename": "async.md", "score": 0.95, "text": "..."}
+            ]
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::FileSearchCall,
+            "req-790",
+            "server",
+            "file_search",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::FileSearchCall {
+                id,
+                status,
+                queries,
+                results,
+            } => {
+                assert_eq!(id, "fs_req-790");
+                assert_eq!(status, FileSearchCallStatus::Completed);
+                assert_eq!(queries, vec!["async patterns", "rust futures"]);
+                let results = results.unwrap();
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].file_id, "file_1");
             }
             _ => panic!("Expected FileSearchCall"),
         }

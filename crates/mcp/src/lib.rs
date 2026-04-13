@@ -56,4 +56,6 @@ pub use responses_bridge::{
 };
 pub use tenant::{SessionId, TenantContext, TenantId};
 // Re-export from transform
-pub use transform::{mcp_response_item_id, ResponseFormat, ResponseTransformer};
+pub use transform::{
+    extract_embedded_openai_responses, mcp_response_item_id, ResponseFormat, ResponseTransformer,
+};

@@ -21,7 +21,8 @@ use openai_protocol::{
 };
 use serde_json::{json, to_value, Value};
 use smg_mcp::{
-    mcp_response_item_id, McpToolSession, ResponseFormat, ResponseTransformer, ToolExecutionInput,
+    extract_embedded_openai_responses, mcp_response_item_id, McpToolSession, ResponseFormat,
+    ResponseTransformer, ToolExecutionInput,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -99,30 +100,15 @@ impl ToolLoopState {
 }
 
 fn extract_openai_response_output_items(output_str: &str) -> Vec<Value> {
-    let text_blocks = match serde_json::from_str::<Value>(output_str) {
-        Ok(Value::Array(items)) => items,
+    let result = match serde_json::from_str::<Value>(output_str) {
+        Ok(value) => value,
         _ => return Vec::new(),
     };
 
-    text_blocks
-        .iter()
-        .filter_map(extract_openai_response_from_text_block)
+    extract_embedded_openai_responses(&result)
+        .into_iter()
         .filter_map(build_message_from_openai_response)
         .collect()
-}
-
-fn extract_openai_response_from_text_block(text_block: &Value) -> Option<Value> {
-    let obj = text_block.as_object()?;
-    if obj.get("type").and_then(Value::as_str) != Some("text") {
-        return None;
-    }
-
-    let text_payload = obj.get("text").and_then(Value::as_str)?;
-    let parsed_payload = serde_json::from_str::<Value>(text_payload).ok()?;
-    parsed_payload
-        .get("openai_response")
-        .filter(|value| !value.is_null())
-        .cloned()
 }
 
 fn build_message_from_openai_response(openai_response: Value) -> Option<Value> {
