@@ -594,7 +594,7 @@ impl TrtllmServiceClient {
         proto::SamplingConfig {
             beam_width: 1,
             num_return_sequences: 1,
-            top_k: None,
+            top_k: Some(request.top_k.max(0)),
             top_p: Some(request.top_p.unwrap_or(1.0)),
             top_p_min: None,
             top_p_reset_ids: None,
@@ -603,14 +603,14 @@ impl TrtllmServiceClient {
             temperature: Some(request.temperature.unwrap_or(1.0)),
             min_tokens: None,
             beam_search_diversity_rate: None,
-            repetition_penalty: Some(1.0),
-            presence_penalty: None,
-            frequency_penalty: None,
+            repetition_penalty: Some(request.repetition_penalty),
+            presence_penalty: request.presence_penalty,
+            frequency_penalty: request.frequency_penalty,
             prompt_ignore_length: None,
             length_penalty: None,
             early_stopping: None,
             no_repeat_ngram_size: None,
-            min_p: None,
+            min_p: Some(request.min_p),
             beam_width_array: vec![],
         }
     }
@@ -1007,6 +1007,31 @@ mod tests {
         assert_eq!(config.temperature, None);
         assert_eq!(config.top_p, None);
         assert_eq!(config.top_k, None);
+    }
+
+    #[test]
+    fn test_responses_sampling_config_is_passed_through() {
+        use openai_protocol::responses::ResponsesRequest;
+
+        let request = ResponsesRequest {
+            top_k: 40,
+            min_p: 0.05,
+            repetition_penalty: 1.2,
+            frequency_penalty: Some(0.3),
+            presence_penalty: Some(-0.4),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            max_output_tokens: Some(128),
+            ..Default::default()
+        };
+
+        let cfg = TrtllmServiceClient::build_sampling_config_from_responses(&request);
+
+        assert_eq!(cfg.top_k, Some(40));
+        assert_eq!(cfg.min_p, Some(0.05));
+        assert_eq!(cfg.repetition_penalty, Some(1.2));
+        assert_eq!(cfg.frequency_penalty, Some(0.3));
+        assert_eq!(cfg.presence_penalty, Some(-0.4));
     }
 
     #[tokio::test]
