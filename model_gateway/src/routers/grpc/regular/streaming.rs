@@ -251,11 +251,22 @@ impl StreamingProcessor {
         let think_in_prefill = tokenizer.think_in_prefill();
 
         // Check if JSON schema constraint was used (specific function or required mode)
-        let used_json_schema = match tool_choice {
-            Some(ToolChoice::Function { .. }) => true,
-            Some(ToolChoice::Value(ToolChoiceValue::Required)) => true,
-            Some(ToolChoice::AllowedTools { mode, .. }) => mode == "required",
-            _ => false,
+        let resolved_parser = self
+            .tool_parser_factory
+            .registry()
+            .resolve_parser_name(self.configured_tool_parser.as_deref(), model);
+        let has_structural_tag = resolved_parser
+            .as_deref()
+            .is_some_and(|p| self.tool_parser_factory.registry().has_structural_tag(p));
+        let used_json_schema = if has_structural_tag {
+            false
+        } else {
+            match tool_choice {
+                Some(ToolChoice::Function { .. }) => true,
+                Some(ToolChoice::Value(ToolChoiceValue::Required)) => true,
+                Some(ToolChoice::AllowedTools { mode, .. }) => mode == "required",
+                _ => false,
+            }
         };
 
         // Check if this is the specific function case (LLM generates parameters only, no name field)
@@ -1625,10 +1636,18 @@ impl StreamingProcessor {
                 model,
             );
 
-        let used_json_schema = matches!(
-            &original_request.tool_choice,
-            Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
-        );
+        let resolved_parser = self
+            .tool_parser_factory
+            .registry()
+            .resolve_parser_name(self.configured_tool_parser.as_deref(), model);
+        let has_structural_tag = resolved_parser
+            .as_deref()
+            .is_some_and(|p| self.tool_parser_factory.registry().has_structural_tag(p));
+        let used_json_schema = !has_structural_tag
+            && matches!(
+                &original_request.tool_choice,
+                Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
+            );
 
         // Check if model output is arguments-only for a specific function (ToolChoice::Tool)
         let is_specific_function = matches!(
