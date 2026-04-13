@@ -100,7 +100,7 @@ spec:
             driver: secrets-store.csi.k8s.io
             readOnly: true
             volumeAttributes:
-              secretProviderClass: {{ default (printf "%s-oci-vault" (include "helm.fullname" $)) $mount.secretProviderClassName | quote }}
+              secretProviderClass: {{ default (printf "%s-%s-oci-vault" (include "helm.fullname" $) $mount.name) $mount.secretProviderClassName | quote }}
         {{- end }}
         {{- end }}
       {{- end }}
