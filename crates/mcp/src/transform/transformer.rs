@@ -29,10 +29,13 @@ pub fn mcp_response_item_id(source_id: &str) -> String {
 
 /// Extract non-null `openai_response` objects from embedded MCP text-block payloads.
 pub fn extract_embedded_openai_responses(result: &serde_json::Value) -> Vec<serde_json::Value> {
-    let text_blocks = result.as_array().map(|items| items.as_slice()).unwrap_or_else(|| {
-        warn!("Expected MCP result to be an array of text blocks");
-        &[]
-    });
+    let text_blocks = result
+        .as_array()
+        .map(|items| items.as_slice())
+        .unwrap_or_else(|| {
+            warn!("Expected MCP result to be an array of text blocks");
+            &[]
+        });
 
     let mut openai_responses = Vec::new();
 

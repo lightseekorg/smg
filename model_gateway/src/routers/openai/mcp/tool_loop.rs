@@ -64,6 +64,7 @@ impl ToolLoopState {
     /// transformed output item (to avoid re-transformation later).
     pub fn record_call(
         &mut self,
+        is_builtin_tool: bool,
         call_id: String,
         tool_name: String,
         args_json_str: String,
@@ -87,14 +88,16 @@ impl ToolLoopState {
 
         self.mcp_call_items.push(transformed_item);
 
-        let openai_output_items = extract_openai_response_output_items(&output_str);
-        if !openai_output_items.is_empty() {
-            debug!(
-                call_id = %call_id,
-                extracted_items = openai_output_items.len(),
-                "Extracted intermediary OpenAI response items from MCP tool output"
-            );
-            self.mcp_call_items.extend(openai_output_items);
+        if is_builtin_tool {
+            let openai_output_items = extract_openai_response_output_items(&output_str);
+            if !openai_output_items.is_empty() {
+                debug!(
+                    call_id = %call_id,
+                    extracted_items = openai_output_items.len(),
+                    "Extracted intermediary OpenAI response items from MCP tool output"
+                );
+                self.mcp_call_items.extend(openai_output_items);
+            }
         }
     }
 }
@@ -198,6 +201,7 @@ pub(crate) async fn execute_streaming_tool_calls(
                     return false;
                 }
                 state.record_call(
+                    session.is_builtin_tool(&call.name),
                     call.call_id,
                     call.name,
                     call.arguments_buffer,
@@ -255,6 +259,7 @@ pub(crate) async fn execute_streaming_tool_calls(
         }
 
         state.record_call(
+            session.is_builtin_tool(&call.name),
             call.call_id,
             call.name,
             call.arguments_buffer,
@@ -725,6 +730,7 @@ pub(crate) async fn execute_tool_loop(
                     );
 
                     state.record_call(
+                        session.is_builtin_tool(&call.name),
                         call.call_id,
                         call.name,
                         call.arguments,
@@ -776,6 +782,7 @@ pub(crate) async fn execute_tool_loop(
             );
 
             state.record_call(
+                session.is_builtin_tool(&call.name),
                 call.call_id,
                 call.name,
                 call.arguments,
@@ -1201,6 +1208,7 @@ mod tests {
         let output = r#"[{"type":"text","text":"{\"openai_response\":{\"content\":{\"type\":\"output_text\",\"annotations\":[],\"logprobs\":[],\"text\":\"intermediate\"}}}"}]"#;
 
         state.record_call(
+            true,
             "call_123".to_string(),
             "search_web".to_string(),
             "{\"query\":\"x\"}".to_string(),
@@ -1215,6 +1223,30 @@ mod tests {
             state.mcp_call_items[1]["content"][0]["text"],
             "intermediate"
         );
+    }
+
+    #[test]
+    fn record_call_does_not_append_openai_response_output_for_non_builtin_tools() {
+        let mut state = ToolLoopState::new(ResponseInput::Text("hello".to_string()));
+        let transformed = json!({
+            "type": "web_search_call",
+            "id": "ws_test",
+            "status": "completed",
+            "action": {"type": "search"}
+        });
+        let output = r#"[{"type":"text","text":"{\"openai_response\":{\"content\":{\"type\":\"output_text\",\"annotations\":[],\"logprobs\":[],\"text\":\"intermediate\"}}}"}]"#;
+
+        state.record_call(
+            false,
+            "call_123".to_string(),
+            "internal_search_web".to_string(),
+            "{\"query\":\"x\"}".to_string(),
+            output.to_string(),
+            transformed,
+        );
+
+        assert_eq!(state.mcp_call_items.len(), 1);
+        assert_eq!(state.mcp_call_items[0]["type"], "web_search_call");
     }
 
     #[test]
