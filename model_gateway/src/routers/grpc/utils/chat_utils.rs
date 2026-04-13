@@ -208,24 +208,6 @@ fn transform_content_field(
     }
 }
 
-// FIXME: migrate golang bindings to use tool_parser::ParserRegistry::generate_tool_constraint
-// then remove this wrapper.
-/// Deprecated: use `ParserRegistry::generate_tool_constraint` instead.
-pub fn generate_tool_constraints(
-    tools: &[Tool],
-    tool_choice: Option<&ToolChoice>,
-    _model: &str,
-) -> Result<Option<(String, String)>, String> {
-    let Some(choice) = tool_choice else {
-        return Ok(None);
-    };
-    let factory = tool_parser::ParserFactory::new();
-    Ok(factory
-        .registry()
-        .generate_tool_constraint(None, tools, choice)?
-        .map(|c| c.to_tuple()))
-}
-
 /// Filter tools based on tool_choice (generic helper)
 ///
 /// Returns filtered tools if filtering is needed, otherwise returns None.
