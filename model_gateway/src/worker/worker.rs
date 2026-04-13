@@ -1,7 +1,8 @@
 use std::{
+    any::Any,
     fmt,
     sync::{
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc, LazyLock,
     },
     time::Duration,
@@ -116,7 +117,10 @@ impl fmt::Debug for WorkerRoutingKeyLoad {
 
 /// Core worker abstraction that represents a backend service
 #[async_trait]
-pub trait Worker: Send + Sync + fmt::Debug {
+pub trait Worker: Send + Sync + fmt::Debug + 'static {
+    /// Downcast support for same-URL replace state sharing.
+    fn as_any(&self) -> &dyn Any;
+
     /// Get the worker's URL
     fn url(&self) -> &str;
     /// Get the worker's API key
@@ -144,8 +148,24 @@ pub trait Worker: Send + Sync + fmt::Debug {
     /// Get the worker's lifecycle status.
     fn status(&self) -> WorkerStatus;
 
+    /// Get the current monotonic worker revision.
+    ///
+    /// Same-URL `replace()` increments the revision so stale probe outcomes
+    /// can be discarded without mutating the newly installed worker object.
+    fn revision(&self) -> u64 {
+        0
+    }
+
     /// Set the worker's lifecycle status.
     fn set_status(&self, status: WorkerStatus);
+
+    /// Adopt shared mutable runtime state from a previous worker object.
+    ///
+    /// Used by same-URL `replace()` so in-flight traffic and counters remain
+    /// attached to a single shared runtime across the old and new objects.
+    fn inherit_shared_state_from(&self, _other: &dyn Worker) -> bool {
+        false
+    }
 
     /// Check if the worker is currently healthy (status == Ready).
     ///
@@ -171,8 +191,36 @@ pub trait Worker: Send + Sync + fmt::Debug {
         }
     }
 
-    /// Perform an async health check on the worker
+    /// Perform an async health check on the worker.
+    ///
+    /// Pure probe — does not mutate worker status, does not increment
+    /// counters beyond `consecutive_*` totals exposed via the accessors
+    /// below. The state machine lives in `WorkerManager`, which reads the
+    /// counters and applies transitions via `WorkerRegistry::transition_status()`.
     async fn check_health_async(&self) -> WorkerResult<()>;
+
+    // ── Health check counter accessors (used by WorkerManager state machine) ──
+
+    /// Increment `consecutive_failures` and return the new value.
+    fn consecutive_failures_increment(&self) -> usize;
+
+    /// Reset `consecutive_failures` to 0.
+    fn consecutive_failures_reset(&self);
+
+    /// Increment `consecutive_successes` and return the new value.
+    fn consecutive_successes_increment(&self) -> usize;
+
+    /// Reset `consecutive_successes` to 0.
+    fn consecutive_successes_reset(&self);
+
+    /// Read `total_pending_probes` (lifetime probe attempts in Pending state).
+    fn total_pending_probes(&self) -> usize;
+
+    /// Increment `total_pending_probes` and return the new value.
+    fn total_pending_probes_increment(&self) -> usize;
+
+    /// Reset `total_pending_probes` to 0 (called when promoting Pending → Ready).
+    fn total_pending_probes_reset(&self);
 
     /// Get the current load (number of active requests)
     fn load(&self) -> usize;
@@ -186,8 +234,14 @@ pub trait Worker: Send + Sync + fmt::Debug {
     /// Reset the load counter to 0 (for sync/recovery)
     fn reset_load(&self) {}
 
-    /// Get the worker routing key load tracker
-    fn worker_routing_key_load(&self) -> &WorkerRoutingKeyLoad;
+    /// Get the current routing-key load cardinality.
+    fn routing_key_load(&self) -> usize;
+
+    /// Increment the routing-key load tracker for an active key.
+    fn increment_routing_key_load(&self, routing_key: &str);
+
+    /// Decrement the routing-key load tracker for a completed key.
+    fn decrement_routing_key_load(&self, routing_key: &str);
 
     /// Get the number of processed requests
     fn processed_requests(&self) -> usize;
@@ -198,15 +252,18 @@ pub trait Worker: Send + Sync + fmt::Debug {
     /// Get worker-specific metadata
     fn metadata(&self) -> &WorkerMetadata;
 
-    /// Get the circuit breaker for this worker.
-    ///
-    /// **Do not call from routers.** Use `record_outcome(status_code)` to
-    /// record request outcomes and `is_available()` to check worker health.
-    fn circuit_breaker(&self) -> &CircuitBreaker;
+    /// Get the current circuit breaker state for observability/debugging.
+    fn circuit_breaker_state(&self) -> super::circuit_breaker::CircuitState;
+
+    /// Check whether the current circuit breaker state allows execution.
+    fn circuit_breaker_can_execute(&self) -> bool;
+
+    /// Record a request outcome against the circuit breaker.
+    fn record_circuit_breaker_outcome(&self, success: bool);
 
     /// Check if the worker is available (healthy + circuit closed/half-open)
     fn is_available(&self) -> bool {
-        self.is_healthy() && self.circuit_breaker().can_execute()
+        self.is_healthy() && self.circuit_breaker_can_execute()
     }
 
     /// Record the outcome of a request based on the HTTP status code.
@@ -223,7 +280,7 @@ pub trait Worker: Send + Sync + fmt::Debug {
             .resilience()
             .retryable_status_codes
             .contains(&status_code);
-        self.circuit_breaker().record_outcome(!is_failure);
+        self.record_circuit_breaker_outcome(!is_failure);
     }
 
     /// Get the resolved resilience config for this worker.
@@ -517,21 +574,55 @@ impl WorkerMetadata {
     }
 }
 
+/// Shared mutable worker state preserved across same-URL replacements.
+#[derive(Debug)]
+pub struct WorkerRuntime {
+    status: AtomicU8,
+    consecutive_failures: AtomicUsize,
+    consecutive_successes: AtomicUsize,
+    total_pending_probes: AtomicUsize,
+    load_counter: AtomicUsize,
+    processed_counter: AtomicUsize,
+    worker_routing_key_load: WorkerRoutingKeyLoad,
+    revision: AtomicU64,
+}
+
+impl WorkerRuntime {
+    pub fn new(url: &str, initial_status: WorkerStatus) -> Self {
+        Self {
+            status: AtomicU8::new(initial_status as u8),
+            consecutive_failures: AtomicUsize::new(0),
+            consecutive_successes: AtomicUsize::new(0),
+            total_pending_probes: AtomicUsize::new(0),
+            load_counter: AtomicUsize::new(0),
+            processed_counter: AtomicUsize::new(0),
+            worker_routing_key_load: WorkerRoutingKeyLoad::new(url),
+            revision: AtomicU64::new(0),
+        }
+    }
+
+    fn status(&self) -> WorkerStatus {
+        WorkerStatus::from_u8(self.status.load(Ordering::Acquire))
+    }
+
+    fn set_status(&self, status: WorkerStatus) {
+        self.status.store(status as u8, Ordering::Release);
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+
+    fn bump_revision(&self) -> u64 {
+        self.revision.fetch_add(1, Ordering::AcqRel) + 1
+    }
+}
+
 /// Basic worker implementation
-#[derive(Clone)]
 pub struct BasicWorker {
     pub metadata: WorkerMetadata,
-    pub load_counter: Arc<AtomicUsize>,
-    pub worker_routing_key_load: Arc<WorkerRoutingKeyLoad>,
-    pub processed_counter: Arc<AtomicUsize>,
-    pub status: Arc<AtomicU8>,
-    pub consecutive_failures: Arc<AtomicUsize>,
-    pub consecutive_successes: Arc<AtomicUsize>,
-    /// Total health check probes attempted while in Pending state.
-    /// Unlike consecutive counters, this counts ALL attempts (not just consecutive).
-    /// Used to detect misconfigured workers stuck in Pending.
-    pub total_pending_probes: Arc<AtomicUsize>,
-    pub circuit_breaker: CircuitBreaker,
+    pub runtime: ArcSwap<WorkerRuntime>,
+    pub circuit_breaker: ArcSwap<CircuitBreaker>,
     /// Lazily initialized gRPC client for gRPC workers.
     /// Uses OnceCell for lock-free reads after initialization.
     pub grpc_client: Arc<OnceCell<Arc<GrpcClient>>>,
@@ -545,15 +636,28 @@ pub struct BasicWorker {
     pub resilience: ResolvedResilience,
 }
 
+impl Clone for BasicWorker {
+    fn clone(&self) -> Self {
+        Self {
+            metadata: self.metadata.clone(),
+            runtime: ArcSwap::from(self.runtime.load_full()),
+            circuit_breaker: ArcSwap::from(self.circuit_breaker.load_full()),
+            grpc_client: Arc::clone(&self.grpc_client),
+            models_override: Arc::clone(&self.models_override),
+            http_client: self.http_client.clone(),
+            resilience: self.resilience.clone(),
+        }
+    }
+}
+
 impl fmt::Debug for BasicWorker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let runtime = self.runtime.load();
         f.debug_struct("BasicWorker")
             .field("metadata", &self.metadata)
-            .field(
-                "status",
-                &WorkerStatus::from_u8(self.status.load(Ordering::Relaxed)),
-            )
-            .field("circuit_breaker", &self.circuit_breaker)
+            .field("status", &runtime.status())
+            .field("revision", &runtime.revision())
+            .field("circuit_breaker_state", &self.circuit_breaker_state())
             .field("grpc_client", &"<OnceCell>")
             .finish()
     }
@@ -564,10 +668,32 @@ impl BasicWorker {
         let load = self.load();
         Metrics::set_worker_requests_active(self.url(), load);
     }
+
+    fn shared_runtime(&self) -> Arc<WorkerRuntime> {
+        self.runtime.load_full()
+    }
+
+    fn install_shared_state_from_basic(&self, other: &BasicWorker) {
+        let shared_runtime = other.shared_runtime();
+        shared_runtime.bump_revision();
+        let shared_status = shared_runtime.status();
+        self.runtime.store(shared_runtime);
+        Metrics::set_worker_health(self.url(), shared_status == WorkerStatus::Ready);
+
+        let existing_cb = self.circuit_breaker.load();
+        let other_cb = other.circuit_breaker.load_full();
+        if other_cb.config() == existing_cb.config() {
+            self.circuit_breaker.store(other_cb);
+        }
+    }
 }
 
 #[async_trait]
 impl Worker for BasicWorker {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn url(&self) -> &str {
         &self.metadata.spec.url
     }
@@ -585,148 +711,121 @@ impl Worker for BasicWorker {
     }
 
     fn status(&self) -> WorkerStatus {
-        WorkerStatus::from_u8(self.status.load(Ordering::Acquire))
+        self.runtime.load().status()
+    }
+
+    fn revision(&self) -> u64 {
+        self.runtime.load().revision()
     }
 
     fn set_status(&self, status: WorkerStatus) {
-        self.status.store(status as u8, Ordering::Release);
+        self.runtime.load().set_status(status);
         Metrics::set_worker_health(self.url(), status == WorkerStatus::Ready);
     }
 
+    fn inherit_shared_state_from(&self, other: &dyn Worker) -> bool {
+        let Some(other) = other.as_any().downcast_ref::<BasicWorker>() else {
+            return false;
+        };
+        self.install_shared_state_from_basic(other);
+        true
+    }
+
     async fn check_health_async(&self) -> WorkerResult<()> {
+        // Pure probe — no state machine, no counter mutation, no status
+        // changes. The HealthChecker (in WorkerManager) owns the state machine
+        // and calls registry.transition_status() to apply transitions.
+        //
+        // Returns Ok(()) if the underlying transport probe succeeded,
+        // Err(HealthCheckFailed) otherwise. Transport-level errors (gRPC
+        // connect failure, TLS handshake, DNS) are surfaced as Err so the
+        // caller can log them with worker URL context.
         if self.metadata.health_config.disable_health_check {
-            if self.status() != WorkerStatus::Ready {
-                self.set_status(WorkerStatus::Ready);
-            }
             return Ok(());
         }
 
-        let current_status = self.status();
-        let health_config = &self.metadata.health_config;
-        let worker_type_str = self.metadata.spec.worker_type.as_metric_label();
+        let probe_ok = match &self.metadata.spec.connection_mode {
+            ConnectionMode::Http => self.http_health_check().await?,
+            ConnectionMode::Grpc => self.grpc_health_check().await?,
+        };
 
-        // Failed is terminal — skip the probe entirely. The health checker
-        // loop will eventually remove the worker (if --remove-unhealthy-workers
-        // is set) or it stays Failed until explicit re-registration.
-        if current_status == WorkerStatus::Failed {
-            return Err(WorkerError::HealthCheckFailed {
-                url: self.metadata.spec.url.clone(),
-                reason: "worker is in Failed state".to_string(),
-            });
-        }
-
-        // Track total probes in Pending for startup timeout detection
-        if current_status == WorkerStatus::Pending {
-            self.total_pending_probes.fetch_add(1, Ordering::Relaxed);
-        }
-
-        // Transport-level errors (e.g. gRPC connect failure, TLS handshake
-        // failure, DNS resolution failure) are treated as failed probes
-        // rather than short-circuiting, so the Pending timeout and
-        // NotReady→Failed paths can observe them. The error is logged with
-        // the worker URL so operators can debug why a worker won't come Ready.
-        let health_result = match &self.metadata.spec.connection_mode {
-            ConnectionMode::Http => self.http_health_check().await,
-            ConnectionMode::Grpc => self.grpc_health_check().await,
-        }
-        .unwrap_or_else(|err| {
-            tracing::warn!(
-                worker_url = %self.metadata.spec.url,
-                error = %err,
-                "Health check probe transport error (treating as failed probe)"
-            );
-            false
-        });
-
-        if health_result {
-            self.consecutive_failures.store(0, Ordering::Release);
-            let successes = self.consecutive_successes.fetch_add(1, Ordering::AcqRel) + 1;
-            Metrics::record_worker_health_check(worker_type_str, metrics_labels::CB_SUCCESS);
-
-            // Pending → Ready or NotReady → Ready on success_threshold.
-            // Failed is terminal — workers that reached Failed must be removed
-            // and re-registered. (replace() preserves the old status, so a
-            // metadata update on a Failed worker would not recover it.)
-            if matches!(
-                current_status,
-                WorkerStatus::Pending | WorkerStatus::NotReady
-            ) && successes >= health_config.success_threshold as usize
-            {
-                self.set_status(WorkerStatus::Ready);
-                self.consecutive_successes.store(0, Ordering::Release);
-                // Reset pending probe counter on successful promotion
-                self.total_pending_probes.store(0, Ordering::Relaxed);
-            } else if current_status == WorkerStatus::Pending {
-                // Even on a successful probe, enforce the Pending cap. A
-                // worker that flaps F,S,F,S,... never reaches success_threshold
-                // and would otherwise grow `total_pending_probes` without bound.
-                let max_pending = health_config.failure_threshold as usize * 10;
-                if self.total_pending_probes.load(Ordering::Relaxed) >= max_pending {
-                    self.set_status(WorkerStatus::Failed);
-                    self.consecutive_successes.store(0, Ordering::Release);
-                    self.consecutive_failures.store(0, Ordering::Release);
-                }
-            }
+        if probe_ok {
             Ok(())
         } else {
-            self.consecutive_successes.store(0, Ordering::Release);
-            let failures = self.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1;
-            Metrics::record_worker_health_check(worker_type_str, metrics_labels::CB_FAILURE);
-
-            match current_status {
-                WorkerStatus::Ready => {
-                    // Ready → NotReady on failure_threshold
-                    if failures >= health_config.failure_threshold as usize {
-                        self.set_status(WorkerStatus::NotReady);
-                        self.consecutive_failures.store(0, Ordering::Release);
-                    }
-                }
-                WorkerStatus::NotReady => {
-                    // NotReady → Failed on liveness_failure_threshold (3× failure_threshold)
-                    let liveness_threshold = health_config.failure_threshold as usize * 3;
-                    if failures >= liveness_threshold {
-                        self.set_status(WorkerStatus::Failed);
-                        self.consecutive_failures.store(0, Ordering::Release);
-                    }
-                }
-                WorkerStatus::Pending => {
-                    // Pending → Failed on max_pending_probes (10× failure_threshold).
-                    // Note: this uses `total_pending_probes` (total attempts), not
-                    // `consecutive_failures`, because a worker flapping between
-                    // success/failure in Pending without reaching success_threshold
-                    // is also suspect. Reset consecutive_failures for consistency
-                    // with other failure-path transitions (Failed is terminal, but
-                    // this keeps counter state clean).
-                    let max_pending = health_config.failure_threshold as usize * 10;
-                    let total = self.total_pending_probes.load(Ordering::Relaxed);
-                    if total >= max_pending {
-                        self.set_status(WorkerStatus::Failed);
-                        self.consecutive_failures.store(0, Ordering::Release);
-                    }
-                }
-                WorkerStatus::Failed => {
-                    // Already failed — no further transitions
-                }
-            }
-
             Err(WorkerError::HealthCheckFailed {
                 url: self.metadata.spec.url.clone(),
-                reason: format!("Health check failed (consecutive failures: {failures})"),
+                reason: "health probe returned non-success".to_string(),
             })
         }
     }
 
+    fn consecutive_failures_increment(&self) -> usize {
+        self.runtime
+            .load()
+            .consecutive_failures
+            .fetch_add(1, Ordering::AcqRel)
+            + 1
+    }
+
+    fn consecutive_failures_reset(&self) {
+        self.runtime
+            .load()
+            .consecutive_failures
+            .store(0, Ordering::Release);
+    }
+
+    fn consecutive_successes_increment(&self) -> usize {
+        self.runtime
+            .load()
+            .consecutive_successes
+            .fetch_add(1, Ordering::AcqRel)
+            + 1
+    }
+
+    fn consecutive_successes_reset(&self) {
+        self.runtime
+            .load()
+            .consecutive_successes
+            .store(0, Ordering::Release);
+    }
+
+    fn total_pending_probes(&self) -> usize {
+        self.runtime
+            .load()
+            .total_pending_probes
+            .load(Ordering::Relaxed)
+    }
+
+    fn total_pending_probes_increment(&self) -> usize {
+        self.runtime
+            .load()
+            .total_pending_probes
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
+    }
+
+    fn total_pending_probes_reset(&self) {
+        self.runtime
+            .load()
+            .total_pending_probes
+            .store(0, Ordering::Relaxed);
+    }
+
     fn load(&self) -> usize {
-        self.load_counter.load(Ordering::Relaxed)
+        self.runtime.load().load_counter.load(Ordering::Relaxed)
     }
 
     fn increment_load(&self) {
-        self.load_counter.fetch_add(1, Ordering::Relaxed);
+        self.runtime
+            .load()
+            .load_counter
+            .fetch_add(1, Ordering::Relaxed);
         self.update_running_requests_metrics();
     }
 
     fn decrement_load(&self) {
-        if self
+        let runtime = self.runtime.load();
+        if runtime
             .load_counter
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_sub(1)
@@ -742,28 +841,56 @@ impl Worker for BasicWorker {
     }
 
     fn reset_load(&self) {
-        self.load_counter.store(0, Ordering::Relaxed);
+        self.runtime.load().load_counter.store(0, Ordering::Relaxed);
         self.update_running_requests_metrics();
     }
 
-    fn worker_routing_key_load(&self) -> &WorkerRoutingKeyLoad {
-        &self.worker_routing_key_load
+    fn routing_key_load(&self) -> usize {
+        self.runtime.load().worker_routing_key_load.value()
+    }
+
+    fn increment_routing_key_load(&self, routing_key: &str) {
+        self.runtime
+            .load()
+            .worker_routing_key_load
+            .increment(routing_key);
+    }
+
+    fn decrement_routing_key_load(&self, routing_key: &str) {
+        self.runtime
+            .load()
+            .worker_routing_key_load
+            .decrement(routing_key);
     }
 
     fn processed_requests(&self) -> usize {
-        self.processed_counter.load(Ordering::Relaxed)
+        self.runtime
+            .load()
+            .processed_counter
+            .load(Ordering::Relaxed)
     }
 
     fn increment_processed(&self) {
-        self.processed_counter.fetch_add(1, Ordering::Relaxed);
+        self.runtime
+            .load()
+            .processed_counter
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn metadata(&self) -> &WorkerMetadata {
         &self.metadata
     }
 
-    fn circuit_breaker(&self) -> &CircuitBreaker {
-        &self.circuit_breaker
+    fn circuit_breaker_state(&self) -> super::circuit_breaker::CircuitState {
+        self.circuit_breaker.load().state()
+    }
+
+    fn circuit_breaker_can_execute(&self) -> bool {
+        self.circuit_breaker.load().can_execute()
+    }
+
+    fn record_circuit_breaker_outcome(&self, success: bool) {
+        self.circuit_breaker.load().record_outcome(success);
     }
 
     fn resilience(&self) -> &ResolvedResilience {
@@ -945,7 +1072,7 @@ impl WorkerLoadGuard {
         let routing_key = extract_routing_key(headers).map(String::from);
 
         if let Some(ref key) = routing_key {
-            worker.worker_routing_key_load().increment(key);
+            worker.increment_routing_key_load(key);
         }
 
         Self {
@@ -959,7 +1086,7 @@ impl Drop for WorkerLoadGuard {
     fn drop(&mut self) {
         self.worker.decrement_load();
         if let Some(ref key) = self.routing_key {
-            self.worker.worker_routing_key_load().decrement(key);
+            self.worker.decrement_routing_key_load(key);
         }
     }
 }
@@ -1011,56 +1138,6 @@ impl<T: Send + Unpin + 'static> http_body::Body for AttachedBody<T> {
 
     fn size_hint(&self) -> http_body::SizeHint {
         self.inner.size_hint()
-    }
-}
-
-/// Health checker handle with graceful shutdown.
-///
-/// The checker sleeps until the next worker is due for a health check,
-/// so it wakes only when there is actual work to do.
-pub(crate) struct HealthChecker {
-    handle: Option<tokio::task::JoinHandle<()>>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
-}
-
-impl fmt::Debug for HealthChecker {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HealthChecker").finish()
-    }
-}
-
-impl HealthChecker {
-    pub fn new(
-        handle: tokio::task::JoinHandle<()>,
-        shutdown_notify: Arc<tokio::sync::Notify>,
-    ) -> Self {
-        Self {
-            handle: Some(handle),
-            shutdown_notify,
-        }
-    }
-
-    /// Shutdown the health checker gracefully.
-    /// Wakes the sleeping task immediately so it can exit cleanly.
-    /// Prefer this over dropping when you can `.await` — it lets the
-    /// current health-check iteration finish instead of aborting mid-flight.
-    #[expect(
-        dead_code,
-        reason = "Drop::drop handles abort; this exists for graceful shutdown when an async context is available"
-    )]
-    pub async fn shutdown(&mut self) {
-        self.shutdown_notify.notify_one();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.await;
-        }
-    }
-}
-
-impl Drop for HealthChecker {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
     }
 }
 
@@ -1622,7 +1699,7 @@ mod tests {
             .build();
 
         assert!(worker.is_available());
-        assert_eq!(worker.circuit_breaker().state(), CircuitState::Closed);
+        assert_eq!(worker.circuit_breaker_state(), CircuitState::Closed);
 
         worker.record_outcome(503);
         worker.record_outcome(503);
@@ -1635,7 +1712,7 @@ mod tests {
 
         assert!(!worker.is_available());
         assert!(worker.is_healthy());
-        assert!(!worker.circuit_breaker().can_execute());
+        assert!(!worker.circuit_breaker_can_execute());
     }
 
     #[test]
@@ -1661,10 +1738,10 @@ mod tests {
         thread::sleep(Duration::from_millis(150));
 
         assert!(worker.is_available());
-        assert_eq!(worker.circuit_breaker().state(), CircuitState::HalfOpen);
+        assert_eq!(worker.circuit_breaker_state(), CircuitState::HalfOpen);
 
         worker.record_outcome(200);
-        assert_eq!(worker.circuit_breaker().state(), CircuitState::Closed);
+        assert_eq!(worker.circuit_breaker_state(), CircuitState::Closed);
     }
 
     #[test]
@@ -1682,7 +1759,7 @@ mod tests {
         }
 
         assert!(!dp_worker.is_available());
-        assert_eq!(dp_worker.circuit_breaker().state(), CircuitState::Open);
+        assert_eq!(dp_worker.circuit_breaker_state(), CircuitState::Open);
     }
 
     #[tokio::test]
@@ -1888,7 +1965,7 @@ mod tests {
         );
 
         assert_eq!(worker.load(), 0);
-        assert_eq!(worker.worker_routing_key_load().value(), 0);
+        assert_eq!(worker.routing_key_load(), 0);
 
         let mut headers = http::HeaderMap::new();
         headers.insert("x-smg-routing-key", "key-123".parse().unwrap());
@@ -1896,11 +1973,11 @@ mod tests {
         {
             let _guard = WorkerLoadGuard::new(worker.clone(), Some(&headers));
             assert_eq!(worker.load(), 1);
-            assert_eq!(worker.worker_routing_key_load().value(), 1);
+            assert_eq!(worker.routing_key_load(), 1);
         }
 
         assert_eq!(worker.load(), 0);
-        assert_eq!(worker.worker_routing_key_load().value(), 0);
+        assert_eq!(worker.routing_key_load(), 0);
     }
 
     #[test]
@@ -1914,16 +1991,16 @@ mod tests {
         );
 
         assert_eq!(worker.load(), 0);
-        assert_eq!(worker.worker_routing_key_load().value(), 0);
+        assert_eq!(worker.routing_key_load(), 0);
 
         {
             let _guard = WorkerLoadGuard::new(worker.clone(), None);
             assert_eq!(worker.load(), 1);
-            assert_eq!(worker.worker_routing_key_load().value(), 0);
+            assert_eq!(worker.routing_key_load(), 0);
         }
 
         assert_eq!(worker.load(), 0);
-        assert_eq!(worker.worker_routing_key_load().value(), 0);
+        assert_eq!(worker.routing_key_load(), 0);
     }
 
     #[test]
@@ -1941,19 +2018,19 @@ mod tests {
 
         let guard1 = WorkerLoadGuard::new(worker.clone(), Some(&headers));
         assert_eq!(worker.load(), 1);
-        assert_eq!(worker.worker_routing_key_load().value(), 1);
+        assert_eq!(worker.routing_key_load(), 1);
 
         let guard2 = WorkerLoadGuard::new(worker.clone(), Some(&headers));
         assert_eq!(worker.load(), 2);
-        assert_eq!(worker.worker_routing_key_load().value(), 1);
+        assert_eq!(worker.routing_key_load(), 1);
 
         drop(guard1);
         assert_eq!(worker.load(), 1);
-        assert_eq!(worker.worker_routing_key_load().value(), 1);
+        assert_eq!(worker.routing_key_load(), 1);
 
         drop(guard2);
         assert_eq!(worker.load(), 0);
-        assert_eq!(worker.worker_routing_key_load().value(), 0);
+        assert_eq!(worker.routing_key_load(), 0);
     }
 
     #[test]

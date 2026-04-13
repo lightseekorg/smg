@@ -41,6 +41,7 @@ pub enum Job {
     },
     RemoveWorker {
         url: String,
+        expected_revision: Option<u64>,
     },
     InitializeWorkersFromConfig {
         router_config: Box<RouterConfig>,
@@ -87,7 +88,7 @@ impl Job {
         match self {
             Job::AddWorker { config } => &config.url,
             Job::UpdateWorker { url, .. } => url,
-            Job::RemoveWorker { url } => url,
+            Job::RemoveWorker { url, .. } => url,
             Job::InitializeWorkersFromConfig { .. } => "startup",
             Job::InitializeMcpServers { .. } => "startup",
             Job::RegisterMcpServer { config } => &config.name,
@@ -366,7 +367,10 @@ impl JobQueue {
                     .wait_for_completion(instance_id, url, timeout_duration)
                     .await
             }
-            Job::RemoveWorker { url } => {
+            Job::RemoveWorker {
+                url,
+                expected_revision,
+            } => {
                 let engines = context
                     .workflow_engines
                     .get()
@@ -375,6 +379,7 @@ impl JobQueue {
                 let workflow_data = create_worker_removal_workflow_data(
                     url.to_string(),
                     context.router_config.dp_aware,
+                    *expected_revision,
                     Arc::clone(context),
                 );
 

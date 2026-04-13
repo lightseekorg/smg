@@ -10,7 +10,7 @@ use super::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
     resilience::ResolvedResilience,
     worker::{
-        BasicWorker, ConnectionMode, RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad, WorkerType,
+        BasicWorker, ConnectionMode, RuntimeType, WorkerMetadata, WorkerRuntime, WorkerType,
         DEFAULT_WORKER_HTTP_TIMEOUT_SECS,
     },
 };
@@ -227,10 +227,7 @@ impl BasicWorkerBuilder {
 
     /// Build the BasicWorker instance
     pub fn build(mut self) -> BasicWorker {
-        use std::sync::{
-            atomic::{AtomicU8, AtomicUsize},
-            Arc,
-        };
+        use std::sync::Arc;
 
         use tokio::sync::OnceCell;
 
@@ -287,17 +284,11 @@ impl BasicWorkerBuilder {
         let resilience = self.resilience.unwrap_or_default();
 
         BasicWorker {
-            load_counter: Arc::new(AtomicUsize::new(0)),
-            worker_routing_key_load: Arc::new(WorkerRoutingKeyLoad::new(&metadata.spec.url)),
-            processed_counter: Arc::new(AtomicUsize::new(0)),
-            status: Arc::new(AtomicU8::new(initial_status as u8)),
-            consecutive_failures: Arc::new(AtomicUsize::new(0)),
-            consecutive_successes: Arc::new(AtomicUsize::new(0)),
-            total_pending_probes: Arc::new(AtomicUsize::new(0)),
-            circuit_breaker: CircuitBreaker::with_config_and_label(
+            runtime: ArcSwap::from_pointee(WorkerRuntime::new(&metadata.spec.url, initial_status)),
+            circuit_breaker: ArcSwap::from_pointee(CircuitBreaker::with_config_and_label(
                 self.circuit_breaker_config,
                 metadata.spec.url.clone(),
-            ),
+            )),
             metadata,
             grpc_client,
             models_override: Arc::new(ArcSwap::from_pointee(WorkerModels::Wildcard)),

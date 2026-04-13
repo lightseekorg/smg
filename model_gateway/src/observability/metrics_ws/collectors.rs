@@ -206,7 +206,7 @@ fn collect_workers(context: &AppContext) -> Value {
                 "is_healthy": w.is_healthy(),
                 "load": w.load(),
                 "processed_requests": w.processed_requests(),
-                "circuit_breaker": w.circuit_breaker().state().to_string(),
+                "circuit_breaker": w.circuit_breaker_state().to_string(),
             })
         })
         .collect();

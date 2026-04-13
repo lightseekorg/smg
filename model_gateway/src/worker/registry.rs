@@ -11,10 +11,7 @@
 //! The ring is rebuilt only when workers are added/removed, not per-request.
 //! Uses virtual nodes (150 per worker) for even distribution and blake3 for stable hashing.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use dashmap::{mapref::entry::Entry, DashMap};
 use openai_protocol::worker::WorkerStatus;
@@ -29,10 +26,9 @@ use crate::{
     worker::{
         circuit_breaker::CircuitState,
         event::WorkerEvent,
-        worker::{HealthChecker, RuntimeType, WorkerType},
+        worker::{RuntimeType, WorkerType},
         ConnectionMode, Worker,
     },
-    workflow::{Job, JobQueue},
 };
 
 /// Number of virtual nodes per physical worker for even distribution.
@@ -179,6 +175,15 @@ impl Default for WorkerId {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Side-effect-free worker snapshot for subscriber bootstrap or lag recovery.
+#[derive(Debug, Clone)]
+pub struct WorkerDescriptor {
+    pub worker_id: WorkerId,
+    pub status: WorkerStatus,
+    pub disable_health_check: bool,
+    pub check_interval_secs: u64,
 }
 
 /// Model index using immutable snapshots for lock-free reads.
@@ -465,6 +470,14 @@ impl WorkerRegistry {
             return false;
         }
 
+        if !new_worker.inherit_shared_state_from(&*old_worker) {
+            tracing::warn!(
+                worker_id = %worker_id.as_str(),
+                worker_url = old_worker.url(),
+                "replace() did not preserve shared mutable worker state"
+            );
+        }
+
         // Overwrite worker object atomically
         self.workers.insert(worker_id.clone(), new_worker.clone());
 
@@ -743,6 +756,22 @@ impl WorkerRegistry {
             .collect()
     }
 
+    /// Get a side-effect-free snapshot for startup reconcile or lag recovery.
+    pub fn reconcile_snapshot(&self) -> Vec<WorkerDescriptor> {
+        self.workers
+            .iter()
+            .map(|entry| {
+                let worker = entry.value();
+                WorkerDescriptor {
+                    worker_id: entry.key().clone(),
+                    status: worker.status(),
+                    disable_health_check: worker.metadata().health_config.disable_health_check,
+                    check_interval_secs: worker.metadata().health_config.check_interval_secs,
+                }
+            })
+            .collect()
+    }
+
     /// Get all worker URLs
     pub fn get_all_urls(&self) -> Vec<String> {
         self.workers
@@ -870,7 +899,7 @@ impl WorkerRegistry {
                 ConnectionMode::Grpc => grpc_count += 1,
             }
 
-            match worker.circuit_breaker().state() {
+            match worker.circuit_breaker_state() {
                 CircuitState::Open => cb_open_count += 1,
                 CircuitState::HalfOpen => cb_half_open_count += 1,
                 CircuitState::Closed => {}
@@ -912,132 +941,117 @@ impl WorkerRegistry {
         (regular_count, pd_count)
     }
 
-    /// Start a deadline-driven health checker for all workers in the registry.
+    /// Atomically transition a worker's lifecycle status and emit a
+    /// `StatusChanged` event if it actually changed.
     ///
-    /// Each worker is checked according to its own `health_config.check_interval_secs`.
-    /// The task sleeps until the next worker is due, so it only wakes when there is
-    /// actual work to do — zero CPU when idle, no polling.
-    pub(crate) fn start_health_checker(
+    /// This is a pure mutation primitive — the registry has no opinion on
+    /// when a worker should transition. The caller (typically `WorkerManager`)
+    /// owns the state machine logic.
+    ///
+    /// The per-worker mutation lock guarantees:
+    ///   1. The status read + write + event emit are atomic per worker.
+    ///   2. Two concurrent calls cannot interleave to publish events out of
+    ///      order for the same worker.
+    ///
+    /// Returns `Some((old, new))` if the status changed, `None` if the worker
+    /// is gone or the status was already `new_status`.
+    pub fn transition_status(
         &self,
-        default_interval_secs: u64,
-        remove_unhealthy: bool,
-        job_queue: Option<Arc<JobQueue>>,
-    ) -> HealthChecker {
-        let shutdown_notify = Arc::new(tokio::sync::Notify::new());
-        let shutdown_clone = shutdown_notify.clone();
-        let workers_ref = self.workers.clone();
-        let job_queue = if remove_unhealthy { job_queue } else { None };
+        worker_id: &WorkerId,
+        new_status: WorkerStatus,
+    ) -> Option<(WorkerStatus, WorkerStatus)> {
+        self.transition_status_inner(worker_id, None, new_status)
+    }
 
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "Health checker loop: runs for the lifetime of the registry, handle is stored in HealthChecker and abort() is called on drop"
-        )]
-        let handle = tokio::spawn(async move {
-            // next_check[url] = Instant when the worker is next due for a health check.
-            let mut next_check: HashMap<String, tokio::time::Instant> = HashMap::new();
+    /// Same as `transition_status()`, but becomes a no-op if the currently
+    /// installed worker revision no longer matches `expected_revision`.
+    pub fn transition_status_if_revision(
+        &self,
+        worker_id: &WorkerId,
+        expected_revision: u64,
+        new_status: WorkerStatus,
+    ) -> Option<(WorkerStatus, WorkerStatus)> {
+        self.transition_status_inner(worker_id, Some(expected_revision), new_status)
+    }
 
-            loop {
-                let now = tokio::time::Instant::now();
+    /// Apply a worker-local mutation while holding the per-worker lock and
+    /// optionally emit a `StatusChanged` event under the same lock.
+    ///
+    /// Used by `WorkerManager` so counter mutation and revision-checked status
+    /// transitions cannot race a same-URL `replace()`.
+    pub fn apply_if_revision<T, F>(
+        &self,
+        worker_id: &WorkerId,
+        expected_revision: u64,
+        f: F,
+    ) -> Option<(T, Option<(WorkerStatus, WorkerStatus)>)>
+    where
+        F: FnOnce(&Arc<dyn Worker>) -> (T, Option<WorkerStatus>),
+    {
+        let lock = self
+            .worker_mutation_locks
+            .entry(worker_id.clone())
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
 
-                // Snapshot current workers from the registry
-                let workers: Vec<Arc<dyn Worker>> = workers_ref
-                    .iter()
-                    .map(|entry| entry.value().clone())
-                    .collect();
+        let worker = self.workers.get(worker_id)?.clone();
+        if worker.revision() != expected_revision {
+            return None;
+        }
 
-                // Sync schedule with registry: add new workers, prune removed
-                // and disabled ones so stale deadlines don't cause wakeups.
-                let checkable_urls: HashSet<String> = workers
-                    .iter()
-                    .filter(|w| !w.metadata().health_config.disable_health_check)
-                    .map(|w| w.url().to_string())
-                    .collect();
-                next_check.retain(|url, _| checkable_urls.contains(url));
-                for url in &checkable_urls {
-                    next_check.entry(url.clone()).or_insert(now);
-                }
-
-                // Collect workers whose deadline has passed
-                let due_workers: Vec<_> = workers
-                    .iter()
-                    .filter(|w| !w.metadata().health_config.disable_health_check)
-                    .filter(|w| {
-                        next_check
-                            .get(w.url())
-                            .is_some_and(|deadline| now >= *deadline)
-                    })
-                    .cloned()
-                    .collect();
-
-                // Run due health checks in parallel and schedule the next deadline
-                if !due_workers.is_empty() {
-                    for worker in &due_workers {
-                        let secs = worker.metadata().health_config.check_interval_secs;
-                        let secs = if secs > 0 {
-                            secs
-                        } else {
-                            default_interval_secs
-                        };
-                        next_check.insert(
-                            worker.url().to_string(),
-                            now + tokio::time::Duration::from_secs(secs),
-                        );
-                    }
-                    let futs: Vec<_> = due_workers
-                        .into_iter()
-                        .map(|w| async move {
-                            let failed = w.check_health_async().await.is_err();
-                            (w, failed)
-                        })
-                        .collect();
-                    let checked_workers = futures::future::join_all(futs).await;
-
-                    // Only remove Failed workers — not Pending (still starting)
-                    // or NotReady (may recover). Failed is terminal, so we
-                    // don't gate on *failed (a worker can reach Failed via
-                    // max_pending_probes on a probe that returned Ok(false)).
-                    if let Some(ref job_queue) = job_queue {
-                        for (worker, _failed) in &checked_workers {
-                            if worker.status() == WorkerStatus::Failed {
-                                let url = worker.url().to_string();
-                                tracing::warn!(
-                                    worker_url = %url,
-                                    "Removing unhealthy worker from registry"
-                                );
-                                next_check.remove(&url);
-                                if let Err(e) = job_queue
-                                    .submit(Job::RemoveWorker { url: url.clone() })
-                                    .await
-                                {
-                                    tracing::error!(
-                                        worker_url = %url,
-                                        error = %e,
-                                        "Failed to submit worker removal job"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Sleep until the earliest deadline or until shutdown is signalled.
-                // If the registry is empty, sleep for the default interval then re-scan
-                // (new workers may have been added).
-                let sleep_until = next_check.values().min().copied().unwrap_or_else(|| {
-                    now + tokio::time::Duration::from_secs(default_interval_secs)
+        let old_status = worker.status();
+        let (result, candidate_status) = f(&worker);
+        let transition = match candidate_status {
+            Some(new_status) if new_status != old_status => {
+                worker.set_status(new_status);
+                let _ = self.event_tx.send(WorkerEvent::StatusChanged {
+                    worker_id: worker_id.clone(),
+                    worker: worker.clone(),
+                    old_status,
+                    new_status,
                 });
-
-                tokio::select! {
-                    () = tokio::time::sleep_until(sleep_until) => {}
-                    () = shutdown_clone.notified() => {
-                        tracing::debug!("Registry health checker shutting down");
-                        break;
-                    }
-                }
+                Some((old_status, new_status))
             }
+            _ => None,
+        };
+
+        Some((result, transition))
+    }
+
+    fn transition_status_inner(
+        &self,
+        worker_id: &WorkerId,
+        expected_revision: Option<u64>,
+        new_status: WorkerStatus,
+    ) -> Option<(WorkerStatus, WorkerStatus)> {
+        let lock = self
+            .worker_mutation_locks
+            .entry(worker_id.clone())
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
+
+        let worker = self.workers.get(worker_id)?.clone();
+        if expected_revision.is_some_and(|revision| worker.revision() != revision) {
+            return None;
+        }
+
+        let old_status = worker.status();
+        if old_status == new_status {
+            return None;
+        }
+
+        worker.set_status(new_status);
+
+        let _ = self.event_tx.send(WorkerEvent::StatusChanged {
+            worker_id: worker_id.clone(),
+            worker: worker.clone(),
+            old_status,
+            new_status,
         });
 
-        HealthChecker::new(handle, shutdown_notify)
+        Some((old_status, new_status))
     }
 }
 
@@ -1128,7 +1142,17 @@ mod tests {
     use openai_protocol::model_card::ModelCard;
 
     use super::*;
-    use crate::worker::{circuit_breaker::CircuitBreakerConfig, BasicWorkerBuilder};
+    use crate::worker::{
+        circuit_breaker::{CircuitBreakerConfig, CircuitState},
+        BasicWorkerBuilder, WorkerLoadGuard,
+    };
+
+    fn no_health_check() -> openai_protocol::worker::HealthCheckConfig {
+        openai_protocol::worker::HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_worker_registry() {
@@ -1229,131 +1253,117 @@ mod tests {
         assert_eq!(llama_workers_after[0].url(), "http://worker2:8080");
     }
 
-    #[tokio::test]
-    async fn test_pending_worker_stays_pending_under_failed_probes() {
-        use openai_protocol::worker::HealthCheckConfig;
-
-        // Pending workers do NOT transition to NotReady on failed probes —
-        // they stay Pending until either `success_threshold` consecutive
-        // successes (→Ready) or `max_pending_probes` total attempts (→Failed).
-        // This test verifies the Pending state is sticky during early failures.
-        let registry = WorkerRegistry::new();
-
-        let mut labels = HashMap::new();
-        labels.insert("model_id".to_string(), "test-model".to_string());
-
-        let worker: Arc<dyn Worker> = Arc::new(
-            BasicWorkerBuilder::new("http://127.0.0.1:1")
-                .worker_type(WorkerType::Regular)
-                .labels(labels)
-                .health_config(HealthCheckConfig {
-                    failure_threshold: 1,
-                    success_threshold: 1,
-                    timeout_secs: 1,
-                    check_interval_secs: 1,
-                    disable_health_check: false,
-                })
-                .build(),
-        );
-        assert_eq!(worker.status(), WorkerStatus::Pending);
-
-        registry.register(worker.clone()).unwrap();
-        let _hc = registry.start_health_checker(1, true, None);
-
-        // Wait for a few probe attempts. With check_interval=1 and a
-        // non-existent URL, probes will fail. With failure_threshold=1,
-        // max_pending_probes is 10 — so after ~3s we expect Pending still.
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
-        let stats = registry.stats();
-        assert_eq!(stats.total_workers, 1);
-        assert_eq!(stats.healthy_workers, 0, "Pending workers are not healthy");
-        // Worker should still be Pending — not yet Failed (max_pending_probes
-        // is 10, we've only run ~3 probes) and not NotReady (Pending workers
-        // don't transition to NotReady on failure).
-        let after = registry.get_by_url("http://127.0.0.1:1").unwrap();
-        assert_eq!(
-            after.status(),
-            WorkerStatus::Pending,
-            "Pending should be sticky under early failures"
-        );
-    }
+    // Health-checker integration tests moved to worker/manager.rs along with
+    // the loop itself. The registry is now a pure collection — see
+    // `worker::manager::WorkerManager` tests.
 
     #[test]
-    fn test_failed_worker_can_be_removed_from_registry() {
-        // Drives the removal-on-Failed logic without needing the async
-        // health checker loop or a JobQueue. Verifies that the registry
-        // accepts removal of a Failed worker via remove() and that the
-        // worker is gone afterward.
-        use openai_protocol::worker::HealthCheckConfig;
-
+    fn test_transition_status_emits_event_and_changes_status() {
         let registry = WorkerRegistry::new();
+        let mut rx = registry.subscribe_events();
 
         let worker: Arc<dyn Worker> = Arc::new(
-            BasicWorkerBuilder::new("http://failed:8080")
+            BasicWorkerBuilder::new("http://w1:8080")
                 .worker_type(WorkerType::Regular)
-                .health_config(HealthCheckConfig {
+                .health_config(openai_protocol::worker::HealthCheckConfig {
                     disable_health_check: true,
-                    ..HealthCheckConfig::default()
+                    ..Default::default()
                 })
                 .build(),
         );
         let worker_id = registry.register(worker.clone()).unwrap();
-        assert_eq!(worker.status(), WorkerStatus::Ready);
+        // Drain Registered event
+        let _ = rx.try_recv().unwrap();
 
-        // Simulate the state machine reaching Failed.
-        worker.set_status(WorkerStatus::Failed);
-        assert_eq!(
-            registry.get(&worker_id).unwrap().status(),
-            WorkerStatus::Failed
-        );
+        // Initial status is Ready (disable_health_check). Transition to NotReady.
+        let result = registry.transition_status(&worker_id, WorkerStatus::NotReady);
+        assert_eq!(result, Some((WorkerStatus::Ready, WorkerStatus::NotReady)));
+        assert_eq!(worker.status(), WorkerStatus::NotReady);
 
-        // The health checker's removal loop only acts on workers in Failed state.
-        // Verify we can remove a Failed worker through the standard remove() API
-        // (which is what Job::RemoveWorker eventually invokes).
-        assert!(registry.remove(&worker_id).is_some());
-        assert!(registry.get(&worker_id).is_none());
-        assert_eq!(registry.stats().total_workers, 0);
+        let event = rx.try_recv().unwrap();
+        match event {
+            WorkerEvent::StatusChanged {
+                old_status,
+                new_status,
+                ..
+            } => {
+                assert_eq!(old_status, WorkerStatus::Ready);
+                assert_eq!(new_status, WorkerStatus::NotReady);
+            }
+            other => panic!("Expected StatusChanged, got {other:?}"),
+        }
     }
 
-    #[tokio::test]
-    async fn test_health_checker_keeps_workers_when_remove_unhealthy_disabled() {
-        use openai_protocol::worker::HealthCheckConfig;
-
-        // When --remove-unhealthy-workers is false, workers in any state
-        // (Pending, NotReady, Failed) should remain in the registry.
+    #[test]
+    fn test_transition_status_no_op_when_status_unchanged() {
         let registry = WorkerRegistry::new();
+        let mut rx = registry.subscribe_events();
 
-        let mut labels = HashMap::new();
-        labels.insert("model_id".to_string(), "test-model".to_string());
-
-        let worker: Box<dyn Worker> = Box::new(
-            BasicWorkerBuilder::new("http://127.0.0.1:1")
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w1:8080")
                 .worker_type(WorkerType::Regular)
-                .labels(labels)
-                .health_config(HealthCheckConfig {
-                    failure_threshold: 1,
-                    success_threshold: 1,
-                    timeout_secs: 1,
-                    check_interval_secs: 1,
-                    disable_health_check: false,
+                .health_config(openai_protocol::worker::HealthCheckConfig {
+                    disable_health_check: true,
+                    ..Default::default()
                 })
                 .build(),
         );
+        let worker_id = registry.register(worker).unwrap();
+        let _ = rx.try_recv().unwrap();
 
-        registry.register(Arc::from(worker)).unwrap();
-        assert_eq!(registry.stats().total_workers, 1);
+        // Already Ready — transition to Ready is a no-op
+        assert_eq!(
+            registry.transition_status(&worker_id, WorkerStatus::Ready),
+            None
+        );
+        assert!(rx.try_recv().is_err(), "no event should be emitted");
+    }
 
-        // Start health checker with remove_unhealthy=false
-        let _hc = registry.start_health_checker(1, false, None);
+    #[test]
+    fn test_transition_status_returns_none_for_missing_worker() {
+        let registry = WorkerRegistry::new();
+        let missing = WorkerId::from_string("nonexistent".to_string());
+        assert_eq!(
+            registry.transition_status(&missing, WorkerStatus::Ready),
+            None
+        );
+    }
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    #[test]
+    fn test_transition_status_if_revision_rejects_stale_transition() {
+        let registry = WorkerRegistry::new();
+
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w1:8080")
+                .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
+                .build(),
+        );
+        let worker_id = registry.register(worker.clone()).unwrap();
+        let stale_revision = worker.revision();
+
+        let replacement: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w1:8080")
+                .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
+                .priority(99)
+                .build(),
+        );
+        assert!(registry.replace(&worker_id, replacement));
 
         assert_eq!(
-            registry.stats().total_workers,
-            1,
-            "Worker should remain in the registry when remove_unhealthy is false"
+            registry.transition_status_if_revision(
+                &worker_id,
+                stale_revision,
+                WorkerStatus::NotReady
+            ),
+            None
         );
+
+        let current = registry.get(&worker_id).unwrap();
+        assert_eq!(current.status(), WorkerStatus::Ready);
+        assert_eq!(current.priority(), 99);
+        assert_eq!(current.revision(), stale_revision + 1);
     }
 
     #[test]
@@ -1516,6 +1526,56 @@ mod tests {
         let after = registry.get(&first_id).unwrap();
         assert_eq!(after.status(), WorkerStatus::Ready);
         assert_eq!(after.priority(), 99, "new priority should be applied");
+    }
+
+    #[test]
+    fn test_replace_preserves_runtime_state_and_circuit_breaker() {
+        let registry = WorkerRegistry::new();
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-smg-routing-key", "sticky-key".parse().unwrap());
+
+        let first: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://worker:8080")
+                .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
+                .build(),
+        );
+        let first_id = registry.register(first.clone()).unwrap();
+        let initial_revision = first.revision();
+
+        first.set_status(WorkerStatus::NotReady);
+        first.increment_processed();
+        let load_guard = WorkerLoadGuard::new(first.clone(), Some(&headers));
+
+        for _ in 0..5 {
+            first.record_outcome(503);
+        }
+        assert_eq!(first.circuit_breaker_state(), CircuitState::Open);
+
+        let replacement: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://worker:8080")
+                .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
+                .priority(99)
+                .build(),
+        );
+        assert!(registry.replace(&first_id, replacement));
+
+        let current = registry.get(&first_id).unwrap();
+        assert_eq!(current.priority(), 99);
+        assert_eq!(current.status(), WorkerStatus::NotReady);
+        assert_eq!(current.load(), 1);
+        assert_eq!(current.routing_key_load(), 1);
+        assert_eq!(current.processed_requests(), 1);
+        assert_eq!(current.circuit_breaker_state(), CircuitState::Open);
+        assert_eq!(current.revision(), initial_revision + 1);
+
+        first.increment_processed();
+        assert_eq!(current.processed_requests(), 2);
+
+        drop(load_guard);
+        assert_eq!(current.load(), 0);
+        assert_eq!(current.routing_key_load(), 0);
     }
 
     #[test]

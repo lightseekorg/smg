@@ -122,9 +122,19 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
             let new_worker: Arc<dyn Worker> = Arc::new(builder.build());
 
             // Replace the worker in the registry (overwrite-then-diff)
-            app_context
+            let worker_id = app_context
                 .worker_registry
                 .register_or_replace(new_worker.clone());
+
+            // Same-URL replace preserves the existing shared runtime. If the
+            // update disables health checks, force the lifecycle to Ready so
+            // the worker does not stay stuck in a non-routable pre-update
+            // status while the manager correctly skips future probes.
+            if updated_health_config.disable_health_check {
+                let _ = app_context
+                    .worker_registry
+                    .transition_status(&worker_id, WorkerStatus::Ready);
+            }
 
             updated_workers.push(new_worker);
         }

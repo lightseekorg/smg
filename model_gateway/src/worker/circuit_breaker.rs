@@ -8,7 +8,7 @@ use tracing::info;
 use crate::observability::metrics::Metrics;
 
 /// Circuit breaker configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CircuitBreakerConfig {
     /// Number of consecutive failures to open the circuit
     pub failure_threshold: u32,
@@ -141,6 +141,11 @@ impl CircuitBreaker {
     /// Get the metric label
     pub fn metric_label(&self) -> &str {
         &self.metric_label
+    }
+
+    /// Get the configuration used to create this circuit breaker.
+    pub fn config(&self) -> &CircuitBreakerConfig {
+        &self.config
     }
 
     /// Check if a request can be executed (lock-free hot path)

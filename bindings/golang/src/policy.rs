@@ -6,6 +6,7 @@
 //! Rust gateway.
 
 use std::{
+    any::Any,
     ffi::{CStr, CString},
     os::raw::c_char,
     ptr,
@@ -106,6 +107,10 @@ impl std::fmt::Debug for GrpcWorker {
 
 #[async_trait]
 impl Worker for GrpcWorker {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn url(&self) -> &str {
         &self.endpoint
     }
@@ -130,10 +135,32 @@ impl Worker for GrpcWorker {
         self.status.store(status as u8, Ordering::Relaxed);
     }
 
+    fn revision(&self) -> u64 {
+        0
+    }
+
     async fn check_health_async(&self) -> WorkerResult<()> {
         // FFI workers don't do their own health checks
         Ok(())
     }
+
+    // FFI workers don't run the state machine — these counters are unused.
+    // The Go SDK manages worker health via direct set_healthy() calls.
+    fn consecutive_failures_increment(&self) -> usize {
+        0
+    }
+    fn consecutive_failures_reset(&self) {}
+    fn consecutive_successes_increment(&self) -> usize {
+        0
+    }
+    fn consecutive_successes_reset(&self) {}
+    fn total_pending_probes(&self) -> usize {
+        0
+    }
+    fn total_pending_probes_increment(&self) -> usize {
+        0
+    }
+    fn total_pending_probes_reset(&self) {}
 
     fn load(&self) -> usize {
         self.load.load(Ordering::Relaxed)
@@ -147,8 +174,16 @@ impl Worker for GrpcWorker {
         self.load.fetch_sub(1, Ordering::Relaxed);
     }
 
-    fn worker_routing_key_load(&self) -> &WorkerRoutingKeyLoad {
-        &self.routing_key_load
+    fn routing_key_load(&self) -> usize {
+        self.routing_key_load.value()
+    }
+
+    fn increment_routing_key_load(&self, routing_key: &str) {
+        self.routing_key_load.increment(routing_key);
+    }
+
+    fn decrement_routing_key_load(&self, routing_key: &str) {
+        self.routing_key_load.decrement(routing_key);
     }
 
     fn processed_requests(&self) -> usize {
@@ -163,8 +198,16 @@ impl Worker for GrpcWorker {
         &self.metadata
     }
 
-    fn circuit_breaker(&self) -> &CircuitBreaker {
-        &self.circuit_breaker
+    fn circuit_breaker_state(&self) -> smg::worker::circuit_breaker::CircuitState {
+        self.circuit_breaker.state()
+    }
+
+    fn circuit_breaker_can_execute(&self) -> bool {
+        self.circuit_breaker.can_execute()
+    }
+
+    fn record_circuit_breaker_outcome(&self, success: bool) {
+        self.circuit_breaker.record_outcome(success);
     }
 
     fn resilience(&self) -> &ResolvedResilience {
