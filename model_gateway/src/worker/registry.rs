@@ -670,32 +670,13 @@ impl WorkerRegistry {
     /// is treated as a new registration (reuses the reserved ID).
     ///
     /// Emits [`WorkerEvent::Registered`] on success. Holds the per-worker
-    /// mutation lock for the index update + event broadcast via
-    /// `register_inner`.
+    /// mutation lock for the entire `register_inner` call — the index
+    /// updates, mesh sync, and event broadcast all run under the same
+    /// lock so subscribers cannot observe `Removed` / `Replaced` /
+    /// `StatusChanged` events before the `Registered` event for a
+    /// concurrent same-ID operation.
     pub fn register(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
-        let worker_id = self.register_inner(worker.clone())?;
-
-        // Sync to mesh if enabled (no-op if mesh is not enabled)
-        {
-            let guard = self.mesh_sync.read();
-            if let Some(ref mesh_sync) = *guard {
-                mesh_sync.sync_worker_state(
-                    worker_id.as_str().to_string(),
-                    worker.model_id().to_string(),
-                    worker.url().to_string(),
-                    worker.is_healthy(),
-                    0.0,
-                    bincode::serialize(&worker.metadata().spec).unwrap_or_default(),
-                );
-            }
-        }
-
-        let _ = self.event_tx.send(WorkerEvent::Registered {
-            worker_id: worker_id.clone(),
-            worker: worker.clone(),
-        });
-
-        Some(worker_id)
+        self.register_inner(worker, true)
     }
 
     /// Register or replace a worker (upsert).
@@ -796,6 +777,17 @@ impl WorkerRegistry {
         // Diff model indexes: remove stale, add new
         for removed_model in old_models.difference(&new_models) {
             self.remove_worker_from_model_index(removed_model, old_worker.url());
+            // Mirror `remove()`: drop any per-model retry override when
+            // the replacement leaves the model with no workers. Without
+            // this, `get_retry_config()` would keep returning a stale
+            // override for a model that is no longer served.
+            let model_empty = self
+                .model_index
+                .get(removed_model)
+                .is_none_or(|workers| workers.is_empty());
+            if model_empty {
+                self.model_retry_configs.remove(removed_model);
+            }
         }
         for added_model in new_models.difference(&old_models) {
             self.add_worker_to_model_index(added_model, new_worker.clone());
@@ -1117,29 +1109,46 @@ impl WorkerRegistry {
     }
 
     /// Core registration logic shared by local and mesh paths.
-    /// Does NOT sync to mesh — callers that need mesh sync do it themselves.
-    fn register_inner(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
-        // Atomic check-and-insert via entry API to avoid TOCTOU races.
-        // If URL already has an ID AND a worker object, it's a duplicate.
-        // If URL has a reserved ID but no worker, it's a pre-reserved slot.
-        // Atomic check-and-insert: reject if URL already has an active worker.
-        // A pre-reserved ID (from reserve_id_for_url) with no worker is allowed.
+    ///
+    /// Acquires the per-worker mutation lock before making the worker
+    /// visible in any index, and holds it for the full sequence — insert,
+    /// index updates, optional outgoing mesh sync, and the `Registered`
+    /// event broadcast. Releasing the lock only after the event is sent
+    /// guarantees subscribers cannot observe a mutation event for this
+    /// `WorkerId` before the `Registered` event that created it.
+    ///
+    /// `sync_mesh` is `true` for local workflow registrations and
+    /// `false` for mesh-imported workers (the mesh subscriber must not
+    /// re-broadcast incoming state to avoid a CRDT version-bump loop).
+    fn register_inner(&self, worker: Arc<dyn Worker>, sync_mesh: bool) -> Option<WorkerId> {
+        // Resolve (or reserve) the worker_id from url_to_id. The entry
+        // API is atomic per bucket, so concurrent callers either reuse
+        // the same existing_id or serialize on vacant insertion.
         let worker_id = match self.url_to_id.entry(worker.url().to_string()) {
-            Entry::Occupied(entry) => {
-                let existing_id = entry.get().clone();
-                if self.workers.contains_key(&existing_id) {
-                    // URL has an active worker — reject
-                    return None;
-                }
-                // Pre-reserved ID with no worker yet — use it
-                existing_id
-            }
+            Entry::Occupied(entry) => entry.get().clone(),
             Entry::Vacant(entry) => {
                 let new_id = WorkerId::new();
                 entry.insert(new_id.clone());
                 new_id
             }
         };
+
+        // Acquire the per-worker mutation lock BEFORE making the worker
+        // visible in `workers`. The lock is keyed on `worker_id`, so
+        // concurrent registrations for the same URL serialize here.
+        let lock = self
+            .worker_mutation_locks
+            .entry(worker_id.clone())
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
+
+        // Under the lock, reject if the URL already has an active
+        // worker. A pre-reserved ID (from `reserve_id_for_url`) or a
+        // same-ID re-entry from a racing caller both hit this check.
+        if self.workers.contains_key(&worker_id) {
+            return None;
+        }
 
         // Store worker
         self.workers.insert(worker_id.clone(), worker.clone());
@@ -1161,6 +1170,30 @@ impl WorkerRegistry {
             .entry(*worker.connection_mode())
             .or_default()
             .push(worker_id.clone());
+
+        // Outgoing mesh sync happens under the lock so mesh observers
+        // cannot see a later mutation (Replaced/Removed/StatusChanged)
+        // for this worker_id before the initial state is published.
+        if sync_mesh {
+            let guard = self.mesh_sync.read();
+            if let Some(ref mesh_sync) = *guard {
+                mesh_sync.sync_worker_state(
+                    worker_id.as_str().to_string(),
+                    worker.model_id().to_string(),
+                    worker.url().to_string(),
+                    worker.is_healthy(),
+                    0.0,
+                    bincode::serialize(&worker.metadata().spec).unwrap_or_default(),
+                );
+            }
+        }
+
+        // Broadcast under the lock so event order per worker_id is
+        // strictly: Registered → (Replaced | StatusChanged | Removed).
+        let _ = self.event_tx.send(WorkerEvent::Registered {
+            worker_id: worker_id.clone(),
+            worker: worker.clone(),
+        });
 
         Some(worker_id)
     }
@@ -1302,20 +1335,15 @@ impl smg_mesh::WorkerStateSubscriber for WorkerRegistry {
 
         worker.set_healthy(state.health);
 
-        // register_inner skips OUTGOING mesh sync to avoid a version-bump
-        // loop on the CRDT. We still publish the local `Registered` event
-        // so in-process subscribers (WorkerManager's health scheduler)
-        // pick up mesh-imported workers via the same event path as any
-        // other registration. Without this, mesh-synced workers would
-        // never enter the health schedule and `--remove-unhealthy-workers`
-        // could not reach them. The event is a local broadcast only; it
-        // does not re-enter the mesh.
+        // `register_inner(worker, false)` skips OUTGOING mesh sync to
+        // avoid a version-bump loop on the CRDT, but still publishes
+        // the local `Registered` event under the per-worker mutation
+        // lock. In-process subscribers (WorkerManager's health
+        // scheduler, etc.) pick up mesh-imported workers via the same
+        // event path as any other registration. The event is a local
+        // broadcast only; it does not re-enter the mesh.
         let worker: Arc<dyn Worker> = Arc::new(worker);
-        if let Some(id) = self.register_inner(worker.clone()) {
-            let _ = self.event_tx.send(WorkerEvent::Registered {
-                worker_id: id.clone(),
-                worker: worker.clone(),
-            });
+        if let Some(id) = self.register_inner(worker, false) {
             tracing::info!(
                 worker_id = %id.as_str(),
                 url = %state.url,
