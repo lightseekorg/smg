@@ -1039,7 +1039,7 @@ mod tests {
         McpToolSession, McpTransport, ResponseFormat, Tool, ToolEntry,
     };
 
-    use super::{build_transformed_mcp_call_item, is_internal_mcp_response_item};
+    use super::*;
 
     fn test_tool(name: &str) -> Tool {
         let mut schema = serde_json::Map::new();
@@ -1190,13 +1190,6 @@ mod tests {
             &session
         ));
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
 
     #[test]
     fn extract_openai_response_output_items_from_embedded_text_json() {
