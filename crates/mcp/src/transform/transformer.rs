@@ -237,17 +237,19 @@ impl ResponseTransformer {
 
     /// Extract queries from MCP result.
     fn extract_queries(result: &serde_json::Value) -> Vec<String> {
-        result
-            .as_object()
-            .and_then(|obj| obj.get("queries"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default()
+        let text_blocks = match result {
+            serde_json::Value::Array(items) => items,
+            _ => return Vec::new(),
+        };
+
+        text_blocks
+            .iter()
+            .filter_map(Self::parse_text_block_payload)
+            .filter_map(|payload| payload.get("queries").cloned())
+            .filter_map(|queries| queries.as_array().cloned())
+            .flat_map(|items| items.into_iter())
+            .filter_map(|query| query.as_str().map(String::from))
+            .collect()
     }
 
     fn extract_query_from_arguments(arguments: &str) -> Option<String> {
