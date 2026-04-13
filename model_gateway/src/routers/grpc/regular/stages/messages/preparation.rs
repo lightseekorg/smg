@@ -199,21 +199,33 @@ impl MessagePreparationStage {
         }
 
         // Step 4: Build tool constraints if tools present
-        let tool_call_constraint = if filtered_tools.is_empty() {
-            None
-        } else {
-            utils::generate_tool_constraints(
-                &filtered_tools,
-                chat_tool_choice.as_ref(),
-                &request.model,
-            )
-            .map_err(|e| {
-                error!(function = "MessagePreparationStage::execute", error = %e, "Invalid tool configuration");
-                error::bad_request(
-                    "invalid_tool_configuration",
-                    format!("Invalid tool configuration: {e}"),
+        let tool_call_constraint = if let (false, Some(tool_choice)) =
+            (filtered_tools.is_empty(), chat_tool_choice.as_ref())
+        {
+            ctx.components
+                .tool_parser_factory
+                .registry()
+                .generate_tool_constraint(
+                    ctx.components.configured_tool_parser.as_deref(),
+                    &filtered_tools,
+                    tool_choice,
                 )
-            })?
+                .map_err(|e| {
+                    error!(function = "MessagePreparationStage::execute", error = %e, "Invalid tool configuration");
+                    error::bad_request(
+                        "invalid_tool_configuration",
+                        format!("Invalid tool configuration: {e}"),
+                    )
+                })?
+        } else {
+            None
+        };
+
+        // Derive skip_special_tokens from constraint type
+        let skip_special_tokens = match &tool_call_constraint {
+            Some(c) if c.is_json_schema() => true,
+            _ if !filtered_tools.is_empty() => false,
+            _ => true,
         };
 
         // Step 5: Create stop sequence decoder
@@ -225,8 +237,8 @@ impl MessagePreparationStage {
         let stop_decoder = utils::create_stop_decoder(
             &tokenizer,
             stop_for_decoder.as_ref(),
-            None,  // no stop_token_ids in Messages API
-            true,  // always skip special tokens — Messages API never exposes raw tokens
+            None, // no stop_token_ids in Messages API
+            skip_special_tokens,
             false, // no_stop_trim default
             false, // ignore_eos — not available in Messages API
         );
@@ -238,7 +250,7 @@ impl MessagePreparationStage {
         ctx.state.preparation = Some(PreparationOutput::Messages {
             token_ids,
             processed_messages,
-            tool_constraints: tool_call_constraint,
+            tool_constraints: tool_call_constraint.map(|c| c.to_tuple()),
         });
 
         // Store stop decoder for reuse in response processing

@@ -68,6 +68,7 @@ impl GrpcPDRouter {
             tokenizer_registry: tokenizer_registry.clone(),
             tool_parser_factory: tool_parser_factory.clone(),
             reasoning_parser_factory: reasoning_parser_factory.clone(),
+            configured_tool_parser: ctx.configured_tool_parser.clone(),
             multimodal,
         });
 

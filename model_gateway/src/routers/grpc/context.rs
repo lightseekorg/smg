@@ -88,10 +88,11 @@ impl std::fmt::Display for FinalResponse {
 /// Shared components (injected once at creation)
 pub(crate) struct SharedComponents {
     pub tokenizer_registry: Arc<TokenizerRegistry>,
-    #[expect(dead_code)]
     pub tool_parser_factory: ToolParserFactory,
     #[expect(dead_code)]
     pub reasoning_parser_factory: ReasoningParserFactory,
+    /// Configured tool parser name (from CLI `--tool-call-parser`)
+    pub configured_tool_parser: Option<String>,
     /// Multimodal processing components (initialized at router creation)
     pub multimodal: Option<Arc<MultimodalComponents>>,
 }

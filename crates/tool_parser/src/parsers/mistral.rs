@@ -45,6 +45,36 @@ pub struct MistralParser {
 }
 
 impl MistralParser {
+    /// Build structural tag for Mistral tool call format.
+    /// Format: `[TOOL_CALLS] [{"name":"func_name", "arguments": {schema} }]`
+    pub fn build_structural_tag(tools: &[Tool], at_least_one: bool) -> Value {
+        let mut tags = Vec::new();
+        for tool in tools {
+            let name = &tool.function.name;
+            if name.is_empty() {
+                continue;
+            }
+            let schema = &tool.function.parameters;
+            let name_json = serde_json::to_string(name).unwrap_or_default();
+            tags.push(serde_json::json!({
+                "begin": format!("[TOOL_CALLS] [{{\"name\": {name_json}, \"arguments\": "),
+                "content": {
+                    "type": "json_schema",
+                    "json_schema": schema,
+                },
+                "end": "}]",
+            }));
+        }
+        serde_json::json!({
+            "format": {
+                "type": "triggered_tags",
+                "triggers": ["[TOOL_CALLS]"],
+                "tags": tags,
+                "at_least_one": at_least_one,
+            }
+        })
+    }
+
     /// Create a new Mistral parser
     pub fn new() -> Self {
         Self {
