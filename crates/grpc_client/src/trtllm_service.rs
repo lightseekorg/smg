@@ -429,6 +429,7 @@ impl TrtllmServiceClient {
         let guided_decoding = Self::build_guided_decoding_from_responses(constraint)?;
 
         let max_tokens = body.max_output_tokens.unwrap_or(2048);
+        let stop = Self::extract_stop_strings(body.stop.as_ref());
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -441,7 +442,7 @@ impl TrtllmServiceClient {
             output_config: Some(output_config),
             max_tokens,
             streaming: body.stream.unwrap_or(false),
-            stop: vec![],
+            stop,
             stop_token_ids: vec![],
             ignore_eos: false,
             bad: vec![],
