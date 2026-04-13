@@ -491,11 +491,11 @@ impl VllmEngineClient {
         Ok(proto::SamplingParams {
             temperature: request.temperature,
             top_p: request.top_p.unwrap_or(1.0),
-            top_k: 0,   // ResponsesRequest doesn't expose top_k (0 means disabled)
-            min_p: 0.0, // ResponsesRequest doesn't expose min_p
-            frequency_penalty: 0.0, // ResponsesRequest doesn't expose frequency_penalty
-            presence_penalty: 0.0, // ResponsesRequest doesn't expose presence_penalty
-            repetition_penalty: 1.0, // ResponsesRequest doesn't expose repetition_penalty
+            top_k: request.top_k.max(0) as u32,
+            min_p: request.min_p,
+            frequency_penalty: request.frequency_penalty.unwrap_or(0.0),
+            presence_penalty: request.presence_penalty.unwrap_or(0.0),
+            repetition_penalty: request.repetition_penalty,
             max_tokens,
             stop: vec![],               // No stop sequences in Responses API
             stop_token_ids: vec![],     // Handled by Harmony stop tokens
@@ -922,6 +922,33 @@ mod tests {
     // vLLM handles multimodal inputs differently than SGLang
 
     // TODO: SessionParams not in current proto - skip test
+
+    #[test]
+    fn test_responses_sampling_params_are_passed_through() {
+        use openai_protocol::responses::ResponsesRequest;
+
+        let request = ResponsesRequest {
+            top_k: 40,
+            min_p: 0.05,
+            repetition_penalty: 1.2,
+            frequency_penalty: Some(0.3),
+            presence_penalty: Some(-0.4),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            max_output_tokens: Some(128),
+            ..Default::default()
+        };
+
+        let params =
+            VllmEngineClient::build_grpc_sampling_params_from_responses(&request, None)
+                .expect("build sampling params");
+
+        assert_eq!(params.top_k, 40);
+        assert!((params.min_p - 0.05).abs() < 1e-6);
+        assert!((params.repetition_penalty - 1.2).abs() < 1e-6);
+        assert!((params.frequency_penalty - 0.3).abs() < 1e-6);
+        assert!((params.presence_penalty - (-0.4)).abs() < 1e-6);
+    }
 
     #[test]
     fn test_embed_request() {
