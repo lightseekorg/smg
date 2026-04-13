@@ -32,10 +32,7 @@ pub fn extract_embedded_openai_responses(result: &serde_json::Value) -> Vec<serd
     let text_blocks = result
         .as_array()
         .map(|items| items.as_slice())
-        .unwrap_or_else(|| {
-            warn!("Expected MCP result to be an array of text blocks");
-            &[]
-        });
+        .unwrap_or(&[]);
 
     let mut openai_responses = Vec::new();
 
