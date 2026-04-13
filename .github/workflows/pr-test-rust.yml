@@ -399,6 +399,7 @@ jobs:
     outputs:
       common: ${{ steps.filter.outputs.common }}
       chat-completions: ${{ steps.filter.outputs.chat-completions }}
+      completions: ${{ steps.filter.outputs.completions }}
       agentic: ${{ steps.filter.outputs.agentic }}
       embeddings: ${{ steps.filter.outputs.embeddings }}
       go-bindings: ${{ steps.filter.outputs.go-bindings }}
@@ -442,6 +443,10 @@ jobs:
               - 'e2e_test/messages/**'
               - 'scripts/ci_agentic_svc_deps.sh'
               - 'scripts/oracle_flyway/**'
+            completions:
+              - 'crates/grpc_client/**'
+              - 'grpc_servicer/**'
+              - 'e2e_test/completions/**'
             embeddings:
               - 'e2e_test/embeddings/**'
             go-bindings:
@@ -481,6 +486,35 @@ jobs:
       runner: 1-gpu-h100
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/chat_completions
+    secrets: inherit
+
+  e2e-1gpu-completions:
+    name: e2e-1gpu-completions (${{ matrix.engine }})
+    needs: [build-wheel, detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.build-wheel.result == 'success'
+      && github.actor != 'dependabot[bot]'
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.completions == 'true')))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sglang
+            timeout: 20
+          - engine: vllm
+            timeout: 20
+    uses: ./.github/workflows/e2e-gpu-job.yml
+    with:
+      engine: ${{ matrix.engine }}
+      gpu_tier: "1"
+      runner: 1-gpu-h100
+      timeout: ${{ matrix.timeout }}
+      test_dirs: e2e_test/completions
     secrets: inherit
 
   e2e-1gpu-embeddings:
@@ -952,7 +986,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-2gpu-chat, e2e-2gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-4gpu-gateway, e2e-vendor, go-unit-tests, go-bindings-e2e]
+    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-completions, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-2gpu-chat, e2e-2gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-4gpu-gateway, e2e-vendor, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -967,6 +1001,7 @@ jobs:
                 "${{ needs.unit-tests.result }}" == "failure" || \
                 "${{ needs.benchmarks.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-chat.result }}" == "failure" || \
+                "${{ needs.e2e-1gpu-completions.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-embeddings.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-gateway.result }}" == "failure" || \
                 "${{ needs.e2e-2gpu-chat.result }}" == "failure" || \
