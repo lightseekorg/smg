@@ -939,9 +939,8 @@ mod tests {
             ..Default::default()
         };
 
-        let params =
-            VllmEngineClient::build_grpc_sampling_params_from_responses(&request, None)
-                .expect("build sampling params");
+        let params = VllmEngineClient::build_grpc_sampling_params_from_responses(&request, None)
+            .expect("build sampling params");
 
         assert_eq!(params.top_k, 40);
         assert!((params.min_p - 0.05).abs() < 1e-6);
