@@ -10,7 +10,7 @@ use std::{
 
 use openai_protocol::{
     chat::ChatCompletionRequest,
-    common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
+    common::{ResponseFormat, StringOrArray},
     completion::CompletionRequest,
     generate::GenerateRequest,
     messages::CreateMessageRequest,
@@ -372,16 +372,7 @@ impl VllmEngineClient {
 
         let max_tokens = request.max_completion_tokens;
 
-        // Handle skip_special_tokens: set to false if tools are present and tool_choice is not "none"
-        let skip_special_tokens = if request.tools.is_some() {
-            match &request.tool_choice {
-                Some(ToolChoice::Value(ToolChoiceValue::None)) => request.skip_special_tokens,
-                Some(_) => false, // tool_choice is not "none"
-                None => false, // TODO: this assumes tool_choice defaults to "auto" when tools present
-            }
-        } else {
-            request.skip_special_tokens
-        };
+        let skip_special_tokens = request.skip_special_tokens;
 
         // Map logprobs: if request.logprobs is true, use top_logprobs value (or 1 if not specified)
         // OpenAI API only exposes output logprobs, not prompt logprobs, for chat completions
@@ -576,9 +567,14 @@ impl VllmEngineClient {
     ) -> Result<proto::SamplingParams, String> {
         let stop_sequences = request.stop_sequences.clone().unwrap_or_default();
 
-        // skip_special_tokens: false when tools are present (same logic as chat)
-        let skip_special_tokens =
-            tool_call_constraint.is_none() && request.tools.as_ref().is_none_or(|t| t.is_empty());
+        // Messages API doesn't expose skip_special_tokens; derive from constraint type.
+        // json_schema constraints include special tokens in the schema itself, so skip them.
+        // Other tool-call modes (e.g. regex) need the raw special tokens preserved.
+        let skip_special_tokens = match &tool_call_constraint {
+            Some((typ, _)) if typ == "json_schema" => true,
+            _ if request.tools.as_ref().is_some_and(|t| !t.is_empty()) => false,
+            _ => true,
+        };
 
         Ok(proto::SamplingParams {
             temperature: Some(request.temperature.unwrap_or(1.0) as f32),
