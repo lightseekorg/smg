@@ -4,10 +4,76 @@ use axum::{
     http::{HeaderMap, HeaderValue},
 };
 use http::header::HeaderName;
+use serde::Deserialize;
 
 static HEADER_TARGET_WORKER: HeaderName = HeaderName::from_static("x-smg-target-worker");
 static HEADER_ROUTING_KEY: HeaderName = HeaderName::from_static("x-smg-routing-key");
 static HEADER_MCP: HeaderName = HeaderName::from_static("x-smg-mcp");
+
+// ── Conversation memory config ────────────────────────────────────────────────
+
+static HEADER_CONVERSATION_MEMORY_CONFIG: HeaderName =
+    HeaderName::from_static("x-conversation-memory-config");
+
+/// Parsed memory configuration extracted from request headers.
+///
+/// Populated from `x-conversation-memory-config` JSON (preferred) or
+/// from legacy `x-smg-memory-*` flat headers (backward compat).
+#[derive(Debug, Clone, Default)]
+pub struct ConversationMemoryConfig {
+    pub ltm_enabled: bool,
+    pub ltm_subject_id: Option<String>,
+    pub ltm_embedding_model_id: Option<String>,
+    pub ltm_extraction_model_id: Option<String>,
+    pub stm_enabled: bool,
+    pub stm_condenser_model_id: Option<String>,
+}
+
+/// Wire-format for the `x-conversation-memory-config` JSON header.
+#[derive(Deserialize, Default)]
+struct MemoryConfigJson {
+    #[serde(default)]
+    long_term_memory: LongTermMemoryJson,
+    #[serde(default)]
+    short_term_memory: ShortTermMemoryJson,
+}
+
+#[derive(Deserialize, Default)]
+struct LongTermMemoryJson {
+    #[serde(default)]
+    enabled: bool,
+    subject_id: Option<String>,
+    embedding_model_id: Option<String>,
+    extraction_model_id: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ShortTermMemoryJson {
+    #[serde(default)]
+    enabled: bool,
+    condenser_model_id: Option<String>,
+}
+
+/// Extract memory configuration from request headers.
+///
+/// Tries the `x-conversation-memory-config` JSON header.
+/// Returns defaults when the header is absent or invalid.
+pub fn extract_conversation_memory_config(headers: Option<&HeaderMap>) -> ConversationMemoryConfig {
+    if let Some(raw) = extract_header_value(headers, &HEADER_CONVERSATION_MEMORY_CONFIG) {
+        if let Ok(cfg) = serde_json::from_str::<MemoryConfigJson>(raw) {
+            return ConversationMemoryConfig {
+                ltm_enabled: cfg.long_term_memory.enabled,
+                ltm_subject_id: cfg.long_term_memory.subject_id,
+                ltm_embedding_model_id: cfg.long_term_memory.embedding_model_id,
+                ltm_extraction_model_id: cfg.long_term_memory.extraction_model_id,
+                stm_enabled: cfg.short_term_memory.enabled,
+                stm_condenser_model_id: cfg.short_term_memory.condenser_model_id,
+            };
+        }
+    }
+
+    ConversationMemoryConfig::default()
+}
 
 fn extract_header_value<'a>(headers: Option<&'a HeaderMap>, name: &HeaderName) -> Option<&'a str> {
     headers
@@ -348,5 +414,60 @@ mod tests {
         let auth = ApiProvider::Anthropic.extract_auth_header(Some(&headers), None);
 
         assert_eq!(auth.unwrap(), "anthropic-key");
+    }
+
+    // ── extract_conversation_memory_config ────────────────────────────────────
+
+    #[test]
+    fn extract_conversation_memory_config_with_valid_json_populates_all_fields() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-conversation-memory-config",
+            r#"{"long_term_memory":{"enabled":true,"subject_id":"sub-1","embedding_model_id":"emb-model","extraction_model_id":"ext-model"},"short_term_memory":{"enabled":true,"condenser_model_id":"cond-model"}}"#
+                .parse()
+                .unwrap(),
+        );
+
+        let cfg = extract_conversation_memory_config(Some(&headers));
+
+        assert!(cfg.ltm_enabled);
+        assert_eq!(cfg.ltm_subject_id.as_deref(), Some("sub-1"));
+        assert_eq!(cfg.ltm_embedding_model_id.as_deref(), Some("emb-model"));
+        assert_eq!(cfg.ltm_extraction_model_id.as_deref(), Some("ext-model"));
+        assert!(cfg.stm_enabled);
+        assert_eq!(cfg.stm_condenser_model_id.as_deref(), Some("cond-model"));
+    }
+
+    #[test]
+    fn extract_conversation_memory_config_with_invalid_json_returns_defaults() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-conversation-memory-config", "not-json".parse().unwrap());
+
+        let cfg = extract_conversation_memory_config(Some(&headers));
+
+        assert!(!cfg.ltm_enabled);
+        assert!(cfg.ltm_subject_id.is_none());
+        assert!(!cfg.stm_enabled);
+    }
+
+    #[test]
+    fn extract_conversation_memory_config_with_absent_json_returns_defaults() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-smg-memory-subject-id", "legacy-sub-2".parse().unwrap());
+
+        let cfg = extract_conversation_memory_config(Some(&headers));
+
+        assert!(!cfg.ltm_enabled);
+        assert!(cfg.ltm_subject_id.is_none());
+    }
+
+    #[test]
+    fn extract_conversation_memory_config_with_no_headers_returns_defaults() {
+        let cfg = extract_conversation_memory_config(None);
+
+        assert!(!cfg.ltm_enabled);
+        assert!(cfg.ltm_subject_id.is_none());
+        assert!(!cfg.stm_enabled);
+        assert!(cfg.stm_condenser_model_id.is_none());
     }
 }

@@ -10,12 +10,12 @@ use openai_protocol::{
 };
 use serde_json::Value;
 use smg_data_connector::{ConversationId, ListParams, ResponseId, ResponseStorageError, SortOrder};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::super::context::ResponsesComponents;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::error,
+    routers::{error, header_utils::ConversationMemoryConfig},
 };
 
 const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
@@ -245,5 +245,78 @@ fn append_current_input(
                 items.push(openai_protocol::responses::normalize_input_item(item));
             }
         }
+    }
+}
+
+// ── Memory context injection ──────────────────────────────────────────────────
+
+/// Inject retrieved memories into the request body before dispatching upstream.
+///
+/// Reads [`ConversationMemoryConfig`] parsed from the incoming headers and
+/// prepends a system message containing the relevant memories so the model
+/// has context for the current turn.
+///
+/// # Current status
+///
+/// This is a **stub**. The config is read and logged so that the call-site
+/// contract is established, but no retrieval is performed yet.
+///
+/// # TODO
+/// - Wire a `ConversationMemoryReader` through the storage layer.
+/// - On `ltm_enabled`: retrieve long-term memories for `subject_id` and
+///   prepend as a system message.
+/// - On `stm_enabled`: retrieve the short-term memory summary (STMO output)
+///   and prepend as a system message.
+pub(crate) async fn inject_memory_context(
+    config: &ConversationMemoryConfig,
+    _request_body: &mut ResponsesRequest,
+) {
+    if config.ltm_enabled {
+        // TODO: retrieve long-term memories and prepend as system message
+        debug!(
+            subject_id = config.ltm_subject_id.as_deref().unwrap_or("<none>"),
+            embedding_model = config.ltm_embedding_model_id.as_deref().unwrap_or("<none>"),
+            extraction_model = config
+                .ltm_extraction_model_id
+                .as_deref()
+                .unwrap_or("<none>"),
+            "LTM recall requested — retrieval not yet implemented"
+        );
+    }
+
+    if config.stm_enabled {
+        // TODO: retrieve STMO condensation summary and prepend as system message
+        debug!(
+            condenser_model = config.stm_condenser_model_id.as_deref().unwrap_or("<none>"),
+            "STMO recall requested — retrieval not yet implemented"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::responses::{ResponseInput, ResponsesRequest};
+
+    use super::inject_memory_context;
+    use crate::routers::header_utils::ConversationMemoryConfig;
+
+    #[tokio::test]
+    async fn inject_memory_context_is_no_op_for_now() {
+        let config = ConversationMemoryConfig {
+            ltm_enabled: true,
+            ltm_subject_id: Some("subj-1".to_string()),
+            ltm_embedding_model_id: Some("embed-1".to_string()),
+            ltm_extraction_model_id: Some("extract-1".to_string()),
+            stm_enabled: true,
+            stm_condenser_model_id: Some("condense-1".to_string()),
+        };
+        let mut request = ResponsesRequest {
+            input: ResponseInput::Text("hello".to_string()),
+            ..Default::default()
+        };
+
+        inject_memory_context(&config, &mut request).await;
+
+        assert!(matches!(request.input, ResponseInput::Text(_)));
     }
 }

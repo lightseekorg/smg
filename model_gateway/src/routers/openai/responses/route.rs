@@ -25,6 +25,7 @@ use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
         error,
+        header_utils::extract_conversation_memory_config,
         worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
 };
@@ -119,6 +120,9 @@ pub(in crate::routers::openai) async fn route_responses(
         Ok(id) => id,
         Err(response) => return response,
     };
+
+    let memory_config = extract_conversation_memory_config(headers);
+    super::history::inject_memory_context(&memory_config, &mut request_body).await;
 
     request_body.store = Some(false);
     if let ResponseInput::Items(ref mut items) = request_body.input {
