@@ -44,7 +44,12 @@
 //! 4. Atomically clear stale entries for the group from the watch
 //!    channel and merge in the fresh loads.
 
-use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 use futures::future;
 use openai_protocol::worker::{WorkerGroupKey, WorkerLoadResponse, WorkerStatus};
@@ -202,7 +207,14 @@ impl WorkerMonitor {
         // registry snapshot and start polling loops.
         self.reconcile_from_registry();
 
-        let monitor = Arc::clone(self);
+        // Hand the spawned task a `Weak<Self>` so it does not pin the
+        // monitor in memory across drops. If we passed an `Arc<Self>`
+        // the spawned task would form a cycle: the monitor stores the
+        // task's `JoinHandle`, and the task closure holds an `Arc`
+        // back to the monitor. The strong count would never reach
+        // zero, `Drop` would never run, and the abort calls would be
+        // unreachable outside of full runtime shutdown.
+        let monitor = Arc::downgrade(self);
         #[expect(
             clippy::disallowed_methods,
             reason = "WorkerMonitor event loop runs for the lifetime of the registry; the JoinHandle is stored on the monitor and aborted in Drop"
@@ -349,7 +361,10 @@ impl WorkerMonitor {
     fn spawn_group_loop(self: &Arc<Self>, key: WorkerGroupKey, interval: Duration) {
         info!("Starting load monitor for group {key} with interval {interval:?}");
 
-        let monitor = Arc::clone(self);
+        // Same `Weak<Self>` rationale as `start_event_loop`: the
+        // group loop is owned by `group_handles` on the monitor, so
+        // it must not own a strong reference back to the monitor.
+        let monitor = Arc::downgrade(self);
         let group_key = key.clone();
 
         #[expect(
@@ -466,12 +481,24 @@ fn group_interval(workers: &[Arc<dyn Worker>], default_interval: Duration) -> Du
 }
 
 /// Background event handler. Lives as long as the `WorkerMonitor`.
+///
+/// Holds a `Weak<WorkerMonitor>` rather than an `Arc<WorkerMonitor>`
+/// so the spawned task does not pin the monitor in memory after every
+/// strong reference has been dropped. Each iteration upgrades the
+/// `Weak` only for the duration of the work and drops the temporary
+/// `Arc` before the next `recv().await`, so the monitor's `Drop` can
+/// fire as soon as the owning `AppContext` goes away.
 async fn run_event_loop(
-    monitor: Arc<WorkerMonitor>,
+    monitor: Weak<WorkerMonitor>,
     mut events_rx: broadcast::Receiver<WorkerEvent>,
 ) {
     loop {
-        match events_rx.recv().await {
+        let event = events_rx.recv().await;
+        let Some(monitor) = monitor.upgrade() else {
+            debug!("WorkerMonitor was dropped; exiting event loop");
+            return;
+        };
+        match event {
             Ok(WorkerEvent::Registered { worker, .. }) => {
                 for key in group_keys_for_worker(&worker) {
                     monitor.reconcile_group(&key);
@@ -534,12 +561,20 @@ async fn run_event_loop(
                 return;
             }
         }
+        // Drop the temporary strong reference so we do not keep the
+        // monitor alive while parked on the next `recv().await`.
+        drop(monitor);
     }
 }
 
 /// Polling loop body for a single worker group.
+///
+/// Holds a `Weak<WorkerMonitor>` for the same cycle-breaking reason
+/// as `run_event_loop`. The temporary `Arc` is upgraded after the
+/// timer tick and dropped before the next tick so the monitor's
+/// `Drop` is reachable.
 async fn group_monitor_loop(
-    monitor: Arc<WorkerMonitor>,
+    monitor: Weak<WorkerMonitor>,
     group_key: WorkerGroupKey,
     interval: Duration,
 ) {
@@ -548,11 +583,17 @@ async fn group_monitor_loop(
     loop {
         interval_timer.tick().await;
 
+        let Some(monitor) = monitor.upgrade() else {
+            debug!("WorkerMonitor was dropped; exiting group loop for {group_key}");
+            return;
+        };
+
         let power_of_two_policies = monitor.policy_registry.get_all_power_of_two_policies();
         if power_of_two_policies.is_empty()
             && monitor.policy_registry.get_dp_rank_policy().is_none()
         {
             debug!("No load-aware policies, skipping load fetch for group {group_key}");
+            drop(monitor);
             continue;
         }
 
@@ -573,6 +614,7 @@ async fn group_monitor_loop(
 
         if workers.is_empty() {
             debug!("No Ready workers in group {group_key}, skipping");
+            drop(monitor);
             continue;
         }
 
@@ -606,8 +648,24 @@ async fn group_monitor_loop(
             }
         }
 
+        // Compute the URL set up front so both the success and
+        // empty-fetch branches can prune stale entries from the watch
+        // snapshot. Without the empty-fetch prune, a group that
+        // starts timing out keeps publishing its previous tick's
+        // loads forever — subscribers see a stale snapshot indefinitely.
+        let all_group_urls: Vec<String> = workers.iter().map(|w| w.url().to_string()).collect();
+
         if group_loads.is_empty() {
-            debug!("No loads fetched for group {group_key}");
+            debug!("No loads fetched for group {group_key}, pruning stale entries");
+            monitor.load_tx.send_modify(|map| {
+                for url in &all_group_urls {
+                    map.remove(url);
+                }
+            });
+            // The DP cache deliberately keeps last-known-good entries
+            // so routing decisions still have a hint to fall back to
+            // when the upstream is briefly unreachable.
+            drop(monitor);
             continue;
         }
 
@@ -626,13 +684,16 @@ async fn group_monitor_loop(
         // entries for *this group's* URLs first, then insert the fresh
         // loads. Workers that failed this tick get their stale entries
         // pruned along with the rest.
-        let all_group_urls: Vec<String> = workers.iter().map(|w| w.url().to_string()).collect();
         monitor.load_tx.send_modify(|map| {
             for url in &all_group_urls {
                 map.remove(url);
             }
             map.extend(group_loads);
         });
+
+        // Drop the temporary strong reference so we do not keep the
+        // monitor alive across the next `interval_timer.tick().await`.
+        drop(monitor);
     }
 }
 
@@ -903,5 +964,38 @@ mod worker_monitor_tests {
         // DP cache entry pruned.
         let cached = monitor.worker_load_manager.dp_cached_loads.read();
         assert!(!cached.contains_key(&url));
+    }
+
+    #[tokio::test]
+    async fn spawned_tasks_use_weak_references() {
+        // Regression test for the Arc cycle bug: the spawned event
+        // loop and the per-group polling loops must hold
+        // `Weak<WorkerMonitor>` rather than `Arc<WorkerMonitor>`. If
+        // they held strong references, the cycle through
+        // `event_task` / `group_handles` would keep the strong count
+        // pinned and `Drop` would never fire outside of full runtime
+        // shutdown.
+        let (registry, monitor) = build_monitor();
+        registry
+            .register(ready_worker("http://w:8080", "llama-3"))
+            .unwrap();
+        monitor.start_event_loop();
+
+        // Bootstrap should have started a polling loop for the
+        // worker's group, on top of the event task itself.
+        assert_eq!(monitor.group_handles.lock().len(), 1);
+
+        // After spawning, only the test's `Arc` should be strong:
+        // both the event task and the group loop downgraded to
+        // `Weak<Self>`.
+        assert_eq!(
+            Arc::strong_count(&monitor),
+            1,
+            "spawned tasks must not hold strong references to the monitor"
+        );
+        assert!(
+            Arc::weak_count(&monitor) >= 2,
+            "expected at least one Weak from the event task and one from the group loop"
+        );
     }
 }
