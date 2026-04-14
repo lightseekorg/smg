@@ -12,7 +12,7 @@ use crate::{
     observability::metrics::Metrics,
     worker::{
         worker::{ConnectionModeExt, WorkerTypeExt},
-        WorkerGroupKey, WorkerRegistry,
+        WorkerRegistry,
     },
     workflow::data::WorkerRegistrationData,
 };
@@ -90,8 +90,8 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for RegisterWorke
             })
             .collect();
 
-        // Update Layer 3 worker pool size metrics per unique type/connection/model
-        // and notify LoadMonitor of new groups
+        // Update Layer 3 worker pool size metrics per unique
+        // `(worker_type, connection_mode, model_id)`.
         for (worker_type, connection_mode, model_id) in &unique_configs {
             // Get labels before moving values into get_workers_filtered
             let worker_type_label = worker_type.as_metric_label();
@@ -116,28 +116,13 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for RegisterWorke
             );
         }
 
-        // Notify LoadMonitor of new worker groups so it can start polling
-        if let Some(ref load_monitor) = app_context.load_monitor {
-            for (worker_type, connection_mode, model_id) in &unique_configs {
-                let key = WorkerGroupKey {
-                    model_id: model_id.clone(),
-                    worker_type: *worker_type,
-                    connection_mode: *connection_mode,
-                };
-                // Use the minimum interval across all workers in this group.
-                // If workers disagree, the fastest polling rate wins (safest default).
-                let interval = workers
-                    .iter()
-                    .filter(|w| {
-                        w.model_id() == model_id
-                            && w.worker_type() == worker_type
-                            && w.connection_mode() == connection_mode
-                    })
-                    .filter_map(|w| w.metadata().spec.load_monitor_interval_secs)
-                    .min();
-                load_monitor.on_group_added(key, interval).await;
-            }
-        }
+        // WorkerMonitor subscribes to registry events directly (see
+        // `worker::monitor::WorkerMonitor::start_event_loop`), so this
+        // step no longer has to push group-add notifications. The
+        // monitor's event loop reconciles the impacted groups as soon
+        // as the `WorkerEvent::Registered` (new worker) or
+        // `WorkerEvent::Replaced` (same-URL update) broadcast fires
+        // from `worker_registry.register_or_replace()` above.
 
         // Note: worker_ids are stored for potential future use but not persisted
         // as they are internal registry identifiers

@@ -16,7 +16,7 @@ use tracing::{debug, error};
 use super::{proxy, RealtimeRegistry};
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::header_utils::extract_auth_header,
+    routers::common::header_utils::extract_auth_header,
     worker::Worker,
 };
 

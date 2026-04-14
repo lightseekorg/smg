@@ -1,6 +1,7 @@
 //! Unified worker activation step.
 
 use async_trait::async_trait;
+use openai_protocol::worker::WorkerStatus;
 use tracing::info;
 use wfaas::{
     StepExecutor, StepResult, WorkflowContext, WorkflowData, WorkflowError, WorkflowResult,
@@ -20,8 +21,8 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for ActivateWorke
             .ok_or_else(|| WorkflowError::ContextValueNotFound("workers".to_string()))?;
 
         for worker in workers {
-            if !worker.is_healthy() {
-                worker.set_healthy(true);
+            if worker.status() != WorkerStatus::Ready {
+                worker.set_status(WorkerStatus::Ready);
             }
         }
 

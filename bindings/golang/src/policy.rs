@@ -145,7 +145,8 @@ impl Worker for GrpcWorker {
     }
 
     // FFI workers don't run the state machine — these counters are unused.
-    // The Go SDK manages worker health via direct set_healthy() calls.
+    // The Go SDK manages worker health via direct set_status() calls
+    // through the `sgl_multi_client_set_worker_health` FFI entry point.
     fn consecutive_failures_increment(&self) -> usize {
         0
     }
@@ -444,7 +445,17 @@ pub unsafe extern "C" fn sgl_multi_client_set_worker_health(
     if worker_index >= client.grpc_workers.len() {
         return SglErrorCode::InvalidArgument;
     }
-    client.grpc_workers[worker_index].set_healthy(healthy);
+    // The Go SDK is the source of truth for FFI worker health, so we
+    // map its boolean directly without the legacy `set_healthy` guard
+    // (which only demoted from `Ready`). FFI workers never run the
+    // local state machine, so a `Pending` start state can be flipped
+    // straight to `Ready` or `NotReady` here.
+    let status = if healthy {
+        WorkerStatus::Ready
+    } else {
+        WorkerStatus::NotReady
+    };
+    client.grpc_workers[worker_index].set_status(status);
     SglErrorCode::Success
 }
 

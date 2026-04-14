@@ -18,6 +18,7 @@ use super::{
 use crate::{
     observability::metrics::Metrics,
     routers::{
+        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
         grpc::{
             common::responses::{
                 build_sse_response, ensure_mcp_connection, persist_response_if_needed,
@@ -25,7 +26,6 @@ use crate::{
             },
             harmony::{processor::ResponsesIterationResult, streaming::HarmonyStreamingProcessor},
         },
-        mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
 };
 

@@ -1,6 +1,6 @@
 //! Step to remove workers from worker registry.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use async_trait::async_trait;
 use tracing::{debug, warn};
@@ -8,10 +8,7 @@ use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowRe
 
 use crate::{
     observability::metrics::Metrics,
-    worker::{
-        worker::{ConnectionModeExt, WorkerTypeExt},
-        WorkerGroupKey,
-    },
+    worker::worker::{ConnectionModeExt, WorkerTypeExt},
     workflow::data::WorkerRemovalWorkflowData,
 };
 
@@ -38,28 +35,28 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
             worker_urls.len()
         );
 
-        // Collect unique worker configurations and their URLs before removal.
-        // We need the URLs pre-removal so LoadMonitor can clean up stale load entries.
-        let mut urls_by_group: HashMap<
-            (
-                openai_protocol::worker::WorkerType,
-                openai_protocol::worker::ConnectionMode,
-                String,
-            ),
-            Vec<String>,
-        > = HashMap::new();
+        // Snapshot the unique `(worker_type, connection_mode, model_id)`
+        // groups for the workers we are about to remove. We capture this
+        // before the removal so the pool-size metric update below can
+        // recompute the per-group count after the workers have been
+        // pulled from the registry. The cache eviction the old
+        // `LoadMonitor` path used to do here is now handled by
+        // `WorkerMonitor` reacting to `WorkerEvent::Removed`.
+        let mut unique_configs: HashSet<(
+            openai_protocol::worker::WorkerType,
+            openai_protocol::worker::ConnectionMode,
+            String,
+        )> = HashSet::new();
         for url in worker_urls {
             if let Some(w) = app_context.worker_registry.get_by_url(url) {
                 let meta = w.metadata();
-                let key = (
+                unique_configs.insert((
                     meta.spec.worker_type,
                     meta.spec.connection_mode,
                     w.model_id().to_string(),
-                );
-                urls_by_group.entry(key).or_default().push(url.clone());
+                ));
             }
         }
-        let unique_configs: HashSet<_> = urls_by_group.keys().cloned().collect();
 
         let mut removed_count = 0;
         for worker_url in worker_urls {
@@ -83,8 +80,11 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
             );
         }
 
-        // Update Layer 3 worker pool size metrics for unique configurations
-        // and notify LoadMonitor when groups become empty
+        // Update Layer 3 worker pool size metrics for unique
+        // configurations. WorkerMonitor subscribes to registry events
+        // directly and reconciles per-group polling state on its own,
+        // so this step no longer needs to push group-removed
+        // notifications.
         for (worker_type, connection_mode, model_id) in &unique_configs {
             // Get labels before moving values into get_workers_filtered
             let worker_type_label = worker_type.as_metric_label();
@@ -107,22 +107,6 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
                 model_id,
                 pool_size,
             );
-
-            // If the group is now empty, stop its load monitor and clean up entries
-            if pool_size == 0 {
-                if let Some(ref load_monitor) = app_context.load_monitor {
-                    let key = WorkerGroupKey {
-                        model_id: model_id.clone(),
-                        worker_type: *worker_type,
-                        connection_mode: *connection_mode,
-                    };
-                    let removed_urls = urls_by_group
-                        .get(&(*worker_type, *connection_mode, model_id.clone()))
-                        .map(|v| v.as_slice())
-                        .unwrap_or_default();
-                    load_monitor.on_group_removed(&key, removed_urls).await;
-                }
-            }
         }
 
         Ok(StepResult::Success)

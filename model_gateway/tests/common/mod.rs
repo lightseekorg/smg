@@ -31,7 +31,8 @@ use smg::{
     policies::PolicyRegistry,
     routers::{router_manager::RouterManager, RouterFactory, RouterTrait},
     worker::{
-        BasicWorkerBuilder, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry, WorkerType,
+        BasicWorkerBuilder, ModelCard, RuntimeType, Worker, WorkerMonitor, WorkerRegistry,
+        WorkerType,
     },
     workflow::Job,
 };
@@ -350,11 +351,11 @@ pub fn create_test_context(
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
         // Initialize load monitor
-        let load_monitor = Some(Arc::new(LoadMonitor::new(
+        let worker_monitor = Some(Arc::new(WorkerMonitor::new(
             worker_registry.clone(),
             policy_registry.clone(),
             client.clone(),
-            config.worker_startup_check_interval_secs,
+            config.load_monitor_interval_secs,
         )));
 
         // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
@@ -375,13 +376,20 @@ pub fn create_test_context(
                 .response_storage(response_storage)
                 .conversation_storage(conversation_storage)
                 .conversation_item_storage(conversation_item_storage)
-                .load_monitor(load_monitor)
+                .worker_monitor(worker_monitor)
                 .worker_job_queue(worker_job_queue)
                 .workflow_engines(workflow_engines)
                 .mcp_orchestrator(mcp_orchestrator_lock)
                 .build()
                 .unwrap(),
         );
+
+        // Mirror production wiring: start the WorkerMonitor event
+        // loop so tests exercise the event-driven group reconciliation
+        // path instead of an inert monitor.
+        if let Some(monitor) = &app_context.worker_monitor {
+            monitor.start_event_loop();
+        }
 
         // Initialize JobQueue after AppContext is created
         let weak_context = Arc::downgrade(&app_context);
@@ -485,11 +493,11 @@ pub fn create_test_context_with_parsers(
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
         // Initialize load monitor
-        let load_monitor = Some(Arc::new(LoadMonitor::new(
+        let worker_monitor = Some(Arc::new(WorkerMonitor::new(
             worker_registry.clone(),
             policy_registry.clone(),
             client.clone(),
-            config.worker_startup_check_interval_secs,
+            config.load_monitor_interval_secs,
         )));
 
         // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
@@ -514,13 +522,20 @@ pub fn create_test_context_with_parsers(
                 .response_storage(response_storage)
                 .conversation_storage(conversation_storage)
                 .conversation_item_storage(conversation_item_storage)
-                .load_monitor(load_monitor)
+                .worker_monitor(worker_monitor)
                 .worker_job_queue(worker_job_queue)
                 .workflow_engines(workflow_engines)
                 .mcp_orchestrator(mcp_orchestrator_lock)
                 .build()
                 .unwrap(),
         );
+
+        // Mirror production wiring: start the WorkerMonitor event
+        // loop so tests exercise the event-driven group reconciliation
+        // path instead of an inert monitor.
+        if let Some(monitor) = &app_context.worker_monitor {
+            monitor.start_event_loop();
+        }
 
         // Initialize JobQueue after AppContext is created
         let weak_context = Arc::downgrade(&app_context);
@@ -627,11 +642,11 @@ pub fn create_test_context_with_mcp_config(
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
         // Initialize load monitor
-        let load_monitor = Some(Arc::new(LoadMonitor::new(
+        let worker_monitor = Some(Arc::new(WorkerMonitor::new(
             worker_registry.clone(),
             policy_registry.clone(),
             client.clone(),
-            config.worker_startup_check_interval_secs,
+            config.load_monitor_interval_secs,
         )));
 
         // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
@@ -652,13 +667,20 @@ pub fn create_test_context_with_mcp_config(
                 .response_storage(response_storage)
                 .conversation_storage(conversation_storage)
                 .conversation_item_storage(conversation_item_storage)
-                .load_monitor(load_monitor)
+                .worker_monitor(worker_monitor)
                 .worker_job_queue(worker_job_queue)
                 .workflow_engines(workflow_engines)
                 .mcp_orchestrator(mcp_orchestrator_lock)
                 .build()
                 .unwrap(),
         );
+
+        // Mirror production wiring: start the WorkerMonitor event
+        // loop so tests exercise the event-driven group reconciliation
+        // path instead of an inert monitor.
+        if let Some(monitor) = &app_context.worker_monitor {
+            monitor.start_event_loop();
+        }
 
         // Initialize JobQueue after AppContext is created
         let weak_context = Arc::downgrade(&app_context);

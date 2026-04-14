@@ -13,8 +13,10 @@ use super::{
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
-    routers::RouterTrait,
-    worker::{is_retryable_status, RetryExecutor},
+    routers::{
+        common::retry::{is_retryable_status, RetryExecutor},
+        RouterTrait,
+    },
 };
 
 pub struct GeminiRouter {

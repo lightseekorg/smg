@@ -50,6 +50,7 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
+        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
         grpc::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
@@ -58,7 +59,6 @@ use crate::{
             },
             utils,
         },
-        mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
 };
 

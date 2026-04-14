@@ -182,7 +182,7 @@ pub struct SelectWorkerInfo<'a> {
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::worker::HealthCheckConfig;
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
 
     use super::*;
     use crate::worker::{BasicWorkerBuilder, WorkerType};
@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(indices, vec![0, 1, 2]);
 
         // Mark one unhealthy
-        workers[1].set_healthy(false);
+        workers[1].set_status(WorkerStatus::NotReady);
         let indices = get_healthy_worker_indices(&workers);
         assert_eq!(indices, vec![0, 2]);
     }

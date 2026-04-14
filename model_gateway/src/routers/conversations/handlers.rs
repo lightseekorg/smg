@@ -15,7 +15,7 @@ use smg_data_connector::{
 };
 use tracing::info;
 
-use crate::routers::persistence_utils::item_to_json;
+use crate::routers::common::persistence_utils::item_to_json;
 
 // ============================================================================
 // Constants

@@ -24,11 +24,11 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
+        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
         error,
         grpc::common::responses::{
             ensure_mcp_connection, persist_response_if_needed, ResponsesContext,
         },
-        mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
 };
 

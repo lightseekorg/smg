@@ -24,7 +24,7 @@ use super::{
 };
 use crate::{
     config::ManualAssignmentMode, observability::metrics::Metrics,
-    routers::header_utils::extract_routing_key, worker::Worker,
+    routers::common::header_utils::extract_routing_key, worker::Worker,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,7 +299,7 @@ fn min_group_select(workers: &[Arc<dyn Worker>], healthy_indices: &[usize]) -> u
 mod tests {
     use std::collections::HashMap;
 
-    use openai_protocol::worker::HealthCheckConfig;
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
 
     use super::*;
     use crate::worker::{BasicWorkerBuilder, WorkerType};
@@ -402,7 +402,7 @@ mod tests {
         let policy = ManualPolicy::new();
         let workers = create_workers(&["http://w1:8000", "http://w2:8000"]);
 
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
 
         let headers = headers_with_routing_key("test-routing-id");
         let info = SelectWorkerInfo {
@@ -426,7 +426,7 @@ mod tests {
         let policy = ManualPolicy::new();
         let workers = create_workers(&["http://w1:8000"]);
 
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
         let headers = headers_with_routing_key("test");
         let info = SelectWorkerInfo {
             headers: Some(&headers),
@@ -478,7 +478,7 @@ mod tests {
         let first_idx = first_result.unwrap();
         assert_eq!(branch, ExecutionBranch::Vacant);
 
-        workers[first_idx].set_healthy(false);
+        workers[first_idx].set_status(WorkerStatus::NotReady);
 
         let (new_result, branch) = policy.select_worker_impl(&workers, &info);
         let new_idx = new_result.unwrap();
@@ -547,14 +547,14 @@ mod tests {
         let first_idx = first_result.unwrap();
         assert_eq!(branch, ExecutionBranch::Vacant);
 
-        workers[first_idx].set_healthy(false);
+        workers[first_idx].set_status(WorkerStatus::NotReady);
 
         let (second_result, branch) = policy.select_worker_impl(&workers, &info);
         let second_idx = second_result.unwrap();
         assert_ne!(second_idx, first_idx);
         assert_eq!(branch, ExecutionBranch::OccupiedMiss);
 
-        workers[first_idx].set_healthy(true);
+        workers[first_idx].set_status(WorkerStatus::Ready);
 
         let (after_recovery, branch) = policy.select_worker_impl(&workers, &info);
         assert_eq!(
@@ -580,14 +580,14 @@ mod tests {
         let first_idx = first_result.unwrap();
         assert_eq!(branch, ExecutionBranch::Vacant);
 
-        workers[first_idx].set_healthy(false);
+        workers[first_idx].set_status(WorkerStatus::NotReady);
 
         let (second_result, branch) = policy.select_worker_impl(&workers, &info);
         let second_idx = second_result.unwrap();
         assert_ne!(second_idx, first_idx);
         assert_eq!(branch, ExecutionBranch::OccupiedMiss);
 
-        workers[second_idx].set_healthy(false);
+        workers[second_idx].set_status(WorkerStatus::NotReady);
 
         let remaining_idx = (0..3).find(|&i| i != first_idx && i != second_idx).unwrap();
         let (third_result, branch) = policy.select_worker_impl(&workers, &info);
@@ -598,7 +598,7 @@ mod tests {
         );
         assert_eq!(branch, ExecutionBranch::OccupiedMiss);
 
-        workers[first_idx].set_healthy(true);
+        workers[first_idx].set_status(WorkerStatus::Ready);
 
         let (idx_after_restore, branch) = policy.select_worker_impl(&workers, &info);
         assert_ne!(
@@ -654,17 +654,17 @@ mod tests {
             "Should return first healthy worker in urls"
         );
 
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
         let healthy_indices = vec![1, 2];
         let result = find_healthy_worker(&urls, &workers, &healthy_indices);
         assert_eq!(result, Some(1), "Should skip unhealthy and return next");
 
-        workers[1].set_healthy(false);
+        workers[1].set_status(WorkerStatus::NotReady);
         let healthy_indices = vec![2];
         let result = find_healthy_worker(&urls, &workers, &healthy_indices);
         assert_eq!(result, Some(2), "Should return last healthy worker");
 
-        workers[2].set_healthy(false);
+        workers[2].set_status(WorkerStatus::NotReady);
         let healthy_indices: Vec<usize> = vec![];
         let result = find_healthy_worker(&urls, &workers, &healthy_indices);
         assert_eq!(result, None, "Should return None when no healthy workers");
@@ -736,7 +736,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         // OccupiedMiss: worker becomes unhealthy
-        workers[first_idx].set_healthy(false);
+        workers[first_idx].set_status(WorkerStatus::NotReady);
         let (_, branch) = policy.select_worker_impl(&workers, &info);
         assert_eq!(branch, ExecutionBranch::OccupiedMiss);
         let access_after_miss = policy.routing_map.get(&routing_id).unwrap().last_access;

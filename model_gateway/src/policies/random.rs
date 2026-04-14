@@ -50,7 +50,7 @@ impl LoadBalancingPolicy for RandomPolicy {
 mod tests {
     use std::collections::HashMap;
 
-    use openai_protocol::worker::HealthCheckConfig;
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
 
     use super::*;
     use crate::worker::{BasicWorkerBuilder, WorkerType};
@@ -117,7 +117,7 @@ mod tests {
         ];
 
         // Mark first worker as unhealthy
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
 
         // Should always select the healthy worker (index 1)
         for _ in 0..10 {
@@ -138,7 +138,7 @@ mod tests {
                 .build(),
         )];
 
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
         assert_eq!(
             policy.select_worker(&workers, &SelectWorkerInfo::default()),
             None
