@@ -1,9 +1,13 @@
 //! HTTP/WebSocket server for the Prometheus metrics endpoint (port 29000).
 //! Serves `GET /metrics` (Prometheus) and `WS /ws/metrics` (real-time state push).
+//!
+//! The `/metrics` endpoint returns both SMG's own metrics (`smg_*`) and engine
+//! metrics (`vllm_*`, `sglang_*`, `nv_trt_*`) in a single Prometheus text
+//! response, so Prometheus only needs one scrape target per pod.
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{atomic::AtomicUsize, Arc, OnceLock},
     time::Duration,
 };
 
@@ -16,9 +20,31 @@ use super::{
     metrics::UPKEEP_INTERVAL_SECS,
     metrics_ws::{handler, registry::WatchRegistry},
 };
+use crate::worker::{
+    manager::{EngineMetricsResult, WorkerManager},
+    registry::WorkerRegistry,
+};
 
 /// Default maximum concurrent WebSocket connections on the metrics endpoint.
 pub const DEFAULT_MAX_WS_CONNECTIONS: usize = 32;
+
+/// Shared references for engine metrics collection, populated after app init.
+pub struct EngineMetricsDeps {
+    pub worker_registry: Arc<WorkerRegistry>,
+    pub client: reqwest::Client,
+}
+
+/// Global handle set once after AppContext is built.
+static ENGINE_METRICS_DEPS: OnceLock<EngineMetricsDeps> = OnceLock::new();
+
+/// Register the worker registry and HTTP client for engine metrics collection.
+/// Called once after AppContext is initialized.
+pub fn register_engine_metrics_deps(worker_registry: Arc<WorkerRegistry>, client: reqwest::Client) {
+    let _ = ENGINE_METRICS_DEPS.set(EngineMetricsDeps {
+        worker_registry,
+        client,
+    });
+}
 
 #[derive(Clone)]
 struct MetricsState {
@@ -26,12 +52,23 @@ struct MetricsState {
 }
 
 async fn prometheus_handler(State(state): State<MetricsState>) -> impl IntoResponse {
+    let smg_text = state.handle.render();
+
+    let engine_text = if let Some(deps) = ENGINE_METRICS_DEPS.get() {
+        match WorkerManager::get_engine_metrics(&deps.worker_registry, &deps.client).await {
+            EngineMetricsResult::Ok(text) => text,
+            EngineMetricsResult::Err(_) => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
     (
         [(
             http::header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        state.handle.render(),
+        format!("{smg_text}\n{engine_text}"),
     )
 }
 
