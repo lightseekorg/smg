@@ -823,7 +823,7 @@ mod tests {
     fn create_test_unhealthy_router() -> Router {
         let router = create_test_regular_router();
         let workers = router.worker_registry.get_all();
-        workers[0].set_healthy(false);
+        workers[0].set_status(openai_protocol::worker::WorkerStatus::NotReady);
         router
     }
 

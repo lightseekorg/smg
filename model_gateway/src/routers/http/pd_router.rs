@@ -1435,7 +1435,12 @@ mod tests {
         let worker = BasicWorkerBuilder::new(url)
             .worker_type(worker_type)
             .build();
-        worker.set_healthy(healthy);
+        let status = if healthy {
+            openai_protocol::worker::WorkerStatus::Ready
+        } else {
+            openai_protocol::worker::WorkerStatus::NotReady
+        };
+        worker.set_status(status);
         Box::new(worker)
     }
 

@@ -198,7 +198,7 @@ impl LoadBalancingPolicy for ConsistentHashingPolicy {
 mod tests {
     use std::collections::HashMap;
 
-    use openai_protocol::worker::HealthCheckConfig;
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
 
     use super::*;
     use crate::worker::{BasicWorkerBuilder, HashRing, WorkerType};
@@ -312,7 +312,7 @@ mod tests {
     fn test_target_worker_miss_unhealthy() {
         let policy = ConsistentHashingPolicy::new();
         let workers = create_workers(&["http://w1:8000", "http://w2:8000"]);
-        workers[1].set_healthy(false);
+        workers[1].set_status(WorkerStatus::NotReady);
 
         let headers = headers_with_target_worker(1);
         let info = SelectWorkerInfo {
@@ -370,7 +370,7 @@ mod tests {
     fn test_no_healthy_workers() {
         let policy = ConsistentHashingPolicy::new();
         let workers = create_workers(&["http://w1:8000"]);
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
 
         let headers = headers_with_routing_key("test");
         let info = SelectWorkerInfo {
@@ -421,7 +421,7 @@ mod tests {
         }
 
         // Mark worker 1 as unhealthy
-        workers[1].set_healthy(false);
+        workers[1].set_status(WorkerStatus::NotReady);
 
         // Record new routing and count how many keys moved
         let mut moved_count = 0;
@@ -477,7 +477,7 @@ mod tests {
         let original_idx = result.unwrap();
 
         // Mark that worker unhealthy
-        workers[original_idx].set_healthy(false);
+        workers[original_idx].set_status(WorkerStatus::NotReady);
 
         // Key should now route to a different healthy worker
         let (failover_result, _) = policy.select_worker_impl(&workers, &info);
@@ -498,7 +498,7 @@ mod tests {
         }
 
         // Recover the original worker
-        workers[original_idx].set_healthy(true);
+        workers[original_idx].set_status(WorkerStatus::Ready);
 
         // Key should route back to original worker
         let (recovered_result, _) = policy.select_worker_impl(&workers, &info);

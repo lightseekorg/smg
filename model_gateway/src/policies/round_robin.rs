@@ -58,7 +58,7 @@ impl LoadBalancingPolicy for RoundRobinPolicy {
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::worker::HealthCheckConfig;
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
 
     use super::*;
     use crate::worker::{BasicWorkerBuilder, WorkerType};
@@ -128,7 +128,7 @@ mod tests {
         ];
 
         // Mark middle worker as unhealthy
-        workers[1].set_healthy(false);
+        workers[1].set_status(WorkerStatus::NotReady);
 
         // Should skip unhealthy worker: 0, 2, 0, 2, ...
         let info = SelectWorkerInfo::default();

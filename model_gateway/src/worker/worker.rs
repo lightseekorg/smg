@@ -175,22 +175,6 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
         self.status() == WorkerStatus::Ready
     }
 
-    /// Set the worker's health status (compatibility shim).
-    ///
-    /// Maps `true` → `Ready`, `false` → `NotReady`.
-    /// Prefer `set_status()` for explicit state transitions.
-    fn set_healthy(&self, healthy: bool) {
-        if healthy {
-            self.set_status(WorkerStatus::Ready);
-        } else {
-            // Only transition to NotReady if currently Ready.
-            // Don't transition Pending→NotReady (hasn't proven itself).
-            if self.status() == WorkerStatus::Ready {
-                self.set_status(WorkerStatus::NotReady);
-            }
-        }
-    }
-
     /// Perform an async health check on the worker.
     ///
     /// Pure probe — does not mutate worker status, does not increment
@@ -1325,11 +1309,11 @@ mod tests {
         assert!(worker.is_healthy());
         assert_eq!(worker.status(), WorkerStatus::Ready);
 
-        worker.set_healthy(false);
+        worker.set_status(WorkerStatus::NotReady);
         assert!(!worker.is_healthy());
         assert_eq!(worker.status(), WorkerStatus::NotReady);
 
-        worker.set_healthy(true);
+        worker.set_status(WorkerStatus::Ready);
         assert!(worker.is_healthy());
         assert_eq!(worker.status(), WorkerStatus::Ready);
     }
@@ -1344,15 +1328,6 @@ mod tests {
         assert_eq!(worker.status(), WorkerStatus::Pending);
         assert!(!worker.is_healthy()); // Pending is not routable
         assert!(!worker.is_available()); // Pending is not available
-
-        // set_healthy(false) on Pending is a no-op (hasn't proven itself)
-        worker.set_healthy(false);
-        assert_eq!(worker.status(), WorkerStatus::Pending);
-
-        // set_healthy(true) promotes Pending → Ready
-        worker.set_healthy(true);
-        assert_eq!(worker.status(), WorkerStatus::Ready);
-        assert!(worker.is_healthy());
     }
 
     #[test]
@@ -1480,7 +1455,12 @@ mod tests {
                 reason = "Test helper: short-lived tasks joined before test ends"
             )]
             let handle = tokio::spawn(async move {
-                worker_clone.set_healthy(i % 2 == 0);
+                let status = if i % 2 == 0 {
+                    WorkerStatus::Ready
+                } else {
+                    WorkerStatus::NotReady
+                };
+                worker_clone.set_status(status);
                 time::sleep(Duration::from_micros(10)).await;
             });
             handles.push(handle);
@@ -1682,7 +1662,7 @@ mod tests {
             .build();
 
         assert!(dp_worker.is_healthy());
-        dp_worker.set_healthy(false);
+        dp_worker.set_status(WorkerStatus::NotReady);
         assert!(!dp_worker.is_healthy());
 
         assert_eq!(dp_worker.load(), 0);

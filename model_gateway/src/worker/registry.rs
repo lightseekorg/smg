@@ -1041,7 +1041,16 @@ impl WorkerRegistry {
                 conn_workers.retain(|id| id != worker_id);
             }
 
-            worker.set_healthy(false);
+            // Mark the worker as not-ready before tearing down its
+            // metrics so any in-flight `is_healthy()` callers that
+            // still hold an `Arc` see the correct state. Skip the
+            // transition for `Pending` (hasn't proven itself) and
+            // `Failed` (already terminal); only Ready warrants the
+            // explicit demotion. Mirrors the legacy `set_healthy(false)`
+            // semantics without going through the deprecated shim.
+            if worker.status() == WorkerStatus::Ready {
+                worker.set_status(WorkerStatus::NotReady);
+            }
             Metrics::remove_worker_metrics(worker.url());
 
             // Sync removal to mesh if enabled (no-op if mesh is not enabled)
@@ -1308,11 +1317,20 @@ impl smg_mesh::WorkerStateSubscriber for WorkerRegistry {
     fn on_remote_worker_state(&self, state: &smg_mesh::WorkerState) {
         use openai_protocol::model_card::ModelCard;
 
-        // If worker already exists at this URL, update its health status
-        // from the mesh state. Don't re-register — the existing worker has
-        // full config from its creation workflow.
+        // If worker already exists at this URL, update its health
+        // status from the mesh state. Don't re-register — the existing
+        // worker has full config from its creation workflow. The
+        // transition rules mirror the legacy `set_healthy(state.health)`
+        // semantics intentionally: `true` always promotes to `Ready`,
+        // `false` only demotes from `Ready` to `NotReady` and leaves
+        // `Pending` / `Failed` alone (those are owned by the local
+        // state machine, not by mesh hints).
         if let Some(existing) = self.get_by_url(&state.url) {
-            existing.set_healthy(state.health);
+            if state.health {
+                existing.set_status(WorkerStatus::Ready);
+            } else if existing.status() == WorkerStatus::Ready {
+                existing.set_status(WorkerStatus::NotReady);
+            }
             tracing::debug!(
                 url = %state.url,
                 healthy = state.health,
@@ -1333,7 +1351,13 @@ impl smg_mesh::WorkerStateSubscriber for WorkerRegistry {
                 .build(),
         };
 
-        worker.set_healthy(state.health);
+        // Same legacy `set_healthy(state.health)` semantics for the
+        // pre-registration newly built worker: `true` → `Ready`,
+        // `false` → leave the builder default (typically `Pending`).
+        // The state machine takes over after registration.
+        if state.health {
+            worker.set_status(WorkerStatus::Ready);
+        }
 
         // `register_inner(worker, false)` skips OUTGOING mesh sync to
         // avoid a version-bump loop on the CRDT, but still publishes
@@ -2026,12 +2050,13 @@ mod tests {
     fn test_mesh_worker_state_update_is_silent_on_existing_worker() {
         use smg_mesh::{WorkerState, WorkerStateSubscriber};
 
-        // Health updates for an already-registered worker go through the
-        // compat shim (set_healthy) without emitting an event — the
-        // existing worker is already on WorkerManager's schedule, and
-        // local probes will reconcile the state on the next tick. We
-        // verify the no-event behavior so a future regression (e.g. adding
-        // a StatusChanged emit here) is caught.
+        // Health updates for an already-registered worker mutate the
+        // local status field directly (via `set_status`) without
+        // emitting an event — the existing worker is already on
+        // WorkerManager's schedule, and local probes will reconcile
+        // the state on the next tick. We verify the no-event behavior
+        // so a future regression (e.g. adding a `StatusChanged` emit
+        // here) is caught.
         let registry = WorkerRegistry::new();
 
         let worker: Arc<dyn Worker> = Arc::new(
