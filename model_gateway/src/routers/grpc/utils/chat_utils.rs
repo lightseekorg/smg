@@ -508,7 +508,12 @@ pub fn create_stop_decoder(
         };
     }
 
-    // Add stop token IDs (visible if no_stop_trim is true, hidden otherwise)
+    // Add EOS token IDs from tokenizer (generation_config.json) as hidden stops.
+    for &eos_id in tokenizer.eos_token_ids() {
+        builder = builder.stop_token(eos_id);
+    }
+
+    // Add user-provided stop token IDs (visible if no_stop_trim, hidden otherwise)
     if let Some(token_ids) = stop_token_ids {
         for &token_id in token_ids {
             builder = if no_stop_trim {

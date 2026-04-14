@@ -22,6 +22,8 @@ pub struct HuggingFaceTokenizer {
     vocab: HashMap<String, TokenIdType>,
     reverse_vocab: HashMap<TokenIdType, String>,
     chat_template: ChatTemplateState,
+    /// EOS token IDs from tokenizer_config.json + generation_config.json
+    eos_token_ids: Vec<TokenIdType>,
 }
 
 impl HuggingFaceTokenizer {
@@ -82,12 +84,15 @@ impl HuggingFaceTokenizer {
             }
         }
 
+        let eos_token_ids = Self::resolve_eos_token_ids(file_path, &special_tokens, &vocab);
+
         Ok(HuggingFaceTokenizer {
             tokenizer,
             special_tokens,
             vocab,
             reverse_vocab,
             chat_template: ChatTemplateState::new(chat_template_str)?,
+            eos_token_ids,
         })
     }
 
@@ -148,12 +153,20 @@ impl HuggingFaceTokenizer {
             .map(|(token, &id)| (id, token.clone()))
             .collect();
 
+        let mut eos_token_ids = Vec::new();
+        if let Some(ref eos_str) = special_tokens.eos_token {
+            if let Some(&id) = vocab.get(eos_str.as_str()) {
+                eos_token_ids.push(id);
+            }
+        }
+
         HuggingFaceTokenizer {
             tokenizer,
             special_tokens,
             vocab,
             reverse_vocab,
             chat_template: ChatTemplateState::empty(),
+            eos_token_ids,
         }
     }
 
@@ -259,6 +272,57 @@ impl HuggingFaceTokenizer {
         })()
         .unwrap_or_default()
     }
+
+    /// Resolve all EOS token IDs from tokenizer_config.json and generation_config.json.
+    fn resolve_eos_token_ids(
+        tokenizer_path: &str,
+        special_tokens: &SpecialTokens,
+        vocab: &HashMap<String, TokenIdType>,
+    ) -> Vec<TokenIdType> {
+        let mut ids = Vec::new();
+
+        // 1. From tokenizer_config.json eos_token string
+        if let Some(ref eos_str) = special_tokens.eos_token {
+            if let Some(&id) = vocab.get(eos_str.as_str()) {
+                ids.push(id);
+            }
+        }
+
+        // 2. From generation_config.json eos_token_id (int or list)
+        if let Some(gen_ids) = Self::load_generation_config_eos(tokenizer_path) {
+            for id in gen_ids {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+
+        ids
+    }
+
+    /// Load `eos_token_id` from `generation_config.json`.
+    fn load_generation_config_eos(tokenizer_path: &str) -> Option<Vec<TokenIdType>> {
+        let path = std::path::Path::new(tokenizer_path);
+        let config_path = path.parent()?.join("generation_config.json");
+
+        if !config_path.exists() {
+            return None;
+        }
+
+        let content = std::fs::read_to_string(&config_path).ok()?;
+        let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+        let eos = config.get("eos_token_id")?;
+        if let Some(id) = eos.as_u64() {
+            Some(vec![id as TokenIdType])
+        } else {
+            eos.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_u64().map(|id| id as TokenIdType))
+                    .collect()
+            })
+        }
+    }
 }
 
 /// Special token strings read from tokenizer_config.json.
@@ -351,6 +415,10 @@ impl TokenizerTrait for HuggingFaceTokenizer {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn eos_token_ids(&self) -> &[TokenIdType] {
+        &self.eos_token_ids
     }
 
     fn apply_chat_template(
