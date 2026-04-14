@@ -602,23 +602,23 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             logger.error(f"Failed to build tokenizer ZIP: {e}\n{get_exception_traceback()}")
             await context.abort(grpc.StatusCode.INTERNAL, str(e))
 
-        zip_bytes = zip_buffer.getvalue()
-        sha256 = hashlib.sha256(zip_bytes).hexdigest()
+        zip_data = zip_buffer.getbuffer()
+        sha256 = hashlib.sha256(zip_data).hexdigest()
 
         logger.info(
             "Streaming tokenizer bundle: %d bytes, sha256=%s",
-            len(zip_bytes),
+            len(zip_data),
             sha256,
         )
 
         # Stream chunks; SHA-256 only on the final chunk
         offset = 0
-        total = len(zip_bytes)
+        total = len(zip_data)
         while offset < total:
             end = min(offset + _TOKENIZER_CHUNK_SIZE, total)
             is_last = end == total
             yield common_pb2.GetTokenizerChunk(
-                data=zip_bytes[offset:end],
+                data=bytes(zip_data[offset:end]),
                 sha256=sha256 if is_last else "",
             )
             offset = end
