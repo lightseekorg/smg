@@ -122,18 +122,6 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
     /// Returns a reference to avoid cloning on every access
     fn connection_mode(&self) -> &ConnectionMode;
 
-    /// Get the bootstrap hostname for PD mode
-    /// Returns cached hostname parsed from URL at construction time
-    fn bootstrap_host(&self) -> &str {
-        &self.metadata().spec.bootstrap_host
-    }
-
-    /// Get the bootstrap port for PD mode
-    /// Returns cached port from WorkerType::Prefill
-    fn bootstrap_port(&self) -> Option<u16> {
-        self.metadata().spec.bootstrap_port
-    }
-
     /// Get the worker's lifecycle status.
     fn status(&self) -> WorkerStatus;
 
@@ -262,170 +250,99 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
     /// Get the per-worker HTTP client.
     fn http_client(&self) -> &reqwest::Client;
 
-    /// Check if this worker is DP-aware
-    fn is_dp_aware(&self) -> bool {
-        self.metadata().spec.dp_rank.is_some()
+    // ── Metadata convenience delegates ──────────────────────────────
+    //
+    // These default impls forward to the canonical implementation on
+    // [`WorkerMetadata`] so callers can write `worker.foo()` instead
+    // of the longer `worker.metadata().foo()`. Adding a new metadata
+    // accessor means adding it to `impl WorkerMetadata` first and
+    // then forwarding it here. Implementors of `Worker` should never
+    // need to override these — `BasicWorker` and the FFI workers
+    // both rely on the defaults.
+
+    /// Get the bootstrap hostname for PD mode.
+    fn bootstrap_host(&self) -> &str {
+        self.metadata().bootstrap_host()
     }
 
-    /// Get the base URL without any DP rank suffix
+    /// Get the bootstrap port for PD mode.
+    fn bootstrap_port(&self) -> Option<u16> {
+        self.metadata().bootstrap_port()
+    }
+
+    /// Get the base URL without any DP rank suffix.
     fn base_url(&self) -> &str {
-        self.metadata()
-            .spec
-            .dp_base_url
-            .as_deref()
-            .unwrap_or_else(|| self.url())
+        self.metadata().base_url()
     }
 
-    /// Get DP rank if this is a DP-aware worker
-    fn dp_rank(&self) -> Option<usize> {
-        self.metadata().spec.dp_rank
-    }
-
-    /// Get DP size if this worker is part of a DP group
-    fn dp_size(&self) -> Option<usize> {
-        self.metadata().spec.dp_size
-    }
-
-    /// Transform a request for DP-aware routing
-    async fn prepare_request(&self, mut req: serde_json::Value) -> WorkerResult<serde_json::Value> {
-        if let Some(rank) = self.metadata().spec.dp_rank {
-            if let Some(map) = req.as_object_mut() {
-                map.insert("data_parallel_rank".to_string(), serde_json::json!(rank));
-                Ok(req)
-            } else {
-                Err(WorkerError::InvalidConfiguration {
-                    message: "Request must be a JSON object for DP-aware routing".to_string(),
-                })
-            }
-        } else {
-            Ok(req)
-        }
-    }
-
-    /// Get the actual endpoint URL for requests
+    /// Compose an endpoint URL for a specific route.
     fn endpoint_url(&self, route: &str) -> String {
-        format!("{}{}", self.base_url(), route)
+        self.metadata().endpoint_url(route)
     }
 
-    /// Check if this worker can handle a specific request
-    fn can_handle(&self, _req: &serde_json::Value) -> bool {
-        true
+    /// Check if this worker is DP-aware.
+    fn is_dp_aware(&self) -> bool {
+        self.metadata().is_dp_aware()
     }
 
-    /// Get the model ID this worker serves
-    /// Checks ModelCards first, then falls back to labels
+    /// Get DP rank if this is a DP-aware worker.
+    fn dp_rank(&self) -> Option<usize> {
+        self.metadata().dp_rank()
+    }
+
+    /// Get DP size if this worker is part of a DP group.
+    fn dp_size(&self) -> Option<usize> {
+        self.metadata().dp_size()
+    }
+
+    /// Transform a request for DP-aware routing.
+    ///
+    /// When the worker has a `dp_rank`, injects `data_parallel_rank`
+    /// into the request body. Otherwise returns the request unchanged.
+    fn prepare_request(&self, req: serde_json::Value) -> WorkerResult<serde_json::Value> {
+        self.metadata().prepare_request(req)
+    }
+
+    /// Get the model ID this worker serves.
     fn model_id(&self) -> &str {
-        // Check ModelCards first
-        self.metadata()
-            .spec
-            .models
-            .primary()
-            .map(|m| m.id.as_str())
-            .or_else(|| {
-                // Fall back to labels
-                self.metadata()
-                    .spec
-                    .labels
-                    .get("model_id")
-                    .map(|s| s.as_str())
-            })
-            .unwrap_or(UNKNOWN_MODEL_ID)
+        self.metadata().model_id()
     }
 
-    /// Get the priority of this worker (higher value = higher priority)
+    /// Get the priority of this worker (higher value = higher priority).
     fn priority(&self) -> u32 {
-        self.metadata().spec.priority
+        self.metadata().priority()
     }
 
-    /// Get the cost factor of this worker (baseline = 1.0)
+    /// Get the cost factor of this worker (baseline = 1.0).
     fn cost(&self) -> f32 {
-        self.metadata().spec.cost
-    }
-
-    /// Get tokenizer path for a specific model.
-    fn tokenizer_path(&self, model_id: &str) -> Option<&str> {
-        self.metadata()
-            .find_model(model_id)
-            .and_then(|m| m.tokenizer_path.as_deref())
-    }
-
-    /// Get reasoning parser for a specific model.
-    fn reasoning_parser(&self, model_id: &str) -> Option<&str> {
-        self.metadata()
-            .find_model(model_id)
-            .and_then(|m| m.reasoning_parser.as_deref())
-    }
-
-    /// Get tool parser for a specific model.
-    fn tool_parser(&self, model_id: &str) -> Option<&str> {
-        self.metadata()
-            .find_model(model_id)
-            .and_then(|m| m.tool_parser.as_deref())
-    }
-
-    /// Get chat template for a specific model.
-    fn chat_template(&self, model_id: &str) -> Option<&str> {
-        self.metadata()
-            .find_model(model_id)
-            .and_then(|m| m.chat_template.as_deref())
+        self.metadata().cost()
     }
 
     /// Get the default provider type for this worker.
     /// `None` means native/passthrough.
     fn default_provider(&self) -> Option<&ProviderType> {
-        self.metadata().spec.provider.as_ref()
+        self.metadata().default_provider()
     }
 
-    /// Get provider for a specific model.
-    /// Priority: ModelCard.provider > worker.default_provider
+    /// Get the provider for a specific model. Priority:
+    /// `ModelCard.provider` > `worker.default_provider()`.
     fn provider_for_model(&self, model_id: &str) -> Option<&ProviderType> {
         self.metadata().provider_for_model(model_id)
     }
 
-    /// Check if a model is a classifier (has id2label mapping).
-    fn is_classifier(&self, model_id: &str) -> bool {
-        self.metadata()
-            .find_model(model_id)
-            .map(|m| m.is_classifier())
-            .unwrap_or(false)
-    }
-
-    /// Get the id2label mapping for a classification model.
-    /// Returns None if model is not a classifier or not found.
-    fn id2label(&self, model_id: &str) -> Option<&std::collections::HashMap<u32, String>> {
-        self.metadata()
-            .find_model(model_id)
-            .filter(|m| m.is_classifier())
-            .map(|m| &m.id2label)
-    }
-
-    /// Get the number of classification labels for a model.
-    fn num_labels(&self, model_id: &str) -> u32 {
-        self.metadata()
-            .find_model(model_id)
-            .map(|m| m.num_labels)
-            .unwrap_or(0)
-    }
-
-    /// Get label for a class index from a classification model.
-    /// Returns generic label (LABEL_N) if model not found or index not in mapping.
-    fn get_label(&self, model_id: &str, class_idx: u32) -> String {
-        self.metadata()
-            .find_model(model_id)
-            .map(|m| m.get_label(class_idx))
-            .unwrap_or_else(|| format!("LABEL_{class_idx}"))
+    /// Check if this worker supports an endpoint for a given model.
+    /// Falls back to LLM capabilities if the model is not registered.
+    fn supports_endpoint(&self, model_id: &str, endpoint: Endpoint) -> bool {
+        self.metadata().supports_endpoint(model_id, endpoint)
     }
 
     /// Check if this worker supports a specific model.
-    /// If models list is empty, worker accepts any model.
+    ///
+    /// `BasicWorker` overrides this to consult its lazy-discovered
+    /// `models_override`; the default delegates to the underlying
+    /// [`WorkerMetadata::supports_model`].
     fn supports_model(&self, model_id: &str) -> bool {
         self.metadata().supports_model(model_id)
-    }
-
-    /// Check if this worker supports an endpoint for a given model.
-    /// Falls back to default_model_type if model not found.
-    fn supports_endpoint(&self, model_id: &str, endpoint: Endpoint) -> bool {
-        self.metadata().supports_endpoint(model_id, endpoint)
     }
 
     /// Get all models this worker can serve.
@@ -505,6 +422,103 @@ pub struct WorkerMetadata {
 }
 
 impl WorkerMetadata {
+    // ── Identity / transport ────────────────────────────────────────
+
+    /// Get the bootstrap hostname for PD mode (parsed from URL at
+    /// construction time).
+    pub fn bootstrap_host(&self) -> &str {
+        &self.spec.bootstrap_host
+    }
+
+    /// Get the bootstrap port for PD mode.
+    pub fn bootstrap_port(&self) -> Option<u16> {
+        self.spec.bootstrap_port
+    }
+
+    /// Get the base URL without any DP rank suffix.
+    pub fn base_url(&self) -> &str {
+        self.spec
+            .dp_base_url
+            .as_deref()
+            .unwrap_or(self.spec.url.as_str())
+    }
+
+    /// Compose an endpoint URL for a specific route.
+    pub fn endpoint_url(&self, route: &str) -> String {
+        format!("{}{}", self.base_url(), route)
+    }
+
+    // ── DP awareness ────────────────────────────────────────────────
+
+    /// Check if this worker is DP-aware.
+    pub fn is_dp_aware(&self) -> bool {
+        self.spec.dp_rank.is_some()
+    }
+
+    /// Get DP rank if this is a DP-aware worker.
+    pub fn dp_rank(&self) -> Option<usize> {
+        self.spec.dp_rank
+    }
+
+    /// Get DP size if this worker is part of a DP group.
+    pub fn dp_size(&self) -> Option<usize> {
+        self.spec.dp_size
+    }
+
+    /// Transform a request for DP-aware routing.
+    ///
+    /// When the worker has a `dp_rank`, injects `data_parallel_rank`
+    /// into the request body. Otherwise returns the request unchanged.
+    /// Sync because the body is pure JSON manipulation — the previous
+    /// `async` on the trait method had no `await` inside.
+    pub fn prepare_request(&self, mut req: serde_json::Value) -> WorkerResult<serde_json::Value> {
+        if let Some(rank) = self.spec.dp_rank {
+            if let Some(map) = req.as_object_mut() {
+                map.insert("data_parallel_rank".to_string(), serde_json::json!(rank));
+                Ok(req)
+            } else {
+                Err(WorkerError::InvalidConfiguration {
+                    message: "Request must be a JSON object for DP-aware routing".to_string(),
+                })
+            }
+        } else {
+            Ok(req)
+        }
+    }
+
+    // ── Routing priorities / model lookup ───────────────────────────
+
+    /// Get the model ID this worker serves.
+    ///
+    /// Checks `ModelCards` first, then falls back to the `model_id`
+    /// label, and finally [`UNKNOWN_MODEL_ID`] if nothing is set.
+    pub fn model_id(&self) -> &str {
+        self.spec
+            .models
+            .primary()
+            .map(|m| m.id.as_str())
+            .or_else(|| self.spec.labels.get("model_id").map(|s| s.as_str()))
+            .unwrap_or(UNKNOWN_MODEL_ID)
+    }
+
+    /// Get the priority of this worker (higher value = higher priority).
+    pub fn priority(&self) -> u32 {
+        self.spec.priority
+    }
+
+    /// Get the cost factor of this worker (baseline = 1.0).
+    pub fn cost(&self) -> f32 {
+        self.spec.cost
+    }
+
+    /// Get the default provider type for this worker.
+    /// `None` means native/passthrough.
+    pub fn default_provider(&self) -> Option<&ProviderType> {
+        self.spec.provider.as_ref()
+    }
+
+    // ── Model lookups ───────────────────────────────────────────────
+
     /// Find a model card by ID (including aliases)
     pub fn find_model(&self, model_id: &str) -> Option<&ModelCard> {
         self.spec.models.find(model_id)
@@ -1576,8 +1590,8 @@ mod tests {
         assert_eq!(dp_worker.worker_type(), &WorkerType::Decode);
     }
 
-    #[tokio::test]
-    async fn test_dp_aware_prepare_request() {
+    #[test]
+    fn test_dp_aware_prepare_request() {
         let dp_worker = BasicWorkerBuilder::new("http://worker1:8080")
             .dp_config(3, 8)
             .worker_type(WorkerType::Regular)
@@ -1588,15 +1602,15 @@ mod tests {
             "max_tokens": 100
         });
 
-        let prepared_req = dp_worker.prepare_request(original_req).await.unwrap();
+        let prepared_req = dp_worker.prepare_request(original_req).unwrap();
 
         assert_eq!(prepared_req["prompt"], "Hello");
         assert_eq!(prepared_req["max_tokens"], 100);
         assert_eq!(prepared_req["data_parallel_rank"], 3);
     }
 
-    #[tokio::test]
-    async fn test_dp_aware_prepare_request_invalid() {
+    #[test]
+    fn test_dp_aware_prepare_request_invalid() {
         let dp_worker = BasicWorkerBuilder::new("http://worker1:8080")
             .dp_config(0, 4)
             .worker_type(WorkerType::Regular)
@@ -1604,7 +1618,7 @@ mod tests {
 
         // Non-object JSON should fail
         let invalid_req = serde_json::json!("not an object");
-        let result = dp_worker.prepare_request(invalid_req).await;
+        let result = dp_worker.prepare_request(invalid_req);
 
         assert!(result.is_err());
         match result.unwrap_err() {

@@ -484,7 +484,7 @@ impl Router {
             }
         };
 
-        let json_val = match worker.prepare_request(json_val).await {
+        let json_val = match worker.prepare_request(json_val) {
             Ok(prepared) => prepared,
             Err(e) => {
                 return error::bad_request(
