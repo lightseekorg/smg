@@ -126,8 +126,7 @@ pub trait Tokenizer: Encoder + Decoder {
 
     /// EOS token IDs for stop detection.
     ///
-    /// Loaded from `tokenizer_config.json` (eos_token string → vocab lookup) and
-    /// `generation_config.json` (eos_token_id, can be int or list).
+    /// Merged from `config.json` and `generation_config.json` (eos_token_id, int or list).
     /// Models can have multiple EOS tokens (e.g., Llama 3: end_of_text + eom_id + eot_id).
     fn eos_token_ids(&self) -> &[TokenIdType] {
         &[]

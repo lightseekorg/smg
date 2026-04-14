@@ -22,7 +22,7 @@ pub struct HuggingFaceTokenizer {
     vocab: HashMap<String, TokenIdType>,
     reverse_vocab: HashMap<TokenIdType, String>,
     chat_template: ChatTemplateState,
-    /// EOS token IDs from tokenizer_config.json + generation_config.json
+    /// EOS token IDs from config.json + generation_config.json
     eos_token_ids: Vec<TokenIdType>,
 }
 
