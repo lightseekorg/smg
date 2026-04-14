@@ -2,7 +2,9 @@
 //!
 //! The ring maps a routing key to a worker URL using consistent hashing over
 //! virtual nodes. The registry rebuilds one ring per model when workers are
-//! added or removed, so lookups stay allocation-free on the request path.
+//! added or removed, so the build cost is amortized — individual lookups only
+//! pay an `O(log n)` binary search plus a small bounded dedupe set to skip
+//! virtual-node duplicates. See [`HashRing::find_healthy_url`] for details.
 //!
 //! The type intentionally has no dependency on the `Worker` trait — it is
 //! constructed from URLs — so policies and tests can build rings without
@@ -84,10 +86,15 @@ impl HashRing {
         )
     }
 
-    /// Find worker URL for a key using consistent hashing.
+    /// Find a worker URL for a key using consistent hashing.
     ///
     /// Returns the first healthy worker URL at or after the key's position
     /// (clockwise). Skips virtual nodes for workers already checked.
+    ///
+    /// Cost per call: `O(log n)` binary search to find the start position
+    /// plus one small `HashSet` allocation bounded by
+    /// `min(worker_count(), 16)` slots to dedupe virtual-node hits while
+    /// walking clockwise. The dedupe set is dropped before return.
     ///
     /// - `key`: The routing key to hash
     /// - `is_healthy`: Function to check if a worker URL is healthy
@@ -105,7 +112,10 @@ impl HashRing {
         let start = self.entries.partition_point(|(pos, _)| *pos < key_pos);
 
         // Walk clockwise from start, wrapping around. Track visited URLs to
-        // avoid checking the same worker multiple times (virtual nodes).
+        // avoid calling `is_healthy` multiple times for the same worker when
+        // we hit its virtual nodes. Capacity is bounded by the physical worker
+        // count — typically a handful of entries — so the per-lookup
+        // allocation is negligible relative to the hashing itself.
         let mut checked_urls = HashSet::with_capacity(self.worker_count().min(16));
 
         for i in 0..self.entries.len() {
