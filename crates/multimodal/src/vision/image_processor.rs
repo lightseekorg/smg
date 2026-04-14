@@ -464,6 +464,9 @@ impl ImageProcessorRegistry {
             Box::new(super::processors::Llama4VisionProcessor::new()),
         );
 
+        // Register Kimi-K2.5 (MoonViT3d, NaViT-style)
+        registry.register("kimi", Box::new(super::processors::KimiK25Processor::new()));
+
         registry
     }
 }
