@@ -192,9 +192,6 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
     /// Decrement the load counter
     fn decrement_load(&self);
 
-    /// Reset the load counter to 0 (for sync/recovery)
-    fn reset_load(&self) {}
-
     /// Get the current routing-key load cardinality.
     fn routing_key_load(&self) -> usize;
 
@@ -588,20 +585,96 @@ impl WorkerRuntime {
         }
     }
 
-    fn status(&self) -> WorkerStatus {
+    // ── Lifecycle status ────────────────────────────────────────────
+
+    pub fn status(&self) -> WorkerStatus {
         WorkerStatus::from_u8(self.status.load(Ordering::Acquire))
     }
 
-    fn set_status(&self, status: WorkerStatus) {
+    pub fn set_status(&self, status: WorkerStatus) {
         self.status.store(status as u8, Ordering::Release);
     }
 
-    fn revision(&self) -> u64 {
+    pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
 
-    fn bump_revision(&self) -> u64 {
+    pub fn bump_revision(&self) -> u64 {
         self.revision.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    // ── Health-check counters ───────────────────────────────────────
+
+    pub fn consecutive_failures_increment(&self) -> usize {
+        self.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub fn consecutive_failures_reset(&self) {
+        self.consecutive_failures.store(0, Ordering::Release);
+    }
+
+    pub fn consecutive_successes_increment(&self) -> usize {
+        self.consecutive_successes.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub fn consecutive_successes_reset(&self) {
+        self.consecutive_successes.store(0, Ordering::Release);
+    }
+
+    pub fn total_pending_probes(&self) -> usize {
+        self.total_pending_probes.load(Ordering::Relaxed)
+    }
+
+    pub fn total_pending_probes_increment(&self) -> usize {
+        self.total_pending_probes.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn total_pending_probes_reset(&self) {
+        self.total_pending_probes.store(0, Ordering::Relaxed);
+    }
+
+    // ── Load counter ────────────────────────────────────────────────
+
+    pub fn load(&self) -> usize {
+        self.load_counter.load(Ordering::Relaxed)
+    }
+
+    pub fn increment_load(&self) {
+        self.load_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Saturating decrement. Returns `true` if the counter was decremented,
+    /// `false` if it was already zero — callers can log when that happens.
+    pub fn try_decrement_load(&self) -> bool {
+        self.load_counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_sub(1)
+            })
+            .is_ok()
+    }
+
+    // ── Routing-key load ────────────────────────────────────────────
+
+    pub fn routing_key_load(&self) -> usize {
+        self.worker_routing_key_load.value()
+    }
+
+    pub fn increment_routing_key_load(&self, routing_key: &str) {
+        self.worker_routing_key_load.increment(routing_key);
+    }
+
+    pub fn decrement_routing_key_load(&self, routing_key: &str) {
+        self.worker_routing_key_load.decrement(routing_key);
+    }
+
+    // ── Processed-request counter ───────────────────────────────────
+
+    pub fn processed_requests(&self) -> usize {
+        self.processed_counter.load(Ordering::Relaxed)
+    }
+
+    pub fn increment_processed(&self) {
+        self.processed_counter.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -739,78 +812,44 @@ impl Worker for BasicWorker {
     }
 
     fn consecutive_failures_increment(&self) -> usize {
-        self.runtime
-            .load()
-            .consecutive_failures
-            .fetch_add(1, Ordering::AcqRel)
-            + 1
+        self.runtime.load().consecutive_failures_increment()
     }
 
     fn consecutive_failures_reset(&self) {
-        self.runtime
-            .load()
-            .consecutive_failures
-            .store(0, Ordering::Release);
+        self.runtime.load().consecutive_failures_reset();
     }
 
     fn consecutive_successes_increment(&self) -> usize {
-        self.runtime
-            .load()
-            .consecutive_successes
-            .fetch_add(1, Ordering::AcqRel)
-            + 1
+        self.runtime.load().consecutive_successes_increment()
     }
 
     fn consecutive_successes_reset(&self) {
-        self.runtime
-            .load()
-            .consecutive_successes
-            .store(0, Ordering::Release);
+        self.runtime.load().consecutive_successes_reset();
     }
 
     fn total_pending_probes(&self) -> usize {
-        self.runtime
-            .load()
-            .total_pending_probes
-            .load(Ordering::Relaxed)
+        self.runtime.load().total_pending_probes()
     }
 
     fn total_pending_probes_increment(&self) -> usize {
-        self.runtime
-            .load()
-            .total_pending_probes
-            .fetch_add(1, Ordering::Relaxed)
-            + 1
+        self.runtime.load().total_pending_probes_increment()
     }
 
     fn total_pending_probes_reset(&self) {
-        self.runtime
-            .load()
-            .total_pending_probes
-            .store(0, Ordering::Relaxed);
+        self.runtime.load().total_pending_probes_reset();
     }
 
     fn load(&self) -> usize {
-        self.runtime.load().load_counter.load(Ordering::Relaxed)
+        self.runtime.load().load()
     }
 
     fn increment_load(&self) {
-        self.runtime
-            .load()
-            .load_counter
-            .fetch_add(1, Ordering::Relaxed);
+        self.runtime.load().increment_load();
         self.update_running_requests_metrics();
     }
 
     fn decrement_load(&self) {
-        let runtime = self.runtime.load();
-        if runtime
-            .load_counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_sub(1)
-            })
-            .is_err()
-        {
+        if !self.runtime.load().try_decrement_load() {
             tracing::warn!(
                 worker_url = %self.metadata.spec.url,
                 "Attempted to decrement load counter that is already at 0"
@@ -819,41 +858,24 @@ impl Worker for BasicWorker {
         self.update_running_requests_metrics();
     }
 
-    fn reset_load(&self) {
-        self.runtime.load().load_counter.store(0, Ordering::Relaxed);
-        self.update_running_requests_metrics();
-    }
-
     fn routing_key_load(&self) -> usize {
-        self.runtime.load().worker_routing_key_load.value()
+        self.runtime.load().routing_key_load()
     }
 
     fn increment_routing_key_load(&self, routing_key: &str) {
-        self.runtime
-            .load()
-            .worker_routing_key_load
-            .increment(routing_key);
+        self.runtime.load().increment_routing_key_load(routing_key);
     }
 
     fn decrement_routing_key_load(&self, routing_key: &str) {
-        self.runtime
-            .load()
-            .worker_routing_key_load
-            .decrement(routing_key);
+        self.runtime.load().decrement_routing_key_load(routing_key);
     }
 
     fn processed_requests(&self) -> usize {
-        self.runtime
-            .load()
-            .processed_counter
-            .load(Ordering::Relaxed)
+        self.runtime.load().processed_requests()
     }
 
     fn increment_processed(&self) {
-        self.runtime
-            .load()
-            .processed_counter
-            .fetch_add(1, Ordering::Relaxed);
+        self.runtime.load().increment_processed();
     }
 
     fn metadata(&self) -> &WorkerMetadata {
