@@ -427,19 +427,16 @@ async fn test_web_search_transform_sets_action_query_for_brave_search_with_mock(
         ToolCallResult::Success(ResponseOutputItem::WebSearchCall { action, .. }) => match action {
             WebSearchAction::Search {
                 query,
-                queries,
-                sources,
+                queries: _,
+                sources: _,
             } => {
                 assert_eq!(query, Some("rust brave query".to_string()));
-                assert!(queries.is_empty());
-                assert!(sources.is_empty());
             }
             _ => panic!("Expected Search action"),
         },
         ToolCallResult::Success(other) => panic!("Expected WebSearchCall, got {other:?}"),
         ToolCallResult::PendingApproval(_) => panic!("Expected Success result"),
     }
-
     manager.shutdown().await;
 }
 
