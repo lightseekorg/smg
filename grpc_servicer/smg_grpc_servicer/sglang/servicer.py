@@ -592,7 +592,6 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                 grpc.StatusCode.FAILED_PRECONDITION,
                 "Tokenizer path is not configured on this server.",
             )
-            return
         tokenizer_dir = Path(tokenizer_path)
 
         # Build ZIP archive in memory
