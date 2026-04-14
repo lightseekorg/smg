@@ -54,6 +54,8 @@ fn is_tokenizer_file(filename: &str) -> bool {
         || filename.ends_with("merges.txt")
         || filename.ends_with(".model")  // SentencePiece models
         || filename.ends_with(".tiktoken")
+        || filename == "config.json"
+        || filename == "generation_config.json"
         || is_chat_template_file(filename) // Include chat template files
 }
 

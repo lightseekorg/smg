@@ -130,6 +130,7 @@ pub struct TiktokenTokenizer {
     reverse_vocab: HashMap<TokenIdType, String>,
     vocab_size: usize,
     chat_template: ChatTemplateState,
+    eos_token_ids: Vec<TokenIdType>,
 }
 
 /// Supported Tiktoken models
@@ -178,6 +179,7 @@ impl TiktokenTokenizer {
             reverse_vocab: HashMap::new(),
             vocab_size,
             chat_template: ChatTemplateState::empty(),
+            eos_token_ids: Vec::new(), // No directory path in from_model
         })
     }
 
@@ -259,6 +261,9 @@ impl TiktokenTokenizer {
             })
         };
 
+        // Load merged EOS token IDs from config.json + generation_config.json
+        let eos_token_ids = crate::eos::load_eos_token_ids(dir);
+
         Ok(TiktokenTokenizer {
             tokenizer,
             special_tokens: config.special_tokens,
@@ -266,6 +271,7 @@ impl TiktokenTokenizer {
             reverse_vocab,
             vocab_size,
             chat_template: ChatTemplateState::new(chat_template)?,
+            eos_token_ids,
         })
     }
 
@@ -519,6 +525,10 @@ impl TokenizerTrait for TiktokenTokenizer {
     fn thinking_key_name(&self) -> Option<ThinkingKeyName> {
         self.chat_template.thinking_key_name()
     }
+    fn eos_token_ids(&self) -> &[TokenIdType] {
+        &self.eos_token_ids
+    }
+
     fn think_in_prefill(&self) -> bool {
         self.chat_template.think_in_prefill()
     }
