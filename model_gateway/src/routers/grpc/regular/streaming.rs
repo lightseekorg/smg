@@ -266,8 +266,11 @@ impl StreamingProcessor {
             }
         };
 
-        // Check if this is the specific function case (LLM generates parameters only, no name field)
-        let is_specific_function = matches!(tool_choice, Some(ToolChoice::Function { .. }));
+        // Check if this is the specific function case (LLM generates parameters only, no name field).
+        // Only applies when json_schema is used — structural tags include framing tokens
+        // that the parser must handle.
+        let is_specific_function =
+            used_json_schema && matches!(tool_choice, Some(ToolChoice::Function { .. }));
 
         let tool_parser_available = tools.is_some()
             && utils::check_tool_parser_availability(
@@ -1643,11 +1646,13 @@ impl StreamingProcessor {
                 Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
             );
 
-        // Check if model output is arguments-only for a specific function (ToolChoice::Tool)
-        let is_specific_function = matches!(
-            &original_request.tool_choice,
-            Some(messages::ToolChoice::Tool { .. })
-        );
+        // Check if model output is arguments-only for a specific function (ToolChoice::Tool).
+        // Only applies when json_schema is used — structural tags include framing tokens.
+        let is_specific_function = used_json_schema
+            && matches!(
+                &original_request.tool_choice,
+                Some(messages::ToolChoice::Tool { .. })
+            );
 
         let history_tool_calls_count =
             message_utils::get_history_tool_calls_count_messages(&original_request);

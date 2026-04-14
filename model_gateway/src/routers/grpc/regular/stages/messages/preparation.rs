@@ -2,7 +2,10 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use openai_protocol::{common::StringOrArray, messages::CreateMessageRequest};
+use openai_protocol::{
+    common::{StringOrArray, ToolChoice, ToolChoiceValue},
+    messages::CreateMessageRequest,
+};
 use tracing::{debug, error};
 
 use crate::routers::{
@@ -224,7 +227,14 @@ impl MessagePreparationStage {
         // Derive skip_special_tokens from constraint type
         let skip_special_tokens = match &tool_call_constraint {
             Some(c) if c.is_json_schema() => true,
-            _ if !filtered_tools.is_empty() => false,
+            _ if !filtered_tools.is_empty()
+                && !matches!(
+                    chat_tool_choice,
+                    Some(ToolChoice::Value(ToolChoiceValue::None))
+                ) =>
+            {
+                false
+            }
             _ => true,
         };
 
