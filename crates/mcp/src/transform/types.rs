@@ -15,6 +15,8 @@ pub enum ResponseFormat {
     WebSearchCall,
     /// Transform to OpenAI code_interpreter_call format
     CodeInterpreterCall,
+    /// Transform to OpenAI image_generation_call format
+    ImageGenerationCall,
     /// Transform to OpenAI file_search_call format
     FileSearchCall,
 }
@@ -25,6 +27,7 @@ impl From<ResponseFormatConfig> for ResponseFormat {
             ResponseFormatConfig::Passthrough => ResponseFormat::Passthrough,
             ResponseFormatConfig::WebSearchCall => ResponseFormat::WebSearchCall,
             ResponseFormatConfig::CodeInterpreterCall => ResponseFormat::CodeInterpreterCall,
+            ResponseFormatConfig::ImageGenerationCall => ResponseFormat::ImageGenerationCall,
             ResponseFormatConfig::FileSearchCall => ResponseFormat::FileSearchCall,
         }
     }
@@ -42,6 +45,10 @@ mod tests {
             (
                 ResponseFormat::CodeInterpreterCall,
                 "\"code_interpreter_call\"",
+            ),
+            (
+                ResponseFormat::ImageGenerationCall,
+                "\"image_generation_call\"",
             ),
             (ResponseFormat::FileSearchCall, "\"file_search_call\""),
         ];

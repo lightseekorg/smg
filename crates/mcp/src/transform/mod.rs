@@ -22,5 +22,7 @@
 mod transformer;
 mod types;
 
-pub use transformer::{mcp_response_item_id, ResponseTransformer};
+pub use transformer::{
+    extract_image_generation_fallback_text, mcp_response_item_id, ResponseTransformer,
+};
 pub use types::ResponseFormat;

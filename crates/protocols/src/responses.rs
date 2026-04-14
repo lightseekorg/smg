@@ -36,6 +36,10 @@ pub enum ResponseTool {
     #[serde(rename = "code_interpreter")]
     CodeInterpreter(CodeInterpreterTool),
 
+    /// Built-in tool.
+    #[serde(rename = "image_generation")]
+    ImageGeneration(ImageGenerationTool),
+
     /// MCP server tool.
     #[serde(rename = "mcp")]
     Mcp(McpTool),
@@ -78,6 +82,19 @@ pub struct WebSearchPreviewTool {
 #[serde(deny_unknown_fields)]
 pub struct CodeInterpreterTool {
     pub container: Option<Value>,
+}
+
+/// Built-in image generation tool.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+pub struct ImageGenerationTool {
+    pub size: Option<String>,
+    pub quality: Option<String>,
+    pub background: Option<String>,
+    pub output_format: Option<String>,
+    pub output_compression: Option<u32>,
+    pub moderation: Option<String>,
+    pub model: Option<String>,
 }
 
 /// `require_approval` values.
@@ -314,6 +331,25 @@ pub enum ResponseOutputItem {
         queries: Vec<String>,
         results: Option<Vec<FileSearchResult>>,
     },
+    #[serde(rename = "image_generation_call")]
+    ImageGenerationCall {
+        id: String,
+        status: ImageGenerationCallStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        revised_prompt: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        background: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_format: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+    },
 }
 
 // ============================================================================
@@ -386,6 +422,16 @@ pub enum FileSearchCallStatus {
     Searching,
     Completed,
     Incomplete,
+    Failed,
+}
+
+/// Status for image generation tool calls.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageGenerationCallStatus {
+    InProgress,
+    Generating,
+    Completed,
     Failed,
 }
 

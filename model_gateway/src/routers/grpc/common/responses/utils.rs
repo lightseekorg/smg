@@ -36,6 +36,20 @@ pub(crate) async fn ensure_mcp_connection(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: Option<&[ResponseTool]>,
 ) -> Result<(bool, Vec<McpServerBinding>), Response> {
+    // grpc Responses currently does not support image_generation tool calls.
+    if tools
+        .map(|t| {
+            t.iter()
+                .any(|tool| matches!(tool, ResponseTool::ImageGeneration(_)))
+        })
+        .unwrap_or(false)
+    {
+        return Err(error::bad_request(
+            "unsupported_tool",
+            "image_generation tool is not supported on grpc responses routes.",
+        ));
+    }
+
     // Check for explicit MCP tools (must error if connection fails)
     let has_explicit_mcp_tools = tools
         .map(|t| t.iter().any(|tool| matches!(tool, ResponseTool::Mcp(_))))
