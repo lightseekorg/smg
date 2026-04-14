@@ -54,8 +54,6 @@ fn is_tokenizer_file(filename: &str) -> bool {
         || filename.ends_with("merges.txt")
         || filename.ends_with(".model")  // SentencePiece models
         || filename.ends_with(".tiktoken")
-        || filename == "config.json" || filename.ends_with("/config.json")
-        || filename == "generation_config.json" || filename.ends_with("/generation_config.json")
         || is_chat_template_file(filename) // Include chat template files
 }
 
@@ -134,6 +132,13 @@ pub async fn download_tokenizer_from_hf(model_id: impl AsRef<Path>) -> anyhow::R
         return Err(anyhow::anyhow!(
             "No tokenizer files could be downloaded for model '{model_name}'."
         ));
+    }
+
+    // Download config files for EOS token loading (best-effort, non-fatal).
+    // Downloaded separately by name to avoid matching nested files like
+    // 1_Pooling/config.json that would break cache_dir resolution.
+    for config_file in ["config.json", "generation_config.json"] {
+        let _ = repo.get(config_file).await;
     }
 
     match cache_dir {
@@ -300,15 +305,6 @@ mod tests {
         assert!(is_tokenizer_file("spiece.model"));
         assert!(is_tokenizer_file("chat_template.jinja"));
         assert!(is_tokenizer_file("template.jinja"));
-        // Config files for EOS loading
-        assert!(is_tokenizer_file("config.json"));
-        assert!(is_tokenizer_file("subfolder/config.json"));
-        assert!(is_tokenizer_file("generation_config.json"));
-        assert!(is_tokenizer_file("subfolder/generation_config.json"));
-        // Other *_config.json files must NOT match
-        assert!(!is_tokenizer_file("preprocessor_config.json"));
-        assert!(!is_tokenizer_file("quantize_config.json"));
-        assert!(!is_tokenizer_file("adapter_config.json"));
         assert!(!is_tokenizer_file("model.bin"));
         assert!(!is_tokenizer_file("README.md"));
     }
