@@ -1,15 +1,16 @@
 //! Worker Registry for multi-router support
 //!
-//! Provides centralized registry for workers with model-based indexing
+//! Provides centralized registry for workers with model-based indexing.
 //!
 //! # Performance Optimizations
 //! The model index uses immutable Arc snapshots instead of RwLock for lock-free reads.
 //! This is critical for high-concurrency scenarios where many requests query the same model.
 //!
 //! # Consistent Hash Ring
-//! The registry maintains a pre-computed hash ring per model for O(log n) consistent hashing.
-//! The ring is rebuilt only when workers are added/removed, not per-request.
-//! Uses virtual nodes (150 per worker) for even distribution and blake3 for stable hashing.
+//! The registry maintains a pre-computed [`HashRing`] per model for O(log n)
+//! consistent hashing. The ring is rebuilt only when workers are added or
+//! removed, not per request. See [`crate::worker::hash_ring`] for the ring
+//! itself — this file only wires registry events to ring rebuilds.
 
 use std::{collections::HashSet, sync::Arc};
 
@@ -26,129 +27,11 @@ use crate::{
     worker::{
         circuit_breaker::CircuitState,
         event::WorkerEvent,
+        hash_ring::HashRing,
         worker::{RuntimeType, WorkerType},
         ConnectionMode, Worker,
     },
 };
-
-/// Number of virtual nodes per physical worker for even distribution.
-/// 150 is a common choice that provides good balance between memory and distribution.
-const VIRTUAL_NODES_PER_WORKER: usize = 150;
-
-/// Consistent hash ring for O(log n) worker selection.
-///
-/// Each worker is placed at multiple positions (virtual nodes) on the ring
-/// based on hash(worker_url + vnode_index). This provides:
-/// - Even key distribution across workers
-/// - Minimal key redistribution when workers are added/removed (~1/N keys move)
-/// - O(log n) lookup via binary search
-///
-/// Uses blake3 for stable, fast hashing that's consistent across Rust versions.
-#[derive(Debug, Clone)]
-pub struct HashRing {
-    /// Sorted list of (ring_position, worker_url)
-    /// Multiple entries per worker (virtual nodes) for even distribution.
-    /// Uses Arc<str> to share URL across all virtual nodes (150 refs vs 150 copies).
-    entries: Arc<[(u64, Arc<str>)]>,
-}
-
-impl HashRing {
-    /// Build a hash ring from a list of workers.
-    /// Creates VIRTUAL_NODES_PER_WORKER entries per worker for even distribution.
-    pub fn new(workers: &[Arc<dyn Worker>]) -> Self {
-        let mut entries: Vec<(u64, Arc<str>)> =
-            Vec::with_capacity(workers.len() * VIRTUAL_NODES_PER_WORKER);
-
-        for worker in workers {
-            // Create Arc<str> once per worker, share across all virtual nodes
-            let url: Arc<str> = Arc::from(worker.url());
-
-            // Create multiple virtual nodes per worker
-            for vnode in 0..VIRTUAL_NODES_PER_WORKER {
-                let vnode_key = format!("{url}#{vnode}");
-                let pos = Self::hash_position(&vnode_key);
-                entries.push((pos, Arc::clone(&url)));
-            }
-        }
-
-        // Sort by ring position for binary search
-        entries.sort_unstable_by_key(|(pos, _)| *pos);
-
-        Self {
-            entries: Arc::from(entries.into_boxed_slice()),
-        }
-    }
-
-    /// Hash a string to a ring position using blake3 (stable across versions).
-    #[inline]
-    #[expect(
-        clippy::expect_used,
-        reason = "blake3 always produces 32 bytes — converting a fixed 8-byte slice to [u8; 8] is infallible"
-    )]
-    fn hash_position(s: &str) -> u64 {
-        let hash = blake3::hash(s.as_bytes());
-        // Take first 8 bytes as u64
-        u64::from_le_bytes(
-            hash.as_bytes()[..8]
-                .try_into()
-                .expect("blake3 hash is always 32 bytes, slicing first 8 is infallible"),
-        )
-    }
-
-    /// Find worker URL for a key using consistent hashing.
-    /// Returns the first healthy worker URL at or after the key's position (clockwise).
-    ///
-    /// - `key`: The routing key to hash
-    /// - `is_healthy`: Function to check if a worker URL is healthy
-    pub fn find_healthy_url<F>(&self, key: &str, is_healthy: F) -> Option<&str>
-    where
-        F: Fn(&str) -> bool,
-    {
-        if self.entries.is_empty() {
-            return None;
-        }
-
-        let key_pos = Self::hash_position(key);
-
-        // Binary search to find first entry at or after key_pos
-        let start = self.entries.partition_point(|(pos, _)| *pos < key_pos);
-
-        // Walk clockwise from start, wrapping around
-        // Track visited URLs to avoid checking same worker multiple times (virtual nodes)
-        let mut checked_urls = HashSet::with_capacity(self.worker_count().min(16));
-
-        for i in 0..self.entries.len() {
-            let (_, url) = &self.entries[(start + i) % self.entries.len()];
-            let url_str: &str = url;
-
-            // Skip if we already checked this worker (from another virtual node)
-            if !checked_urls.insert(url_str) {
-                continue;
-            }
-
-            if is_healthy(url_str) {
-                return Some(url_str);
-            }
-        }
-
-        None
-    }
-
-    /// Check if the ring is empty
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Get the number of entries in the ring (including virtual nodes)
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Get the number of unique workers in the ring
-    pub fn worker_count(&self) -> usize {
-        self.entries.len() / VIRTUAL_NODES_PER_WORKER.max(1)
-    }
-}
 
 /// Unique identifier for a worker
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -1210,7 +1093,7 @@ impl WorkerRegistry {
     /// Rebuild the hash ring for a model based on current workers in the model index.
     fn rebuild_hash_ring(&self, model_id: &str) {
         if let Some(workers) = self.model_index.get(model_id) {
-            let ring = HashRing::new(&workers);
+            let ring = HashRing::new(workers.value().iter().map(|w| w.url()));
             self.hash_rings.insert(model_id.to_string(), Arc::new(ring));
         } else {
             // No workers for this model, remove the ring

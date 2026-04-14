@@ -4,6 +4,7 @@ pub mod builder;
 pub mod circuit_breaker;
 pub mod error;
 pub mod event;
+pub mod hash_ring;
 pub mod http_client;
 pub mod kv_event_monitor;
 pub mod manager;
@@ -37,7 +38,8 @@ pub use openai_protocol::{
     model_type::{Endpoint, ModelType},
     worker::{ProviderType, WorkerGroupKey},
 };
-pub use registry::{HashRing, WorkerRegistry};
+pub use hash_ring::HashRing;
+pub use registry::WorkerRegistry;
 pub use resilience::{resolve_resilience, ResolvedResilience, DEFAULT_RETRYABLE_STATUS_CODES};
 pub use service::WorkerService;
 pub use worker::{
