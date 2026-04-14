@@ -372,7 +372,9 @@ impl VllmEngineClient {
 
         let max_tokens = request.max_completion_tokens;
 
-        let skip_special_tokens = request.skip_special_tokens;
+        // Hardcode to true: gRPC backends return raw token IDs, not decoded text.
+        // Detokenization happens on the SMG Rust side (StopDecoder/Sequence).
+        let skip_special_tokens = true;
 
         // Map logprobs: if request.logprobs is true, use top_logprobs value (or 1 if not specified)
         // OpenAI API only exposes output logprobs, not prompt logprobs, for chat completions
@@ -567,14 +569,8 @@ impl VllmEngineClient {
     ) -> Result<proto::SamplingParams, String> {
         let stop_sequences = request.stop_sequences.clone().unwrap_or_default();
 
-        // Messages API doesn't expose skip_special_tokens; derive from constraint type.
-        // json_schema constraints include special tokens in the schema itself, so skip them.
-        // Other tool-call modes (e.g. regex) need the raw special tokens preserved.
-        let skip_special_tokens = match &tool_call_constraint {
-            Some((typ, _)) if typ == "json_schema" => true,
-            _ if request.tools.as_ref().is_some_and(|t| !t.is_empty()) => false,
-            _ => true,
-        };
+        // Hardcode to true: gRPC backends return raw token IDs, not decoded text.
+        let skip_special_tokens = true;
 
         Ok(proto::SamplingParams {
             temperature: Some(request.temperature.unwrap_or(1.0) as f32),

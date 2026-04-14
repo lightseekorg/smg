@@ -2,10 +2,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use openai_protocol::{
-    common::{StringOrArray, ToolChoice, ToolChoiceValue},
-    messages::CreateMessageRequest,
-};
+use openai_protocol::{common::StringOrArray, messages::CreateMessageRequest};
 use tracing::{debug, error};
 
 use crate::routers::{
@@ -224,20 +221,6 @@ impl MessagePreparationStage {
             None
         };
 
-        // Derive skip_special_tokens from constraint type
-        let skip_special_tokens = match &tool_call_constraint {
-            Some(c) if c.is_json_schema() => true,
-            _ if !filtered_tools.is_empty()
-                && !matches!(
-                    chat_tool_choice,
-                    Some(ToolChoice::Value(ToolChoiceValue::None))
-                ) =>
-            {
-                false
-            }
-            _ => true,
-        };
-
         // Step 5: Create stop sequence decoder
         let stop_for_decoder = request
             .stop_sequences
@@ -247,8 +230,8 @@ impl MessagePreparationStage {
         let stop_decoder = utils::create_stop_decoder(
             &tokenizer,
             stop_for_decoder.as_ref(),
-            None, // no stop_token_ids in Messages API
-            skip_special_tokens,
+            None,  // no stop_token_ids in Messages API
+            true,  // Messages API default
             false, // no_stop_trim default
             false, // ignore_eos — not available in Messages API
         );

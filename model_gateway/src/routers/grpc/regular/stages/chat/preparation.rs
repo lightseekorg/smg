@@ -2,10 +2,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use openai_protocol::{
-    chat::ChatCompletionRequest,
-    common::{ToolChoice, ToolChoiceValue},
-};
+use openai_protocol::chat::ChatCompletionRequest;
 use tracing::{debug, error};
 
 use crate::routers::{
@@ -47,7 +44,7 @@ impl ChatPreparationStage {
             utils::resolve_tokenizer(ctx, "ChatPreparationStage::prepare_chat").map_err(|e| *e)?;
 
         // Step 1: Filter tools if needed
-        let mut body_ref = utils::filter_chat_request_by_tool_choice(request);
+        let body_ref = utils::filter_chat_request_by_tool_choice(request);
 
         // Resolve multimodal context once: placeholder token, model_id, tokenizer_source.
         // The placeholder is passed to process_chat_messages so that string-format chat
@@ -203,31 +200,13 @@ impl ChatPreparationStage {
             None
         };
 
-        // Derive skip_special_tokens from constraint type and mutate the request:
-        // - json_schema → output is pure JSON, special tokens not needed
-        // - structural_tag or no constraint with tools → parser needs special token delimiters
-        // This ensures both StopDecoder and the backend (via grpc_client passthrough)
-        // see the same value.
-        match &tool_call_constraint {
-            Some(c) if c.is_json_schema() => {} // keep request default
-            _ if body_ref.tools.is_some()
-                && !matches!(
-                    body_ref.tool_choice,
-                    Some(ToolChoice::Value(ToolChoiceValue::None))
-                ) =>
-            {
-                body_ref.to_mut().skip_special_tokens = false;
-            }
-            _ => {}
-        }
-
         // Step 5: Create stop sequence decoder (build once, reuse in non-stream)
         let stop_decoder = utils::create_stop_decoder(
             &tokenizer,
-            body_ref.stop.as_ref(),
-            body_ref.stop_token_ids.as_ref(),
-            body_ref.skip_special_tokens,
-            body_ref.no_stop_trim,
+            request.stop.as_ref(),
+            request.stop_token_ids.as_ref(),
+            request.skip_special_tokens,
+            request.no_stop_trim,
             request.ignore_eos,
         );
 
