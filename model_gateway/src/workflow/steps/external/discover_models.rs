@@ -1,11 +1,10 @@
 //! Model discovery step for external API endpoints.
 
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use openai_protocol::{model_card::ModelCard, model_type::ModelType, worker::ProviderType};
-use regex::Regex;
 use reqwest::Client;
 use serde::Deserialize;
 use tracing::{debug, info};
@@ -25,14 +24,6 @@ static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         .expect("Failed to create HTTP client")
 });
 
-// Regex to strip date suffix: -YYYY-MM-DD or -YYYY-MM
-#[expect(
-    clippy::expect_used,
-    reason = "Lazy static initialization — compile-time constant regex pattern cannot fail"
-)]
-static DATE_SUFFIX_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"-\d{4}-\d{2}(-\d{2})?$").expect("Invalid date regex"));
-
 /// OpenAI /v1/models response format.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelsResponse {
@@ -46,6 +37,8 @@ pub struct ModelsResponse {
 pub struct ModelInfo {
     pub id: String,
     #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
     pub object: String,
     #[serde(default)]
     pub created: Option<u64>,
@@ -53,43 +46,40 @@ pub struct ModelInfo {
     pub owned_by: Option<String>,
 }
 
-/// Group models by base name (stripping date suffixes) and create ModelCards with aliases.
+/// Convert a flat upstream `/v1/models` list into `ModelCard`s.
 ///
-/// # Example
-/// Input:  `["gpt-4o", "gpt-4o-2024-05-13", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20"]`
-/// Output: `ModelCard { id: "gpt-4o", aliases: ["gpt-4o-2024-05-13", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20"] }`
-pub fn group_models_into_cards(models: Vec<ModelInfo>) -> Vec<ModelCard> {
-    // Group model IDs by base name (with date stripped)
-    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
-    for model in &models {
-        let base = DATE_SUFFIX_PATTERN.replace(&model.id, "").to_string();
-        groups.entry(base).or_default().push(model.id.clone());
-    }
+/// Upstream IDs are preserved as-is. Virtual short aliases like `grok-4` are
+/// resolved later by `WorkerModels::find` via prefix fallback.
+pub fn build_model_cards(models: Vec<ModelInfo>) -> Vec<ModelCard> {
+    models
+        .into_iter()
+        .map(|model| {
+            let mut card = ModelCard::new(&model.id)
+                .with_model_type(infer_model_type_from_id(&model.id))
+                .with_created_at(model.created.unwrap_or(0));
 
-    // Create ModelCard for each group
-    groups
-        .into_values()
-        .map(|mut variants| {
-            // Sort: shortest first (base name), then alphabetically
-            variants.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-
-            let primary_id = variants.remove(0); // shortest = primary ID
-            let aliases = variants; // rest = aliases
-
-            let model_type = infer_model_type_from_id(&primary_id);
-            let provider = infer_provider_from_id(&primary_id);
-
-            let mut card = ModelCard::new(&primary_id)
-                .with_aliases(aliases)
-                .with_model_type(model_type);
-
-            if let Some(p) = provider {
-                card = card.with_provider(p);
+            if !model.aliases.is_empty() {
+                card = card.with_aliases(model.aliases);
             }
 
+            card.provider = infer_provider_from_id(&card.id);
             card
         })
         .collect()
+}
+
+fn apply_provider_hint(model_cards: &mut [ModelCard], provider: Option<&ProviderType>) {
+    if let Some(provider) = provider {
+        for card in model_cards {
+            card.provider = Some(provider.clone());
+        }
+    }
+}
+
+/// Kept for backwards compatibility with existing call sites.
+#[inline]
+pub fn group_models_into_cards(models: Vec<ModelInfo>) -> Vec<ModelCard> {
+    build_model_cards(models)
 }
 
 /// Infer ModelType from model ID string.
@@ -129,13 +119,23 @@ pub fn infer_model_type_from_id(id: &str) -> ModelType {
         return ModelType::MODERATION_MODEL;
     }
 
+    // Reasoning models
+    let is_reasoning = id_lower.starts_with("o1")
+        || id_lower.starts_with("o3")
+        || (id_lower.contains("reasoning") && !id_lower.contains("non-reasoning"));
+
     // Vision LLM
-    if id_lower.contains("vision") || id_lower.contains("4o") {
+    let is_vision = id_lower.contains("vision") || id_lower.contains("4o");
+
+    if is_reasoning && is_vision {
+        return ModelType::FULL_LLM;
+    }
+
+    if is_vision {
         return ModelType::VISION_LLM;
     }
 
-    // Reasoning models
-    if id_lower.starts_with("o1") || id_lower.starts_with("o3") {
+    if is_reasoning {
         return ModelType::REASONING_LLM;
     }
 
@@ -247,7 +247,8 @@ async fn fetch_models(
         url
     );
 
-    let model_cards = group_models_into_cards(models_response.data);
+    let mut model_cards = group_models_into_cards(models_response.data);
+    apply_provider_hint(&mut model_cards, provider);
 
     debug!(
         "Grouped into {} model cards with aliases",
@@ -316,5 +317,90 @@ impl StepExecutor<WorkerWorkflowData> for DiscoverModelsStep {
 
     fn is_retryable(&self, _error: &WorkflowError) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::{model_type::ModelType, worker::ProviderType};
+
+    use super::{
+        apply_provider_hint, build_model_cards, group_models_into_cards, infer_model_type_from_id,
+        ModelInfo,
+    };
+
+    #[test]
+    fn group_models_into_cards_preserves_created_at_and_aliases() {
+        let cards = group_models_into_cards(vec![ModelInfo {
+            id: "grok-4-0709".to_string(),
+            aliases: vec!["grok-4".to_string()],
+            object: "model".to_string(),
+            created: Some(1_752_019_200),
+            owned_by: None,
+        }]);
+
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, "grok-4-0709");
+        assert_eq!(cards[0].aliases, vec!["grok-4"]);
+        assert_eq!(cards[0].provider, Some(ProviderType::XAI));
+        assert_eq!(cards[0].model_type, ModelType::LLM);
+        assert_eq!(cards[0].created_at, 1_752_019_200);
+    }
+
+    #[test]
+    fn build_model_cards_keeps_flat_ids_for_prefix_fallback_lookup() {
+        let cards = build_model_cards(vec![
+            ModelInfo {
+                id: "gpt-4o-2024-05-13".to_string(),
+                aliases: Vec::new(),
+                object: "model".to_string(),
+                created: Some(1_715_000_000),
+                owned_by: None,
+            },
+            ModelInfo {
+                id: "gpt-4o-2024-11-20".to_string(),
+                aliases: Vec::new(),
+                object: "model".to_string(),
+                created: Some(1_732_000_000),
+                owned_by: None,
+            },
+        ]);
+
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].aliases, Vec::<String>::new());
+        assert_eq!(cards[1].aliases, Vec::<String>::new());
+    }
+
+    #[test]
+    fn infer_model_type_marks_reasoning_before_visionish_suffixes() {
+        assert_eq!(
+            infer_model_type_from_id("grok-4-fast-reasoning"),
+            ModelType::REASONING_LLM
+        );
+    }
+
+    #[test]
+    fn infer_model_type_preserves_vision_when_reasoning_and_vision_both_match() {
+        assert_eq!(
+            infer_model_type_from_id("gpt-4o-reasoning-preview"),
+            ModelType::FULL_LLM
+        );
+    }
+
+    #[test]
+    fn apply_provider_hint_uses_worker_provider_for_prefixed_ids() {
+        let mut cards = build_model_cards(vec![ModelInfo {
+            id: "models/gemini-2.5-pro".to_string(),
+            aliases: Vec::new(),
+            object: "model".to_string(),
+            created: Some(1_752_019_200),
+            owned_by: None,
+        }]);
+
+        assert_eq!(cards[0].provider, None);
+
+        apply_provider_hint(&mut cards, Some(&ProviderType::Gemini));
+
+        assert_eq!(cards[0].provider, Some(ProviderType::Gemini));
     }
 }

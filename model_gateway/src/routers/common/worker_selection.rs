@@ -9,7 +9,6 @@ use axum::{
     response::Response,
 };
 use futures_util::future::join_all;
-use openai_protocol::models::ListModelsResponse;
 
 use crate::{
     routers::{
@@ -17,6 +16,7 @@ use crate::{
         error,
     },
     worker::{ConnectionMode, ProviderType, RuntimeType, Worker, WorkerRegistry, WorkerType},
+    workflow::steps::external::{group_models_into_cards, ModelsResponse},
 };
 
 /// Holds references to shared infrastructure needed for worker selection.
@@ -216,7 +216,9 @@ fn filter_by_provider(
 ///
 /// Auth headers are adapted per-vendor via [`apply_provider_headers`] (e.g.
 /// Anthropic uses `x-api-key`, OpenAI uses `Authorization: Bearer`). The
-/// response is parsed via [`ListModelsResponse::parse_upstream`].
+/// response is rebuilt with the same model-card construction path used during
+/// external-worker registration so aliases and creation timestamps stay
+/// consistent after refresh-on-miss.
 async fn refresh_worker_models(
     client: &reqwest::Client,
     worker: &Arc<dyn Worker>,
@@ -238,14 +240,20 @@ async fn refresh_worker_models(
 
     match backend_req.send().await {
         Ok(response) if response.status().is_success() => {
-            match response.json::<serde_json::Value>().await {
-                Ok(json) => {
+            match response.json::<ModelsResponse>().await {
+                Ok(resp) => {
                     let provider = ProviderType::from_url(&url);
-                    let model_cards = ListModelsResponse::parse_upstream(&json, provider);
+                    let mut model_cards = group_models_into_cards(resp.data);
+
+                    if let Some(ref provider) = provider {
+                        for card in &mut model_cards {
+                            card.provider = Some(provider.clone());
+                        }
+                    }
 
                     if !model_cards.is_empty() {
                         tracing::info!(
-                            "Model refresh: found {} models from {}",
+                            "Model refresh: found {} model cards from {}",
                             model_cards.len(),
                             url
                         );

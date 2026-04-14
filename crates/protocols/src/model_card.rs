@@ -21,6 +21,14 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if passes &T"
+)]
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
 fn default_model_type() -> ModelType {
     ModelType::LLM
 }
@@ -56,6 +64,12 @@ pub struct ModelCard {
     /// Alternative names/aliases for this model
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+
+    /// Unix timestamp when this model was created (0 = unknown).
+    /// Used to prefer the newest prefix-matched variant when providers only
+    /// expose versioned model IDs upstream.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub created_at: u64,
 
     // === Capabilities ===
     /// Supported endpoint types (bitflags)
@@ -120,6 +134,7 @@ impl ModelCard {
             id: id.into(),
             display_name: None,
             aliases: Vec::new(),
+            created_at: 0,
             model_type: ModelType::LLM,
             hf_model_type: None,
             architectures: Vec::new(),
@@ -152,6 +167,12 @@ impl ModelCard {
     /// Add multiple aliases
     pub fn with_aliases(mut self, aliases: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.aliases.extend(aliases.into_iter().map(|a| a.into()));
+        self
+    }
+
+    /// Set the creation timestamp from the upstream `/v1/models` response.
+    pub fn with_created_at(mut self, ts: u64) -> Self {
+        self.created_at = ts;
         self
     }
 
@@ -301,10 +322,11 @@ impl ModelCard {
     /// consuming `self` to avoid cloning the model ID.
     pub fn into_model_object(self) -> ModelObject {
         let owned_by = self.owned_by().to_owned();
+        let created = i64::try_from(self.created_at).unwrap_or(i64::MAX);
         ModelObject {
             id: self.id,
             object: "model".to_owned(),
-            created: 0,
+            created,
             owned_by,
         }
     }
@@ -327,6 +349,24 @@ impl ModelCard {
 impl Default for ModelCard {
     fn default() -> Self {
         Self::new(super::UNKNOWN_MODEL_ID)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelCard;
+    use crate::worker::ProviderType;
+
+    #[test]
+    fn into_model_object_preserves_created_at_and_provider() {
+        let model = ModelCard::new("grok-4-0709")
+            .with_created_at(1_752_019_200)
+            .with_provider(ProviderType::XAI)
+            .into_model_object();
+
+        assert_eq!(model.id, "grok-4-0709");
+        assert_eq!(model.created, 1_752_019_200);
+        assert_eq!(model.owned_by, "xai");
     }
 }
 

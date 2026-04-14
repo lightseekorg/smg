@@ -188,6 +188,14 @@ impl RouterManager {
 
     pub fn get_router_for_model(&self, model_id: &str) -> Option<Arc<dyn RouterTrait>> {
         let workers = self.worker_registry.get_by_model(model_id);
+        let alias_workers = workers.is_empty().then(|| {
+            self.worker_registry
+                .get_all()
+                .into_iter()
+                .filter(|worker| worker.supports_model(model_id))
+                .collect::<Vec<_>>()
+        });
+        let workers = alias_workers.as_deref().unwrap_or(&workers);
 
         // Find the best router ID based on worker capabilities
         // Priority: external (provider-specific) > grpc-pd > http-pd > grpc-regular > http-regular
