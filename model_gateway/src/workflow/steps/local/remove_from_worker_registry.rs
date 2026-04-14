@@ -8,10 +8,7 @@ use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowRe
 
 use crate::{
     observability::metrics::Metrics,
-    worker::{
-        worker::{ConnectionModeExt, WorkerTypeExt},
-        WorkerGroupKey,
-    },
+    worker::worker::{ConnectionModeExt, WorkerTypeExt},
     workflow::data::WorkerRemovalWorkflowData,
 };
 
@@ -83,8 +80,11 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
             );
         }
 
-        // Update Layer 3 worker pool size metrics for unique configurations
-        // and notify LoadMonitor when groups become empty
+        // Update Layer 3 worker pool size metrics for unique
+        // configurations. WorkerMonitor subscribes to registry events
+        // directly and reconciles per-group polling state on its own,
+        // so this step no longer needs to push group-removed
+        // notifications.
         for (worker_type, connection_mode, model_id) in &unique_configs {
             // Get labels before moving values into get_workers_filtered
             let worker_type_label = worker_type.as_metric_label();
@@ -107,22 +107,6 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
                 model_id,
                 pool_size,
             );
-
-            // If the group is now empty, stop its load monitor and clean up entries
-            if pool_size == 0 {
-                if let Some(ref load_monitor) = app_context.load_monitor {
-                    let key = WorkerGroupKey {
-                        model_id: model_id.clone(),
-                        worker_type: *worker_type,
-                        connection_mode: *connection_mode,
-                    };
-                    let removed_urls = urls_by_group
-                        .get(&(*worker_type, *connection_mode, model_id.clone()))
-                        .map(|v| v.as_slice())
-                        .unwrap_or_default();
-                    load_monitor.on_group_removed(&key, removed_urls).await;
-                }
-            }
         }
 
         Ok(StepResult::Success)

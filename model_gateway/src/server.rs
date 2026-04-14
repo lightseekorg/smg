@@ -1100,10 +1100,14 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         Some(manager)
     };
 
-    // LoadMonitor groups are started dynamically when workers are registered.
-    // No explicit start() needed — see RegisterWorkersStep.
-    if app_context.load_monitor.is_some() {
-        debug!("LoadMonitor initialized (groups start on worker registration)");
+    // WorkerMonitor subscribes to registry events. Starting its event
+    // loop here (after the synchronous worker population in
+    // RouterManager::from_config above) means the bootstrap reconcile
+    // captures every worker that exists at this point and the event
+    // task picks up everything registered afterwards.
+    if let Some(ref worker_monitor) = app_context.worker_monitor {
+        worker_monitor.start_event_loop();
+        debug!("Started WorkerMonitor event loop");
     }
 
     let (limiter, processor) = middleware::ConcurrencyLimiter::new(

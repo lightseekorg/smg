@@ -30,7 +30,7 @@ use smg::{
         },
         module_manager::WasmModuleManager,
     },
-    worker::{LoadMonitor, WorkerRegistry},
+    worker::{WorkerMonitor, WorkerRegistry},
 };
 use smg_data_connector::{
     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
@@ -61,7 +61,7 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
     // Initialize load monitor
-    let load_monitor = Some(Arc::new(LoadMonitor::new(
+    let worker_monitor = Some(Arc::new(WorkerMonitor::new(
         worker_registry.clone(),
         policy_registry.clone(),
         client.clone(),
@@ -87,7 +87,7 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
-            .load_monitor(load_monitor)
+            .worker_monitor(worker_monitor)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
             .mcp_orchestrator(mcp_orchestrator_lock)

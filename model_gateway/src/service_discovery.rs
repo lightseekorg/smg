@@ -1267,7 +1267,7 @@ mod tests {
             conversation_item_storage: Arc::new(
                 smg_data_connector::MemoryConversationItemStorage::new(),
             ),
-            load_monitor: None,
+            worker_monitor: None,
             configured_reasoning_parser: None,
             configured_tool_parser: None,
             worker_job_queue: worker_job_queue.clone(),

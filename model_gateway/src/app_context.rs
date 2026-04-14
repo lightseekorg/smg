@@ -21,7 +21,7 @@ use crate::{
     policies::PolicyRegistry,
     routers::{openai::realtime::RealtimeRegistry, router_manager::RouterManager},
     wasm::{config::WasmRuntimeConfig, module_manager::WasmModuleManager},
-    worker::{KvEventMonitor, LoadMonitor, WorkerRegistry, WorkerService},
+    worker::{KvEventMonitor, WorkerMonitor, WorkerRegistry, WorkerService},
     workflow::{JobQueue, WorkflowEngines},
 };
 
@@ -57,7 +57,7 @@ pub struct AppContext {
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    pub load_monitor: Option<Arc<LoadMonitor>>,
+    pub worker_monitor: Option<Arc<WorkerMonitor>>,
     pub configured_reasoning_parser: Option<String>,
     pub configured_tool_parser: Option<String>,
     pub worker_job_queue: Arc<OnceLock<Arc<JobQueue>>>,
@@ -95,7 +95,7 @@ pub struct AppContextBuilder {
     response_storage: Option<Arc<dyn ResponseStorage>>,
     conversation_storage: Option<Arc<dyn ConversationStorage>>,
     conversation_item_storage: Option<Arc<dyn ConversationItemStorage>>,
-    load_monitor: Option<Arc<LoadMonitor>>,
+    worker_monitor: Option<Arc<WorkerMonitor>>,
     worker_job_queue: Option<Arc<OnceLock<Arc<JobQueue>>>>,
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
     mcp_orchestrator: Option<Arc<OnceLock<Arc<McpOrchestrator>>>>,
@@ -147,7 +147,7 @@ impl AppContextBuilder {
             response_storage: None,
             conversation_storage: None,
             conversation_item_storage: None,
-            load_monitor: None,
+            worker_monitor: None,
             worker_job_queue: None,
             workflow_engines: None,
             mcp_orchestrator: None,
@@ -227,8 +227,8 @@ impl AppContextBuilder {
         self
     }
 
-    pub fn load_monitor(mut self, load_monitor: Option<Arc<LoadMonitor>>) -> Self {
-        self.load_monitor = load_monitor;
+    pub fn worker_monitor(mut self, worker_monitor: Option<Arc<WorkerMonitor>>) -> Self {
+        self.worker_monitor = worker_monitor;
         self
     }
 
@@ -344,7 +344,7 @@ impl AppContextBuilder {
             conversation_item_storage: self.conversation_item_storage.ok_or(
                 AppContextBuildError::MissingField("conversation_item_storage"),
             )?,
-            load_monitor: self.load_monitor,
+            worker_monitor: self.worker_monitor,
             configured_reasoning_parser,
             configured_tool_parser,
             worker_job_queue,
@@ -382,7 +382,7 @@ impl AppContextBuilder {
             .with_policy_registry(&router_config)
             .with_storage(&router_config)
             .await?
-            .with_load_monitor(&router_config)?
+            .with_worker_monitor(&router_config)?
             .with_worker_job_queue()
             .with_workflow_engines()
             .with_mcp_orchestrator(&router_config)
@@ -553,12 +553,12 @@ impl AppContextBuilder {
     }
 
     /// Create load monitor
-    fn with_load_monitor(mut self, config: &RouterConfig) -> Result<Self, String> {
+    fn with_worker_monitor(mut self, config: &RouterConfig) -> Result<Self, String> {
         let client = self
             .client
             .as_ref()
             .ok_or_else(|| "client must be set before load monitor".to_string())?;
-        self.load_monitor = Some(Arc::new(LoadMonitor::new(
+        self.worker_monitor = Some(Arc::new(WorkerMonitor::new(
             self.worker_registry
                 .as_ref()
                 .ok_or_else(|| "worker_registry must be set before load monitor".to_string())?

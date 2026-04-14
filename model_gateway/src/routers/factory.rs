@@ -121,9 +121,9 @@ impl RouterFactory {
         let config = ctx.router_config.clone();
         if config.dp_minimum_tokens_scheduler {
             let mini_tokens_policy = MinimumTokensPolicy::new(
-                ctx.load_monitor
+                ctx.worker_monitor
                     .as_ref()
-                    .map(|load_monitor_arc| load_monitor_arc.worker_load_manager.clone()),
+                    .map(|monitor| monitor.worker_load_manager.clone()),
             );
             let dp_rank_policy: Arc<dyn DPRankLoadPolicy> = Arc::new(mini_tokens_policy);
             ctx.policy_registry.set_dp_rank_policy(dp_rank_policy);

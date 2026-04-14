@@ -6,9 +6,9 @@ pub mod error;
 pub mod event;
 pub mod http_client;
 pub mod kv_event_monitor;
-pub mod load;
 pub mod manager;
 pub mod metrics_aggregator;
+pub mod monitor;
 pub mod registry;
 pub mod resilience;
 pub mod retry;
@@ -29,8 +29,8 @@ pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use error::{WorkerError, WorkerResult};
 pub use http_client::build_worker_http_client;
 pub use kv_event_monitor::KvEventMonitor;
-pub use load::WorkerLoadManager;
-pub use manager::{LoadMonitor, WorkerManager};
+pub use manager::WorkerManager;
+pub use monitor::{WorkerLoadManager, WorkerMonitor};
 // Re-export UNKNOWN_MODEL_ID from protocols
 pub use openai_protocol::UNKNOWN_MODEL_ID;
 pub use openai_protocol::{

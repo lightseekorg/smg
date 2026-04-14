@@ -11,7 +11,8 @@ use smg::{
     routers::RouterTrait,
     server::{build_app, AppState},
     worker::{
-        BasicWorkerBuilder, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry, WorkerType,
+        BasicWorkerBuilder, ModelCard, RuntimeType, Worker, WorkerMonitor, WorkerRegistry,
+        WorkerType,
     },
 };
 use smg_data_connector::{
@@ -54,7 +55,7 @@ pub fn create_test_app(
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
     // Initialize load monitor
-    let load_monitor = Some(Arc::new(LoadMonitor::new(
+    let worker_monitor = Some(Arc::new(WorkerMonitor::new(
         worker_registry.clone(),
         policy_registry.clone(),
         client.clone(),
@@ -79,7 +80,7 @@ pub fn create_test_app(
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
-            .load_monitor(load_monitor)
+            .worker_monitor(worker_monitor)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
             .build()
@@ -209,7 +210,7 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
-            .load_monitor(None)
+            .worker_monitor(None)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
             .mcp_orchestrator(mcp_orchestrator_lock)
