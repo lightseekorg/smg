@@ -3,7 +3,7 @@ use std::{
     fmt,
     sync::{
         atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
-        Arc, LazyLock,
+        Arc,
     },
     time::Duration,
 };
@@ -23,7 +23,7 @@ use tokio::{sync::OnceCell, time};
 use super::{CircuitBreaker, ResolvedResilience, WorkerError, WorkerResult, UNKNOWN_MODEL_ID};
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::grpc::client::GrpcClient,
+    routers::{grpc::client::GrpcClient, header_utils::extract_routing_key},
 };
 
 /// Default HTTP client timeout for worker requests (in seconds)
@@ -34,17 +34,6 @@ pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8998;
 
 /// vLLM Mooncake KV connector name
 pub const MOONCAKE_CONNECTOR: &str = "MooncakeConnector";
-
-#[expect(
-    clippy::expect_used,
-    reason = "LazyLock static initialization — reqwest::Client::build() only fails on TLS backend misconfiguration which is unrecoverable"
-)]
-static WORKER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(DEFAULT_WORKER_HTTP_TIMEOUT_SECS))
-        .build()
-        .expect("Failed to create worker HTTP client")
-});
 
 pub struct WorkerRoutingKeyLoad {
     url: String,
@@ -716,14 +705,6 @@ impl Worker for BasicWorker {
     }
 
     async fn check_health_async(&self) -> WorkerResult<()> {
-        // Pure probe — no state machine, no counter mutation, no status
-        // changes. The HealthChecker (in WorkerManager) owns the state machine
-        // and calls registry.transition_status() to apply transitions.
-        //
-        // Returns Ok(()) if the underlying transport probe succeeded,
-        // Err(HealthCheckFailed) otherwise. Transport-level errors (gRPC
-        // connect failure, TLS handshake, DNS) are surfaced as Err so the
-        // caller can log them with worker URL context.
         if self.metadata.health_config.disable_health_check {
             return Ok(());
         }
@@ -1009,7 +990,7 @@ impl Worker for BasicWorker {
 
         let health_url = format!("{}{}", self.base_url(), self.metadata.health_endpoint);
 
-        let mut req = WORKER_CLIENT.get(&health_url).timeout(timeout);
+        let mut req = self.http_client.get(&health_url).timeout(timeout);
         if let Some(api_key) = &self.metadata.spec.api_key {
             req = req.bearer_auth(api_key);
         }
@@ -1049,8 +1030,6 @@ pub struct WorkerLoadGuard {
 
 impl WorkerLoadGuard {
     pub fn new(worker: Arc<dyn Worker>, headers: Option<&http::HeaderMap>) -> Self {
-        use crate::routers::header_utils::extract_routing_key;
-
         worker.increment_load();
 
         let routing_key = extract_routing_key(headers).map(String::from);
