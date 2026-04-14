@@ -415,7 +415,7 @@ impl ProtoGenerateRequest {
         match self {
             Self::Sglang(req) => req.mm_inputs = None,
             Self::Vllm(req) => req.mm_inputs = None,
-            Self::Trtllm(_) => {} // TRT-LLM proto has no mm_inputs field
+            Self::Trtllm(_) | Self::Mlx(_) => {} // TRT-LLM and MLX protos have no mm_inputs field
         }
     }
 
