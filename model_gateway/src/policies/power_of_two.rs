@@ -10,7 +10,7 @@ use rand::Rng;
 use tracing::debug;
 
 use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
-use crate::core::Worker;
+use crate::worker::Worker;
 
 /// Power-of-two choices policy
 ///
@@ -132,10 +132,17 @@ impl Default for PowerOfTwoPolicy {
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::worker::SchedulerLoadSnapshot;
+    use openai_protocol::worker::{HealthCheckConfig, SchedulerLoadSnapshot};
 
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     /// Create a `WorkerLoadResponse` with a single DP rank at the given token_usage ratio.
     fn make_load(token_usage: f64) -> WorkerLoadResponse {
@@ -163,12 +170,15 @@ mod tests {
         let policy = PowerOfTwoPolicy::new();
         let worker1 = BasicWorkerBuilder::new("http://w1:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         let worker2 = BasicWorkerBuilder::new("http://w2:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         let worker3 = BasicWorkerBuilder::new("http://w3:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
 
         // Set different loads
@@ -204,11 +214,13 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -240,6 +252,7 @@ mod tests {
         let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
             BasicWorkerBuilder::new("http://w1:8000")
                 .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
                 .build(),
         )];
 
@@ -255,7 +268,7 @@ mod tests {
     fn test_reproduce_incompatible_metric_bug() {
         use std::{collections::HashMap, sync::Arc};
 
-        use crate::core::{BasicWorkerBuilder, WorkerType};
+        use crate::worker::{BasicWorkerBuilder, WorkerType};
 
         // 1. Setup the policy
         let policy = PowerOfTwoPolicy::new();
@@ -263,11 +276,13 @@ mod tests {
         // 2. Create Worker A: Idle (0 reqs), but has high token usage in cache
         let worker_a = BasicWorkerBuilder::new("http://worker_a:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
 
         // 3. Create Worker B: Busy (5 reqs), but missing from cache
         let worker_b = BasicWorkerBuilder::new("http://worker_b:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
 
         // Manually increment load on Worker B to simulate active requests
@@ -313,7 +328,7 @@ mod tests {
     fn test_power_of_two_edge_cases() {
         use std::{collections::HashMap, sync::Arc};
 
-        use crate::core::{BasicWorkerBuilder, WorkerType};
+        use crate::worker::{BasicWorkerBuilder, WorkerType};
 
         let policy = PowerOfTwoPolicy::new();
 
@@ -321,6 +336,7 @@ mod tests {
         let create_worker = |url: &str, reqs: usize| {
             let w = BasicWorkerBuilder::new(url)
                 .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
                 .build();
             for _ in 0..reqs {
                 w.increment_load();

@@ -263,6 +263,17 @@ class TestParseServeArgs:
         )
         assert args.router_policy == "round_robin"
 
+    def test_trtllm_accepts_router_disable_arg_fallback_flag(self):
+        """--router-disable-arg-fallback should parse and be available on the namespace."""
+        _, args, _ = parse_serve_args(
+            [
+                "--backend",
+                "trtllm",
+                "--router-disable-arg-fallback",
+            ]
+        )
+        assert args.router_disable_arg_fallback is True
+
     def test_trtllm_router_args_defaults(self):
         """Router args should have sensible defaults."""
         _, args, _ = parse_serve_args(["--backend", "trtllm"])

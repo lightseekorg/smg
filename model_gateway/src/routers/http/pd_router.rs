@@ -26,10 +26,6 @@ use tracing::{debug, error, warn};
 use super::pd_types::api_path;
 use crate::{
     config::types::RetryConfig,
-    core::{
-        is_retryable_status, HashRing, RetryExecutor, Worker, WorkerLoadGuard, WorkerRegistry,
-        WorkerType, UNKNOWN_MODEL_ID,
-    },
     observability::{
         events::{self, Event},
         metrics::{bool_to_static_str, metrics_labels, Metrics},
@@ -37,10 +33,15 @@ use crate::{
     },
     policies::{LoadBalancingPolicy, PolicyRegistry, SelectWorkerInfo},
     routers::{
+        common::{
+            header_utils,
+            retry::{is_retryable_status, RetryExecutor},
+        },
         error,
         grpc::utils::{error_type_from_status, route_to_endpoint},
-        header_utils, RouterTrait,
+        RouterTrait,
     },
+    worker::{HashRing, Worker, WorkerLoadGuard, WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID},
 };
 
 #[derive(Debug)]
@@ -765,7 +766,7 @@ impl PDRouter {
                 .collect();
             if by_model.is_empty() && is_unknown_model {
                 // "auto" means pick any — fall back to all prefill workers
-                self.worker_registry.get_prefill_workers()
+                self.worker_registry.get_prefill_workers().to_vec()
             } else {
                 by_model
             }
@@ -781,7 +782,7 @@ impl PDRouter {
                 .collect();
             if by_model.is_empty() && is_unknown_model {
                 // Only fall back to all workers when model is "unknown" (wildcard)
-                self.worker_registry.get_decode_workers()
+                self.worker_registry.get_decode_workers().to_vec()
             } else {
                 by_model
             }
@@ -892,7 +893,7 @@ impl PDRouter {
         prefill: Arc<dyn Worker>,
         decode: Arc<dyn Worker>,
     ) -> Response {
-        use crate::core::AttachedBody;
+        use crate::worker::AttachedBody;
 
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -1415,7 +1416,7 @@ mod tests {
     use super::*;
     use crate::{
         config::PolicyConfig,
-        core::{BasicWorkerBuilder, WorkerType},
+        worker::{BasicWorkerBuilder, WorkerType},
     };
 
     fn create_test_pd_router() -> PDRouter {
@@ -1435,7 +1436,12 @@ mod tests {
         let worker = BasicWorkerBuilder::new(url)
             .worker_type(worker_type)
             .build();
-        worker.set_healthy(healthy);
+        let status = if healthy {
+            openai_protocol::worker::WorkerStatus::Ready
+        } else {
+            openai_protocol::worker::WorkerStatus::NotReady
+        };
+        worker.set_status(status);
         Box::new(worker)
     }
 

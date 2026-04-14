@@ -8,7 +8,7 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use smg::core::Worker;
+use smg::worker::Worker;
 use smg_grpc_client::{
     sglang_proto as proto,
     sglang_scheduler::{AbortOnDropStream, SglangSchedulerClient},

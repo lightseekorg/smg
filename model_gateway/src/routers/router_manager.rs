@@ -40,13 +40,13 @@ use tracing::{debug, info, warn};
 use crate::{
     app_context::AppContext,
     config::RoutingMode,
-    core::{ConnectionMode, ProviderType, RuntimeType, WorkerRegistry, WorkerType},
     routers::{
+        common::header_utils::apply_provider_headers,
         factory::{router_ids, RouterId},
-        header_utils::apply_provider_headers,
         RouterFactory, RouterTrait,
     },
     server::ServerConfig,
+    worker::{ConnectionMode, ProviderType, RuntimeType, WorkerRegistry, WorkerType},
 };
 
 pub struct RouterManager {

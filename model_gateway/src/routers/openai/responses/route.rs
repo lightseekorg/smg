@@ -21,12 +21,12 @@ use super::{
     handle_non_streaming_response, handle_streaming_response,
 };
 use crate::{
-    core::{Endpoint, ProviderType, WorkerRegistry},
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
+        common::worker_selection::{SelectWorkerRequest, WorkerSelector},
         error,
-        worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
+    worker::{Endpoint, ProviderType, WorkerRegistry},
 };
 
 /// Shared context passed to responses routing functions.

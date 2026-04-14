@@ -20,13 +20,16 @@ use super::{
 };
 use crate::{
     config::types::RetryConfig,
-    core::{is_retryable_status, Endpoint, ProviderType, RetryExecutor, WorkerRegistry},
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
+        common::{
+            header_utils::{apply_provider_headers, extract_auth_header},
+            retry::{is_retryable_status, RetryExecutor},
+            worker_selection::{SelectWorkerRequest, WorkerSelector},
+        },
         error,
-        header_utils::{apply_provider_headers, extract_auth_header},
-        worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
+    worker::{Endpoint, ProviderType, WorkerRegistry},
 };
 
 /// Shared context passed to chat routing functions.

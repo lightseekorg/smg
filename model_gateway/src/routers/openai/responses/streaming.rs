@@ -44,9 +44,12 @@ const SSE_DONE: &str = "data: [DONE]\n\n";
 use crate::{
     observability::metrics::Metrics,
     routers::{
+        common::{
+            header_utils::{preserve_response_headers, ApiProvider},
+            mcp_utils::DEFAULT_MAX_ITERATIONS,
+            persistence_utils::persist_conversation_items,
+        },
         error,
-        header_utils::{preserve_response_headers, ApiProvider},
-        mcp_utils::DEFAULT_MAX_ITERATIONS,
         openai::{
             context::{RequestContext, StreamingEventContext, StreamingRequest},
             mcp::{
@@ -55,7 +58,6 @@ use crate::{
                 StreamingToolHandler, ToolLoopState,
             },
         },
-        persistence_utils::persist_conversation_items,
     },
 };
 
@@ -477,7 +479,7 @@ pub(super) fn send_final_response_event(
         inject_mcp_metadata_streaming(&mut final_response, state, session);
     }
 
-    restore_original_tools(&mut final_response, ctx.original_request);
+    restore_original_tools(&mut final_response, ctx.original_request, None);
     patch_response_with_request_metadata(
         &mut final_response,
         ctx.original_request,
@@ -506,7 +508,7 @@ pub(super) fn send_final_response_event(
 /// Simple pass-through streaming without MCP interception
 pub(super) async fn handle_simple_streaming_passthrough(
     client: &reqwest::Client,
-    worker: &Arc<dyn crate::core::Worker>,
+    worker: &Arc<dyn crate::worker::Worker>,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
 ) -> Response {
@@ -902,7 +904,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     }
                     inject_mcp_metadata_streaming(&mut response_json, &state, &session);
 
-                    restore_original_tools(&mut response_json, &original_request);
+                    restore_original_tools(&mut response_json, &original_request, Some(&session));
                     patch_response_with_request_metadata(
                         &mut response_json,
                         &original_request,
@@ -1010,7 +1012,7 @@ pub(super) fn handle_streaming_with_tool_interception(
 
 /// Main entry point for streaming responses
 pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
-    use crate::routers::mcp_utils::ensure_request_mcp_client;
+    use crate::routers::common::mcp_utils::ensure_request_mcp_client;
 
     let worker = match ctx.worker() {
         Some(w) => w.clone(),

@@ -1,6 +1,6 @@
 [package]
 name = "llm-tokenizer"
-version = "1.3.1"
+version = "1.3.2"
 edition = "2021"
 description = "LLM tokenizer library with caching and chat template support"
 license = "Apache-2.0"

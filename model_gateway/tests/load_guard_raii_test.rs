@@ -11,7 +11,7 @@ use axum::{body::Body, response::Response};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
-use smg::core::{AttachedBody, BasicWorkerBuilder, Worker, WorkerLoadGuard};
+use smg::worker::{AttachedBody, BasicWorkerBuilder, Worker, WorkerLoadGuard};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -24,7 +24,14 @@ fn create_sse_response(rx: mpsc::UnboundedReceiver<Bytes>) -> Response {
 
 /// Helper to create a test worker
 fn create_test_worker() -> Arc<dyn Worker> {
-    Arc::new(BasicWorkerBuilder::new("http://localhost:8000").build())
+    Arc::new(
+        BasicWorkerBuilder::new("http://localhost:8000")
+            .health_config(openai_protocol::worker::HealthCheckConfig {
+                disable_health_check: true,
+                ..Default::default()
+            })
+            .build(),
+    )
 }
 
 #[tokio::test]

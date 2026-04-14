@@ -3,8 +3,8 @@ use std::{hint::black_box, sync::Arc, thread};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use smg::{
-    core::{BasicWorkerBuilder, Worker, WorkerType},
     policies::{LoadBalancingPolicy, ManualPolicy, SelectWorkerInfo},
+    worker::{BasicWorkerBuilder, Worker, WorkerType},
 };
 
 // ============================================================================
@@ -132,7 +132,7 @@ fn bench_failover(c: &mut Criterion) {
                         let policy = ManualPolicy::new();
                         let workers = create_workers(count);
                         let idx = select_with_key(&policy, &workers, "failover-test").unwrap();
-                        workers[idx].set_healthy(false);
+                        workers[idx].set_status(openai_protocol::worker::WorkerStatus::NotReady);
                         (policy, workers)
                     },
                     |(policy, workers)| {

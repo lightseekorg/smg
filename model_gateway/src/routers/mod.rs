@@ -26,22 +26,19 @@ use openai_protocol::{
 };
 
 pub mod anthropic;
+pub mod common;
 pub mod conversations;
 pub mod error;
 pub mod factory;
 pub mod gemini;
 pub mod grpc;
-pub mod header_utils;
 pub mod http;
-pub mod mcp_utils;
 pub mod mesh;
 pub mod openai;
 pub mod parse;
-pub mod persistence_utils;
 pub mod responses;
 pub mod router_manager;
 pub mod tokenize;
-pub mod worker_selection;
 
 pub use factory::RouterFactory;
 // Re-export HTTP routers for convenience

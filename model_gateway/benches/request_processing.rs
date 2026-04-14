@@ -16,8 +16,8 @@ use openai_protocol::{
 };
 use serde_json::{from_str, to_string, to_value, to_vec};
 use smg::{
-    core::{BasicWorker, BasicWorkerBuilder, Worker, WorkerType},
     routers::http::pd_types::{generate_room_id, RequestWithBootstrap},
+    worker::{BasicWorker, BasicWorkerBuilder, Worker, WorkerType},
 };
 
 fn create_test_worker() -> BasicWorker {

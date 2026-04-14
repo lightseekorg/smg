@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
-use crate::core::Worker;
+use crate::worker::Worker;
 
 /// Round-robin selection policy
 ///
@@ -58,8 +58,17 @@ impl LoadBalancingPolicy for RoundRobinPolicy {
 
 #[cfg(test)]
 mod tests {
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
+
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_round_robin_selection() {
@@ -68,16 +77,19 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w3:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -98,22 +110,25 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w3:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
 
         // Mark middle worker as unhealthy
-        workers[1].set_healthy(false);
+        workers[1].set_status(WorkerStatus::NotReady);
 
         // Should skip unhealthy worker: 0, 2, 0, 2, ...
         let info = SelectWorkerInfo::default();
@@ -130,11 +145,13 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];

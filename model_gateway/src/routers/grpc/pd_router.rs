@@ -14,9 +14,12 @@ use super::{
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
-    core::{is_retryable_status, ConnectionMode, RetryExecutor, WorkerRegistry, WorkerType},
     observability::metrics::{metrics_labels, Metrics},
-    routers::RouterTrait,
+    routers::{
+        common::retry::{is_retryable_status, RetryExecutor},
+        RouterTrait,
+    },
+    worker::{ConnectionMode, WorkerRegistry, WorkerType},
 };
 
 /// gRPC PD (Prefill-Decode) router implementation for SGLang

@@ -32,7 +32,7 @@
 use std::sync::Arc;
 
 use super::{LoadBalancingPolicy, SelectWorkerInfo};
-use crate::{core::Worker, observability::metrics::Metrics};
+use crate::{observability::metrics::Metrics, worker::Worker};
 
 /// Configuration for the PrefixHash load balancing policy
 #[derive(Debug, Clone)]
@@ -239,8 +239,10 @@ impl LoadBalancingPolicy for PrefixHashPolicy {
 
 #[cfg(test)]
 mod tests {
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
+
     use super::*;
-    use crate::core::{BasicWorkerBuilder, HashRing, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, HashRing, WorkerType};
 
     fn create_workers(urls: &[&str]) -> Vec<Arc<dyn Worker>> {
         urls.iter()
@@ -248,6 +250,10 @@ mod tests {
                 Arc::new(
                     BasicWorkerBuilder::new(*url)
                         .worker_type(WorkerType::Regular)
+                        .health_config(HealthCheckConfig {
+                            disable_health_check: true,
+                            ..Default::default()
+                        })
                         .build(),
                 ) as Arc<dyn Worker>
             })
@@ -258,7 +264,7 @@ mod tests {
     fn test_prefix_hash_consistent_routing() {
         let policy = PrefixHashPolicy::with_defaults();
         let workers = create_workers(&["http://w1:8000", "http://w2:8000", "http://w3:8000"]);
-        let ring = Arc::new(HashRing::new(&workers));
+        let ring = Arc::new(HashRing::new(workers.iter().map(|w| w.url())));
 
         // Same tokens should always route to same worker
         let tokens: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -282,7 +288,7 @@ mod tests {
     fn test_different_prefixes_distribute() {
         let policy = PrefixHashPolicy::with_defaults();
         let workers = create_workers(&["http://w1:8000", "http://w2:8000", "http://w3:8000"]);
-        let ring = Arc::new(HashRing::new(&workers));
+        let ring = Arc::new(HashRing::new(workers.iter().map(|w| w.url())));
 
         let mut distribution = std::collections::HashMap::new();
 
@@ -312,7 +318,7 @@ mod tests {
             ..Default::default()
         });
         let workers = create_workers(&["http://w1:8000", "http://w2:8000", "http://w3:8000"]);
-        let ring = Arc::new(HashRing::new(&workers));
+        let ring = Arc::new(HashRing::new(workers.iter().map(|w| w.url())));
 
         // Two sequences with same first 5 tokens should route to same worker
         let tokens1: Vec<u32> = vec![1, 2, 3, 4, 5, 100, 200, 300];
@@ -339,7 +345,7 @@ mod tests {
     fn test_no_tokens_returns_none() {
         let policy = PrefixHashPolicy::with_defaults();
         let workers = create_workers(&["http://w1:8000"]);
-        let ring = Arc::new(HashRing::new(&workers));
+        let ring = Arc::new(HashRing::new(workers.iter().map(|w| w.url())));
 
         // Empty tokens
         let tokens: Vec<u32> = vec![];
@@ -369,9 +375,9 @@ mod tests {
     fn test_no_healthy_workers() {
         let policy = PrefixHashPolicy::with_defaults();
         let workers = create_workers(&["http://w1:8000"]);
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
 
-        let ring = Arc::new(HashRing::new(&workers));
+        let ring = Arc::new(HashRing::new(workers.iter().map(|w| w.url())));
         let tokens: Vec<u32> = vec![1, 2, 3];
         let info = SelectWorkerInfo {
             tokens: Some(&tokens),

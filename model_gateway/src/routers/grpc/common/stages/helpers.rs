@@ -7,8 +7,8 @@ use smg_grpc_client::sglang_proto::DisaggregatedParams;
 use tracing::debug;
 
 use crate::{
-    core::{RuntimeType, Worker, DEFAULT_BOOTSTRAP_PORT},
     routers::grpc::{context::WorkerSelection, proto_wrapper::ProtoGenerateRequest},
+    worker::{RuntimeType, Worker, DEFAULT_BOOTSTRAP_PORT},
 };
 
 /// Inject PD bootstrap metadata for SGLang if needed.
@@ -37,10 +37,9 @@ fn inject_sglang_bootstrap_metadata(
     request: &mut ProtoGenerateRequest,
     prefill_worker: &Arc<dyn Worker>,
 ) {
-    let hostname = prefill_worker.bootstrap_host();
-    let bootstrap_port = prefill_worker
-        .bootstrap_port()
-        .unwrap_or(DEFAULT_BOOTSTRAP_PORT);
+    let metadata = prefill_worker.metadata();
+    let hostname = metadata.bootstrap_host();
+    let bootstrap_port = metadata.bootstrap_port().unwrap_or(DEFAULT_BOOTSTRAP_PORT);
     let room_id = rand::rng().random_range(0..i32::MAX);
 
     let disagg_params = DisaggregatedParams {

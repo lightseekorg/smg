@@ -23,13 +23,15 @@ use super::{
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
-    core::{ProviderType, Worker, WorkerRegistry},
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        header_utils::extract_auth_header,
+        common::{
+            header_utils::extract_auth_header,
+            worker_selection::{SelectWorkerRequest, WorkerSelector},
+        },
         openai::realtime::{rest::forward_realtime_rest, ws::handle_realtime_ws, RealtimeRegistry},
-        worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
+    worker::{ProviderType, Worker, WorkerRegistry},
 };
 
 /// Resolve the provider implementation for a given worker and model.

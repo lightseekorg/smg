@@ -19,7 +19,6 @@ use llm_tokenizer::TokenizerRegistry;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
-    core::{LoadMonitor, WorkerRegistry},
     policies::PolicyRegistry,
     routers::RouterFactory,
     server::{build_app, AppState},
@@ -31,6 +30,7 @@ use smg::{
         },
         module_manager::WasmModuleManager,
     },
+    worker::{WorkerMonitor, WorkerRegistry},
 };
 use smg_data_connector::{
     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
@@ -60,12 +60,14 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
     let conversation_storage = Arc::new(MemoryConversationStorage::new());
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
-    // Initialize load monitor
-    let load_monitor = Some(Arc::new(LoadMonitor::new(
+    // Initialize the worker monitor with the same interval the
+    // production builder uses so tests exercise the real polling
+    // cadence.
+    let worker_monitor = Some(Arc::new(WorkerMonitor::new(
         worker_registry.clone(),
         policy_registry.clone(),
         client.clone(),
-        config.worker_startup_check_interval_secs,
+        config.load_monitor_interval_secs,
     )));
 
     // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
@@ -87,7 +89,7 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
-            .load_monitor(load_monitor)
+            .worker_monitor(worker_monitor)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
             .mcp_orchestrator(mcp_orchestrator_lock)
@@ -96,16 +98,24 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
             .expect("Failed to build AppContext with WASM manager"),
     );
 
+    // Mirror production wiring: start the WorkerMonitor event loop so
+    // tests exercise the event-driven group reconciliation path
+    // instead of an inert monitor.
+    if let Some(monitor) = &app_context.worker_monitor {
+        monitor.start_event_loop();
+    }
+
     // Initialize JobQueue after AppContext is created
     let weak_context = Arc::downgrade(&app_context);
-    let job_queue = smg::core::JobQueue::new(smg::core::JobQueueConfig::default(), weak_context);
+    let job_queue =
+        smg::workflow::JobQueue::new(smg::workflow::JobQueueConfig::default(), weak_context);
     app_context
         .worker_job_queue
         .set(job_queue)
         .expect("JobQueue should only be initialized once");
 
     // Initialize WorkflowEngines
-    use smg::core::steps::WorkflowEngines;
+    use smg::workflow::WorkflowEngines;
     let engines = WorkflowEngines::new(&config);
     app_context
         .workflow_engines
@@ -662,7 +672,7 @@ async fn test_wasm_module_execution() {
         .expect("Workflow engines should be initialized");
 
     // Create workflow context for registration
-    use smg::core::steps::{WasmModuleConfigRequest, WasmRegistrationWorkflowData};
+    use smg::workflow::{WasmModuleConfigRequest, WasmRegistrationWorkflowData};
     use wfaas::WorkflowId;
 
     let descriptor = WasmModuleDescriptor {

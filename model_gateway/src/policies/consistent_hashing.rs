@@ -22,9 +22,9 @@ use rand::Rng as _;
 
 use super::{LoadBalancingPolicy, SelectWorkerInfo};
 use crate::{
-    core::Worker,
     observability::metrics::Metrics,
-    routers::header_utils::{extract_routing_key, extract_target_worker},
+    routers::common::header_utils::{extract_routing_key, extract_target_worker},
+    worker::Worker,
 };
 
 /// Execution branch for metrics
@@ -198,8 +198,17 @@ impl LoadBalancingPolicy for ConsistentHashingPolicy {
 mod tests {
     use std::collections::HashMap;
 
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
+
     use super::*;
-    use crate::core::{BasicWorkerBuilder, HashRing, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, HashRing, WorkerType};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     fn headers_with_routing_key(key: &str) -> http::HeaderMap {
         let mut headers = http::HeaderMap::new();
@@ -219,6 +228,7 @@ mod tests {
                 Arc::new(
                     BasicWorkerBuilder::new(*url)
                         .worker_type(WorkerType::Regular)
+                        .health_config(no_health_check())
                         .build(),
                 ) as Arc<dyn Worker>
             })
@@ -302,7 +312,7 @@ mod tests {
     fn test_target_worker_miss_unhealthy() {
         let policy = ConsistentHashingPolicy::new();
         let workers = create_workers(&["http://w1:8000", "http://w2:8000"]);
-        workers[1].set_healthy(false);
+        workers[1].set_status(WorkerStatus::NotReady);
 
         let headers = headers_with_target_worker(1);
         let info = SelectWorkerInfo {
@@ -360,7 +370,7 @@ mod tests {
     fn test_no_healthy_workers() {
         let policy = ConsistentHashingPolicy::new();
         let workers = create_workers(&["http://w1:8000"]);
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
 
         let headers = headers_with_routing_key("test");
         let info = SelectWorkerInfo {
@@ -394,7 +404,7 @@ mod tests {
             "http://w2:8000",
             "http://w3:8000",
         ]);
-        let ring = Arc::new(HashRing::new(&workers));
+        let ring = Arc::new(HashRing::new(workers.iter().map(|w| w.url())));
 
         // Record which worker each key routes to with all workers healthy
         let mut key_to_worker_before: HashMap<String, usize> = HashMap::new();
@@ -411,7 +421,7 @@ mod tests {
         }
 
         // Mark worker 1 as unhealthy
-        workers[1].set_healthy(false);
+        workers[1].set_status(WorkerStatus::NotReady);
 
         // Record new routing and count how many keys moved
         let mut moved_count = 0;
@@ -453,7 +463,7 @@ mod tests {
         // and when it recovers, keys return to the original worker
         let policy = ConsistentHashingPolicy::new();
         let workers = create_workers(&["http://w0:8000", "http://w1:8000", "http://w2:8000"]);
-        let ring = Arc::new(HashRing::new(&workers));
+        let ring = Arc::new(HashRing::new(workers.iter().map(|w| w.url())));
 
         // Find which worker a key routes to when all are healthy
         let test_key = "session-abc-123";
@@ -467,7 +477,7 @@ mod tests {
         let original_idx = result.unwrap();
 
         // Mark that worker unhealthy
-        workers[original_idx].set_healthy(false);
+        workers[original_idx].set_status(WorkerStatus::NotReady);
 
         // Key should now route to a different healthy worker
         let (failover_result, _) = policy.select_worker_impl(&workers, &info);
@@ -488,7 +498,7 @@ mod tests {
         }
 
         // Recover the original worker
-        workers[original_idx].set_healthy(true);
+        workers[original_idx].set_status(WorkerStatus::Ready);
 
         // Key should route back to original worker
         let (recovered_result, _) = policy.select_worker_impl(&workers, &info);
