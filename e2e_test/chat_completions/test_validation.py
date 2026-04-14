@@ -377,6 +377,9 @@ class TestEosTokenStripping:
         )
         content = response.choices[0].message.content
         assert content is not None
+        assert response.choices[0].finish_reason == "stop", (
+            "Model hit max_tokens before EOS — test is inconclusive"
+        )
         # EOS should be visible when both no_stop_trim=true and skip_special_tokens=false
         has_eos = any(eos in content for eos in self.EOS_TOKENS)
         assert has_eos, (
