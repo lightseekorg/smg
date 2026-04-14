@@ -30,14 +30,6 @@ use crate::{
     },
 };
 
-/// Type alias for the storage tuple returned by factory functions.
-/// This avoids clippy::type_complexity warnings while keeping Arc explicit.
-pub type StorageTuple = (
-    Arc<dyn ResponseStorage>,
-    Arc<dyn ConversationStorage>,
-    Arc<dyn ConversationItemStorage>,
-);
-
 /// Complete storage handles returned by the factory, including optional memory writer.
 pub struct StorageBundle {
     /// Storage backend for responses.
@@ -62,29 +54,11 @@ pub struct StorageFactoryConfig<'a> {
     pub hook: Option<Arc<dyn StorageHook>>,
 }
 
-/// Create all three storage backends based on configuration.
-///
-/// # Arguments
-/// * `config` - Storage factory configuration
-///
-/// # Returns
-/// Tuple of (response_storage, conversation_storage, conversation_item_storage)
+/// Create all configured storage handles, including optional conversation memory writer.
 ///
 /// # Errors
 /// Returns error string if required configuration is missing or initialization fails
-pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageTuple, String> {
-    let bundle = create_storage_bundle(config).await?;
-    Ok((
-        bundle.response_storage,
-        bundle.conversation_storage,
-        bundle.conversation_item_storage,
-    ))
-}
-
-/// Create all configured storage handles, including optional conversation memory writer.
-pub async fn create_storage_bundle(
-    config: StorageFactoryConfig<'_>,
-) -> Result<StorageBundle, String> {
+pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageBundle, String> {
     let bundle = match config.backend {
         HistoryBackend::Memory => {
             info!("Initializing data connector: Memory");
@@ -274,7 +248,12 @@ mod tests {
             redis: None,
             hook: None,
         };
-        let (resp, conv, items) = create_storage(config).await.unwrap();
+        let bundle = create_storage(config).await.unwrap();
+        let (resp, conv, items) = (
+            bundle.response_storage,
+            bundle.conversation_storage,
+            bundle.conversation_item_storage,
+        );
 
         // Verify they work end-to-end
         let mut response = StoredResponse::new(None);
@@ -318,7 +297,8 @@ mod tests {
             redis: None,
             hook: None,
         };
-        let (resp, conv, _items) = create_storage(config).await.unwrap();
+        let bundle = create_storage(config).await.unwrap();
+        let (resp, conv) = (bundle.response_storage, bundle.conversation_storage);
 
         // NoOp storage should accept writes but return nothing on reads
         let mut response = StoredResponse::new(None);
@@ -333,8 +313,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_storage_bundle_memory_exposes_memory_writer() {
-        let bundle = create_storage_bundle(StorageFactoryConfig {
+    async fn test_create_storage_memory_exposes_memory_writer() {
+        let bundle = create_storage(StorageFactoryConfig {
             backend: &HistoryBackend::Memory,
             oracle: None,
             postgres: None,
@@ -348,8 +328,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_storage_bundle_none_exposes_memory_writer() {
-        let bundle = create_storage_bundle(StorageFactoryConfig {
+    async fn test_create_storage_none_exposes_memory_writer() {
+        let bundle = create_storage(StorageFactoryConfig {
             backend: &HistoryBackend::None,
             oracle: None,
             postgres: None,
@@ -364,40 +344,46 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_storage_oracle_missing_config() {
-        let config = StorageFactoryConfig {
+        let err = create_storage(StorageFactoryConfig {
             backend: &HistoryBackend::Oracle,
             oracle: None,
             postgres: None,
             redis: None,
             hook: None,
-        };
-        let err = create_storage(config).await.err().expect("should fail");
+        })
+        .await
+        .err()
+        .expect("should fail");
         assert!(err.contains("oracle configuration is required"));
     }
 
     #[tokio::test]
     async fn test_create_storage_postgres_missing_config() {
-        let config = StorageFactoryConfig {
+        let err = create_storage(StorageFactoryConfig {
             backend: &HistoryBackend::Postgres,
             oracle: None,
             postgres: None,
             redis: None,
             hook: None,
-        };
-        let err = create_storage(config).await.err().expect("should fail");
+        })
+        .await
+        .err()
+        .expect("should fail");
         assert!(err.contains("Postgres configuration is required"));
     }
 
     #[tokio::test]
     async fn test_create_storage_redis_missing_config() {
-        let config = StorageFactoryConfig {
+        let err = create_storage(StorageFactoryConfig {
             backend: &HistoryBackend::Redis,
             oracle: None,
             postgres: None,
             redis: None,
             hook: None,
-        };
-        let err = create_storage(config).await.err().expect("should fail");
+        })
+        .await
+        .err()
+        .expect("should fail");
         assert!(err.contains("Redis configuration is required"));
     }
 
@@ -444,7 +430,7 @@ mod tests {
             redis: None,
             hook: Some(Arc::new(NoOpHook)),
         };
-        let bundle = create_storage_bundle(config).await.expect("should succeed");
+        let bundle = create_storage(config).await.expect("should succeed");
         assert!(bundle.conversation_memory_writer.is_some());
     }
 }

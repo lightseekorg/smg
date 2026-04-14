@@ -8,7 +8,19 @@ pub use smg_data_connector::{
 };
 
 use super::{validation::ConfigValidator, ConfigResult};
-use crate::{memory::MemoryRuntimeConfig, worker::ConnectionMode};
+use crate::worker::ConnectionMode;
+
+/// Runtime feature flags that gate memory store/recall behavior.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryRuntimeConfig {
+    /// Master switch for all long-term memory features (store + recall).
+    pub ltm_enabled: bool,
+    /// When true (and `ltm_enabled` is also true), incoming requests may
+    /// trigger conversation-memory writes.  Requires a backend that provides
+    /// a `ConversationMemoryWriter`.
+    pub ltm_store_enabled: bool,
+}
 
 /// Main router configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -4,10 +4,10 @@ use smg_mcp::McpConfig;
 
 use super::{
     CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
-    HistoryBackend, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig, RedisConfig,
-    RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig, TraceConfig,
+    HistoryBackend, MemoryRuntimeConfig, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig,
+    RedisConfig, RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig, TraceConfig,
 };
-use crate::{memory::MemoryRuntimeConfig, worker::ConnectionMode};
+use crate::worker::ConnectionMode;
 
 /// Builder for RouterConfig that wraps the config itself
 /// This eliminates field duplication and stays in sync automatically
@@ -824,7 +824,6 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::memory::MemoryRuntimeConfig;
 
     /// Test that .to_builder() round-trip conversion works correctly
     #[test]

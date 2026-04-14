@@ -736,7 +736,7 @@ impl ConfigValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{memory::MemoryRuntimeConfig, worker::ConnectionMode};
+    use crate::worker::ConnectionMode;
 
     #[test]
     fn test_validate_regular_mode() {

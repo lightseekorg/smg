@@ -7,7 +7,7 @@ use llm_tokenizer::registry::TokenizerRegistry;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use reqwest::Client;
 use smg_data_connector::{
-    create_storage_bundle, ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
+    create_storage, ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
     ResponseStorage, StorageFactoryConfig,
 };
 use smg_mcp::McpOrchestrator;
@@ -562,7 +562,7 @@ impl AppContextBuilder {
             redis: config.redis.as_ref(),
             hook,
         };
-        let bundle = create_storage_bundle(storage_config).await?;
+        let bundle = create_storage(storage_config).await?;
 
         self.response_storage = Some(bundle.response_storage);
         self.conversation_storage = Some(bundle.conversation_storage);
@@ -721,10 +721,7 @@ mod tests {
     };
 
     use super::validate_memory_writer_configuration;
-    use crate::{
-        config::{PolicyConfig, RouterConfig, RoutingMode},
-        memory::MemoryRuntimeConfig,
-    };
+    use crate::config::{MemoryRuntimeConfig, PolicyConfig, RouterConfig, RoutingMode};
 
     struct DummyConversationMemoryWriter;
 

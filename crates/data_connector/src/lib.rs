@@ -46,7 +46,7 @@ pub use context::{
     RequestContext,
 };
 // Re-export factory
-pub use factory::{create_storage, create_storage_bundle, StorageBundle, StorageFactoryConfig};
+pub use factory::{create_storage, StorageBundle, StorageFactoryConfig};
 pub use hooks::{BeforeHookResult, ExtraColumns, HookError, StorageHook, StorageOperation};
 // Re-export memory implementations for testing
 pub use memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage};

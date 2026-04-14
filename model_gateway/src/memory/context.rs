@@ -1,26 +1,36 @@
 use axum::http::HeaderMap;
-use serde::{Deserialize, Serialize};
 
 pub use super::headers::MemoryHeaderView;
+use crate::config::MemoryRuntimeConfig;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-/// Runtime feature flags that gate memory store/recall behavior.
-#[serde(default)]
-pub struct MemoryRuntimeConfig {
-    pub ltm_enabled: bool,
-    pub ltm_store_enabled: bool,
-}
-
+/// Normalized per-request memory execution context derived from HTTP headers
+/// and runtime configuration flags.
+///
+/// Each request can carry memory-related headers (policy, subject, models).
+/// This struct captures the caller's *intent* (`*_requested` flags) and the
+/// system's *readiness* (`*_active` flags).  A feature is active only when
+/// both the caller requests it **and** the runtime has it enabled.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-/// Normalized per-request memory execution context derived from headers and runtime flags.
 pub struct MemoryExecutionContext {
+    /// The caller asked to persist conversation memories (via policy or
+    /// explicit `x-smg-memory-ltm-store-enabled` header).
     pub store_ltm_requested: bool,
+    /// Store is both requested **and** the runtime has `ltm_enabled` +
+    /// `ltm_store_enabled` set.  Hooks should check this flag, not
+    /// `store_ltm_requested`, before writing.
     pub store_ltm_active: bool,
+    /// The caller asked to recall previously stored memories (via
+    /// `store_and_recall` policy).
     pub recall_requested: bool,
+    /// Recall is both requested **and** the runtime has `ltm_enabled` set.
     pub recall_active: bool,
+    /// Opaque identifier for the memory subject (e.g. end-user or session).
     pub subject_id: Option<String>,
+    /// Recall strategy hint (e.g. "semantic", "keyword").
     pub recall_method: Option<String>,
+    /// Model identifier to use for embedding generation during store/recall.
     pub embedding_model: Option<String>,
+    /// Model identifier to use for memory extraction / summarization.
     pub extraction_model: Option<String>,
 }
 
@@ -103,9 +113,8 @@ fn normalize(value: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
-    use super::{MemoryExecutionContext, MemoryHeaderView, MemoryRuntimeConfig};
+    use super::{MemoryExecutionContext, MemoryHeaderView};
+    use crate::config::MemoryRuntimeConfig;
 
     #[test]
     fn header_policy_store_and_recall_enables_store_request() {
@@ -189,14 +198,5 @@ mod tests {
 
         assert!(!ctx.recall_requested);
         assert!(!ctx.recall_active);
-    }
-
-    #[test]
-    fn memory_runtime_config_deserializes_with_missing_fields_defaulted() {
-        let config: MemoryRuntimeConfig =
-            serde_json::from_value(json!({ "ltm_enabled": true })).expect("should deserialize");
-
-        assert!(config.ltm_enabled);
-        assert!(!config.ltm_store_enabled);
     }
 }

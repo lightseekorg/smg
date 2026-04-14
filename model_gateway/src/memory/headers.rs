@@ -1,16 +1,12 @@
 use axum::http::HeaderMap;
 
-// Placeholder header names for memory controls.
-// These names are under active discussion and may change in a follow-up PR.
-pub const MEMORY_POLICY_HEADER: &str = "x-smg-memory-policy";
-pub const MEMORY_LTM_STORE_ENABLED_HEADER: &str = "x-smg-memory-ltm-store-enabled";
-pub const MEMORY_SUBJECT_ID_HEADER: &str = "x-smg-memory-subject-id";
-pub const MEMORY_RECALL_METHOD_HEADER: &str = "x-smg-memory-recall-method";
-pub const MEMORY_EMBEDDING_MODEL_HEADER: &str = "x-smg-memory-embedding-model";
-pub const MEMORY_EXTRACTION_MODEL_HEADER: &str = "x-smg-memory-extraction-model";
+pub use crate::routers::common::header_utils::{
+    MEMORY_EMBEDDING_MODEL_HEADER, MEMORY_EXTRACTION_MODEL_HEADER, MEMORY_LTM_STORE_ENABLED_HEADER,
+    MEMORY_POLICY_HEADER, MEMORY_RECALL_METHOD_HEADER, MEMORY_SUBJECT_ID_HEADER,
+};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// Normalized view of memory-related request headers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryHeaderView {
     pub policy: Option<String>,
     pub ltm_store_enabled: Option<String>,

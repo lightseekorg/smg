@@ -316,8 +316,8 @@ mod tests {
         ComponentRefs, PayloadState, RequestContext, ResponsesComponents, SharedComponents,
     };
     use crate::{
-        config::RouterConfig,
-        memory::{MemoryRuntimeConfig, MEMORY_LTM_STORE_ENABLED_HEADER},
+        config::{MemoryRuntimeConfig, RouterConfig},
+        memory::MEMORY_LTM_STORE_ENABLED_HEADER,
     };
 
     struct DummyMemoryWriter;
