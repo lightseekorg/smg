@@ -148,20 +148,19 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_create(
         serde_json::from_str::<Vec<u32>>(ids_str).ok()
     };
 
-    // Create stop decoder if needed (also when tokenizer has EOS tokens to strip)
-    let stop_decoder =
-        if stop.is_some() || stop_token_ids.is_some() || !tokenizer.eos_token_ids().is_empty() {
-            Some(Arc::new(TokioMutex::new(create_stop_decoder(
-                &tokenizer,
-                stop.as_ref(),
-                stop_token_ids.as_ref(),
-                skip_special_tokens != 0,
-                false, // no_stop_trim
-                false, // ignore_eos
-            ))))
-        } else {
-            None
-        };
+    // Create stop decoder if needed
+    let stop_decoder = if stop.is_some() || stop_token_ids.is_some() {
+        Some(Arc::new(TokioMutex::new(create_stop_decoder(
+            &tokenizer,
+            stop.as_ref(),
+            stop_token_ids.as_ref(),
+            skip_special_tokens != 0,
+            false, // no_stop_trim
+            false, // ignore_eos
+        ))))
+    } else {
+        None
+    };
 
     // Create tool parser if tools are provided
     let tool_parser = if tools.is_some() {
