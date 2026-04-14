@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use validator::Validate;
 
 use super::{
@@ -316,6 +316,10 @@ pub struct ChatCompletionRequest {
 
     /// Random seed for sampling for deterministic outputs
     pub sampling_seed: Option<u64>,
+
+    /// Additional fields not explicitly defined above (e.g. engine-specific parameters)
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 // ============================================================================
