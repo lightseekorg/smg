@@ -300,6 +300,15 @@ mod tests {
         assert!(is_tokenizer_file("spiece.model"));
         assert!(is_tokenizer_file("chat_template.jinja"));
         assert!(is_tokenizer_file("template.jinja"));
+        // Config files for EOS loading
+        assert!(is_tokenizer_file("config.json"));
+        assert!(is_tokenizer_file("subfolder/config.json"));
+        assert!(is_tokenizer_file("generation_config.json"));
+        assert!(is_tokenizer_file("subfolder/generation_config.json"));
+        // Other *_config.json files must NOT match
+        assert!(!is_tokenizer_file("preprocessor_config.json"));
+        assert!(!is_tokenizer_file("quantize_config.json"));
+        assert!(!is_tokenizer_file("adapter_config.json"));
         assert!(!is_tokenizer_file("model.bin"));
         assert!(!is_tokenizer_file("README.md"));
     }
