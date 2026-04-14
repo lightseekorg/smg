@@ -9,6 +9,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  branch-naming:
+    name: Branch Naming Convention
+    runs-on: ubuntu-latest
+    # Only enforce on internal PRs, not forks
+    if: github.event.pull_request.head.repo.full_name == 'lightseekorg/smg' && github.head_ref != 'main'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Validate branch name
+        env:
+          BRANCH: ${{ github.head_ref }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          REGEX='^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9._-]+)+$'
+
+          if [[ "$BRANCH" =~ $REGEX ]]; then
+            echo "✅ Branch name is valid: '$BRANCH'"
+            exit 0
+          fi
+
+          # Post comment and close the PR
+          gh pr comment "$PR_NUMBER" \
+            --repo "${{ github.repository }}" \
+            --body "Hi @${PR_AUTHOR}, the branch \`${BRANCH}\` does not follow our naming convention.
+
+          Please use one of the following formats:
+          - \`<type>/<description>\` — e.g. \`feat/add-auth\`, \`fix/null-pointer\`, \`dependabot/cargo/pyo3-0.28.1\`
+          - \`<username>/<description>\` — e.g. \`changsu/fix-routing\`
+
+          Allowed types: \`feat\`, \`fix\`, \`chore\`, \`docs\`, \`refactor\`, \`test\`, \`ci\`, \`perf\`
+
+          To fix, rename your branch locally, push the new branch, and open a new PR:
+          \`\`\`bash
+          git branch -m <new-branch-name>
+          git push origin -u <new-branch-name>
+          \`\`\`"
+
+          gh pr close "$PR_NUMBER" \
+            --repo "${{ github.repository }}" \
+            --comment "Closing this PR because the branch name \`${BRANCH}\` does not follow the naming convention."
+
+          exit 1
+
   pr-validation:
     name: PR Title & Commit Messages
     runs-on: ubuntu-latest
