@@ -265,6 +265,10 @@ impl TrtllmServiceClient {
         clippy::unused_self,
         reason = "method receiver kept for consistent public API across gRPC backends"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors vLLM backend API; refactoring to a params struct is tracked separately"
+    )]
     pub fn build_generate_request_from_chat(
         &self,
         request_id: String,
@@ -273,6 +277,7 @@ impl TrtllmServiceClient {
         token_ids: Vec<u32>,
         multimodal_input: Option<proto::MultimodalInput>,
         tool_call_constraint: Option<(String, String)>, // (constraint_type, constraint_value)
+        eos_token_ids: &[u32],
     ) -> Result<proto::GenerateRequest, String> {
         // Build sampling config
         let sampling_config = Self::build_sampling_config_from_chat(body);
@@ -287,6 +292,12 @@ impl TrtllmServiceClient {
 
         let max_tokens = body.max_completion_tokens.unwrap_or(2048);
 
+        let stop_token_ids: Vec<u32> = if body.ignore_eos {
+            vec![]
+        } else {
+            eos_token_ids.to_vec()
+        };
+
         let grpc_request = proto::GenerateRequest {
             request_id,
             tokenized: Some(proto::TokenizedInput {
@@ -299,7 +310,7 @@ impl TrtllmServiceClient {
             max_tokens,
             streaming: body.stream,
             stop,
-            stop_token_ids: vec![],
+            stop_token_ids,
             ignore_eos: body.ignore_eos,
             bad: vec![],
             bad_token_ids: vec![],
@@ -414,6 +425,7 @@ impl TrtllmServiceClient {
         processed_text: String,
         token_ids: Vec<u32>,
         constraint: Option<(String, String)>,
+        eos_token_ids: &[u32],
     ) -> Result<proto::GenerateRequest, String> {
         let sampling_config = Self::build_sampling_config_from_responses(body);
         let output_config = proto::OutputConfig {
@@ -442,7 +454,7 @@ impl TrtllmServiceClient {
             max_tokens,
             streaming: body.stream.unwrap_or(false),
             stop: vec![],
-            stop_token_ids: vec![],
+            stop_token_ids: eos_token_ids.to_vec(),
             ignore_eos: false,
             bad: vec![],
             bad_token_ids: vec![],

@@ -316,6 +316,10 @@ impl GrpcClient {
         clippy::unreachable,
         reason = "assembly stage guarantees matching MultimodalData variant for each backend"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors per-backend build methods; params struct tracked separately"
+    )]
     pub fn build_chat_request(
         &self,
         request_id: String,
@@ -324,6 +328,7 @@ impl GrpcClient {
         token_ids: Vec<u32>,
         multimodal_inputs: Option<MultimodalData>,
         tool_constraints: Option<(String, String)>,
+        eos_token_ids: &[u32],
     ) -> Result<ProtoGenerateRequest, String> {
         match self {
             Self::Sglang(client) => {
@@ -368,6 +373,7 @@ impl GrpcClient {
                     token_ids,
                     trtllm_mm,
                     tool_constraints,
+                    eos_token_ids,
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
