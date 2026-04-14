@@ -54,6 +54,7 @@ impl PipelineStage for CompletionPreparationStage {
             request.stop_token_ids.as_ref(),
             request.skip_special_tokens,
             request.no_stop_trim,
+            request.ignore_eos,
         );
 
         ctx.state.preparation = Some(PreparationOutput {

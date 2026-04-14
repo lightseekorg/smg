@@ -66,6 +66,7 @@ impl GeneratePreparationStage {
             params.and_then(|p| p.stop_token_ids.as_ref()),
             params.and_then(|p| p.skip_special_tokens).unwrap_or(true),
             params.and_then(|p| p.no_stop_trim).unwrap_or(false),
+            params.and_then(|p| p.ignore_eos).unwrap_or(false),
         );
 
         ctx.state.preparation = Some(PreparationOutput {

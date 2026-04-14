@@ -156,6 +156,7 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_create(
             stop_token_ids.as_ref(),
             skip_special_tokens != 0,
             false, // no_stop_trim
+            false, // ignore_eos
         ))))
     } else {
         None

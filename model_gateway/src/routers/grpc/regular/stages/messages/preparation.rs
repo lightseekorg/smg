@@ -228,6 +228,7 @@ impl MessagePreparationStage {
             None,  // no stop_token_ids in Messages API
             true,  // always skip special tokens — Messages API never exposes raw tokens
             false, // no_stop_trim default
+            false, // ignore_eos — not available in Messages API
         );
 
         let mut processed_messages = processed_messages;

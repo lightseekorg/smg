@@ -104,6 +104,7 @@ impl StreamingProcessor {
             chat_request.stop_token_ids.clone(),
             chat_request.skip_special_tokens,
             chat_request.no_stop_trim,
+            chat_request.ignore_eos,
         );
 
         // Create SSE channel
@@ -185,7 +186,7 @@ impl StreamingProcessor {
         mut grpc_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
-        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<ChatCompletionRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -298,14 +299,20 @@ impl StreamingProcessor {
 
                     // Get or create stop decoder for this index
                     let stop_decoder = stop_decoders.entry(index).or_insert_with(|| {
-                        let (ref stop, ref stop_token_ids, skip_special_tokens, no_stop_trim) =
-                            stop_params;
+                        let (
+                            ref stop,
+                            ref stop_token_ids,
+                            skip_special_tokens,
+                            no_stop_trim,
+                            ignore_eos,
+                        ) = stop_params;
                         utils::create_stop_decoder(
                             &tokenizer,
                             stop.as_ref(),
                             stop_token_ids.as_ref(),
                             skip_special_tokens,
                             no_stop_trim,
+                            ignore_eos,
                         )
                     });
 
@@ -588,7 +595,7 @@ impl StreamingProcessor {
         decode_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
-        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<ChatCompletionRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -1442,6 +1449,7 @@ impl StreamingProcessor {
             None::<Vec<u32>>, // No stop_token_ids in Messages API
             true,             // always skip special tokens
             false,            // no_stop_trim
+            false,            // ignore_eos — not available in Messages API
         );
 
         let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -1536,7 +1544,7 @@ impl StreamingProcessor {
         mut grpc_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
-        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<CreateMessageRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -1563,13 +1571,15 @@ impl StreamingProcessor {
 
         // Stop decoder
         let mut stop_decoder = {
-            let (ref stop, ref stop_token_ids, skip_special_tokens, no_stop_trim) = stop_params;
+            let (ref stop, ref stop_token_ids, skip_special_tokens, no_stop_trim, ignore_eos) =
+                stop_params;
             utils::create_stop_decoder(
                 &tokenizer,
                 stop.as_ref(),
                 stop_token_ids.as_ref(),
                 skip_special_tokens,
                 no_stop_trim,
+                ignore_eos,
             )
         };
 
@@ -2143,7 +2153,7 @@ impl StreamingProcessor {
         decode_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
-        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<CreateMessageRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -2192,6 +2202,7 @@ impl StreamingProcessor {
             completion_request.stop_token_ids.clone(),
             completion_request.skip_special_tokens,
             completion_request.no_stop_trim,
+            completion_request.ignore_eos,
         );
 
         let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -2271,7 +2282,7 @@ impl StreamingProcessor {
         mut grpc_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
-        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         completion_request: Arc<CompletionRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -2343,6 +2354,7 @@ impl StreamingProcessor {
                             stop_params.1.as_ref(),
                             stop_params.2,
                             stop_params.3,
+                            stop_params.4,
                         )
                     });
 
@@ -2595,7 +2607,7 @@ impl StreamingProcessor {
         decode_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
-        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<CompletionRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
