@@ -509,25 +509,24 @@ pub fn create_stop_decoder(
         };
     }
 
-    // Add EOS token IDs from tokenizer (generation_config.json) as hidden stops.
-    // Skip when ignore_eos=true — the backend continues past EOS and the user
-    // expects EOS tokens to either be invisible (skip_special_tokens=true) or
-    // visible (skip_special_tokens=false), not cause early termination.
-    if !ignore_eos {
-        for &eos_id in tokenizer.eos_token_ids() {
-            builder = builder.stop_token(eos_id);
-        }
-    }
-
-    // Add user-provided stop token IDs (visible if no_stop_trim, hidden otherwise)
-    if let Some(token_ids) = stop_token_ids {
-        for &token_id in token_ids {
-            builder = if no_stop_trim {
-                builder.visible_stop_token(token_id)
-            } else {
-                builder.stop_token(token_id)
-            };
-        }
+    // Collect stop token IDs: EOS from tokenizer (unless ignore_eos) + user-provided.
+    // EOS tokens come from generation_config.json and are stripped at the token ID
+    // level before decoding, matching vllm/sglang behavior.
+    // When ignore_eos=true, EOS tokens are not added — the backend continues past EOS.
+    let eos_ids = if ignore_eos {
+        &[] as &[u32]
+    } else {
+        tokenizer.eos_token_ids()
+    };
+    for &token_id in eos_ids
+        .iter()
+        .chain(stop_token_ids.map(|ids| ids.as_slice()).unwrap_or_default())
+    {
+        builder = if no_stop_trim {
+            builder.visible_stop_token(token_id)
+        } else {
+            builder.stop_token(token_id)
+        };
     }
 
     builder.build()

@@ -341,3 +341,44 @@ class TestEosTokenStripping:
                 assert eos not in choice.message.content, (
                     f"EOS token {eos} in content: {choice.message.content}"
                 )
+
+    def test_no_stop_trim_with_skip_special_true(self, model, api_client):
+        """With no_stop_trim=true and skip_special_tokens=true (default),
+        EOS should be kept in token list but invisible (decoded to empty)."""
+        response = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Say hello in one sentence."},
+            ],
+            temperature=0,
+            max_tokens=50,
+            stream=False,
+            extra_body={"no_stop_trim": True},
+        )
+        content = response.choices[0].message.content
+        assert content is not None
+        for eos in self.EOS_TOKENS:
+            assert eos not in content, (
+                f"EOS token {eos} should be invisible with skip_special_tokens=true: {content}"
+            )
+
+    def test_no_stop_trim_with_skip_special_false(self, model, api_client):
+        """With no_stop_trim=true and skip_special_tokens=false,
+        EOS should be visible in output (matching sglang behavior)."""
+        response = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Say hello in one sentence."},
+            ],
+            temperature=0,
+            max_tokens=50,
+            stream=False,
+            extra_body={"no_stop_trim": True, "skip_special_tokens": False},
+        )
+        content = response.choices[0].message.content
+        assert content is not None
+        # EOS should be visible when both no_stop_trim=true and skip_special_tokens=false
+        has_eos = any(eos in content for eos in self.EOS_TOKENS)
+        assert has_eos, (
+            f"EOS token should be visible with no_stop_trim=true + skip_special_tokens=false: {content}"
+        )
