@@ -134,31 +134,7 @@ impl ConversationItemStorage for NoOpConversationItemStorage {
 }
 
 // ============================================================================
-// PART 3: NoOpConversationMemoryWriter
-// ============================================================================
-
-#[derive(Clone, Copy, Default)]
-pub(super) struct NoOpConversationMemoryWriter;
-
-impl NoOpConversationMemoryWriter {
-    /// Create a no-op conversation memory writer.
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl ConversationMemoryWriter for NoOpConversationMemoryWriter {
-    async fn create_memory(
-        &self,
-        _input: NewConversationMemory,
-    ) -> ConversationMemoryResult<ConversationMemoryId> {
-        Ok(ConversationMemoryId(format!("mem_{}", ulid::Ulid::new())))
-    }
-}
-
-// ============================================================================
-// PART 4: NoOpResponseStorage
+// PART 3: NoOpResponseStorage
 // ============================================================================
 
 /// No-op implementation of response storage (does nothing)

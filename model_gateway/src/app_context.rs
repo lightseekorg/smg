@@ -15,7 +15,7 @@ use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::debug;
 
 use crate::{
-    config::RouterConfig,
+    config::{HistoryBackend, RouterConfig},
     middleware::TokenBucket,
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
@@ -320,7 +320,7 @@ impl AppContextBuilder {
 
         validate_memory_writer_configuration(
             &router_config,
-            self.conversation_memory_writer.as_ref(),
+            self.conversation_memory_writer.is_some(),
         )
         .map_err(AppContextBuildError::InvalidConfig)?;
 
@@ -392,6 +392,11 @@ impl AppContextBuilder {
         webrtc_bind_addr: Option<std::net::IpAddr>,
         webrtc_stun_server: Option<String>,
     ) -> Result<Self, String> {
+        validate_memory_writer_configuration(
+            &router_config,
+            history_backend_supports_memory_writer(&router_config.history_backend),
+        )?;
+
         Ok(Self::new()
             .with_client(&router_config, request_timeout_secs)?
             .maybe_rate_limiter(&router_config)
@@ -690,9 +695,9 @@ impl Default for AppContextBuilder {
 /// Enforce runtime-aware constraints for conversation memory writer availability.
 fn validate_memory_writer_configuration(
     config: &RouterConfig,
-    memory_writer: Option<&Arc<dyn ConversationMemoryWriter>>,
+    memory_writer_available: bool,
 ) -> Result<(), String> {
-    if config.memory_runtime.ltm_store_enabled && memory_writer.is_none() {
+    if config.memory_runtime.ltm_store_enabled && !memory_writer_available {
         return Err(
             "memory_runtime.ltm_store_enabled is true but selected storage backend does not provide conversation memory writer".to_string(),
         );
@@ -700,7 +705,7 @@ fn validate_memory_writer_configuration(
 
     if config.memory_runtime.ltm_store_enabled
         && config.storage_hook_wasm_path.is_some()
-        && memory_writer.is_some()
+        && memory_writer_available
     {
         return Err(
             "memory_runtime.ltm_store_enabled cannot be used with storage_hook_wasm_path until conversation memory writer hooks are implemented".to_string(),
@@ -710,32 +715,14 @@ fn validate_memory_writer_configuration(
     Ok(())
 }
 
+fn history_backend_supports_memory_writer(history_backend: &HistoryBackend) -> bool {
+    matches!(history_backend, HistoryBackend::Memory)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
-    use smg_data_connector::{
-        ConversationMemoryId, ConversationMemoryResult, ConversationMemoryStorageError,
-        ConversationMemoryWriter, NewConversationMemory,
-    };
-
-    use super::validate_memory_writer_configuration;
+    use super::{validate_memory_writer_configuration, AppContextBuilder};
     use crate::config::{MemoryRuntimeConfig, PolicyConfig, RouterConfig, RoutingMode};
-
-    struct DummyConversationMemoryWriter;
-
-    #[async_trait]
-    impl ConversationMemoryWriter for DummyConversationMemoryWriter {
-        async fn create_memory(
-            &self,
-            _input: NewConversationMemory,
-        ) -> ConversationMemoryResult<ConversationMemoryId> {
-            Err(ConversationMemoryStorageError::StorageError(
-                "not used in this test".to_string(),
-            ))
-        }
-    }
 
     #[test]
     fn rejects_missing_memory_writer_when_ltm_store_is_enabled() {
@@ -750,7 +737,7 @@ mod tests {
             ltm_store_enabled: true,
         };
 
-        let err = validate_memory_writer_configuration(&config, None).expect_err("should fail");
+        let err = validate_memory_writer_configuration(&config, false).expect_err("should fail");
         assert!(err.contains("does not provide conversation memory writer"));
     }
 
@@ -768,9 +755,7 @@ mod tests {
         };
         config.storage_hook_wasm_path = Some("/tmp/hook.wasm".to_string());
 
-        let writer: Arc<dyn ConversationMemoryWriter> = Arc::new(DummyConversationMemoryWriter);
-        let err =
-            validate_memory_writer_configuration(&config, Some(&writer)).expect_err("should fail");
+        let err = validate_memory_writer_configuration(&config, true).expect_err("should fail");
         assert!(err.contains("storage_hook_wasm_path"));
     }
 
@@ -788,8 +773,29 @@ mod tests {
         };
         config.storage_hook_wasm_path = Some("/tmp/hook.wasm".to_string());
 
-        let writer: Arc<dyn ConversationMemoryWriter> = Arc::new(DummyConversationMemoryWriter);
-        validate_memory_writer_configuration(&config, Some(&writer))
+        validate_memory_writer_configuration(&config, true)
             .expect("should allow when store is disabled");
+    }
+
+    #[tokio::test]
+    async fn from_config_rejects_invalid_memory_hook_combo_before_loading_hook() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+        config.memory_runtime = MemoryRuntimeConfig {
+            ltm_enabled: true,
+            ltm_store_enabled: true,
+        };
+        config.storage_hook_wasm_path = Some("/tmp/does-not-exist-memory-hook.wasm".to_string());
+
+        let err = match Box::pin(AppContextBuilder::from_config(config, 30, None, None)).await {
+            Ok(_) => panic!("invalid memory/hook combo should fail before hook loading"),
+            Err(err) => err,
+        };
+        assert!(err.contains("storage_hook_wasm_path"));
+        assert!(!err.contains("failed to read WASM storage hook"));
     }
 }

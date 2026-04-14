@@ -16,10 +16,7 @@ use crate::{
         MemoryConversationItemStorage, MemoryConversationMemoryWriter, MemoryConversationStorage,
         MemoryResponseStorage,
     },
-    noop::{
-        NoOpConversationItemStorage, NoOpConversationMemoryWriter, NoOpConversationStorage,
-        NoOpResponseStorage,
-    },
+    noop::{NoOpConversationItemStorage, NoOpConversationStorage, NoOpResponseStorage},
     oracle::{OracleConversationItemStorage, OracleConversationStorage, OracleResponseStorage},
     postgres::{
         PostgresConversationItemStorage, PostgresConversationStorage, PostgresResponseStorage,
@@ -75,7 +72,7 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageB
                 response_storage: Arc::new(NoOpResponseStorage::new()),
                 conversation_storage: Arc::new(NoOpConversationStorage::new()),
                 conversation_item_storage: Arc::new(NoOpConversationItemStorage::new()),
-                conversation_memory_writer: Some(Arc::new(NoOpConversationMemoryWriter::new())),
+                conversation_memory_writer: None,
             }
         }
         HistoryBackend::Oracle => {
@@ -328,7 +325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_storage_none_exposes_memory_writer() {
+    async fn test_create_storage_none_does_not_expose_memory_writer() {
         let bundle = create_storage(StorageFactoryConfig {
             backend: &HistoryBackend::None,
             oracle: None,
@@ -339,7 +336,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(bundle.conversation_memory_writer.is_some());
+        assert!(bundle.conversation_memory_writer.is_none());
     }
 
     #[tokio::test]
