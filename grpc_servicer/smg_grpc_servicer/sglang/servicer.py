@@ -628,29 +628,17 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         """Create an in-memory ZIP archive of tokenizer files from a directory."""
         buf = io.BytesIO()
         added: set[str] = set()
-        root = tokenizer_dir.resolve()
-
-        def _is_safe_file(path: Path) -> bool:
-            """Check file exists, is not a symlink, and resolves within root."""
-            if not path.is_file() or path.is_symlink():
-                return False
-            try:
-                path.resolve().relative_to(root)
-                return True
-            except ValueError:
-                return False
-
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             # Exact-name files
             for name in _TOKENIZER_FILES:
                 filepath = tokenizer_dir / name
-                if _is_safe_file(filepath):
+                if filepath.is_file():
                     zf.write(filepath, name)
                     added.add(name)
             # Glob patterns (*.tiktoken, *.jinja, *.model)
             for pattern in _TOKENIZER_GLOBS:
                 for match in tokenizer_dir.glob(pattern):
-                    if match.name not in added and _is_safe_file(match):
+                    if match.is_file() and match.name not in added:
                         zf.write(match, match.name)
                         added.add(match.name)
         if not added:
