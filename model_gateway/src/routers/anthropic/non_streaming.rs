@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     observability::metrics::Metrics,
-    routers::{error, mcp_utils::DEFAULT_MAX_ITERATIONS},
+    routers::{common::mcp_utils::DEFAULT_MAX_ITERATIONS, error},
 };
 
 /// Execute a non-streaming Messages API request, handling both

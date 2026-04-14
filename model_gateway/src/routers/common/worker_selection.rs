@@ -13,8 +13,8 @@ use openai_protocol::models::ListModelsResponse;
 
 use crate::{
     routers::{
+        common::header_utils::{apply_provider_headers, extract_auth_header},
         error,
-        header_utils::{apply_provider_headers, extract_auth_header},
     },
     worker::{ConnectionMode, ProviderType, RuntimeType, Worker, WorkerRegistry, WorkerType},
 };

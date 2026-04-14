@@ -22,8 +22,9 @@ pub struct CollectorConfig {
     /// Interval for the metrics (Prometheus) collector.
     pub metrics_interval: Duration,
     /// Checkpoint interval for the worker collector.
-    /// Catches health changes that bypass the broadcast (e.g., `set_healthy()`
-    /// called directly by the health checker or circuit breaker).
+    /// Catches health changes that bypass the broadcast (e.g.,
+    /// `set_status()` called directly by FFI bindings, the registry
+    /// teardown path, or the mesh subscriber).
     pub worker_checkpoint_interval: Duration,
 }
 
@@ -80,9 +81,9 @@ pub fn start_collectors(
 // ── Event-driven collector ──────────────────────────────────────────────
 
 /// Listens on WorkerRegistry broadcast for instant push on register/remove.
-/// Also polls on a checkpoint interval to catch health changes that bypass
-/// the broadcast (e.g., `set_healthy()` called directly by health checker
-/// or circuit breaker).
+/// Also polls on a checkpoint interval to catch health changes that
+/// bypass the broadcast (e.g., `set_status()` called directly by FFI
+/// bindings, the registry teardown path, or the mesh subscriber).
 fn spawn_worker_collector(
     context: Arc<AppContext>,
     registry: Arc<WatchRegistry>,
@@ -110,7 +111,7 @@ fn spawn_worker_collector(
                             debug!("worker event: {event:?}");
                             publish_workers(&context, &registry);
                             // Only publish models on membership changes, not health
-                            if matches!(event, WorkerEvent::Registered { .. } | WorkerEvent::Removed { .. }) {
+                            if matches!(event, WorkerEvent::Registered { .. } | WorkerEvent::Removed { .. } | WorkerEvent::Replaced { .. }) {
                                 publish_models(&context, &registry);
                             }
                         }
@@ -206,7 +207,7 @@ fn collect_workers(context: &AppContext) -> Value {
                 "is_healthy": w.is_healthy(),
                 "load": w.load(),
                 "processed_requests": w.processed_requests(),
-                "circuit_breaker": w.circuit_breaker().state().to_string(),
+                "circuit_breaker": w.circuit_breaker_state().to_string(),
             })
         })
         .collect();

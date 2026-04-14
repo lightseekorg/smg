@@ -10,12 +10,12 @@ use axum::{
 use serde_json::Value;
 
 use crate::routers::{
+    common::header_utils::ApiProvider,
     error,
     gemini::{
         context::RequestContext,
         state::{RequestState, StepResult},
     },
-    header_utils::ApiProvider,
 };
 
 /// POST the payload to the upstream worker and handle the response.

@@ -23,8 +23,8 @@ use super::{
 use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
+        common::worker_selection::{SelectWorkerRequest, WorkerSelector},
         error,
-        worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
     worker::{Endpoint, ProviderType, WorkerRegistry},
 };

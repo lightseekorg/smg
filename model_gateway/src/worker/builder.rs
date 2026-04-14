@@ -3,14 +3,14 @@ use std::collections::HashMap;
 use arc_swap::ArcSwap;
 use openai_protocol::{
     model_card::ModelCard,
-    worker::{HealthCheckConfig, WorkerModels, WorkerSpec},
+    worker::{HealthCheckConfig, WorkerModels, WorkerSpec, WorkerStatus},
 };
 
 use super::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
     resilience::ResolvedResilience,
     worker::{
-        BasicWorker, ConnectionMode, RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad, WorkerType,
+        BasicWorker, ConnectionMode, RuntimeType, WorkerMetadata, WorkerRuntime, WorkerType,
         DEFAULT_WORKER_HTTP_TIMEOUT_SECS,
     },
 };
@@ -32,6 +32,11 @@ pub struct BasicWorkerBuilder {
     http_client: Option<reqwest::Client>,
     /// Resolved resilience config (if not set, defaults are used).
     resilience: Option<ResolvedResilience>,
+    /// Initial lifecycle status. If unset, defaults to `Pending` for
+    /// health-checked workers and `Ready` for `disable_health_check == true`.
+    /// Callers replacing an existing worker (e.g. metadata updates) should
+    /// pass the old worker's status to avoid kicking it back to Pending.
+    initial_status: Option<WorkerStatus>,
 }
 
 impl BasicWorkerBuilder {
@@ -45,6 +50,7 @@ impl BasicWorkerBuilder {
             grpc_client: None,
             http_client: None,
             resilience: None,
+            initial_status: None,
         }
     }
 
@@ -58,6 +64,7 @@ impl BasicWorkerBuilder {
             grpc_client: None,
             http_client: None,
             resilience: None,
+            initial_status: None,
         }
     }
 
@@ -73,6 +80,7 @@ impl BasicWorkerBuilder {
             grpc_client: None,
             http_client: None,
             resilience: None,
+            initial_status: None,
         }
     }
 
@@ -124,6 +132,19 @@ impl BasicWorkerBuilder {
     /// stored on `WorkerMetadata` for runtime use.
     pub fn health_config(mut self, config: HealthCheckConfig) -> Self {
         self.health_config = Some(config);
+        self
+    }
+
+    /// Override the initial lifecycle status.
+    ///
+    /// By default, `build()` chooses `Pending` for health-checked workers and
+    /// `Ready` for workers with `disable_health_check == true`. Callers that
+    /// replace an existing worker (e.g. metadata-only updates via
+    /// `register_or_replace`) should pass the old worker's status here to
+    /// avoid kicking a healthy worker back to Pending and causing avoidable
+    /// 503s while it re-proves itself.
+    pub fn status(mut self, status: WorkerStatus) -> Self {
+        self.initial_status = Some(status);
         self
     }
 
@@ -206,10 +227,7 @@ impl BasicWorkerBuilder {
 
     /// Build the BasicWorker instance
     pub fn build(mut self) -> BasicWorker {
-        use std::sync::{
-            atomic::{AtomicBool, AtomicUsize},
-            Arc,
-        };
+        use std::sync::Arc;
 
         use tokio::sync::OnceCell;
 
@@ -239,8 +257,19 @@ impl BasicWorkerBuilder {
             None => OnceCell::new(),
         });
 
-        let healthy = true;
-        Metrics::set_worker_health(&metadata.spec.url, healthy);
+        // Caller can override the initial status (e.g. when replacing an
+        // existing worker, to preserve its prior status). Otherwise:
+        // - workers with health checks disabled start Ready (routable)
+        // - workers with health checks enabled start Pending (not routable
+        //   until the health checker promotes them after success_threshold)
+        let initial_status =
+            self.initial_status
+                .unwrap_or(if metadata.health_config.disable_health_check {
+                    WorkerStatus::Ready
+                } else {
+                    WorkerStatus::Pending
+                });
+        Metrics::set_worker_health(&metadata.spec.url, initial_status == WorkerStatus::Ready);
 
         let http_client = self.http_client.unwrap_or_else(|| {
             reqwest::Client::builder()
@@ -255,16 +284,11 @@ impl BasicWorkerBuilder {
         let resilience = self.resilience.unwrap_or_default();
 
         BasicWorker {
-            load_counter: Arc::new(AtomicUsize::new(0)),
-            worker_routing_key_load: Arc::new(WorkerRoutingKeyLoad::new(&metadata.spec.url)),
-            processed_counter: Arc::new(AtomicUsize::new(0)),
-            healthy: Arc::new(AtomicBool::new(healthy)),
-            consecutive_failures: Arc::new(AtomicUsize::new(0)),
-            consecutive_successes: Arc::new(AtomicUsize::new(0)),
-            circuit_breaker: CircuitBreaker::with_config_and_label(
+            runtime: ArcSwap::from_pointee(WorkerRuntime::new(&metadata.spec.url, initial_status)),
+            circuit_breaker: ArcSwap::from_pointee(CircuitBreaker::with_config_and_label(
                 self.circuit_breaker_config,
                 metadata.spec.url.clone(),
-            ),
+            )),
             metadata,
             grpc_client,
             models_override: Arc::new(ArcSwap::from_pointee(WorkerModels::Wildcard)),
@@ -327,7 +351,9 @@ mod tests {
         assert_eq!(worker.url(), "http://localhost:8080");
         assert_eq!(worker.worker_type(), &WorkerType::Regular);
         assert_eq!(worker.connection_mode(), &ConnectionMode::Http);
-        assert!(worker.is_healthy());
+        // Health-checked workers start Pending (not routable until health checker promotes)
+        assert!(!worker.is_healthy());
+        assert_eq!(worker.status(), WorkerStatus::Pending);
     }
 
     #[test]
@@ -339,7 +365,7 @@ mod tests {
         assert_eq!(worker.url(), "http://localhost:8080");
         assert_eq!(worker.worker_type(), &WorkerType::Decode);
         assert_eq!(worker.connection_mode(), &ConnectionMode::Http);
-        assert!(worker.is_healthy());
+        assert!(!worker.is_healthy());
     }
 
     #[test]

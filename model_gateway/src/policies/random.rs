@@ -50,8 +50,17 @@ impl LoadBalancingPolicy for RandomPolicy {
 mod tests {
     use std::collections::HashMap;
 
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
+
     use super::*;
     use crate::worker::{BasicWorkerBuilder, WorkerType};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_random_selection() {
@@ -60,16 +69,19 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w3:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -93,17 +105,19 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
 
         // Mark first worker as unhealthy
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
 
         // Should always select the healthy worker (index 1)
         for _ in 0..10 {
@@ -120,10 +134,11 @@ mod tests {
         let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
             BasicWorkerBuilder::new("http://w1:8000")
                 .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
                 .build(),
         )];
 
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
         assert_eq!(
             policy.select_worker(&workers, &SelectWorkerInfo::default()),
             None

@@ -6,11 +6,12 @@
 //! Rust gateway.
 
 use std::{
+    any::Any,
     ffi::{CStr, CString},
     os::raw::c_char,
     ptr,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -19,7 +20,7 @@ use async_trait::async_trait;
 use llm_tokenizer::{create_tokenizer_from_file, traits::Tokenizer};
 use openai_protocol::{
     chat::ChatCompletionRequest,
-    worker::{HealthCheckConfig, WorkerSpec},
+    worker::{HealthCheckConfig, WorkerSpec, WorkerStatus},
 };
 use smg::{
     policies::{
@@ -31,7 +32,7 @@ use smg::{
         utils::{generate_tool_constraints, process_chat_messages},
     },
     worker::{
-        circuit_breaker::CircuitBreaker,
+        circuit_breaker::{CircuitBreaker, CircuitState},
         resilience::ResolvedResilience,
         worker::{RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad},
         ConnectionMode, Worker, WorkerResult, WorkerType,
@@ -54,7 +55,7 @@ use super::{
 pub struct GrpcWorker {
     pub(crate) client: Arc<SglangSchedulerClient>,
     pub(crate) endpoint: String,
-    pub(crate) healthy: AtomicBool,
+    pub(crate) status: AtomicU8,
     pub(crate) load: AtomicUsize,
     pub(crate) processed: AtomicUsize,
     pub(crate) circuit_breaker: CircuitBreaker,
@@ -80,7 +81,7 @@ impl GrpcWorker {
             client,
             routing_key_load: WorkerRoutingKeyLoad::new(&endpoint),
             endpoint,
-            healthy: AtomicBool::new(true),
+            status: AtomicU8::new(WorkerStatus::Ready as u8),
             load: AtomicUsize::new(0),
             processed: AtomicUsize::new(0),
             circuit_breaker: CircuitBreaker::new(),
@@ -96,13 +97,20 @@ impl std::fmt::Debug for GrpcWorker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GrpcWorker")
             .field("endpoint", &self.endpoint)
-            .field("healthy", &self.healthy.load(Ordering::Relaxed))
+            .field(
+                "status",
+                &WorkerStatus::from_u8(self.status.load(Ordering::Relaxed)),
+            )
             .finish()
     }
 }
 
 #[async_trait]
 impl Worker for GrpcWorker {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn url(&self) -> &str {
         &self.endpoint
     }
@@ -119,18 +127,41 @@ impl Worker for GrpcWorker {
         &self.metadata.spec.connection_mode
     }
 
-    fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Relaxed)
+    fn status(&self) -> WorkerStatus {
+        WorkerStatus::from_u8(self.status.load(Ordering::Relaxed))
     }
 
-    fn set_healthy(&self, healthy: bool) {
-        self.healthy.store(healthy, Ordering::Relaxed);
+    fn set_status(&self, status: WorkerStatus) {
+        self.status.store(status as u8, Ordering::Relaxed);
+    }
+
+    fn revision(&self) -> u64 {
+        0
     }
 
     async fn check_health_async(&self) -> WorkerResult<()> {
         // FFI workers don't do their own health checks
         Ok(())
     }
+
+    // FFI workers don't run the state machine — these counters are unused.
+    // The Go SDK manages worker health via direct set_status() calls
+    // through the `sgl_multi_client_set_worker_health` FFI entry point.
+    fn consecutive_failures_increment(&self) -> usize {
+        0
+    }
+    fn consecutive_failures_reset(&self) {}
+    fn consecutive_successes_increment(&self) -> usize {
+        0
+    }
+    fn consecutive_successes_reset(&self) {}
+    fn total_pending_probes(&self) -> usize {
+        0
+    }
+    fn total_pending_probes_increment(&self) -> usize {
+        0
+    }
+    fn total_pending_probes_reset(&self) {}
 
     fn load(&self) -> usize {
         self.load.load(Ordering::Relaxed)
@@ -144,8 +175,16 @@ impl Worker for GrpcWorker {
         self.load.fetch_sub(1, Ordering::Relaxed);
     }
 
-    fn worker_routing_key_load(&self) -> &WorkerRoutingKeyLoad {
-        &self.routing_key_load
+    fn routing_key_load(&self) -> usize {
+        self.routing_key_load.value()
+    }
+
+    fn increment_routing_key_load(&self, routing_key: &str) {
+        self.routing_key_load.increment(routing_key);
+    }
+
+    fn decrement_routing_key_load(&self, routing_key: &str) {
+        self.routing_key_load.decrement(routing_key);
     }
 
     fn processed_requests(&self) -> usize {
@@ -160,8 +199,16 @@ impl Worker for GrpcWorker {
         &self.metadata
     }
 
-    fn circuit_breaker(&self) -> &CircuitBreaker {
-        &self.circuit_breaker
+    fn circuit_breaker_state(&self) -> CircuitState {
+        self.circuit_breaker.state()
+    }
+
+    fn circuit_breaker_can_execute(&self) -> bool {
+        self.circuit_breaker.can_execute()
+    }
+
+    fn record_circuit_breaker_outcome(&self, success: bool) {
+        self.circuit_breaker.record_outcome(success);
     }
 
     fn resilience(&self) -> &ResolvedResilience {
@@ -178,11 +225,11 @@ impl Worker for GrpcWorker {
     }
 
     async fn grpc_health_check(&self) -> WorkerResult<bool> {
-        Ok(self.healthy.load(Ordering::Relaxed))
+        Ok(self.is_healthy())
     }
 
     async fn http_health_check(&self) -> WorkerResult<bool> {
-        Ok(self.healthy.load(Ordering::Relaxed))
+        Ok(self.is_healthy())
     }
 }
 
@@ -377,7 +424,7 @@ pub unsafe extern "C" fn sgl_multi_client_healthy_count(
     (*handle)
         .grpc_workers
         .iter()
-        .filter(|w| w.healthy.load(Ordering::Relaxed))
+        .filter(|w| w.is_healthy())
         .count()
 }
 
@@ -398,9 +445,17 @@ pub unsafe extern "C" fn sgl_multi_client_set_worker_health(
     if worker_index >= client.grpc_workers.len() {
         return SglErrorCode::InvalidArgument;
     }
-    client.grpc_workers[worker_index]
-        .healthy
-        .store(healthy, Ordering::Relaxed);
+    // The Go SDK is the source of truth for FFI worker health, so we
+    // map its boolean directly without the legacy `set_healthy` guard
+    // (which only demoted from `Ready`). FFI workers never run the
+    // local state machine, so a `Pending` start state can be flipped
+    // straight to `Ready` or `NotReady` here.
+    let status = if healthy {
+        WorkerStatus::Ready
+    } else {
+        WorkerStatus::NotReady
+    };
+    client.grpc_workers[worker_index].set_status(status);
     SglErrorCode::Success
 }
 

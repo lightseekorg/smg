@@ -640,6 +640,7 @@ async fn handle_pod_event(
             );
             let job = Job::RemoveWorker {
                 url: old_url.clone(),
+                expected_revision: None,
             };
             if let Some(job_queue) = app_context.worker_job_queue.get() {
                 if let Err(e) = job_queue.submit(job).await {
@@ -789,6 +790,7 @@ async fn handle_pod_deletion(
 
         let job = Job::RemoveWorker {
             url: worker_url.clone(),
+            expected_revision: None,
         };
 
         if let Some(job_queue) = app_context.worker_job_queue.get() {
@@ -930,6 +932,7 @@ async fn reconcile_pods(
         );
         let job = Job::RemoveWorker {
             url: worker_url.clone(),
+            expected_revision: None,
         };
         if let Some(job_queue) = app_context.worker_job_queue.get() {
             match job_queue.submit(job).await {
@@ -1265,7 +1268,7 @@ mod tests {
                 smg_data_connector::MemoryConversationItemStorage::new(),
             ),
             conversation_memory_writer: None,
-            load_monitor: None,
+            worker_monitor: None,
             configured_reasoning_parser: None,
             configured_tool_parser: None,
             worker_job_queue: worker_job_queue.clone(),

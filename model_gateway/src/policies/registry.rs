@@ -689,6 +689,7 @@ impl std::fmt::Debug for PolicyRegistry {
 mod tests {
     use std::sync::Arc;
 
+    use openai_protocol::worker::HealthCheckConfig;
     use smg_mesh::{MeshSyncManager, StateStores};
 
     use super::*;
@@ -696,6 +697,13 @@ mod tests {
         policies::SelectWorkerInfo,
         worker::{BasicWorkerBuilder, Worker, WorkerType, UNKNOWN_MODEL_ID},
     };
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_policy_registry_basic() {
@@ -782,6 +790,7 @@ mod tests {
             BasicWorkerBuilder::new("http://w1:8000")
                 .worker_type(WorkerType::Regular)
                 .api_key("test_api_key")
+                .health_config(no_health_check())
                 .build(),
         )];
 
@@ -826,12 +835,14 @@ mod tests {
             BasicWorkerBuilder::new("http://w1:8000")
                 .worker_type(WorkerType::Regular)
                 .api_key("test_api_key")
+                .health_config(no_health_check())
                 .build(),
         );
         let worker2: Arc<dyn Worker> = Arc::new(
             BasicWorkerBuilder::new("http://w2:8000")
                 .worker_type(WorkerType::Regular)
                 .api_key("test_api_key")
+                .health_config(no_health_check())
                 .build(),
         );
         let workers = vec![worker1, worker2];

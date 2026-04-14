@@ -144,7 +144,7 @@ pub(crate) fn get_healthy_worker_indices(workers: &[Arc<dyn Worker>]) -> Vec<usi
     workers
         .iter()
         .enumerate()
-        .filter(|(_, w)| w.is_healthy() && w.circuit_breaker().can_execute())
+        .filter(|(_, w)| w.is_healthy() && w.circuit_breaker_can_execute())
         .map(|(idx, _)| idx)
         .collect()
 }
@@ -182,8 +182,17 @@ pub struct SelectWorkerInfo<'a> {
 
 #[cfg(test)]
 mod tests {
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
+
     use super::*;
     use crate::worker::{BasicWorkerBuilder, WorkerType};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_get_healthy_worker_indices() {
@@ -192,18 +201,21 @@ mod tests {
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
                     .api_key("test_api_key")
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
                     .api_key("test_api_key2")
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w3:8000")
                     .worker_type(WorkerType::Regular)
                     .api_key("test_api_key")
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -213,7 +225,7 @@ mod tests {
         assert_eq!(indices, vec![0, 1, 2]);
 
         // Mark one unhealthy
-        workers[1].set_healthy(false);
+        workers[1].set_status(WorkerStatus::NotReady);
         let indices = get_healthy_worker_indices(&workers);
         assert_eq!(indices, vec![0, 2]);
     }

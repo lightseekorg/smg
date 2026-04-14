@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use openai_protocol::worker::WorkerStatus;
 use tracing::{debug, info, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
@@ -71,8 +72,21 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
                 .clone()
                 .or_else(|| worker.metadata().spec.api_key.clone());
 
-            // Create a new worker with updated properties
-            // Use base_url() so DP workers start from the un-suffixed URL
+            // Create a new worker with updated properties.
+            // Use base_url() so DP workers start from the un-suffixed URL.
+            //
+            // Status: a metadata-only update is not a re-registration — the
+            // worker is the same endpoint. Preserve the old status so a
+            // healthy worker stays routable through the update. The one
+            // exception is when the update flips `disable_health_check` to
+            // `true`: the health checker skips disabled workers, so a stale
+            // Pending/NotReady status would never recover. Force Ready in
+            // that case.
+            let next_status = if updated_health_config.disable_health_check {
+                WorkerStatus::Ready
+            } else {
+                worker.status()
+            };
             let mut builder = BasicWorkerBuilder::new(worker.base_url())
                 .worker_type(*worker.worker_type())
                 .connection_mode(*worker.connection_mode())
@@ -84,7 +98,8 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
                 .http_client(worker.http_client().clone())
                 .resilience(worker.resilience().clone())
                 .priority(updated_priority)
-                .cost(updated_cost);
+                .cost(updated_cost)
+                .status(next_status);
 
             if let Some(ref api_key) = updated_api_key {
                 builder = builder.api_key(api_key.clone());
@@ -107,9 +122,19 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
             let new_worker: Arc<dyn Worker> = Arc::new(builder.build());
 
             // Replace the worker in the registry (overwrite-then-diff)
-            app_context
+            let worker_id = app_context
                 .worker_registry
                 .register_or_replace(new_worker.clone());
+
+            // Same-URL replace preserves the existing shared runtime. If the
+            // update disables health checks, force the lifecycle to Ready so
+            // the worker does not stay stuck in a non-routable pre-update
+            // status while the manager correctly skips future probes.
+            if updated_health_config.disable_health_check {
+                let _ = app_context
+                    .worker_registry
+                    .transition_status(&worker_id, WorkerStatus::Ready);
+            }
 
             updated_workers.push(new_worker);
         }

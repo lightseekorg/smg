@@ -23,8 +23,8 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
+        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
         error::{self as router_error, extract_error_code_from_response},
-        mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
 };
 

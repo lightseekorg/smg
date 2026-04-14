@@ -27,6 +27,7 @@ use super::{
 use crate::{
     observability::metrics::Metrics,
     routers::{
+        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
         error,
         grpc::{
             common::responses::{
@@ -34,7 +35,6 @@ use crate::{
             },
             harmony::processor::ResponsesIterationResult,
         },
-        mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
 };
 

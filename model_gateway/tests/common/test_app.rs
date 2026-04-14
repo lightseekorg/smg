@@ -11,7 +11,8 @@ use smg::{
     routers::RouterTrait,
     server::{build_app, AppState},
     worker::{
-        BasicWorkerBuilder, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry, WorkerType,
+        BasicWorkerBuilder, ModelCard, RuntimeType, Worker, WorkerMonitor, WorkerRegistry,
+        WorkerType,
     },
 };
 use smg_data_connector::{
@@ -53,12 +54,14 @@ pub fn create_test_app(
     let conversation_storage = Arc::new(MemoryConversationStorage::new());
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
-    // Initialize load monitor
-    let load_monitor = Some(Arc::new(LoadMonitor::new(
+    // Initialize the worker monitor with the same interval the
+    // production builder uses so tests exercise the real polling
+    // cadence.
+    let worker_monitor = Some(Arc::new(WorkerMonitor::new(
         worker_registry.clone(),
         policy_registry.clone(),
         client.clone(),
-        router_config.worker_startup_check_interval_secs,
+        router_config.load_monitor_interval_secs,
     )));
 
     // Create empty OnceLock for worker job queue and workflow engines
@@ -79,12 +82,19 @@ pub fn create_test_app(
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
-            .load_monitor(load_monitor)
+            .worker_monitor(worker_monitor)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
             .build()
             .unwrap(),
     );
+
+    // Mirror production wiring: start the WorkerMonitor event loop so
+    // tests that depend on event-driven group reconciliation exercise
+    // the real code path instead of an inert monitor.
+    if let Some(monitor) = &app_context.worker_monitor {
+        monitor.start_event_loop();
+    }
 
     // Create AppState with the test router and context
     let app_state = Arc::new(AppState {
@@ -209,7 +219,7 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
-            .load_monitor(None)
+            .worker_monitor(None)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
             .mcp_orchestrator(mcp_orchestrator_lock)
@@ -239,6 +249,10 @@ pub fn register_external_worker(ctx: &Arc<AppContext>, url: &str, models: Option
             .worker_type(WorkerType::Regular)
             .runtime_type(RuntimeType::External)
             .models(model_list)
+            .health_config(openai_protocol::worker::HealthCheckConfig {
+                disable_health_check: true,
+                ..Default::default()
+            })
             .build(),
     );
 
@@ -257,6 +271,10 @@ pub fn register_external_worker_with_card(ctx: &Arc<AppContext>, url: &str, mode
             .worker_type(WorkerType::Regular)
             .runtime_type(RuntimeType::External)
             .model(model_card)
+            .health_config(openai_protocol::worker::HealthCheckConfig {
+                disable_health_check: true,
+                ..Default::default()
+            })
             .build(),
     );
 

@@ -388,7 +388,10 @@ impl WorkerService {
                 worker_id: worker_id_raw.to_string(),
             })?;
 
-        let job = Job::RemoveWorker { url: url.clone() };
+        let job = Job::RemoveWorker {
+            url: url.clone(),
+            expected_revision: None,
+        };
 
         let job_queue = self.get_job_queue()?;
         job_queue

@@ -918,9 +918,17 @@ impl Default for CacheAwarePolicy {
 #[cfg(test)]
 mod tests {
     use kv_index::{compute_content_hash, SequenceHash, StoredBlock, WorkerBlockMap};
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
 
     use super::*;
     use crate::worker::{BasicWorkerBuilder, WorkerType};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_cache_aware_with_balanced_load() {
@@ -935,12 +943,14 @@ mod tests {
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
                     .api_key("test_api_key")
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
                     .api_key("test_api_key")
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -997,9 +1007,11 @@ mod tests {
 
         let worker1 = BasicWorkerBuilder::new("http://w1:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         let worker2 = BasicWorkerBuilder::new("http://w2:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
 
         // Create significant load imbalance
@@ -1033,11 +1045,13 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -1062,7 +1076,7 @@ mod tests {
 
         // Remove a worker
         policy.remove_worker_by_url("http://w1:8000");
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
 
         // All requests should now go to worker2
         let idx = policy
@@ -1097,6 +1111,7 @@ mod tests {
             BasicWorkerBuilder::new("http://w1:8000")
                 .worker_type(WorkerType::Regular)
                 .api_key("test_api_key")
+                .health_config(no_health_check())
                 .build(),
         )];
 
@@ -1268,6 +1283,7 @@ mod tests {
             BasicWorkerBuilder::new("http://w1:8000")
                 .worker_type(WorkerType::Regular)
                 .api_key("test_api_key")
+                .health_config(no_health_check())
                 .build(),
         )];
 
@@ -1331,11 +1347,13 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -1370,6 +1388,7 @@ mod tests {
         let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
             BasicWorkerBuilder::new("http://w1:8000")
                 .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
                 .build(),
         )];
         policy.init_workers(&workers);
@@ -1394,9 +1413,11 @@ mod tests {
 
         let w1 = BasicWorkerBuilder::new("http://w1:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         let w2 = BasicWorkerBuilder::new("http://w2:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
 
         // Give w1 higher load
@@ -1440,11 +1461,13 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -1489,6 +1512,7 @@ mod tests {
         let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
             BasicWorkerBuilder::new("http://w1:8000")
                 .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
                 .build(),
         )];
 
@@ -1506,11 +1530,13 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -1574,11 +1600,13 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -1610,9 +1638,11 @@ mod tests {
 
         let w1 = BasicWorkerBuilder::new("http://w1:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         let w2 = BasicWorkerBuilder::new("http://w2:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         // Give w1 higher load so min-load picks w2
         for _ in 0..3 {
@@ -1647,9 +1677,11 @@ mod tests {
 
         let w1 = BasicWorkerBuilder::new("http://w1:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         let w2 = BasicWorkerBuilder::new("http://w2:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         for _ in 0..3 {
             w1.increment_load();
@@ -1683,11 +1715,13 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -1743,11 +1777,13 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];
@@ -1799,9 +1835,11 @@ mod tests {
 
         let w1 = BasicWorkerBuilder::new("http://w1:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
         let w2 = BasicWorkerBuilder::new("http://w2:8000")
             .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
             .build();
 
         // Create heavy imbalance: w1 has 20 load, w2 has 0
@@ -1839,11 +1877,13 @@ mod tests {
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
             Arc::new(
                 BasicWorkerBuilder::new("http://w2:8000")
                     .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
                     .build(),
             ),
         ];

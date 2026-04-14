@@ -14,6 +14,7 @@ use crate::workflow::data::{WorkerList, WorkerRemovalWorkflowData};
 pub struct WorkerRemovalRequest {
     pub url: String,
     pub dp_aware: bool,
+    pub expected_revision: Option<u64>,
 }
 
 /// Step to find workers to remove based on URL.
@@ -35,10 +36,24 @@ impl StepExecutor<WorkerRemovalWorkflowData> for FindWorkersToRemoveStep {
             .as_ref()
             .ok_or_else(|| WorkflowError::ContextValueNotFound("app_context".to_string()))?;
 
-        let workers_to_remove =
+        let mut workers_to_remove =
             find_workers_by_url(&app_context.worker_registry, &request.url, request.dp_aware);
 
-        if workers_to_remove.is_empty() {
+        if let Some(expected_revision) = request.expected_revision {
+            workers_to_remove.retain(|worker| worker.revision() == expected_revision);
+            if workers_to_remove.is_empty() {
+                debug!(
+                    worker_url = %request.url,
+                    expected_revision,
+                    "Skipping stale worker removal job after same-URL replacement"
+                );
+                context.data.workers_to_remove = Some(WorkerList::new());
+                context.data.actual_workers_to_remove = Some(Vec::new());
+                context.data.worker_urls = Vec::new();
+                context.data.affected_models = HashSet::new();
+                return Ok(StepResult::Success);
+            }
+        } else if workers_to_remove.is_empty() {
             let error_msg = if request.dp_aware {
                 format!("No workers found with prefix {}@", request.url)
             } else {

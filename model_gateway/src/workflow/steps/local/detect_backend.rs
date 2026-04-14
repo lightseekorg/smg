@@ -1,8 +1,8 @@
 //! Backend runtime detection step.
 //!
-//! Detects the runtime type (sglang, vllm, trtllm) for both HTTP and gRPC workers.
+//! Detects the runtime type (sglang, vllm, trtllm, mlx) for both HTTP and gRPC workers.
 //! - HTTP: probes `/v1/models` (owned_by field), falls back to unique endpoints.
-//! - gRPC: tries sglang → vllm → trtllm health checks sequentially.
+//! - gRPC: tries sglang → vllm → trtllm → mlx health checks sequentially.
 
 use std::time::Duration;
 
@@ -25,7 +25,7 @@ use crate::{
 /// Detect gRPC backend by trying runtime-specific health checks sequentially.
 ///
 /// If `runtime_hint` is provided (from explicit config), tries that first.
-/// Otherwise tries sglang → vllm → trtllm.
+/// Otherwise tries sglang → vllm → trtllm → mlx.
 async fn detect_grpc_backend(
     url: &str,
     timeout_secs: u64,
@@ -33,7 +33,7 @@ async fn detect_grpc_backend(
 ) -> Result<String, String> {
     let grpc_url = grpc_base_url(url);
 
-    // If we have a hint, try it first
+    // If we have a hint, try it first (fast path)
     if let Some(hint) = runtime_hint {
         if do_grpc_health_check(&grpc_url, timeout_secs, hint)
             .await
@@ -44,7 +44,7 @@ async fn detect_grpc_backend(
     }
 
     // Try each runtime sequentially (most common first), skipping the hint we already tried
-    for runtime in &["sglang", "vllm", "trtllm"] {
+    for runtime in &["sglang", "vllm", "trtllm", "mlx"] {
         if Some(*runtime) == runtime_hint {
             continue;
         }
@@ -57,7 +57,7 @@ async fn detect_grpc_backend(
     }
 
     Err(format!(
-        "gRPC backend detection failed for {url} (tried sglang, vllm, trtllm)"
+        "gRPC backend detection failed for {url} (tried sglang, vllm, trtllm, mlx)"
     ))
 }
 
@@ -221,7 +221,7 @@ async fn detect_http_backend(
 
 // ─── Step implementation ───────────────────────────────────────────────────
 
-/// Step 2: Detect backend runtime type (sglang, vllm, trtllm).
+/// Step 2: Detect backend runtime type (sglang, vllm, trtllm, mlx).
 ///
 /// Runs after `detect_connection_mode` and before `discover_metadata`.
 /// Sets `detected_runtime_type` in workflow data for all downstream steps.

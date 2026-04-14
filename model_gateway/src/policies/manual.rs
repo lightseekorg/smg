@@ -24,7 +24,7 @@ use super::{
 };
 use crate::{
     config::ManualAssignmentMode, observability::metrics::Metrics,
-    routers::header_utils::extract_routing_key, worker::Worker,
+    routers::common::header_utils::extract_routing_key, worker::Worker,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,17 +292,24 @@ fn min_load_select(workers: &[Arc<dyn Worker>], healthy_indices: &[usize]) -> us
 }
 
 fn min_group_select(workers: &[Arc<dyn Worker>], healthy_indices: &[usize]) -> usize {
-    select_min_by(healthy_indices, |idx| {
-        workers[idx].worker_routing_key_load().value()
-    })
+    select_min_by(healthy_indices, |idx| workers[idx].routing_key_load())
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
+
     use super::*;
     use crate::worker::{BasicWorkerBuilder, WorkerType};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
 
     fn create_workers(urls: &[&str]) -> Vec<Arc<dyn Worker>> {
         urls.iter()
@@ -310,6 +317,7 @@ mod tests {
                 Arc::new(
                     BasicWorkerBuilder::new(*url)
                         .worker_type(WorkerType::Regular)
+                        .health_config(no_health_check())
                         .build(),
                 ) as Arc<dyn Worker>
             })
@@ -394,7 +402,7 @@ mod tests {
         let policy = ManualPolicy::new();
         let workers = create_workers(&["http://w1:8000", "http://w2:8000"]);
 
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
 
         let headers = headers_with_routing_key("test-routing-id");
         let info = SelectWorkerInfo {
@@ -418,7 +426,7 @@ mod tests {
         let policy = ManualPolicy::new();
         let workers = create_workers(&["http://w1:8000"]);
 
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
         let headers = headers_with_routing_key("test");
         let info = SelectWorkerInfo {
             headers: Some(&headers),
@@ -470,7 +478,7 @@ mod tests {
         let first_idx = first_result.unwrap();
         assert_eq!(branch, ExecutionBranch::Vacant);
 
-        workers[first_idx].set_healthy(false);
+        workers[first_idx].set_status(WorkerStatus::NotReady);
 
         let (new_result, branch) = policy.select_worker_impl(&workers, &info);
         let new_idx = new_result.unwrap();
@@ -539,14 +547,14 @@ mod tests {
         let first_idx = first_result.unwrap();
         assert_eq!(branch, ExecutionBranch::Vacant);
 
-        workers[first_idx].set_healthy(false);
+        workers[first_idx].set_status(WorkerStatus::NotReady);
 
         let (second_result, branch) = policy.select_worker_impl(&workers, &info);
         let second_idx = second_result.unwrap();
         assert_ne!(second_idx, first_idx);
         assert_eq!(branch, ExecutionBranch::OccupiedMiss);
 
-        workers[first_idx].set_healthy(true);
+        workers[first_idx].set_status(WorkerStatus::Ready);
 
         let (after_recovery, branch) = policy.select_worker_impl(&workers, &info);
         assert_eq!(
@@ -572,14 +580,14 @@ mod tests {
         let first_idx = first_result.unwrap();
         assert_eq!(branch, ExecutionBranch::Vacant);
 
-        workers[first_idx].set_healthy(false);
+        workers[first_idx].set_status(WorkerStatus::NotReady);
 
         let (second_result, branch) = policy.select_worker_impl(&workers, &info);
         let second_idx = second_result.unwrap();
         assert_ne!(second_idx, first_idx);
         assert_eq!(branch, ExecutionBranch::OccupiedMiss);
 
-        workers[second_idx].set_healthy(false);
+        workers[second_idx].set_status(WorkerStatus::NotReady);
 
         let remaining_idx = (0..3).find(|&i| i != first_idx && i != second_idx).unwrap();
         let (third_result, branch) = policy.select_worker_impl(&workers, &info);
@@ -590,7 +598,7 @@ mod tests {
         );
         assert_eq!(branch, ExecutionBranch::OccupiedMiss);
 
-        workers[first_idx].set_healthy(true);
+        workers[first_idx].set_status(WorkerStatus::Ready);
 
         let (idx_after_restore, branch) = policy.select_worker_impl(&workers, &info);
         assert_ne!(
@@ -646,17 +654,17 @@ mod tests {
             "Should return first healthy worker in urls"
         );
 
-        workers[0].set_healthy(false);
+        workers[0].set_status(WorkerStatus::NotReady);
         let healthy_indices = vec![1, 2];
         let result = find_healthy_worker(&urls, &workers, &healthy_indices);
         assert_eq!(result, Some(1), "Should skip unhealthy and return next");
 
-        workers[1].set_healthy(false);
+        workers[1].set_status(WorkerStatus::NotReady);
         let healthy_indices = vec![2];
         let result = find_healthy_worker(&urls, &workers, &healthy_indices);
         assert_eq!(result, Some(2), "Should return last healthy worker");
 
-        workers[2].set_healthy(false);
+        workers[2].set_status(WorkerStatus::NotReady);
         let healthy_indices: Vec<usize> = vec![];
         let result = find_healthy_worker(&urls, &workers, &healthy_indices);
         assert_eq!(result, None, "Should return None when no healthy workers");
@@ -728,7 +736,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         // OccupiedMiss: worker becomes unhealthy
-        workers[first_idx].set_healthy(false);
+        workers[first_idx].set_status(WorkerStatus::NotReady);
         let (_, branch) = policy.select_worker_impl(&workers, &info);
         assert_eq!(branch, ExecutionBranch::OccupiedMiss);
         let access_after_miss = policy.routing_map.get(&routing_id).unwrap().last_access;
@@ -783,9 +791,7 @@ mod tests {
             assert_eq!(branch, ExecutionBranch::Vacant);
 
             let selected_idx = result.unwrap();
-            workers[selected_idx]
-                .worker_routing_key_load()
-                .increment(&routing_key);
+            workers[selected_idx].increment_routing_key_load(&routing_key);
         }
 
         let distribution: HashMap<_, usize> = policy
@@ -812,13 +818,13 @@ mod tests {
         let policy = ManualPolicy::with_config(config);
         let workers = create_workers(&["http://w1:8000", "http://w2:8000", "http://w3:8000"]);
 
-        workers[0].worker_routing_key_load().increment("existing-1");
-        workers[0].worker_routing_key_load().increment("existing-2");
-        workers[1].worker_routing_key_load().increment("existing-3");
+        workers[0].increment_routing_key_load("existing-1");
+        workers[0].increment_routing_key_load("existing-2");
+        workers[1].increment_routing_key_load("existing-3");
 
-        assert_eq!(workers[0].worker_routing_key_load().value(), 2);
-        assert_eq!(workers[1].worker_routing_key_load().value(), 1);
-        assert_eq!(workers[2].worker_routing_key_load().value(), 0);
+        assert_eq!(workers[0].routing_key_load(), 2);
+        assert_eq!(workers[1].routing_key_load(), 1);
+        assert_eq!(workers[2].routing_key_load(), 0);
 
         let headers = headers_with_routing_key("new-key");
         let info = SelectWorkerInfo {
@@ -868,9 +874,9 @@ mod tests {
         let policy = ManualPolicy::with_config(config);
         let workers = create_workers(&["http://w1:8000", "http://w2:8000"]);
 
-        workers[0].worker_routing_key_load().increment("key-0");
-        workers[1].worker_routing_key_load().increment("key-1");
-        workers[1].worker_routing_key_load().increment("key-2");
+        workers[0].increment_routing_key_load("key-0");
+        workers[1].increment_routing_key_load("key-1");
+        workers[1].increment_routing_key_load("key-2");
 
         let headers = headers_with_routing_key("new-key");
         let info = SelectWorkerInfo {
@@ -906,9 +912,9 @@ mod tests {
         let policy = ManualPolicy::with_config(config);
         let workers = create_workers(&["http://w1:8000", "http://w2:8000"]);
 
-        workers[0].worker_routing_key_load().increment("key-1");
-        workers[0].worker_routing_key_load().increment("key-2");
-        workers[0].worker_routing_key_load().increment("key-3");
+        workers[0].increment_routing_key_load("key-1");
+        workers[0].increment_routing_key_load("key-2");
+        workers[0].increment_routing_key_load("key-3");
 
         let mut selected_worker_0 = false;
         for i in 0..50 {

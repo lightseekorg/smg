@@ -184,10 +184,15 @@ pub fn create_worker_update_workflow() -> WorkflowDefinition<WorkerUpdateWorkflo
 pub fn create_worker_removal_workflow_data(
     url: String,
     dp_aware: bool,
+    expected_revision: Option<u64>,
     app_context: Arc<AppContext>,
 ) -> WorkerRemovalWorkflowData {
     WorkerRemovalWorkflowData {
-        config: WorkerRemovalRequest { url, dp_aware },
+        config: WorkerRemovalRequest {
+            url,
+            dp_aware,
+            expected_revision,
+        },
         workers_to_remove: None,
         worker_urls: Vec::new(),
         affected_models: std::collections::HashSet::new(),
