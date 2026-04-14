@@ -2348,13 +2348,20 @@ impl StreamingProcessor {
                     total_completion.record_chunk(&chunk);
 
                     let stop_decoder = stop_decoders.entry(index).or_insert_with(|| {
+                        let (
+                            ref stop,
+                            ref stop_token_ids,
+                            skip_special_tokens,
+                            no_stop_trim,
+                            ignore_eos,
+                        ) = stop_params;
                         utils::create_stop_decoder(
                             &tokenizer,
-                            stop_params.0.as_ref(),
-                            stop_params.1.as_ref(),
-                            stop_params.2,
-                            stop_params.3,
-                            stop_params.4,
+                            stop.as_ref(),
+                            stop_token_ids.as_ref(),
+                            skip_special_tokens,
+                            no_stop_trim,
+                            ignore_eos,
                         )
                     });
 
