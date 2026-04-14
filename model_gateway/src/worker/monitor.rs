@@ -107,6 +107,20 @@ impl WorkerLoadManager {
             cached.remove(url);
         }
     }
+
+    /// Drop a single worker's cached DP loads. Avoids the
+    /// `&[String]` allocation that `remove_workers` requires when the
+    /// caller only has a single `&str`.
+    pub fn remove_worker(&self, url: &str) {
+        self.dp_cached_loads.write().remove(url);
+    }
+
+    /// Drop every cached DP load entry. Used by `WorkerMonitor` during
+    /// `stop_all_groups` and lag-recovery rebuilds so the cache cannot
+    /// hand out stale per-rank loads after a full reconcile.
+    pub fn clear(&self) {
+        self.dp_cached_loads.write().clear();
+    }
 }
 
 /// Per-group polling loop state.
@@ -200,28 +214,34 @@ impl WorkerMonitor {
         *self.event_task.lock() = Some(handle);
     }
 
-    /// Stop every per-group polling loop and clear the shared load map.
+    /// Stop every per-group polling loop and clear the shared load
+    /// snapshot + DP-rank cache.
     ///
-    /// Called from `Drop`, but also exposed for explicit shutdown in
-    /// tests and graceful server stop. Idempotent.
+    /// Called from `Drop`, the bootstrap reconcile path, and the
+    /// `RecvError::Lagged` rebuild. Always clears both caches even
+    /// when no groups were running, so a lag-recovery rebuild cannot
+    /// inherit stale per-rank loads from a previous incarnation.
+    /// Idempotent.
     pub fn stop_all_groups(&self) {
         let drained: Vec<(WorkerGroupKey, GroupState)> = {
             let mut handles = self.group_handles.lock();
             handles.drain().collect()
         };
 
-        if drained.is_empty() {
-            return;
+        if !drained.is_empty() {
+            info!("Stopping all {} load monitor groups", drained.len());
+            for (key, state) in drained {
+                debug!("Stopping load monitor group: {key}");
+                state.handle.abort();
+            }
         }
 
-        info!("Stopping all {} load monitor groups", drained.len());
-        for (key, state) in drained {
-            debug!("Stopping load monitor group: {key}");
-            state.handle.abort();
-        }
-
-        // Clear the shared load snapshot since every group is gone.
+        // Always clear both caches. Skipping when `drained.is_empty()`
+        // would leave stale per-rank loads behind for any caller that
+        // seeded the cache without going through a group loop, and
+        // makes the function harder to reason about as a "reset".
         self.load_tx.send_modify(|map| map.clear());
+        self.worker_load_manager.clear();
     }
 
     /// Recompute the polling state for every currently-known group.
@@ -295,7 +315,14 @@ impl WorkerMonitor {
         }
     }
 
-    /// Stop a single group's polling loop and evict its cached loads.
+    /// Stop a single group's polling loop.
+    ///
+    /// Does **not** evict per-worker cached loads from the watch
+    /// channel or DP cache. Callers that know the affected URLs (e.g.
+    /// the event loop on `Removed` / `Replaced` / `StatusChanged`)
+    /// must invoke [`Self::evict_worker_loads`] separately. The
+    /// per-group polling loop itself prunes URLs on the next tick when
+    /// the worker is gone, but a stopped loop never gets a next tick.
     fn stop_group(&self, key: &WorkerGroupKey) {
         let removed = {
             let mut handles = self.group_handles.lock();
@@ -306,23 +333,16 @@ impl WorkerMonitor {
             info!("Stopping load monitor for empty group {key}");
             state.handle.abort();
         }
-
-        // Evict any cached entries for workers that may still be in the
-        // shared snapshot under this group's URLs. We do not know the
-        // exact URL set anymore, so we cannot scope the eviction
-        // tightly; the next tick of any remaining group will refresh
-        // its own URLs anyway.
     }
 
-    /// Evict a single worker's cached loads from both the watch channel
-    /// snapshot and the DP cache. Used on `StatusChanged` away from
-    /// `Ready`.
+    /// Evict a single worker's cached loads from both the watch
+    /// channel snapshot and the DP cache. Used by the event loop on
+    /// `Removed`, `Replaced`, and `StatusChanged` away from `Ready`.
     fn evict_worker_loads(&self, url: &str) {
         self.load_tx.send_modify(|map| {
             map.remove(url);
         });
-        self.worker_load_manager
-            .remove_workers(std::slice::from_ref(&url.to_string()));
+        self.worker_load_manager.remove_worker(url);
     }
 
     /// Spawn the polling loop for a single group.
@@ -452,16 +472,30 @@ async fn run_event_loop(
 ) {
     loop {
         match events_rx.recv().await {
-            Ok(WorkerEvent::Registered { worker, .. })
-            | Ok(WorkerEvent::Removed { worker, .. }) => {
+            Ok(WorkerEvent::Registered { worker, .. }) => {
+                for key in group_keys_for_worker(&worker) {
+                    monitor.reconcile_group(&key);
+                }
+            }
+            Ok(WorkerEvent::Removed { worker, .. }) => {
+                // Evict the worker from both caches BEFORE reconciling
+                // the group. If this was the last worker in its group,
+                // `reconcile_group` will stop the polling loop, and a
+                // stopped loop cannot prune the stale entry on a later
+                // tick — it would persist forever otherwise.
+                monitor.evict_worker_loads(worker.url());
                 for key in group_keys_for_worker(&worker) {
                     monitor.reconcile_group(&key);
                 }
             }
             Ok(WorkerEvent::Replaced { old, new, .. }) => {
-                // Replacement may shift the worker between groups (e.g.
-                // model list changed), so reconcile both old and new
-                // group sets.
+                // Registry guarantees `old.url() == new.url()` (replace
+                // rejects URL changes), but the model list may have
+                // shrunk so some old groups disappear. Evict the URL
+                // from caches before reconciling so the disappearing
+                // groups do not leak the entry; the surviving / new
+                // groups will repopulate it on their next poll tick.
+                monitor.evict_worker_loads(old.url());
                 let mut keys = group_keys_for_worker(&old);
                 keys.extend(group_keys_for_worker(&new));
                 keys.sort_by(|a, b| {
@@ -775,6 +809,69 @@ mod worker_monitor_tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         assert!(monitor.group_handles.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn removed_event_evicts_cached_loads() {
+        // Regression test for the bug where a removed worker's last
+        // known load would persist forever in `load_tx` and the DP
+        // cache because the polling loop that pruned it had been
+        // stopped by the same removal.
+        let (registry, monitor) = build_monitor();
+        let worker = ready_worker("http://w:8080", "llama-3");
+        let url = worker.url().to_string();
+        let id = registry.register(worker).unwrap();
+        monitor.start_event_loop();
+
+        monitor.load_tx.send_modify(|map| {
+            map.insert(url.clone(), WorkerLoadResponse::default());
+        });
+        let mut dp_loads: HashMap<String, HashMap<isize, isize>> = HashMap::new();
+        let mut inner = HashMap::new();
+        inner.insert(0, 5);
+        dp_loads.insert(url.clone(), inner);
+        monitor.worker_load_manager.update_dp_loads(&dp_loads);
+
+        registry.remove(&id);
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let snapshot = monitor.load_rx.borrow().clone();
+        assert!(
+            !snapshot.contains_key(&url),
+            "load_tx must not retain entries for removed workers"
+        );
+        let cached = monitor.worker_load_manager.dp_cached_loads.read();
+        assert!(
+            !cached.contains_key(&url),
+            "DP cache must not retain entries for removed workers"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_all_groups_clears_dp_cache() {
+        // Regression test for the bug where a `RecvError::Lagged`
+        // rebuild would leave stale DP cache entries because
+        // stop_all_groups only cleared the watch snapshot.
+        let (registry, monitor) = build_monitor();
+        registry
+            .register(ready_worker("http://w1:8080", "llama-3"))
+            .unwrap();
+
+        let mut dp_loads: HashMap<String, HashMap<isize, isize>> = HashMap::new();
+        let mut inner = HashMap::new();
+        inner.insert(0, 7);
+        dp_loads.insert("http://w1:8080".to_string(), inner);
+        monitor.worker_load_manager.update_dp_loads(&dp_loads);
+
+        monitor.stop_all_groups();
+
+        assert!(monitor.load_rx.borrow().is_empty());
+        assert!(monitor
+            .worker_load_manager
+            .dp_cached_loads
+            .read()
+            .is_empty());
     }
 
     #[tokio::test]

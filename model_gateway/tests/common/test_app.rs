@@ -54,12 +54,14 @@ pub fn create_test_app(
     let conversation_storage = Arc::new(MemoryConversationStorage::new());
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
-    // Initialize load monitor
+    // Initialize the worker monitor with the same interval the
+    // production builder uses so tests exercise the real polling
+    // cadence.
     let worker_monitor = Some(Arc::new(WorkerMonitor::new(
         worker_registry.clone(),
         policy_registry.clone(),
         client.clone(),
-        router_config.worker_startup_check_interval_secs,
+        router_config.load_monitor_interval_secs,
     )));
 
     // Create empty OnceLock for worker job queue and workflow engines
@@ -86,6 +88,13 @@ pub fn create_test_app(
             .build()
             .unwrap(),
     );
+
+    // Mirror production wiring: start the WorkerMonitor event loop so
+    // tests that depend on event-driven group reconciliation exercise
+    // the real code path instead of an inert monitor.
+    if let Some(monitor) = &app_context.worker_monitor {
+        monitor.start_event_loop();
+    }
 
     // Create AppState with the test router and context
     let app_state = Arc::new(AppState {

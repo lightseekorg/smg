@@ -90,8 +90,8 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for RegisterWorke
             })
             .collect();
 
-        // Update Layer 3 worker pool size metrics per unique type/connection/model
-        // and notify LoadMonitor of new groups
+        // Update Layer 3 worker pool size metrics per unique
+        // `(worker_type, connection_mode, model_id)`.
         for (worker_type, connection_mode, model_id) in &unique_configs {
             // Get labels before moving values into get_workers_filtered
             let worker_type_label = worker_type.as_metric_label();
@@ -119,9 +119,10 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for RegisterWorke
         // WorkerMonitor subscribes to registry events directly (see
         // `worker::monitor::WorkerMonitor::start_event_loop`), so this
         // step no longer has to push group-add notifications. The
-        // monitor's event loop will reconcile the new group as soon as
-        // the `WorkerEvent::Registered` broadcast fires from
-        // `worker_registry.register()` above.
+        // monitor's event loop reconciles the impacted groups as soon
+        // as the `WorkerEvent::Registered` (new worker) or
+        // `WorkerEvent::Replaced` (same-URL update) broadcast fires
+        // from `worker_registry.register_or_replace()` above.
 
         // Note: worker_ids are stored for potential future use but not persisted
         // as they are internal registry identifiers

@@ -1,6 +1,6 @@
 //! Step to remove workers from worker registry.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use async_trait::async_trait;
 use tracing::{debug, warn};
@@ -35,28 +35,28 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
             worker_urls.len()
         );
 
-        // Collect unique worker configurations and their URLs before removal.
-        // We need the URLs pre-removal so LoadMonitor can clean up stale load entries.
-        let mut urls_by_group: HashMap<
-            (
-                openai_protocol::worker::WorkerType,
-                openai_protocol::worker::ConnectionMode,
-                String,
-            ),
-            Vec<String>,
-        > = HashMap::new();
+        // Snapshot the unique `(worker_type, connection_mode, model_id)`
+        // groups for the workers we are about to remove. We capture this
+        // before the removal so the pool-size metric update below can
+        // recompute the per-group count after the workers have been
+        // pulled from the registry. The cache eviction the old
+        // `LoadMonitor` path used to do here is now handled by
+        // `WorkerMonitor` reacting to `WorkerEvent::Removed`.
+        let mut unique_configs: HashSet<(
+            openai_protocol::worker::WorkerType,
+            openai_protocol::worker::ConnectionMode,
+            String,
+        )> = HashSet::new();
         for url in worker_urls {
             if let Some(w) = app_context.worker_registry.get_by_url(url) {
                 let meta = w.metadata();
-                let key = (
+                unique_configs.insert((
                     meta.spec.worker_type,
                     meta.spec.connection_mode,
                     w.model_id().to_string(),
-                );
-                urls_by_group.entry(key).or_default().push(url.clone());
+                ));
             }
         }
-        let unique_configs: HashSet<_> = urls_by_group.keys().cloned().collect();
 
         let mut removed_count = 0;
         for worker_url in worker_urls {

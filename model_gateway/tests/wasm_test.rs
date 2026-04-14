@@ -60,12 +60,14 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
     let conversation_storage = Arc::new(MemoryConversationStorage::new());
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
 
-    // Initialize load monitor
+    // Initialize the worker monitor with the same interval the
+    // production builder uses so tests exercise the real polling
+    // cadence.
     let worker_monitor = Some(Arc::new(WorkerMonitor::new(
         worker_registry.clone(),
         policy_registry.clone(),
         client.clone(),
-        config.worker_startup_check_interval_secs,
+        config.load_monitor_interval_secs,
     )));
 
     // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
@@ -95,6 +97,13 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
             .build()
             .expect("Failed to build AppContext with WASM manager"),
     );
+
+    // Mirror production wiring: start the WorkerMonitor event loop so
+    // tests exercise the event-driven group reconciliation path
+    // instead of an inert monitor.
+    if let Some(monitor) = &app_context.worker_monitor {
+        monitor.start_event_loop();
+    }
 
     // Initialize JobQueue after AppContext is created
     let weak_context = Arc::downgrade(&app_context);
