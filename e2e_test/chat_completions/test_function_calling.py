@@ -1483,7 +1483,7 @@ class _TestToolChoiceBase:
         # Verify the error message indicates conflicting tool definitions
         error_msg = str(exc_info.value).lower()
         assert "invalid tool configuration" in error_msg
-        assert "not supported" in error_msg
+        assert "conflicting" in error_msg
 
 
 # =============================================================================
@@ -1558,6 +1558,13 @@ class TestToolChoiceMistral(_TestToolChoiceBase):
     def test_complex_parameters_required_non_streaming(self, model, api_client):
         """Validate complex nested parameter schemas in non-streaming required mode."""
         super().test_complex_parameters_required_non_streaming(model, api_client)
+
+    @pytest.mark.skip(
+        reason="Structural tags handle each tool's schema independently — "
+        "$defs conflicts are irrelevant when not consolidated into a single array schema"
+    )
+    def test_conflicting_defs_required_tool_choice(self, model, api_client):
+        """Skip: Mistral uses structural tags which don't consolidate $defs."""
 
 
 # =============================================================================
