@@ -1,8 +1,10 @@
 //! Request execution stage: Execute gRPC requests (single or dual dispatch)
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 use axum::response::Response;
-use tracing::{debug, error, info_span, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use super::PipelineStage;
 use crate::{
@@ -173,8 +175,31 @@ impl RequestExecutionStage {
             )
         })?;
 
+        let send_start = Instant::now();
         let result = client.generate(proto_request).await;
+        let backend_duration_ms = send_start.elapsed().as_millis() as u64;
         workers.record_outcome(result.cb_status_code());
+
+        let worker_url = workers.single().map(|w| w.url()).unwrap_or("unknown");
+        match &result {
+            Ok(_) => {
+                info!(
+                    target: "smg::upstream",
+                    worker_url,
+                    duration_ms = backend_duration_ms,
+                    "Backend request completed"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    target: "smg::upstream",
+                    worker_url,
+                    duration_ms = backend_duration_ms,
+                    error = %e.message(),
+                    "Backend request failed"
+                );
+            }
+        }
 
         let stream = result.map_err(|e| {
             error!(function = "execute_single", error = %e, "Failed to start generation");
