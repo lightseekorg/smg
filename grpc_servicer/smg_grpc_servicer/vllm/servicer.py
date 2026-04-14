@@ -383,17 +383,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 grpc.StatusCode.FAILED_PRECONDITION,
                 "Tokenizer path is not configured on this server.",
             )
+        # TODO: model_config.tokenizer may be an HF model ID (e.g. "meta-llama/...")
+        # rather than a local path. vLLM does not resolve it on the config object.
+        # For now, GetTokenizer only works when vLLM is started with a local path.
         tokenizer_dir = Path(tokenizer_path)
-
-        # model_config.tokenizer may be an HF model ID (e.g. "meta-llama/...")
-        # rather than a local path. Resolve it to the HF cache directory.
-        if not tokenizer_dir.is_dir():
-            try:
-                from huggingface_hub import snapshot_download
-
-                tokenizer_dir = Path(snapshot_download(tokenizer_path, local_files_only=True))
-            except Exception:
-                pass  # Fall through to build_tokenizer_zip which will raise
 
         # Build ZIP archive in memory
         try:
