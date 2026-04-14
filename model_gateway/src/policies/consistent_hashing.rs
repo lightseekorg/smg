@@ -404,7 +404,7 @@ mod tests {
             "http://w2:8000",
             "http://w3:8000",
         ]);
-        let ring = Arc::new(HashRing::new(&workers));
+        let ring = Arc::new(HashRing::new(workers.iter().map(|w| w.url())));
 
         // Record which worker each key routes to with all workers healthy
         let mut key_to_worker_before: HashMap<String, usize> = HashMap::new();
@@ -463,7 +463,7 @@ mod tests {
         // and when it recovers, keys return to the original worker
         let policy = ConsistentHashingPolicy::new();
         let workers = create_workers(&["http://w0:8000", "http://w1:8000", "http://w2:8000"]);
-        let ring = Arc::new(HashRing::new(&workers));
+        let ring = Arc::new(HashRing::new(workers.iter().map(|w| w.url())));
 
         // Find which worker a key routes to when all are healthy
         let test_key = "session-abc-123";

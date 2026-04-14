@@ -1,13 +1,4 @@
-merge_protections:
-  - name: Branch naming convention
-    description: |
-      Branch must match the required pattern: `<type>/<description>` or `<username>/<description>` (sub-paths like `a/b/c` are also allowed).
-    if:
-      - head-repo-full-name = lightseekorg/smg
-      - head != main
-    success_conditions:
-      - "head~=^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9._-]+)+$"
-
+# post_check rule 'Enforce branch naming convention (internal)' was removed without replacement (no success_conditions or neutral_conditions to migrate)
 pull_request_rules:
   - name: Enforce branch naming convention (internal)
     description: Auto-close PRs from internal branches that don't follow naming convention
