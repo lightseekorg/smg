@@ -944,6 +944,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     if config.prometheus_config.is_some() {
         app_context.inflight_tracker.start_sampler(20);
+        metrics_server::register_engine_metrics_deps(
+            app_context.worker_registry.clone(),
+            app_context.client.clone(),
+        );
     }
 
     // Start WS metrics collectors now that AppContext is available.
