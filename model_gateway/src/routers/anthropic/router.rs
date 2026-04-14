@@ -19,9 +19,11 @@ use super::{
 use crate::{
     app_context::AppContext,
     routers::{
+        common::{
+            header_utils, mcp_utils,
+            worker_selection::{SelectWorkerRequest, WorkerSelector},
+        },
         error::bad_gateway,
-        header_utils, mcp_utils,
-        worker_selection::{SelectWorkerRequest, WorkerSelector},
         RouterTrait,
     },
     worker::ProviderType,

@@ -13,14 +13,15 @@ use tracing::warn;
 
 use super::utils::{patch_response_with_request_metadata, restore_original_tools};
 use crate::routers::{
+    common::{
+        header_utils::ApiProvider, mcp_utils::ensure_request_mcp_client,
+        persistence_utils::persist_conversation_items,
+    },
     error,
-    header_utils::ApiProvider,
-    mcp_utils::ensure_request_mcp_client,
     openai::{
         context::{PayloadState, RequestContext},
         mcp::{execute_tool_loop, prepare_mcp_tools_as_functions},
     },
-    persistence_utils::persist_conversation_items,
 };
 
 /// Handle a non-streaming responses request

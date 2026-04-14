@@ -41,8 +41,8 @@ use crate::{
     app_context::AppContext,
     config::RoutingMode,
     routers::{
+        common::header_utils::apply_provider_headers,
         factory::{router_ids, RouterId},
-        header_utils::apply_provider_headers,
         RouterFactory, RouterTrait,
     },
     server::ServerConfig,

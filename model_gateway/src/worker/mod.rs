@@ -11,7 +11,6 @@ pub mod metrics_aggregator;
 pub mod monitor;
 pub mod registry;
 pub mod resilience;
-pub mod retry;
 pub mod service;
 pub mod token_bucket;
 // FIXME: worker.rs is a 1800-line monolith containing the Worker trait,
@@ -40,7 +39,6 @@ pub use openai_protocol::{
 };
 pub use registry::{HashRing, WorkerRegistry};
 pub use resilience::{resolve_resilience, ResolvedResilience, DEFAULT_RETRYABLE_STATUS_CODES};
-pub use retry::{is_retryable_status, RetryExecutor};
 pub use service::WorkerService;
 pub use worker::{
     AttachedBody, BasicWorker, ConnectionMode, RuntimeType, Worker, WorkerLoadGuard, WorkerType,

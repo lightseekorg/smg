@@ -23,7 +23,7 @@ use rand::Rng as _;
 use super::{LoadBalancingPolicy, SelectWorkerInfo};
 use crate::{
     observability::metrics::Metrics,
-    routers::header_utils::{extract_routing_key, extract_target_worker},
+    routers::common::header_utils::{extract_routing_key, extract_target_worker},
     worker::Worker,
 };
 

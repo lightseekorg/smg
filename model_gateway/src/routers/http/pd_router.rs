@@ -33,14 +33,15 @@ use crate::{
     },
     policies::{LoadBalancingPolicy, PolicyRegistry, SelectWorkerInfo},
     routers::{
+        common::{
+            header_utils,
+            retry::{is_retryable_status, RetryExecutor},
+        },
         error,
         grpc::utils::{error_type_from_status, route_to_endpoint},
-        header_utils, RouterTrait,
+        RouterTrait,
     },
-    worker::{
-        is_retryable_status, HashRing, RetryExecutor, Worker, WorkerLoadGuard, WorkerRegistry,
-        WorkerType, UNKNOWN_MODEL_ID,
-    },
+    worker::{HashRing, Worker, WorkerLoadGuard, WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID},
 };
 
 #[derive(Debug)]

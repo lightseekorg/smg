@@ -44,9 +44,12 @@ const SSE_DONE: &str = "data: [DONE]\n\n";
 use crate::{
     observability::metrics::Metrics,
     routers::{
+        common::{
+            header_utils::{preserve_response_headers, ApiProvider},
+            mcp_utils::DEFAULT_MAX_ITERATIONS,
+            persistence_utils::persist_conversation_items,
+        },
         error,
-        header_utils::{preserve_response_headers, ApiProvider},
-        mcp_utils::DEFAULT_MAX_ITERATIONS,
         openai::{
             context::{RequestContext, StreamingEventContext, StreamingRequest},
             mcp::{
@@ -55,7 +58,6 @@ use crate::{
                 StreamingToolHandler, ToolLoopState,
             },
         },
-        persistence_utils::persist_conversation_items,
     },
 };
 
@@ -1010,7 +1012,7 @@ pub(super) fn handle_streaming_with_tool_interception(
 
 /// Main entry point for streaming responses
 pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
-    use crate::routers::mcp_utils::ensure_request_mcp_client;
+    use crate::routers::common::mcp_utils::ensure_request_mcp_client;
 
     let worker = match ctx.worker() {
         Some(w) => w.clone(),

@@ -24,7 +24,7 @@ use super::{
 };
 use crate::{
     config::ManualAssignmentMode, observability::metrics::Metrics,
-    routers::header_utils::extract_routing_key, worker::Worker,
+    routers::common::header_utils::extract_routing_key, worker::Worker,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

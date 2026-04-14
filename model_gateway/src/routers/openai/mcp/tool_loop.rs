@@ -29,7 +29,10 @@ use tracing::{debug, info, warn};
 use super::tool_handler::FunctionCallInProgress;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::{error, header_utils::ApiProvider, mcp_utils::DEFAULT_MAX_ITERATIONS},
+    routers::{
+        common::{header_utils::ApiProvider, mcp_utils::DEFAULT_MAX_ITERATIONS},
+        error,
+    },
 };
 
 /// State for tracking multi-turn tool calling loop

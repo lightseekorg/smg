@@ -33,14 +33,15 @@ use crate::{
     },
     policies::{PolicyRegistry, SelectWorkerInfo},
     routers::{
+        common::{
+            header_utils,
+            retry::{is_retryable_status, RetryExecutor},
+        },
         error::{self, extract_error_code_from_response},
         grpc::utils::{error_type_from_status, route_to_endpoint},
-        header_utils, RouterTrait,
+        RouterTrait,
     },
-    worker::{
-        is_retryable_status, AttachedBody, ConnectionMode, RetryExecutor, Worker, WorkerLoadGuard,
-        WorkerRegistry, WorkerType,
-    },
+    worker::{AttachedBody, ConnectionMode, Worker, WorkerLoadGuard, WorkerRegistry, WorkerType},
 };
 
 /// Regular router that uses injected load balancing policies

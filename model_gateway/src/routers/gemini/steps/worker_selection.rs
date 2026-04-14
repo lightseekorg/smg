@@ -6,12 +6,12 @@ use axum::response::Response;
 
 use crate::{
     routers::{
+        common::worker_selection::{SelectWorkerRequest, WorkerSelector},
         error,
         gemini::{
             context::RequestContext,
             state::{RequestState, StepResult},
         },
-        worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
     worker::ProviderType,
 };

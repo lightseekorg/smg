@@ -23,7 +23,7 @@ use tokio::{sync::OnceCell, time};
 use super::{CircuitBreaker, ResolvedResilience, WorkerError, WorkerResult, UNKNOWN_MODEL_ID};
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::{grpc::client::GrpcClient, header_utils::extract_routing_key},
+    routers::{common::header_utils::extract_routing_key, grpc::client::GrpcClient},
 };
 
 /// Default HTTP client timeout for worker requests (in seconds)

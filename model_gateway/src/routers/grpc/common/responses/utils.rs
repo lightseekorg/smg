@@ -17,7 +17,10 @@ use tracing::{debug, error, warn};
 
 use crate::{
     routers::{
-        error, mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
+        common::{
+            mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
+        },
+        error,
     },
     worker::WorkerRegistry,
 };
