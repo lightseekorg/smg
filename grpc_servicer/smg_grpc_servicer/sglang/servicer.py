@@ -8,11 +8,9 @@ for orchestration without tokenization.
 import asyncio
 import dataclasses
 import hashlib
-import io
 import logging
 import os
 import time
-import zipfile
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,28 +53,10 @@ from smg_grpc_proto.generated import common_pb2
 from smg_grpc_servicer.sglang.health_servicer import SGLangHealthServicer
 from smg_grpc_servicer.sglang.request_manager import GrpcRequestManager
 from smg_grpc_servicer.sglang.utils import abort_code_from_output
+from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
 
 logger = logging.getLogger(__name__)
 HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
-
-# Tokenizer bundle streaming constants (aligned with Rust grpc_client limits)
-_TOKENIZER_CHUNK_SIZE = 64 * 1024  # 64 KB per gRPC chunk
-# Files to include in the tokenizer ZIP bundle.
-# Aligned with crates/tokenizer/src/hub.rs:is_tokenizer_file() plus model config files.
-_TOKENIZER_FILES = [
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "config.json",
-    "generation_config.json",
-    "special_tokens_map.json",
-    "vocab.json",
-    "merges.txt",
-    "tokenizer.model",  # SentencePiece
-    "tiktoken.model",  # tiktoken
-    "chat_template.json",
-]
-# Glob patterns for additional tokenizer-related files
-_TOKENIZER_GLOBS = ["*.tiktoken", "*.jinja", "*.model"]
 
 
 def _convert_loads_to_protobuf(
@@ -596,7 +576,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
 
         # Build ZIP archive in memory
         try:
-            zip_buffer = self._build_tokenizer_zip(tokenizer_dir)
+            zip_buffer = build_tokenizer_zip(tokenizer_dir)
         except Exception as e:
             logger.error(f"Failed to build tokenizer ZIP: {e}\n{get_exception_traceback()}")
             await context.abort(grpc.StatusCode.INTERNAL, str(e))
@@ -614,35 +594,13 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         offset = 0
         total = len(zip_data)
         while offset < total:
-            end = min(offset + _TOKENIZER_CHUNK_SIZE, total)
+            end = min(offset + CHUNK_SIZE, total)
             is_last = end == total
             yield common_pb2.GetTokenizerChunk(
                 data=bytes(zip_data[offset:end]),
                 sha256=sha256 if is_last else "",
             )
             offset = end
-
-    @staticmethod
-    def _build_tokenizer_zip(tokenizer_dir: Path) -> io.BytesIO:
-        """Create an in-memory ZIP archive of tokenizer files from a directory."""
-        buf = io.BytesIO()
-        added: set[str] = set()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            # Exact-name files
-            for name in _TOKENIZER_FILES:
-                filepath = tokenizer_dir / name
-                if filepath.is_file():
-                    zf.write(filepath, name)
-                    added.add(name)
-            # Glob patterns (*.tiktoken, *.jinja, *.model)
-            for pattern in _TOKENIZER_GLOBS:
-                for match in tokenizer_dir.glob(pattern):
-                    if match.is_file() and match.name not in added:
-                        zf.write(match, match.name)
-                        added.add(match.name)
-        if not added:
-            raise FileNotFoundError(f"No tokenizer files found in {tokenizer_dir}")
-        return buf
 
     async def SubscribeKvEvents(
         self,
