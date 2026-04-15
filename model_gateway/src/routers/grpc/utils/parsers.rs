@@ -4,6 +4,7 @@ use llm_tokenizer::{
     chat_template::{ThinkingKeyName, ThinkingToggle},
     traits::Tokenizer,
 };
+use openai_protocol::common::{ResponseFormat, ToolChoice, ToolChoiceValue};
 use reasoning_parser::{
     ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser, ReasoningParser,
 };
@@ -176,5 +177,171 @@ pub(crate) fn create_tool_parser(
     } else {
         // Auto-detect based on model
         tool_parser_factory.registry().create_for_model(model)
+    }
+}
+
+/// Returns `true` when constrained decoding is active, meaning the model output
+/// is structured JSON rather than free-form text. In that case the reasoning
+/// parser must be skipped — otherwise it captures the constrained JSON as
+/// `reasoning_content` and leaves `content` empty.
+///
+/// Constrained decoding is triggered by:
+/// - `tool_choice` = a specific function, `required`, or `allowed_tools` with
+///   `mode == "required"`
+/// - `response_format` = `json_object` or `json_schema`
+pub(crate) fn has_constrained_output(
+    tool_choice: Option<&ToolChoice>,
+    response_format: Option<&ResponseFormat>,
+) -> bool {
+    let constrained_tool_choice = matches!(
+        tool_choice,
+        Some(ToolChoice::Function { .. }) | Some(ToolChoice::Value(ToolChoiceValue::Required))
+    ) || matches!(
+        tool_choice,
+        Some(ToolChoice::AllowedTools { mode, .. }) if mode == "required"
+    );
+
+    let constrained_response_format = matches!(
+        response_format,
+        Some(ResponseFormat::JsonObject) | Some(ResponseFormat::JsonSchema { .. })
+    );
+
+    constrained_tool_choice || constrained_response_format
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openai_protocol::common::{
+        FunctionChoice, JsonSchemaFormat, ToolReference,
+    };
+
+    // ── has_constrained_output: tool_choice variants ────────────────────
+
+    #[test]
+    fn no_tool_choice_no_response_format_is_unconstrained() {
+        assert!(!has_constrained_output(None, None));
+    }
+
+    #[test]
+    fn tool_choice_auto_is_unconstrained() {
+        let tc = ToolChoice::Value(ToolChoiceValue::Auto);
+        assert!(!has_constrained_output(Some(&tc), None));
+    }
+
+    #[test]
+    fn tool_choice_none_is_unconstrained() {
+        let tc = ToolChoice::Value(ToolChoiceValue::None);
+        assert!(!has_constrained_output(Some(&tc), None));
+    }
+
+    #[test]
+    fn tool_choice_required_is_constrained() {
+        let tc = ToolChoice::Value(ToolChoiceValue::Required);
+        assert!(has_constrained_output(Some(&tc), None));
+    }
+
+    #[test]
+    fn tool_choice_specific_function_is_constrained() {
+        let tc = ToolChoice::Function {
+            tool_type: "function".to_string(),
+            function: FunctionChoice {
+                name: "get_weather".to_string(),
+            },
+        };
+        assert!(has_constrained_output(Some(&tc), None));
+    }
+
+    #[test]
+    fn allowed_tools_required_is_constrained() {
+        let tc = ToolChoice::AllowedTools {
+            tool_type: "allowed_tools".to_string(),
+            mode: "required".to_string(),
+            tools: vec![ToolReference::Function {
+                name: "search".to_string(),
+            }],
+        };
+        assert!(has_constrained_output(Some(&tc), None));
+    }
+
+    #[test]
+    fn allowed_tools_auto_is_unconstrained() {
+        let tc = ToolChoice::AllowedTools {
+            tool_type: "allowed_tools".to_string(),
+            mode: "auto".to_string(),
+            tools: vec![ToolReference::Function {
+                name: "search".to_string(),
+            }],
+        };
+        assert!(!has_constrained_output(Some(&tc), None));
+    }
+
+    // ── has_constrained_output: response_format variants ────────────────
+
+    #[test]
+    fn response_format_text_is_unconstrained() {
+        assert!(!has_constrained_output(None, Some(&ResponseFormat::Text)));
+    }
+
+    #[test]
+    fn response_format_json_object_is_constrained() {
+        assert!(has_constrained_output(
+            None,
+            Some(&ResponseFormat::JsonObject)
+        ));
+    }
+
+    #[test]
+    fn response_format_json_schema_is_constrained() {
+        let rf = ResponseFormat::JsonSchema {
+            json_schema: JsonSchemaFormat {
+                name: "feedback".to_string(),
+                schema: serde_json::json!({"type": "object"}),
+                strict: Some(true),
+            },
+        };
+        assert!(has_constrained_output(None, Some(&rf)));
+    }
+
+    // ── has_constrained_output: combinations ────────────────────────────
+
+    #[test]
+    fn tool_choice_auto_with_json_object_is_constrained() {
+        let tc = ToolChoice::Value(ToolChoiceValue::Auto);
+        assert!(has_constrained_output(
+            Some(&tc),
+            Some(&ResponseFormat::JsonObject)
+        ));
+    }
+
+    #[test]
+    fn tool_choice_auto_with_text_format_is_unconstrained() {
+        let tc = ToolChoice::Value(ToolChoiceValue::Auto);
+        assert!(!has_constrained_output(
+            Some(&tc),
+            Some(&ResponseFormat::Text)
+        ));
+    }
+
+    #[test]
+    fn tool_choice_required_with_json_schema_both_constrain() {
+        let tc = ToolChoice::Value(ToolChoiceValue::Required);
+        let rf = ResponseFormat::JsonSchema {
+            json_schema: JsonSchemaFormat {
+                name: "output".to_string(),
+                schema: serde_json::json!({"type": "object"}),
+                strict: None,
+            },
+        };
+        assert!(has_constrained_output(Some(&tc), Some(&rf)));
+    }
+
+    #[test]
+    fn tool_choice_none_with_json_object_is_constrained_via_format() {
+        let tc = ToolChoice::Value(ToolChoiceValue::None);
+        assert!(has_constrained_output(
+            Some(&tc),
+            Some(&ResponseFormat::JsonObject)
+        ));
     }
 }
