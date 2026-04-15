@@ -238,13 +238,19 @@ policy:
       trust_level: trusted
 ```
 
-### Environment Variable Expansion
+### Keeping Credentials Out of Config Files
 
-Tokens support `${VAR_NAME}` syntax to keep credentials out of config files:
+SMG parses `mcp.yaml` as plain YAML and does not expand environment
+variables inside server `token` values. To keep credentials out of the
+checked-in config, substitute placeholders before the gateway loads the
+file — for example, render the YAML through `envsubst` from a shell
+wrapper, use a templating tool (Helm, Kustomize, Jinja), or inject the
+final config via a secret mount.
 
-```yaml
-token: "${BRAVE_API_KEY}"
-```
+For MCP-specific HTTP proxy configuration, SMG does read the
+`MCP_HTTP_PROXY`, `MCP_HTTPS_PROXY`, and `MCP_NO_PROXY` environment
+variables (falling back to `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`)
+when no `proxy:` block is set in `mcp.yaml`.
 
 ---
 
