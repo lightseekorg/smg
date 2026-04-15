@@ -230,13 +230,63 @@ pub struct PreProcessorConfig {
 
 impl PreProcessorConfig {
     /// Parse from JSON string.
+    ///
+    /// Handles both standard HuggingFace format (top-level fields) and Kimi-K2.5's
+    /// nested format where values are under `media_proc_cfg`.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
+        let raw: serde_json::Value = serde_json::from_str(json)?;
+        Self::from_value(raw)
     }
 
     /// Parse from JSON value.
+    ///
+    /// Handles both standard HuggingFace format (top-level fields) and Kimi-K2.5's
+    /// nested format where values are under `media_proc_cfg`.
     pub fn from_value(value: serde_json::Value) -> Result<Self, serde_json::Error> {
-        serde_json::from_value(value)
+        let mut config: Self = serde_json::from_value(value.clone())?;
+        Self::apply_nested_media_cfg(&mut config, &value);
+        Ok(config)
+    }
+
+    /// Extract values from nested `media_proc_cfg` (used by Kimi-K2.5 and
+    /// similar models) when top-level fields are missing.
+    fn apply_nested_media_cfg(config: &mut Self, raw: &serde_json::Value) {
+        let Some(media_cfg) = raw.get("media_proc_cfg") else {
+            return;
+        };
+        if config.image_mean.is_none() {
+            config.image_mean = media_cfg
+                .get("image_mean")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+        }
+        if config.image_std.is_none() {
+            config.image_std = media_cfg
+                .get("image_std")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+        }
+        if config.patch_size.is_none() {
+            config.patch_size = media_cfg.get("patch_size").and_then(|v| {
+                v.as_u64().map(|ps| PatchSize {
+                    height: Some(ps as u32),
+                    width: Some(ps as u32),
+                })
+            });
+        }
+        if config.merge_size.is_none() {
+            config.merge_size = media_cfg
+                .get("merge_kernel_size")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+        }
+        // Also extract Kimi-specific limits into the extra map
+        // so processors can read them via get_extra()
+        for key in ["in_patch_limit", "patch_limit_on_one_side"] {
+            if !config.extra.contains_key(key) {
+                if let Some(v) = media_cfg.get(key) {
+                    config.extra.insert(key.to_string(), v.clone());
+                }
+            }
+        }
     }
 
     /// Get patch size as a simple usize.
@@ -466,5 +516,36 @@ mod tests {
             nested.as_ref().unwrap().get("foo"),
             Some(&"bar".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_kimi_nested_media_proc_cfg() {
+        let json = r#"{
+            "auto_map": {
+                "AutoProcessor": "kimi_k25_processor.KimiK25Processor"
+            },
+            "media_proc_cfg": {
+                "in_patch_limit": 16384,
+                "patch_size": 14,
+                "image_mean": [0.5, 0.5, 0.5],
+                "image_std": [0.5, 0.5, 0.5],
+                "merge_kernel_size": 2,
+                "patch_limit_on_one_side": 512
+            }
+        }"#;
+
+        let config = PreProcessorConfig::from_json(json).unwrap();
+
+        // image_mean/std should be extracted from media_proc_cfg
+        let mean = config.get_image_mean();
+        assert!((mean[0] - 0.5).abs() < 1e-6);
+        assert!((mean[1] - 0.5).abs() < 1e-6);
+        assert!((mean[2] - 0.5).abs() < 1e-6);
+
+        let std = config.get_image_std();
+        assert!((std[0] - 0.5).abs() < 1e-6);
+
+        assert_eq!(config.get_patch_size(0), 14);
+        assert_eq!(config.merge_size, Some(2));
     }
 }

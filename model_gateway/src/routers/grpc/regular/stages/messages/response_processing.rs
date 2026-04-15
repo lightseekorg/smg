@@ -81,6 +81,9 @@ impl PipelineStage for MessageResponseProcessingStage {
         })?;
 
         if is_streaming {
+            // Read derived skip_special_tokens (set in preparation, survives request_building .take())
+            let skip_special_tokens = ctx.state.response.skip_special_tokens.unwrap_or(true);
+
             // Streaming: use StreamingProcessor and return SSE response
             let response = self
                 .streaming_processor
@@ -90,6 +93,7 @@ impl PipelineStage for MessageResponseProcessingStage {
                     ctx.messages_request_arc(),
                     dispatch,
                     tokenizer,
+                    skip_special_tokens,
                 );
 
             // Attach load guards for RAII lifecycle

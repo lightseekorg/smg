@@ -22,6 +22,8 @@ pub struct HuggingFaceTokenizer {
     vocab: HashMap<String, TokenIdType>,
     reverse_vocab: HashMap<TokenIdType, String>,
     chat_template: ChatTemplateState,
+    /// EOS token IDs from config.json + generation_config.json
+    eos_token_ids: Vec<TokenIdType>,
 }
 
 impl HuggingFaceTokenizer {
@@ -82,12 +84,19 @@ impl HuggingFaceTokenizer {
             }
         }
 
+        // Load merged EOS token IDs from config.json + generation_config.json
+        let eos_token_ids = std::path::Path::new(file_path)
+            .parent()
+            .map(crate::eos::load_eos_token_ids)
+            .unwrap_or_default();
+
         Ok(HuggingFaceTokenizer {
             tokenizer,
             special_tokens,
             vocab,
             reverse_vocab,
             chat_template: ChatTemplateState::new(chat_template_str)?,
+            eos_token_ids,
         })
     }
 
@@ -154,6 +163,7 @@ impl HuggingFaceTokenizer {
             vocab,
             reverse_vocab,
             chat_template: ChatTemplateState::empty(),
+            eos_token_ids: Vec::new(), // No directory path in from_tokenizer
         }
     }
 
@@ -351,6 +361,10 @@ impl TokenizerTrait for HuggingFaceTokenizer {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn eos_token_ids(&self) -> &[TokenIdType] {
+        &self.eos_token_ids
     }
 
     fn apply_chat_template(

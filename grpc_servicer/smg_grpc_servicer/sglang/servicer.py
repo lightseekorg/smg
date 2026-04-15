@@ -7,11 +7,13 @@ for orchestration without tokenization.
 
 import asyncio
 import dataclasses
+import hashlib
 import logging
 import os
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
+from pathlib import Path
 
 import grpc
 import msgspec
@@ -37,11 +39,7 @@ from sglang.srt.managers.io_struct import (
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
 )
-from sglang.srt.managers.schedule_batch import (
-    Modality,
-    MultimodalDataItem,
-    MultimodalInputs,
-)
+from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem, MultimodalInputs
 from sglang.srt.sampling.sampling_params import SamplingParams as SGLSamplingParams
 from sglang.srt.server_args import ServerArgs
 from sglang.utils import get_exception_traceback
@@ -51,6 +49,7 @@ from smg_grpc_proto.generated import common_pb2
 from smg_grpc_servicer.sglang.health_servicer import SGLangHealthServicer
 from smg_grpc_servicer.sglang.request_manager import GrpcRequestManager
 from smg_grpc_servicer.sglang.utils import abort_code_from_output
+from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
 
 logger = logging.getLogger(__name__)
 HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
@@ -550,6 +549,55 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             aggregate=_compute_aggregate_protobuf(loads),
         )
 
+    async def GetTokenizer(
+        self,
+        request: common_pb2.GetTokenizerRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[common_pb2.GetTokenizerChunk]:
+        """Stream tokenizer artifacts as a ZIP bundle.
+
+        Resolves the tokenizer directory from server_args, zips all relevant
+        tokenizer files, and streams them as GetTokenizerChunk messages.
+        The final chunk carries the SHA-256 fingerprint of the full archive.
+        """
+        logger.info("Receive GetTokenizer request")
+
+        tokenizer_path = self.server_args.tokenizer_path
+        if not tokenizer_path:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "Tokenizer path is not configured on this server.",
+            )
+        tokenizer_dir = Path(tokenizer_path)
+
+        # Build ZIP archive in memory
+        try:
+            zip_buffer = build_tokenizer_zip(tokenizer_dir)
+        except Exception as e:
+            logger.error(f"Failed to build tokenizer ZIP: {e}\n{get_exception_traceback()}")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+
+        zip_data = zip_buffer.getbuffer()
+        sha256 = hashlib.sha256(zip_data).hexdigest()
+
+        logger.info(
+            "Streaming tokenizer bundle: %d bytes, sha256=%s",
+            len(zip_data),
+            sha256,
+        )
+
+        # Stream chunks; SHA-256 only on the final chunk
+        offset = 0
+        total = len(zip_data)
+        while offset < total:
+            end = min(offset + CHUNK_SIZE, total)
+            is_last = end == total
+            yield common_pb2.GetTokenizerChunk(
+                data=bytes(zip_data[offset:end]),
+                sha256=sha256 if is_last else "",
+            )
+            offset = end
+
     async def SubscribeKvEvents(
         self,
         request: common_pb2.SubscribeKvEventsRequest,
@@ -773,7 +821,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         return torch.from_numpy(arr)
 
     def _parse_mm_inputs(self, mm_proto) -> MultimodalInputs:
-        """Parse proto MultimodalInputs into the mm_inputs expected by scheduler."""
+        """Parse proto MultimodalInputs into a MultimodalInputs object for the scheduler."""
         # Decode pixel_values from typed TensorData field
         pixel_values = self._decode_tensor_data(mm_proto.pixel_values)
 
@@ -799,12 +847,12 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             offsets=offsets,
         )
 
-        result = MultimodalInputs(mm_items=[mm_item])
+        im_token_id = mm_proto.im_token_id if mm_proto.HasField("im_token_id") else None
 
-        if mm_proto.HasField("im_token_id"):
-            result.im_token_id = mm_proto.im_token_id
-
-        return result
+        return MultimodalInputs(
+            mm_items=[mm_item],
+            im_token_id=im_token_id,
+        )
 
     def _convert_embed_request(
         self, grpc_req: sglang_scheduler_pb2.EmbedRequest

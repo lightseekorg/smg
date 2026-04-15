@@ -52,7 +52,6 @@ impl HashRing {
             Vec::with_capacity(lower.saturating_mul(VIRTUAL_NODES_PER_WORKER));
 
         for url in iter {
-            // Create Arc<str> once per worker, share across all virtual nodes.
             let url: Arc<str> = Arc::from(url.as_ref());
 
             for vnode in 0..VIRTUAL_NODES_PER_WORKER {
@@ -62,7 +61,6 @@ impl HashRing {
             }
         }
 
-        // Sort by ring position for binary search.
         entries.sort_unstable_by_key(|(pos, _)| *pos);
 
         Self {
@@ -78,7 +76,6 @@ impl HashRing {
     )]
     fn hash_position(s: &str) -> u64 {
         let hash = blake3::hash(s.as_bytes());
-        // Take first 8 bytes as u64.
         u64::from_le_bytes(
             hash.as_bytes()[..8]
                 .try_into()
@@ -108,7 +105,6 @@ impl HashRing {
 
         let key_pos = Self::hash_position(key);
 
-        // Binary search to find first entry at or after key_pos.
         let start = self.entries.partition_point(|(pos, _)| *pos < key_pos);
 
         // Walk clockwise from start, wrapping around. Track visited URLs to

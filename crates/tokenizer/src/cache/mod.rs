@@ -284,6 +284,10 @@ impl Tokenizer for CachedTokenizer {
     fn think_in_prefill(&self) -> bool {
         self.inner.think_in_prefill()
     }
+
+    fn eos_token_ids(&self) -> &[TokenIdType] {
+        self.inner.eos_token_ids()
+    }
 }
 
 #[cfg(test)]

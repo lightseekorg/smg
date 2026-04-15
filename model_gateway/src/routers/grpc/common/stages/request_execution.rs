@@ -236,7 +236,10 @@ impl RequestExecutionStage {
         })?;
 
         let prefill_request = proto_request.clone_inner();
-        let decode_request = proto_request;
+        // Strip multimodal data from decode request — the decode worker only
+        // needs the KV cache from prefill, not the pixel tensors (~40MB saved).
+        let mut decode_request = proto_request;
+        decode_request.clear_mm_inputs();
 
         let (prefill_result, decode_result): (StreamResult, StreamResult) = tokio::join!(
             prefill_client.generate(prefill_request),

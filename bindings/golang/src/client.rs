@@ -8,8 +8,11 @@ use std::{
 };
 
 use llm_tokenizer::{create_tokenizer_from_file, traits::Tokenizer};
-use openai_protocol::chat::ChatCompletionRequest;
-use smg::routers::grpc::utils::{generate_tool_constraints, process_chat_messages};
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    common::{ToolChoice, ToolChoiceValue},
+};
+use smg::routers::grpc::utils::process_chat_messages;
 use smg_grpc_client::sglang_scheduler::SglangSchedulerClient;
 use uuid::Uuid;
 
@@ -146,7 +149,7 @@ pub unsafe extern "C" fn sgl_client_chat_completion_stream(
     let tokenizer = Arc::clone(&client_ref.tokenizer);
 
     // Parse OpenAI ChatCompletionRequest
-    let chat_request: ChatCompletionRequest = match serde_json::from_str(request_str) {
+    let mut chat_request: ChatCompletionRequest = match serde_json::from_str(request_str) {
         Ok(req) => req,
         Err(e) => {
             set_error_message(error_out, &format!("Failed to parse request JSON: {e}"));
@@ -174,15 +177,13 @@ pub unsafe extern "C" fn sgl_client_chat_completion_stream(
     let prompt_tokens = token_ids.len() as u32; // Save prompt token count
 
     // Generate tool constraints if needed
-    let tool_constraint = if let Some(tools) = chat_request.tools.as_ref() {
-        match generate_tool_constraints(
-            tools,
-            chat_request.tool_choice.as_ref(),
-            &chat_request.model,
-        ) {
-            Ok(Some((constraint_type, constraint_value))) => {
-                Some((constraint_type, constraint_value))
-            }
+    let registry = super::runtime::PARSER_FACTORY.registry();
+    let tool_constraint = if let (Some(tools), Some(tool_choice)) = (
+        chat_request.tools.as_ref(),
+        chat_request.tool_choice.as_ref(),
+    ) {
+        match registry.generate_tool_constraint(None, tools, tool_choice) {
+            Ok(Some(c)) => Some(c.to_tuple()),
             Ok(None) => None,
             Err(e) => {
                 set_error_message(
@@ -195,6 +196,19 @@ pub unsafe extern "C" fn sgl_client_chat_completion_stream(
     } else {
         None
     };
+
+    // Derive skip_special_tokens from constraint type (option B)
+    if tool_constraint
+        .as_ref()
+        .is_none_or(|c| c.0 != "json_schema")
+        && chat_request.tools.is_some()
+        && !matches!(
+            chat_request.tool_choice,
+            Some(ToolChoice::Value(ToolChoiceValue::None))
+        )
+    {
+        chat_request.skip_special_tokens = false;
+    }
 
     // Build GenerateRequest
     let request_id = format!("chatcmpl-{}", Uuid::now_v7());

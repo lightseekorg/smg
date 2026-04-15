@@ -130,6 +130,7 @@ pub struct TiktokenTokenizer {
     reverse_vocab: HashMap<TokenIdType, String>,
     vocab_size: usize,
     chat_template: ChatTemplateState,
+    eos_token_ids: Vec<TokenIdType>,
 }
 
 /// Supported Tiktoken models
@@ -178,6 +179,7 @@ impl TiktokenTokenizer {
             reverse_vocab: HashMap::new(),
             vocab_size,
             chat_template: ChatTemplateState::empty(),
+            eos_token_ids: Vec::new(), // No directory path in from_model
         })
     }
 
@@ -259,6 +261,9 @@ impl TiktokenTokenizer {
             })
         };
 
+        // Load merged EOS token IDs from config.json + generation_config.json
+        let eos_token_ids = crate::eos::load_eos_token_ids(dir);
+
         Ok(TiktokenTokenizer {
             tokenizer,
             special_tokens: config.special_tokens,
@@ -266,6 +271,7 @@ impl TiktokenTokenizer {
             reverse_vocab,
             vocab_size,
             chat_template: ChatTemplateState::new(chat_template)?,
+            eos_token_ids,
         })
     }
 
@@ -437,7 +443,21 @@ pub fn is_tiktoken_file(path: &Path) -> bool {
 
 impl Encoder for TiktokenTokenizer {
     fn encode(&self, input: &str, _add_special_tokens: bool) -> Result<Encoding> {
-        let tokens = self.tokenizer.encode_ordinary(input);
+        // Always use encode_with_special_tokens so that special token strings
+        // in the input (e.g., <|media_pad|> from chat templates) are recognized
+        // as single tokens rather than split into BPE sub-tokens.
+        //
+        // NOTE: We intentionally ignore `add_special_tokens` here because the
+        // flag has different semantics across backends. For HuggingFace it
+        // controls BOS/EOS prepend/append (tiktoken has no such concept).
+        // For tiktoken, encode_ordinary vs encode_with_special_tokens controls
+        // whether special-token *patterns* in the input are recognized.
+        // All callers that encode chat-template-rendered text pass `false`
+        // (meaning "don't add BOS/EOS"), but tiktoken must still recognize
+        // the special tokens the template inserted. A proper fix requires
+        // redesigning the Encoder trait to separate "add wrapper tokens" from
+        // "recognize special-token patterns".
+        let tokens = self.tokenizer.encode_with_special_tokens(input);
         Ok(Encoding::Tiktoken(tokens))
     }
 
@@ -519,6 +539,10 @@ impl TokenizerTrait for TiktokenTokenizer {
     fn thinking_key_name(&self) -> Option<ThinkingKeyName> {
         self.chat_template.thinking_key_name()
     }
+    fn eos_token_ids(&self) -> &[TokenIdType] {
+        &self.eos_token_ids
+    }
+
     fn think_in_prefill(&self) -> bool {
         self.chat_template.think_in_prefill()
     }
@@ -809,5 +833,22 @@ mod tests {
         let encoding = tokenizer.encode(text, false).unwrap();
         let decoded = tokenizer.decode(encoding.token_ids(), false).unwrap();
         assert_eq!(decoded, text);
+    }
+
+    #[test]
+    fn test_encode_recognizes_special_tokens_in_input() {
+        // encode_with_special_tokens must recognize special token strings
+        // so that chat-template-rendered text (containing e.g. <|endoftext|>)
+        // produces single token IDs, not BPE sub-tokens.
+        let tokenizer = TiktokenTokenizer::new(TiktokenModel::Cl100kBase).unwrap();
+        // <|endoftext|> is token 100257 in cl100k_base
+        // Note: add_special_tokens is intentionally ignored for tiktoken
+        // (see Encoder impl comment), so both true and false produce the same result.
+        let encoding = tokenizer.encode("hello<|endoftext|>world", false).unwrap();
+        let ids = encoding.token_ids();
+        assert!(
+            ids.contains(&100257),
+            "Special token <|endoftext|> should be recognized as single token, got: {ids:?}"
+        );
     }
 }

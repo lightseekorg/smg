@@ -134,6 +134,13 @@ pub async fn download_tokenizer_from_hf(model_id: impl AsRef<Path>) -> anyhow::R
         ));
     }
 
+    // Download config files for EOS token loading (best-effort, non-fatal).
+    // Downloaded separately by name to avoid matching nested files like
+    // 1_Pooling/config.json that would break cache_dir resolution.
+    for config_file in ["config.json", "generation_config.json"] {
+        let _ = repo.get(config_file).await;
+    }
+
     match cache_dir {
         Some(dir) => {
             // Ensure we return the correct model directory, not a subfolder

@@ -2,7 +2,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use openai_protocol::common::{Tool, ToolChoice, ToolChoiceValue};
 use parking_lot::RwLock;
+use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -20,11 +22,50 @@ pub type PooledParser = Arc<Mutex<Box<dyn ToolParser>>>;
 /// Type alias for parser creator functions.
 type ParserCreator = Arc<dyn Fn() -> Box<dyn ToolParser> + Send + Sync>;
 
+/// Function that builds the complete structural tag JSON for a set of tools.
+/// Takes (tools, at_least_one) and returns the full xgrammar structural tag value.
+type BuildStructuralTagFn = Arc<dyn Fn(&[Tool], bool) -> serde_json::Value + Send + Sync>;
+
+/// Constraint type returned by [`ParserRegistry::generate_tool_constraint`].
+#[derive(Debug, Clone)]
+pub enum ToolConstraint {
+    /// JSON schema constraint — output is pure JSON from token 0.
+    /// The model-specific parser is NOT used; the generic "json" parser handles it.
+    JsonSchema(String),
+    /// Structural tag constraint — output includes model-native framing tokens.
+    /// The model-specific parser IS used to parse the response.
+    StructuralTag(String),
+}
+
+impl ToolConstraint {
+    /// Convert to (type, value) tuple for gRPC constraint building.
+    pub fn to_tuple(&self) -> (String, String) {
+        match self {
+            ToolConstraint::JsonSchema(s) => ("json_schema".to_string(), s.clone()),
+            ToolConstraint::StructuralTag(s) => ("structural_tag".to_string(), s.clone()),
+        }
+    }
+
+    /// Returns true if this is a JSON schema constraint.
+    pub fn is_json_schema(&self) -> bool {
+        matches!(self, ToolConstraint::JsonSchema(_))
+    }
+}
+
+/// Registration entry for a parser: creator + optional structural tag builder.
+///
+/// The structural tag builder is queried at preparation time without instantiating the parser.
+/// The creator is called at response processing time.
+struct ParserEntry {
+    creator: ParserCreator,
+    build_structural_tag: Option<BuildStructuralTagFn>,
+}
+
 /// Registry for model-specific tool parsers with pooling support.
 #[derive(Clone)]
 pub struct ParserRegistry {
-    /// Creator functions for parsers (used when pool is empty)
-    creators: Arc<RwLock<HashMap<String, ParserCreator>>>,
+    /// Parser entries (creator + metadata)
+    entries: Arc<RwLock<HashMap<String, Arc<ParserEntry>>>>,
     /// Pooled parser instances for reuse
     pool: Arc<RwLock<HashMap<String, PooledParser>>>,
     /// Model pattern to parser name mappings
@@ -37,20 +78,48 @@ impl ParserRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
-            creators: Arc::new(RwLock::new(HashMap::new())),
+            entries: Arc::new(RwLock::new(HashMap::new())),
             pool: Arc::new(RwLock::new(HashMap::new())),
             model_mapping: Arc::new(RwLock::new(HashMap::new())),
             default_parser: Arc::new(RwLock::new("passthrough".to_string())),
         }
     }
 
-    /// Register a parser creator for a given parser type.
+    /// Register a parser without structural tag support.
     pub fn register_parser<F>(&self, name: &str, creator: F)
     where
         F: Fn() -> Box<dyn ToolParser> + Send + Sync + 'static,
     {
-        let mut creators = self.creators.write();
-        creators.insert(name.to_string(), Arc::new(creator));
+        let mut entries = self.entries.write();
+        entries.insert(
+            name.to_string(),
+            Arc::new(ParserEntry {
+                creator: Arc::new(creator),
+                build_structural_tag: None,
+            }),
+        );
+    }
+
+    /// Register a parser with a structural tag builder.
+    ///
+    /// The `build_structural_tag` function takes `(&[Tool], at_least_one)` and returns
+    /// the full xgrammar structural tag JSON for this parser's native tool-call format.
+    pub fn register_parser_with_structural_tag<F>(
+        &self,
+        name: &str,
+        creator: F,
+        build_structural_tag: fn(&[Tool], bool) -> serde_json::Value,
+    ) where
+        F: Fn() -> Box<dyn ToolParser> + Send + Sync + 'static,
+    {
+        let mut entries = self.entries.write();
+        entries.insert(
+            name.to_string(),
+            Arc::new(ParserEntry {
+                creator: Arc::new(creator),
+                build_structural_tag: Some(Arc::new(build_structural_tag)),
+            }),
+        );
     }
 
     /// Map a model name/pattern to a parser
@@ -71,9 +140,9 @@ impl ParserRegistry {
         }
 
         // If not in pool, create one and add to pool
-        let creators = self.creators.read();
-        if let Some(creator) = creators.get(name) {
-            let parser = Arc::new(Mutex::new(creator()));
+        let entries = self.entries.read();
+        if let Some(entry) = entries.get(name) {
+            let parser = Arc::new(Mutex::new((entry.creator)()));
 
             // Add to pool for future use
             let mut pool = self.pool.write();
@@ -87,117 +156,119 @@ impl ParserRegistry {
 
     /// Check if a parser with the given name is registered.
     pub fn has_parser(&self, name: &str) -> bool {
-        let creators = self.creators.read();
-        creators.contains_key(name)
+        let entries = self.entries.read();
+        entries.contains_key(name)
     }
 
     /// Create a fresh (non-pooled) parser instance by exact name.
     /// Returns a new parser instance for each call - useful for streaming where state isolation is needed.
     pub fn create_parser(&self, name: &str) -> Option<Box<dyn ToolParser>> {
-        let creators = self.creators.read();
-        creators.get(name).map(|creator| creator())
+        let entries = self.entries.read();
+        entries.get(name).map(|entry| (entry.creator)())
+    }
+
+    /// Check if the parser supports structural tag constraints.
+    pub fn has_structural_tag(&self, name: &str) -> bool {
+        let entries = self.entries.read();
+        entries
+            .get(name)
+            .is_some_and(|e| e.build_structural_tag.is_some())
+    }
+
+    /// Check if the configured parser supports structural tags.
+    /// Returns false if no parser is configured (structural tags require explicit opt-in
+    /// via `--tool-call-parser`).
+    pub fn has_structural_tag_for_parser(&self, configured: Option<&str>) -> bool {
+        configured.is_some_and(|p| self.has_structural_tag(p))
+    }
+
+    /// Generate tool call constraint.
+    ///
+    /// If `configured_parser` supports structural tags → `StructuralTag(json)`.
+    /// Otherwise → `JsonSchema(schema)` for required/function tool_choice.
+    /// Returns `Ok(None)` for auto/none tool_choice.
+    pub fn generate_tool_constraint(
+        &self,
+        configured_parser: Option<&str>,
+        tools: &[Tool],
+        tool_choice: &ToolChoice,
+    ) -> Result<Option<ToolConstraint>, String> {
+        if tools.is_empty() {
+            return Ok(None);
+        }
+
+        let at_least_one = match tool_choice {
+            ToolChoice::Value(ToolChoiceValue::Required) => true,
+            ToolChoice::Function { .. } => true,
+            ToolChoice::AllowedTools { mode, .. } if mode == "required" => true,
+            _ => return Ok(None),
+        };
+
+        // Try structural tag from configured parser
+        if let Some(name) = configured_parser {
+            let entries = self.entries.read();
+            if let Some(entry) = entries.get(name) {
+                if let Some(build_fn) = entry.build_structural_tag.as_ref() {
+                    let tag = build_fn(tools, at_least_one);
+                    let json_str = serde_json::to_string(&tag)
+                        .map_err(|e| format!("Failed to serialize structural tag: {e}"))?;
+                    return Ok(Some(ToolConstraint::StructuralTag(json_str)));
+                }
+            }
+        }
+
+        // Fall back to generic JSON schema
+        match tool_choice {
+            ToolChoice::Function { .. } => {
+                let params_schema = serde_json::to_string(&tools[0].function.parameters)
+                    .map_err(|e| format!("Failed to serialize tool parameters: {e}"))?;
+                Ok(Some(ToolConstraint::JsonSchema(params_schema)))
+            }
+            _ => {
+                let schema = build_required_array_schema(tools)?;
+                Ok(Some(ToolConstraint::JsonSchema(schema)))
+            }
+        }
+    }
+
+    /// Resolve model name to parser name via model mappings.
+    /// Returns None if no mapping matches (caller decides fallback).
+    pub fn resolve_model_to_parser(&self, model: &str) -> Option<String> {
+        let mapping = self.model_mapping.read();
+        // Try exact match
+        if let Some(parser_name) = mapping.get(model) {
+            return Some(parser_name.clone());
+        }
+        // Try prefix matching (longest pattern wins)
+        mapping
+            .iter()
+            .filter(|(pattern, _)| {
+                pattern.ends_with('*') && model.starts_with(&pattern[..pattern.len() - 1])
+            })
+            .max_by_key(|(pattern, _)| pattern.len())
+            .map(|(_, parser_name)| parser_name.clone())
     }
 
     /// Check if a parser can be created for a specific model without actually creating it.
-    /// Returns true if a parser is available (registered) for this model.
     pub fn has_parser_for_model(&self, model: &str) -> bool {
-        // Try exact match first
-        {
-            let mapping = self.model_mapping.read();
-            if let Some(parser_name) = mapping.get(model) {
-                let creators = self.creators.read();
-                if creators.contains_key(parser_name) {
-                    return true;
-                }
-            }
-        }
-
-        // Try prefix matching
-        let model_mapping = self.model_mapping.read();
-        let best_match = model_mapping
-            .iter()
-            .filter(|(pattern, _)| {
-                pattern.ends_with('*') && model.starts_with(&pattern[..pattern.len() - 1])
-            })
-            .max_by_key(|(pattern, _)| pattern.len());
-
-        if let Some((_, parser_name)) = best_match {
-            let creators = self.creators.read();
-            if creators.contains_key(parser_name) {
-                return true;
-            }
-        }
-
-        // Return false if no specific parser found for this model
-        // (get_pooled will still fall back to default parser)
-        false
+        self.resolve_model_to_parser(model)
+            .is_some_and(|name| self.has_parser(&name))
     }
 
     /// Create a fresh (non-pooled) parser instance for a specific model.
-    /// Returns a new parser instance for each call - useful for streaming where state isolation is needed.
     pub fn create_for_model(&self, model: &str) -> Option<Box<dyn ToolParser>> {
-        // Try exact match first
-        {
-            let mapping = self.model_mapping.read();
-            if let Some(parser_name) = mapping.get(model) {
-                if let Some(parser) = self.create_parser(parser_name) {
-                    return Some(parser);
-                }
-            }
-        }
-
-        // Try prefix matching with more specific patterns first
-        let model_mapping = self.model_mapping.read();
-        let best_match = model_mapping
-            .iter()
-            .filter(|(pattern, _)| {
-                pattern.ends_with('*') && model.starts_with(&pattern[..pattern.len() - 1])
-            })
-            .max_by_key(|(pattern, _)| pattern.len());
-
-        // Return the best matching parser
-        if let Some((_, parser_name)) = best_match {
-            if let Some(parser) = self.create_parser(parser_name) {
-                return Some(parser);
-            }
-        }
-
-        // Fall back to default parser
-        let default = self.default_parser.read().clone();
-        self.create_parser(&default)
+        let parser_name = self
+            .resolve_model_to_parser(model)
+            .unwrap_or_else(|| self.default_parser.read().clone());
+        self.create_parser(&parser_name)
     }
 
     /// Get parser for a specific model
     pub fn get_pooled_for_model(&self, model: &str) -> Option<PooledParser> {
-        // Try exact match first
-        {
-            let mapping = self.model_mapping.read();
-            if let Some(parser_name) = mapping.get(model) {
-                if let Some(parser) = self.get_pooled_parser(parser_name) {
-                    return Some(parser);
-                }
-            }
-        }
-
-        // Try prefix matching with more specific patterns first
-        let model_mapping = self.model_mapping.read();
-        let best_match = model_mapping
-            .iter()
-            .filter(|(pattern, _)| {
-                pattern.ends_with('*') && model.starts_with(&pattern[..pattern.len() - 1])
-            })
-            .max_by_key(|(pattern, _)| pattern.len());
-
-        // Return the best matching parser
-        if let Some((_, parser_name)) = best_match {
-            if let Some(parser) = self.get_pooled_parser(parser_name) {
-                return Some(parser);
-            }
-        }
-
-        // Fall back to default parser
-        let default = self.default_parser.read().clone();
-        self.get_pooled_parser(&default)
+        let parser_name = self
+            .resolve_model_to_parser(model)
+            .unwrap_or_else(|| self.default_parser.read().clone());
+        self.get_pooled_parser(&parser_name)
     }
 
     /// Clear the parser pool, forcing new instances to be created.
@@ -233,7 +304,11 @@ impl ParserFactory {
         // Register default parsers
         registry.register_parser("passthrough", || Box::new(PassthroughParser::new()));
         registry.register_parser("json", || Box::new(JsonParser::new()));
-        registry.register_parser("mistral", || Box::new(MistralParser::new()));
+        registry.register_parser_with_structural_tag(
+            "mistral",
+            || Box::new(MistralParser::new()),
+            MistralParser::build_structural_tag,
+        );
         registry.register_parser("qwen", || Box::new(QwenParser::new()));
         registry.register_parser("qwen_coder", || Box::new(QwenCoderParser::new()));
         registry.register_parser("pythonic", || Box::new(PythonicParser::new()));
@@ -243,7 +318,11 @@ impl ParserFactory {
         registry.register_parser("glm45_moe", || Box::new(Glm4MoeParser::glm45()));
         registry.register_parser("glm47_moe", || Box::new(Glm4MoeParser::glm47()));
         registry.register_parser("step3", || Box::new(Step3Parser::new()));
-        registry.register_parser("kimik2", || Box::new(KimiK2Parser::new()));
+        registry.register_parser_with_structural_tag(
+            "kimik2",
+            || Box::new(KimiK2Parser::new()),
+            KimiK2Parser::build_structural_tag,
+        );
         registry.register_parser("minimax_m2", || Box::new(MinimaxM2Parser::new()));
         registry.register_parser("cohere", || Box::new(CohereParser::new()));
 
@@ -357,48 +436,25 @@ impl ParserFactory {
     /// Get a non-pooled parser for the given model ID (creates a fresh instance each time).
     /// This is useful for benchmarks and testing where you want independent parser instances.
     pub fn get_parser(&self, model_id: &str) -> Option<Arc<dyn ToolParser>> {
-        // Determine which parser type to use
-        let parser_type = {
-            let mapping = self.registry.model_mapping.read();
-
-            // Try exact match first
-            if let Some(parser_name) = mapping.get(model_id) {
-                parser_name.clone()
-            } else {
-                // Try prefix matching
-                let best_match = mapping
-                    .iter()
-                    .filter(|(pattern, _)| {
-                        pattern.ends_with('*')
-                            && model_id.starts_with(&pattern[..pattern.len() - 1])
-                    })
-                    .max_by_key(|(pattern, _)| pattern.len());
-
-                if let Some((_, parser_name)) = best_match {
-                    parser_name.clone()
-                } else {
-                    // Fall back to default
-                    self.registry.default_parser.read().clone()
-                }
-            }
-        };
-
-        let creators = self.registry.creators.read();
-        creators.get(&parser_type).map(|creator| {
-            // Call the creator to get a Box<dyn ToolParser>, then convert to Arc
-            let boxed_parser = creator();
+        let parser_type = self
+            .registry
+            .resolve_model_to_parser(model_id)
+            .unwrap_or_else(|| self.registry.default_parser.read().clone());
+        let entries = self.registry.entries.read();
+        entries.get(&parser_type).map(|entry| {
+            let boxed_parser = (entry.creator)();
             Arc::from(boxed_parser)
         })
     }
 
     /// Check if a parser with the given name is registered.
     pub fn has_parser(&self, name: &str) -> bool {
-        self.registry.creators.read().contains_key(name)
+        self.registry.entries.read().contains_key(name)
     }
 
     /// List all registered parsers (for compatibility with old API).
     pub fn list_parsers(&self) -> Vec<String> {
-        self.registry.creators.read().keys().cloned().collect()
+        self.registry.entries.read().keys().cloned().collect()
     }
 }
 
@@ -406,4 +462,60 @@ impl Default for ParserFactory {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Build JSON schema for required tool calls (array with minItems: 1).
+fn build_required_array_schema(tools: &[Tool]) -> Result<String, String> {
+    let mut any_of_schemas = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let tool_schema = json!({
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "enum": [tool.function.name]
+                },
+                "parameters": tool.function.parameters
+            },
+            "required": ["name", "parameters"]
+        });
+        any_of_schemas.push(tool_schema);
+    }
+
+    // Consolidate $defs from all tools
+    let mut all_defs: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    for tool in tools {
+        if let serde_json::Value::Object(params) = &tool.function.parameters {
+            if let Some(serde_json::Value::Object(defs)) = params.get("$defs") {
+                for (def_name, def_schema) in defs {
+                    if let Some(existing) = all_defs.get(def_name) {
+                        if existing != def_schema {
+                            return Err(format!(
+                                "Tool definition '{def_name}' has multiple conflicting schemas"
+                            ));
+                        }
+                    } else {
+                        all_defs.insert(def_name.clone(), def_schema.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut array_schema = json!({
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "object",
+            "anyOf": any_of_schemas
+        }
+    });
+
+    if !all_defs.is_empty() {
+        if let serde_json::Value::Object(ref mut obj) = array_schema {
+            obj.insert("$defs".to_string(), serde_json::Value::Object(all_defs));
+        }
+    }
+
+    serde_json::to_string(&array_schema)
+        .map_err(|e| format!("Failed to serialize tool schema: {e}"))
 }

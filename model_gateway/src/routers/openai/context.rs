@@ -92,6 +92,7 @@ impl ComponentRefs {
 pub struct ProcessingState {
     pub worker: Option<WorkerSelection>,
     pub payload: Option<PayloadState>,
+    pub responses_payload: Option<ResponsesPayloadState>,
 }
 
 pub struct WorkerSelection {
@@ -102,7 +103,12 @@ pub struct WorkerSelection {
 pub struct PayloadState {
     pub json: Value,
     pub url: String,
+}
+
+#[derive(Default)]
+pub struct ResponsesPayloadState {
     pub previous_response_id: Option<String>,
+    pub existing_mcp_list_tools_labels: Vec<String>,
 }
 
 impl RequestContext {
@@ -188,6 +194,10 @@ impl RequestContext {
     pub fn take_payload(&mut self) -> Option<PayloadState> {
         self.state.payload.take()
     }
+
+    pub fn take_responses_payload(&mut self) -> Option<ResponsesPayloadState> {
+        self.state.responses_payload.take()
+    }
 }
 
 pub struct StorageHandles {
@@ -202,12 +212,14 @@ pub struct OwnedStreamingContext {
     pub payload: Value,
     pub original_body: ResponsesRequest,
     pub previous_response_id: Option<String>,
+    pub existing_mcp_list_tools_labels: Vec<String>,
     pub storage: StorageHandles,
 }
 
 impl RequestContext {
     pub fn into_streaming_context(mut self) -> Result<OwnedStreamingContext, &'static str> {
         let payload_state = self.take_payload().ok_or("Payload not prepared")?;
+        let responses_payload_state = self.take_responses_payload().unwrap_or_default();
         let original_body = self
             .responses_request()
             .ok_or("Expected responses request")?
@@ -232,7 +244,8 @@ impl RequestContext {
             url: payload_state.url,
             payload: payload_state.json,
             original_body,
-            previous_response_id: payload_state.previous_response_id,
+            previous_response_id: responses_payload_state.previous_response_id,
+            existing_mcp_list_tools_labels: responses_payload_state.existing_mcp_list_tools_labels,
             storage: StorageHandles {
                 response,
                 conversation,

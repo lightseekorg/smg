@@ -54,8 +54,8 @@ use crate::{
             context::{RequestContext, StreamingEventContext, StreamingRequest},
             mcp::{
                 build_resume_payload, execute_streaming_tool_calls, inject_mcp_metadata_streaming,
-                prepare_mcp_tools_as_functions, send_mcp_list_tools_events, StreamAction,
-                StreamingToolHandler, ToolLoopState,
+                mcp_list_tools_bindings_to_emit, prepare_mcp_tools_as_functions,
+                send_mcp_list_tools_events, StreamAction, StreamingToolHandler, ToolLoopState,
             },
         },
     },
@@ -674,6 +674,7 @@ pub(super) fn handle_streaming_with_tool_interception(
     let should_store = req.original_body.store.unwrap_or(true);
     let original_request = req.original_body;
     let previous_response_id = req.previous_response_id;
+    let existing_mcp_list_tools_labels = req.existing_mcp_list_tools_labels;
     let url = req.url;
     let storage = req.storage;
 
@@ -688,7 +689,10 @@ pub(super) fn handle_streaming_with_tool_interception(
         reason = "fire-and-forget MCP tool loop; gateway shutdown need not wait for individual tool loops"
     )]
     tokio::spawn(async move {
-        let mut state = ToolLoopState::new(original_request.input.clone());
+        let mut state = ToolLoopState::new(
+            original_request.input.clone(),
+            existing_mcp_list_tools_labels,
+        );
         let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
         // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
@@ -707,6 +711,10 @@ pub(super) fn handle_streaming_with_tool_interception(
         let mut sequence_number: u64 = 0;
         let mut next_output_index: usize = 0;
         let mut preserved_response_id: Option<String> = None;
+        let list_tools_bindings = mcp_list_tools_bindings_to_emit(
+            &state.existing_mcp_list_tools_labels,
+            session.mcp_servers(),
+        );
 
         let streaming_ctx = StreamingEventContext {
             original_request: &original_request,
@@ -815,16 +823,16 @@ pub(super) fn handle_streaming_with_tool_interception(
                                     if is_in_progress {
                                         seen_in_progress = true;
                                         if !mcp_list_tools_sent {
-                                            for binding in session.mcp_servers() {
+                                            for (server_label, server_key) in &list_tools_bindings {
                                                 let list_tools_index =
                                                     handler.allocate_synthetic_output_index();
                                                 if !send_mcp_list_tools_events(
                                                     &tx,
                                                     &session,
-                                                    &binding.label,
+                                                    server_label,
                                                     list_tools_index,
                                                     &mut sequence_number,
-                                                    &binding.server_key,
+                                                    server_key,
                                                 ) {
                                                     // Client disconnected
                                                     return;

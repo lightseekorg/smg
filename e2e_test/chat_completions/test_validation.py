@@ -233,3 +233,155 @@ class TestGptOssValidation:
                 },
             )
         assert exc_info.value.status_code == 400
+
+
+# =============================================================================
+# EOS Token Stripping Tests (Llama 1B)
+# Verify that EOS tokens are stripped from output by StopDecoder even when
+# skip_special_tokens=false. Regression test for generation_config.json
+# EOS loading and StopDecoder EOS stripping.
+# =============================================================================
+
+
+@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.gpu(1)
+@pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
+@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
+class TestEosTokenStripping:
+    """Verify EOS tokens are stripped from output by StopDecoder.
+
+    gRPC backends return raw token IDs including EOS. The StopDecoder must
+    strip EOS at the token ID level before decoding, matching vllm/sglang
+    HTTP behavior. Without this fix, skip_special_tokens=false causes EOS
+    tokens like <|eom_id|> to appear in decoded text.
+    """
+
+    # Llama 3 EOS tokens that should never appear in output
+    EOS_TOKENS = ["<|eom_id|>", "<|eot_id|>", "<|end_of_text|>"]
+
+    def test_no_eos_in_content_default(self, model, api_client):
+        """With default settings, EOS tokens should not appear in content."""
+        response = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Say hello in one sentence."},
+            ],
+            temperature=0,
+            max_tokens=50,
+            stream=False,
+        )
+        content = response.choices[0].message.content
+        assert content is not None
+        for eos in self.EOS_TOKENS:
+            assert eos not in content, f"EOS token {eos} leaked into content: {content}"
+
+    def test_no_eos_in_content_skip_special_false(self, model, api_client):
+        """With skip_special_tokens=false, EOS should still be stripped by StopDecoder."""
+        response = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Say hello in one sentence."},
+            ],
+            temperature=0,
+            max_tokens=50,
+            stream=False,
+            extra_body={"skip_special_tokens": False},
+        )
+        content = response.choices[0].message.content
+        assert content is not None
+        for eos in self.EOS_TOKENS:
+            assert eos not in content, f"EOS token {eos} leaked into content: {content}"
+
+    def test_no_eos_in_tool_call_with_tools(self, model, api_client):
+        """With tools and skip_special_tokens=false, tool calls should not contain EOS."""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "add",
+                    "description": "Compute the sum of two numbers",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"type": "integer", "description": "A number"},
+                            "b": {"type": "integer", "description": "A number"},
+                        },
+                        "required": ["a", "b"],
+                    },
+                },
+            }
+        ]
+        response = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Compute (3+5)"},
+            ],
+            tools=tools,
+            tool_choice="required",
+            temperature=0,
+            max_tokens=200,
+            stream=False,
+            extra_body={"skip_special_tokens": False},
+        )
+        choice = response.choices[0]
+
+        # Check tool call arguments for EOS
+        if choice.message.tool_calls:
+            for tc in choice.message.tool_calls:
+                for eos in self.EOS_TOKENS:
+                    assert eos not in tc.function.arguments, (
+                        f"EOS token {eos} in tool call arguments: {tc.function.arguments}"
+                    )
+
+        # Check content for EOS (if model returned content instead of tool calls)
+        if choice.message.content:
+            for eos in self.EOS_TOKENS:
+                assert eos not in choice.message.content, (
+                    f"EOS token {eos} in content: {choice.message.content}"
+                )
+
+    def test_no_stop_trim_with_skip_special_true(self, model, api_client):
+        """With no_stop_trim=true and skip_special_tokens=true (default),
+        EOS should be kept in token list but invisible (decoded to empty)."""
+        response = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Say hello in one sentence."},
+            ],
+            temperature=0,
+            max_tokens=50,
+            stream=False,
+            extra_body={"no_stop_trim": True},
+        )
+        content = response.choices[0].message.content
+        assert content is not None
+        for eos in self.EOS_TOKENS:
+            assert eos not in content, (
+                f"EOS token {eos} should be invisible with skip_special_tokens=true: {content}"
+            )
+
+    def test_no_stop_trim_with_skip_special_false(self, model, api_client):
+        """With no_stop_trim=true and skip_special_tokens=false,
+        EOS should be visible in output (matching sglang behavior)."""
+        response = api_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Say hello in one sentence."},
+            ],
+            temperature=0,
+            max_tokens=50,
+            stream=False,
+            extra_body={"no_stop_trim": True, "skip_special_tokens": False},
+        )
+        content = response.choices[0].message.content
+        assert content is not None
+        assert response.choices[0].finish_reason == "stop", (
+            "Model hit max_tokens before EOS — test is inconclusive"
+        )
+        # EOS should be visible when both no_stop_trim=true and skip_special_tokens=false
+        has_eos = any(eos in content for eos in self.EOS_TOKENS)
+        assert has_eos, (
+            f"EOS token should be visible with no_stop_trim=true + skip_special_tokens=false: {content}"
+        )

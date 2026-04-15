@@ -123,6 +123,14 @@ pub trait Tokenizer: Encoder + Decoder {
             "set_chat_template is not supported by this tokenizer"
         ))
     }
+
+    /// EOS token IDs for stop detection.
+    ///
+    /// Merged from `config.json` and `generation_config.json` (eos_token_id, int or list).
+    /// Models can have multiple EOS tokens (e.g., Llama 3: end_of_text + eom_id + eot_id).
+    fn eos_token_ids(&self) -> &[TokenIdType] {
+        &[]
+    }
 }
 
 /// Contains the results of tokenizing text: token IDs, string tokens, and their spans

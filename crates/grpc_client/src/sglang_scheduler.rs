@@ -10,7 +10,7 @@ use std::{
 
 use openai_protocol::{
     chat::ChatCompletionRequest,
-    common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
+    common::{ResponseFormat, StringOrArray},
     completion::CompletionRequest,
     generate::GenerateRequest,
     messages::CreateMessageRequest,
@@ -442,16 +442,9 @@ impl SglangSchedulerClient {
 
         let max_new_tokens = request.max_completion_tokens;
 
-        // Handle skip_special_tokens: set to false if tools are present and tool_choice is not "none"
-        let skip_special_tokens = if request.tools.is_some() {
-            match &request.tool_choice {
-                Some(ToolChoice::Value(ToolChoiceValue::None)) => request.skip_special_tokens,
-                Some(_) => false, // tool_choice is not "none"
-                None => false, // TODO: this assumes tool_choice defaults to "auto" when tools present
-            }
-        } else {
-            request.skip_special_tokens
-        };
+        // Hardcode to true: gRPC backends return raw token IDs, not decoded text.
+        // Detokenization happens on the SMG Rust side (StopDecoder/Sequence).
+        let skip_special_tokens = true;
 
         Ok(proto::SamplingParams {
             temperature: request.temperature.unwrap_or(1.0),
@@ -519,21 +512,26 @@ impl SglangSchedulerClient {
             constraints.push(proto::sampling_params::Constraint::Regex(regex.clone()));
         }
 
-        // Handle tool call constraint from preparation stage
+        // Handle tool call constraint from preparation stage.
+        // If response_format already set a constraint, drop the tool constraint
+        // (matches SGLang HTTP behavior where response_format takes priority).
         if let Some((constraint_type, constraint_value)) = tool_call_constraint {
-            if !constraints.is_empty() {
-                return Err("Constrained decoding is not compatible with tool calls.".to_string());
+            if constraints.is_empty() {
+                let tool_constraint = match constraint_type.as_str() {
+                    "structural_tag" => {
+                        proto::sampling_params::Constraint::StructuralTag(constraint_value)
+                    }
+                    "json_schema" => {
+                        proto::sampling_params::Constraint::JsonSchema(constraint_value)
+                    }
+                    "ebnf" => proto::sampling_params::Constraint::EbnfGrammar(constraint_value),
+                    "regex" => proto::sampling_params::Constraint::Regex(constraint_value),
+                    _ => return Err(format!("Unknown constraint type: {constraint_type}")),
+                };
+                constraints.push(tool_constraint);
+            } else {
+                warn!("Constrained decoding is not compatible with tool calls, dropping tool constraint");
             }
-            let tool_constraint = match constraint_type.as_str() {
-                "structural_tag" => {
-                    proto::sampling_params::Constraint::StructuralTag(constraint_value)
-                }
-                "json_schema" => proto::sampling_params::Constraint::JsonSchema(constraint_value),
-                "ebnf" => proto::sampling_params::Constraint::EbnfGrammar(constraint_value),
-                "regex" => proto::sampling_params::Constraint::Regex(constraint_value),
-                _ => return Err(format!("Unknown constraint type: {constraint_type}")),
-            };
-            constraints.push(tool_constraint);
         }
 
         match constraints.len() {
@@ -643,9 +641,8 @@ impl SglangSchedulerClient {
     ) -> Result<proto::SamplingParams, String> {
         let stop_sequences = request.stop_sequences.clone().unwrap_or_default();
 
-        // skip_special_tokens: false when tools are present (same logic as chat)
-        let skip_special_tokens =
-            tool_call_constraint.is_none() && request.tools.as_ref().is_none_or(|t| t.is_empty());
+        // Hardcode to true: gRPC backends return raw token IDs, not decoded text.
+        let skip_special_tokens = true;
 
         Ok(proto::SamplingParams {
             temperature: request.temperature.unwrap_or(1.0) as f32,

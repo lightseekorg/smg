@@ -95,6 +95,7 @@ impl StreamingProcessor {
         chat_request: Arc<ChatCompletionRequest>,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
+        skip_special_tokens: bool,
     ) -> Response {
         use bytes::Bytes;
         use tokio::sync::mpsc;
@@ -102,8 +103,9 @@ impl StreamingProcessor {
         let stop_params = (
             chat_request.stop.clone(),
             chat_request.stop_token_ids.clone(),
-            chat_request.skip_special_tokens,
+            skip_special_tokens,
             chat_request.no_stop_trim,
+            chat_request.ignore_eos,
         );
 
         // Create SSE channel
@@ -185,7 +187,7 @@ impl StreamingProcessor {
         mut grpc_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
-        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<ChatCompletionRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -250,15 +252,26 @@ impl StreamingProcessor {
         let think_in_prefill = tokenizer.think_in_prefill();
 
         // Check if JSON schema constraint was used (specific function or required mode)
-        let used_json_schema = match tool_choice {
-            Some(ToolChoice::Function { .. }) => true,
-            Some(ToolChoice::Value(ToolChoiceValue::Required)) => true,
-            Some(ToolChoice::AllowedTools { mode, .. }) => mode == "required",
-            _ => false,
+        let has_structural_tag = self
+            .tool_parser_factory
+            .registry()
+            .has_structural_tag_for_parser(self.configured_tool_parser.as_deref());
+        let used_json_schema = if has_structural_tag {
+            false
+        } else {
+            match tool_choice {
+                Some(ToolChoice::Function { .. }) => true,
+                Some(ToolChoice::Value(ToolChoiceValue::Required)) => true,
+                Some(ToolChoice::AllowedTools { mode, .. }) => mode == "required",
+                _ => false,
+            }
         };
 
-        // Check if this is the specific function case (LLM generates parameters only, no name field)
-        let is_specific_function = matches!(tool_choice, Some(ToolChoice::Function { .. }));
+        // Check if this is the specific function case (LLM generates parameters only, no name field).
+        // Only applies when json_schema is used — structural tags include framing tokens
+        // that the parser must handle.
+        let is_specific_function =
+            used_json_schema && matches!(tool_choice, Some(ToolChoice::Function { .. }));
 
         let tool_parser_available = tools.is_some()
             && utils::check_tool_parser_availability(
@@ -298,14 +311,20 @@ impl StreamingProcessor {
 
                     // Get or create stop decoder for this index
                     let stop_decoder = stop_decoders.entry(index).or_insert_with(|| {
-                        let (ref stop, ref stop_token_ids, skip_special_tokens, no_stop_trim) =
-                            stop_params;
+                        let (
+                            ref stop,
+                            ref stop_token_ids,
+                            skip_special_tokens,
+                            no_stop_trim,
+                            ignore_eos,
+                        ) = stop_params;
                         utils::create_stop_decoder(
                             &tokenizer,
                             stop.as_ref(),
                             stop_token_ids.as_ref(),
                             skip_special_tokens,
                             no_stop_trim,
+                            ignore_eos,
                         )
                     });
 
@@ -588,7 +607,7 @@ impl StreamingProcessor {
         decode_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
-        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<ChatCompletionRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -1433,6 +1452,7 @@ impl StreamingProcessor {
         messages_request: Arc<CreateMessageRequest>,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
+        skip_special_tokens: bool,
     ) -> Response {
         let stop_params = (
             messages_request
@@ -1440,8 +1460,9 @@ impl StreamingProcessor {
                 .clone()
                 .map(StringOrArray::Array),
             None::<Vec<u32>>, // No stop_token_ids in Messages API
-            true,             // always skip special tokens
-            false,            // no_stop_trim
+            skip_special_tokens,
+            false, // no_stop_trim
+            false, // ignore_eos — not available in Messages API
         );
 
         let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -1536,7 +1557,7 @@ impl StreamingProcessor {
         mut grpc_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
-        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<CreateMessageRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -1563,13 +1584,15 @@ impl StreamingProcessor {
 
         // Stop decoder
         let mut stop_decoder = {
-            let (ref stop, ref stop_token_ids, skip_special_tokens, no_stop_trim) = stop_params;
+            let (ref stop, ref stop_token_ids, skip_special_tokens, no_stop_trim, ignore_eos) =
+                stop_params;
             utils::create_stop_decoder(
                 &tokenizer,
                 stop.as_ref(),
                 stop_token_ids.as_ref(),
                 skip_special_tokens,
                 no_stop_trim,
+                ignore_eos,
             )
         };
 
@@ -1615,16 +1638,23 @@ impl StreamingProcessor {
                 model,
             );
 
-        let used_json_schema = matches!(
-            &original_request.tool_choice,
-            Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
-        );
+        let has_structural_tag = self
+            .tool_parser_factory
+            .registry()
+            .has_structural_tag_for_parser(self.configured_tool_parser.as_deref());
+        let used_json_schema = !has_structural_tag
+            && matches!(
+                &original_request.tool_choice,
+                Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
+            );
 
-        // Check if model output is arguments-only for a specific function (ToolChoice::Tool)
-        let is_specific_function = matches!(
-            &original_request.tool_choice,
-            Some(messages::ToolChoice::Tool { .. })
-        );
+        // Check if model output is arguments-only for a specific function (ToolChoice::Tool).
+        // Only applies when json_schema is used — structural tags include framing tokens.
+        let is_specific_function = used_json_schema
+            && matches!(
+                &original_request.tool_choice,
+                Some(messages::ToolChoice::Tool { .. })
+            );
 
         let history_tool_calls_count =
             message_utils::get_history_tool_calls_count_messages(&original_request);
@@ -2143,7 +2173,7 @@ impl StreamingProcessor {
         decode_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
-        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<CreateMessageRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -2192,6 +2222,7 @@ impl StreamingProcessor {
             completion_request.stop_token_ids.clone(),
             completion_request.skip_special_tokens,
             completion_request.no_stop_trim,
+            completion_request.ignore_eos,
         );
 
         let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -2271,7 +2302,7 @@ impl StreamingProcessor {
         mut grpc_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
-        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         completion_request: Arc<CompletionRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -2337,12 +2368,20 @@ impl StreamingProcessor {
                     total_completion.record_chunk(&chunk);
 
                     let stop_decoder = stop_decoders.entry(index).or_insert_with(|| {
+                        let (
+                            ref stop,
+                            ref stop_token_ids,
+                            skip_special_tokens,
+                            no_stop_trim,
+                            ignore_eos,
+                        ) = stop_params;
                         utils::create_stop_decoder(
                             &tokenizer,
-                            stop_params.0.as_ref(),
-                            stop_params.1.as_ref(),
-                            stop_params.2,
-                            stop_params.3,
+                            stop.as_ref(),
+                            stop_token_ids.as_ref(),
+                            skip_special_tokens,
+                            no_stop_trim,
+                            ignore_eos,
                         )
                     });
 
@@ -2595,7 +2634,7 @@ impl StreamingProcessor {
         decode_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
-        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool),
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<CompletionRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {

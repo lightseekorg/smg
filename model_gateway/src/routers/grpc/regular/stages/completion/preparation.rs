@@ -54,18 +54,12 @@ impl PipelineStage for CompletionPreparationStage {
             request.stop_token_ids.as_ref(),
             request.skip_special_tokens,
             request.no_stop_trim,
+            request.ignore_eos,
         );
 
-        ctx.state.preparation = Some(PreparationOutput {
-            original_text: Some(prompt_text),
+        ctx.state.preparation = Some(PreparationOutput::Completion {
+            original_text: prompt_text,
             token_ids: encoding.token_ids().to_vec(),
-            processed_messages: None,
-            tool_constraints: None,
-            filtered_request: None,
-            harmony_mode: false,
-            selection_text: None,
-            harmony_messages: None,
-            harmony_stop_ids: None,
         });
 
         ctx.state.response.stop_decoder = Some(stop_decoder);

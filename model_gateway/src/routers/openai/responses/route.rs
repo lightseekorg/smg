@@ -13,7 +13,8 @@ use serde_json::to_value;
 use super::{
     super::{
         context::{
-            ComponentRefs, PayloadState, RequestContext, ResponsesComponents, WorkerSelection,
+            ComponentRefs, PayloadState, RequestContext, ResponsesComponents,
+            ResponsesPayloadState, WorkerSelection,
         },
         provider::ProviderRegistry,
         router::resolve_provider,
@@ -108,7 +109,7 @@ pub(in crate::routers::openai) async fn route_responses(
     request_body.model = model_id.to_string();
     request_body.conversation = None;
 
-    let original_previous_response_id = match super::history::load_input_history(
+    let loaded_history = match super::history::load_input_history(
         deps.responses_components,
         conversation.map(String::as_str),
         &mut request_body,
@@ -172,7 +173,10 @@ pub(in crate::routers::openai) async fn route_responses(
     ctx.state.payload = Some(PayloadState {
         json: payload,
         url: format!("{}/v1/responses", worker.url()),
-        previous_response_id: original_previous_response_id,
+    });
+    ctx.state.responses_payload = Some(ResponsesPayloadState {
+        previous_response_id: loaded_history.previous_response_id,
+        existing_mcp_list_tools_labels: loaded_history.existing_mcp_list_tools_labels,
     });
 
     let response = if ctx.is_streaming() {

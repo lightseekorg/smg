@@ -5,13 +5,16 @@ vLLM gRPC Servicer
 Implements the VllmEngine gRPC service on top of vLLM's EngineClient.
 """
 
+import hashlib
 import itertools
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
+from pathlib import Path
 
 import grpc
 import torch
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
+from smg_grpc_proto.generated import common_pb2
 from transformers import BatchFeature
 from vllm import PoolingParams, SamplingParams, TokensPrompt
 from vllm.engine.protocol import EngineClient
@@ -26,6 +29,8 @@ from vllm.multimodal.inputs import (
 )
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
+
+from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
 
 logger = init_logger(__name__)
 
@@ -49,13 +54,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     """
     gRPC servicer implementing the VllmEngine service.
 
-    Handles 6 RPCs:
+    Handles 7 RPCs:
     - Generate: Streaming text generation
     - Embed: Embeddings
     - HealthCheck: Health probe
     - Abort: Cancel requests out-of-band
     - GetModelInfo: Model metadata
     - GetServerInfo: Server state
+    - GetTokenizer: Stream tokenizer artifacts
     """
 
     def __init__(self, async_llm: EngineClient, start_time: float):
@@ -357,6 +363,58 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             kv_connector=kv_connector,
             kv_role=kv_role,
         )
+
+    async def GetTokenizer(
+        self,
+        request: common_pb2.GetTokenizerRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[common_pb2.GetTokenizerChunk]:
+        """Stream tokenizer artifacts as a ZIP bundle.
+
+        Resolves the tokenizer directory from model_config, zips all relevant
+        tokenizer files, and streams them as GetTokenizerChunk messages.
+        The final chunk carries the SHA-256 fingerprint of the full archive.
+        """
+        logger.info("Receive GetTokenizer request")
+
+        tokenizer_path = self.engine.model_config.tokenizer
+        if not tokenizer_path:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "Tokenizer path is not configured on this server.",
+            )
+        # TODO: model_config.tokenizer may be an HF model ID (e.g. "meta-llama/...")
+        # rather than a local path. vLLM does not resolve it on the config object.
+        # For now, GetTokenizer only works when vLLM is started with a local path.
+        tokenizer_dir = Path(tokenizer_path)
+
+        # Build ZIP archive in memory
+        try:
+            zip_buffer = build_tokenizer_zip(tokenizer_dir)
+        except Exception as e:
+            logger.exception("Failed to build tokenizer ZIP")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+
+        zip_data = zip_buffer.getbuffer()
+        sha256 = hashlib.sha256(zip_data).hexdigest()
+
+        logger.info(
+            "Streaming tokenizer bundle: %d bytes, sha256=%s",
+            len(zip_data),
+            sha256,
+        )
+
+        # Stream chunks; SHA-256 only on the final chunk
+        offset = 0
+        total = len(zip_data)
+        while offset < total:
+            end = min(offset + CHUNK_SIZE, total)
+            is_last = end == total
+            yield common_pb2.GetTokenizerChunk(
+                data=bytes(zip_data[offset:end]),
+                sha256=sha256 if is_last else "",
+            )
+            offset = end
 
     # ========== Helper methods ==========
 

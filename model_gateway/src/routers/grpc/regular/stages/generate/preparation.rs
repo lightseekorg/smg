@@ -66,19 +66,12 @@ impl GeneratePreparationStage {
             params.and_then(|p| p.stop_token_ids.as_ref()),
             params.and_then(|p| p.skip_special_tokens).unwrap_or(true),
             params.and_then(|p| p.no_stop_trim).unwrap_or(false),
+            params.and_then(|p| p.ignore_eos).unwrap_or(false),
         );
 
-        ctx.state.preparation = Some(PreparationOutput {
+        ctx.state.preparation = Some(PreparationOutput::Generate {
             original_text,
             token_ids,
-            processed_messages: None,
-            tool_constraints: None,
-            filtered_request: None,
-            // Harmony fields (not used for generate requests)
-            harmony_mode: false,
-            selection_text: None,
-            harmony_messages: None,
-            harmony_stop_ids: None,
         });
 
         // Store stop decoder

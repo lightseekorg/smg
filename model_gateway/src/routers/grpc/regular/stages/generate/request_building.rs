@@ -68,8 +68,8 @@ impl PipelineStage for GenerateRequestBuildingStage {
             .build_generate_request(
                 request_id,
                 &generate_request,
-                prep.original_text.clone(),
-                prep.token_ids.clone(),
+                prep.routing_text().map(String::from),
+                prep.token_ids().to_vec(),
             )
             .map_err(|e| {
                 error!(function = "GenerateRequestBuildingStage::execute", error = %e, "Failed to build generate request");

@@ -116,7 +116,7 @@ impl PipelineStage for CompletionResponseProcessingStage {
             .state
             .preparation
             .as_ref()
-            .and_then(|p| p.original_text.as_deref())
+            .and_then(|p| p.routing_text())
             .unwrap_or("");
 
         let response = self

@@ -344,6 +344,171 @@ async fn test_final_response_hides_internal_mcp_trace_items() {
 }
 
 #[tokio::test]
+async fn test_previous_response_id_does_not_repeat_mcp_list_tools_for_existing_binding() {
+    let mut mcp = MockMCPServer::start().await.expect("start mcp");
+
+    let mcp_yaml = format!(
+        "servers:\n  - name: mock\n    protocol: streamable\n    url: {}\n",
+        mcp.url()
+    );
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let cfg_path = dir.path().join("mcp.yaml");
+    std::fs::write(&cfg_path, mcp_yaml).expect("write mcp cfg");
+
+    let mut worker = MockWorker::new(MockWorkerConfig {
+        port: 0,
+        worker_type: WorkerType::Regular,
+        health_status: HealthStatus::Healthy,
+        response_delay_ms: 0,
+        fail_rate: 0.0,
+    });
+    let worker_url = worker.start().await.expect("start worker");
+
+    let router_cfg = RouterConfig::builder()
+        .openai_mode(vec![worker_url])
+        .random_policy()
+        .host("127.0.0.1")
+        .port(0)
+        .max_payload_size(8 * 1024 * 1024)
+        .request_timeout_secs(60)
+        .worker_startup_timeout_secs(5)
+        .worker_startup_check_interval_secs(1)
+        .log_level("warn")
+        .max_concurrent_requests(32)
+        .queue_timeout_secs(5)
+        .build_unchecked();
+
+    let ctx =
+        crate::common::create_test_context_with_mcp_config(router_cfg, cfg_path.to_str().unwrap())
+            .await;
+    let router = RouterFactory::create_router(&ctx).await.expect("router");
+
+    let mcp_tool = ResponseTool::Mcp(McpTool {
+        server_url: Some(mcp.url()),
+        authorization: None,
+        headers: None,
+        server_label: "mock".to_string(),
+        server_description: None,
+        require_approval: Some(RequireApproval::Never),
+        allowed_tools: None,
+    });
+
+    let req1 = ResponsesRequest {
+        background: Some(false),
+        include: None,
+        input: ResponseInput::Text("search something".to_string()),
+        instructions: Some("Be brief".to_string()),
+        max_output_tokens: Some(64),
+        max_tool_calls: None,
+        metadata: None,
+        model: "mock-model".to_string(),
+        parallel_tool_calls: Some(true),
+        previous_response_id: None,
+        reasoning: None,
+        service_tier: Some(ServiceTier::Auto),
+        store: Some(true),
+        stream: Some(false),
+        temperature: Some(0.2),
+        tool_choice: Some(ToolChoice::default()),
+        tools: Some(vec![mcp_tool.clone()]),
+        top_logprobs: Some(0),
+        top_p: None,
+        truncation: Some(Truncation::Disabled),
+        text: None,
+        user: None,
+        request_id: Some("resp_prev_id_turn_1".to_string()),
+        priority: 0,
+        frequency_penalty: Some(0.0),
+        presence_penalty: Some(0.0),
+        stop: None,
+        top_k: -1,
+        min_p: 0.0,
+        repetition_penalty: 1.0,
+        conversation: None,
+    };
+
+    let resp1 = router
+        .route_responses(None, &req1, req1.model.as_str())
+        .await;
+    assert_eq!(resp1.status(), StatusCode::OK);
+
+    let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read response body");
+    let body1_json: serde_json::Value =
+        serde_json::from_slice(&body1).expect("Failed to parse response JSON");
+    let first_response_id = body1_json["id"]
+        .as_str()
+        .expect("first response should have id")
+        .to_string();
+
+    let req2 = ResponsesRequest {
+        background: Some(false),
+        include: None,
+        input: ResponseInput::Text("Summarize that in five words".to_string()),
+        instructions: Some("Be brief".to_string()),
+        max_output_tokens: Some(64),
+        max_tool_calls: None,
+        metadata: None,
+        model: "mock-model".to_string(),
+        parallel_tool_calls: Some(true),
+        previous_response_id: Some(first_response_id),
+        reasoning: None,
+        service_tier: Some(ServiceTier::Auto),
+        store: Some(true),
+        stream: Some(false),
+        temperature: Some(0.2),
+        tool_choice: Some(ToolChoice::default()),
+        tools: Some(vec![mcp_tool]),
+        top_logprobs: Some(0),
+        top_p: None,
+        truncation: Some(Truncation::Disabled),
+        text: None,
+        user: None,
+        request_id: Some("resp_prev_id_turn_2".to_string()),
+        priority: 0,
+        frequency_penalty: Some(0.0),
+        presence_penalty: Some(0.0),
+        stop: None,
+        top_k: -1,
+        min_p: 0.0,
+        repetition_penalty: 1.0,
+        conversation: None,
+    };
+
+    let resp2 = router
+        .route_responses(None, &req2, req2.model.as_str())
+        .await;
+    assert_eq!(resp2.status(), StatusCode::OK);
+
+    let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read response body");
+    let body2_json: serde_json::Value =
+        serde_json::from_slice(&body2).expect("Failed to parse response JSON");
+
+    let output = body2_json["output"]
+        .as_array()
+        .expect("response output missing");
+    assert_eq!(
+        output.len(),
+        2,
+        "resume turn should return only current-turn MCP activity plus the final message: {body2_json}",
+    );
+    assert_eq!(output[0]["type"], "mcp_call");
+    assert_eq!(output[1]["type"], "message");
+    assert!(
+        output
+            .iter()
+            .all(|item| item.get("type").and_then(|v| v.as_str()) != Some("mcp_list_tools")),
+        "existing bindings should not repeat mcp_list_tools on previous_response_id turns"
+    );
+
+    worker.stop().await;
+    mcp.stop().await;
+}
+
+#[tokio::test]
 async fn test_final_response_hides_internal_mcp_error_details() {
     let mut mcp = MockFailingMCPServer::start(TEST_INTERNAL_MCP_ERROR_MARKER)
         .await

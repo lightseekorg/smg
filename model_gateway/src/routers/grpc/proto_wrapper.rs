@@ -406,6 +406,19 @@ impl ProtoGenerateRequest {
         self.clone()
     }
 
+    /// Strip multimodal inputs from the request.
+    ///
+    /// Used for the decode worker in PD disaggregation — the decode worker only
+    /// needs the KV cache from prefill, not the image pixel data. This avoids
+    /// transmitting ~40MB of pixel tensors to a worker that ignores them.
+    pub fn clear_mm_inputs(&mut self) {
+        match self {
+            Self::Sglang(req) => req.mm_inputs = None,
+            Self::Vllm(req) => req.mm_inputs = None,
+            Self::Trtllm(_) | Self::Mlx(_) => {} // TRT-LLM and MLX protos have no mm_inputs field
+        }
+    }
+
     /// Get request ID
     pub fn request_id(&self) -> &str {
         match self {

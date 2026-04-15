@@ -141,11 +141,19 @@ impl ResponseProcessor {
 
         if tool_choice_enabled && original_request.tools.is_some() {
             // Check if JSON schema constraint was used (specific function or required mode)
-            let used_json_schema = match &original_request.tool_choice {
-                Some(ToolChoice::Function { .. }) => true,
-                Some(ToolChoice::Value(ToolChoiceValue::Required)) => true,
-                Some(ToolChoice::AllowedTools { mode, .. }) => mode == "required",
-                _ => false,
+            let has_structural_tag = self
+                .tool_parser_factory
+                .registry()
+                .has_structural_tag_for_parser(self.configured_tool_parser.as_deref());
+            let used_json_schema = if has_structural_tag {
+                false
+            } else {
+                match &original_request.tool_choice {
+                    Some(ToolChoice::Function { .. }) => true,
+                    Some(ToolChoice::Value(ToolChoiceValue::Required)) => true,
+                    Some(ToolChoice::AllowedTools { mode, .. }) => mode == "required",
+                    _ => false,
+                }
             };
 
             if used_json_schema {
@@ -616,10 +624,15 @@ impl ResponseProcessor {
 
         if tool_choice_enabled && messages_request.tools.is_some() {
             // Check if JSON schema constraint was used (specific tool or any/required mode)
-            let used_json_schema = matches!(
-                &messages_request.tool_choice,
-                Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
-            );
+            let has_structural_tag = self
+                .tool_parser_factory
+                .registry()
+                .has_structural_tag_for_parser(self.configured_tool_parser.as_deref());
+            let used_json_schema = !has_structural_tag
+                && matches!(
+                    &messages_request.tool_choice,
+                    Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
+                );
 
             if used_json_schema {
                 // Bridge Messages ToolChoice to Chat ToolChoice for reuse

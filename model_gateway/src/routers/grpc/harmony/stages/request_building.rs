@@ -10,7 +10,7 @@ use crate::routers::{
     grpc::{
         client::GrpcClient,
         common::stages::{helpers, PipelineStage},
-        context::{ClientSelection, RequestContext, RequestType},
+        context::{ClientSelection, PreparationOutput, RequestContext, RequestType},
         proto_wrapper::{ProtoGenerateRequest, ProtoRequest},
     },
 };
@@ -33,14 +33,28 @@ impl HarmonyRequestBuildingStage {
 #[async_trait]
 impl PipelineStage for HarmonyRequestBuildingStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
-        // Get preparation output
-        let prep = ctx.state.preparation.as_ref().ok_or_else(|| {
+        // Take preparation output (last consumer — worker_selection already ran)
+        let prep = ctx.state.preparation.take().ok_or_else(|| {
             error!(
                 function = "HarmonyRequestBuildingStage::execute",
                 "Preparation stage not completed"
             );
             error::internal_error("preparation_not_completed", "Preparation not completed")
         })?;
+        let PreparationOutput::Harmony {
+            token_ids,
+            tool_constraints,
+            modified_request,
+            harmony_stop_ids,
+            ..
+        } = prep
+        else {
+            debug_assert!(false, "pipeline guarantees Harmony variant");
+            return Err(error::internal_error(
+                "wrong_preparation_type",
+                "Expected Harmony preparation output",
+            ));
+        };
 
         // Get clients
         let clients = ctx.state.clients.as_ref().ok_or_else(|| {
@@ -87,15 +101,15 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             GrpcClient::Sglang(sglang_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
-                        let body = prep.filtered_request.as_ref().unwrap_or_else(|| request.as_ref());
+                        let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
                         sglang_client
                             .build_generate_request_from_chat(
                                 request_id,
                                 body,
                                 placeholder_processed_text,
-                                prep.token_ids.clone(),
+                                token_ids,
                                 None,
-                                prep.tool_constraints.clone(),
+                                tool_constraints,
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build SGLang generate request");
@@ -107,8 +121,8 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             request_id,
                             request.as_ref(),
                             placeholder_processed_text,
-                            prep.token_ids.clone(),
-                            prep.tool_constraints.clone(),
+                            token_ids,
+                            tool_constraints,
                         )
                         .map_err(|e| {
                             error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build SGLang generate request from responses");
@@ -132,15 +146,15 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             GrpcClient::Vllm(vllm_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
-                        let body = prep.filtered_request.as_ref().unwrap_or_else(|| request.as_ref());
+                        let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
                         vllm_client
                             .build_generate_request_from_chat(
                                 request_id,
                                 body,
                                 placeholder_processed_text,
-                                prep.token_ids.clone(),
+                                token_ids,
                                 None, // No multimodal in Harmony pipeline
-                                prep.tool_constraints.clone(),
+                                tool_constraints,
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build vLLM generate request");
@@ -152,8 +166,8 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             request_id,
                             request.as_ref(),
                             placeholder_processed_text,
-                            prep.token_ids.clone(),
-                            prep.tool_constraints.clone(),
+                            token_ids,
+                            tool_constraints,
                         )
                         .map_err(|e| {
                             error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build vLLM generate request from responses");
@@ -177,15 +191,15 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             GrpcClient::Trtllm(trtllm_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
-                        let body = prep.filtered_request.as_ref().unwrap_or_else(|| request.as_ref());
+                        let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
                         trtllm_client
                             .build_generate_request_from_chat(
                                 request_id,
                                 body,
                                 placeholder_processed_text,
-                                prep.token_ids.clone(),
+                                token_ids,
                                 None, // No multimodal in Harmony pipeline
-                                prep.tool_constraints.clone(),
+                                tool_constraints,
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request");
@@ -197,8 +211,8 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             request_id,
                             request.as_ref(),
                             placeholder_processed_text,
-                            prep.token_ids.clone(),
-                            prep.tool_constraints.clone(),
+                            token_ids,
+                            tool_constraints,
                         )
                         .map_err(|e| {
                             error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request from responses");
@@ -222,14 +236,14 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             GrpcClient::Mlx(mlx_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
-                        let body = prep.filtered_request.as_ref().unwrap_or_else(|| request.as_ref());
+                        let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
                         mlx_client
                             .build_generate_request_from_chat(
                                 request_id,
                                 body,
                                 placeholder_processed_text,
-                                prep.token_ids.clone(),
-                                prep.tool_constraints.clone(),
+                                token_ids,
+                                tool_constraints,
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build MLX generate request");
@@ -241,8 +255,8 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             request_id,
                             request.as_ref(),
                             placeholder_processed_text,
-                            prep.token_ids.clone(),
-                            prep.tool_constraints.clone(),
+                            token_ids,
+                            tool_constraints,
                         )
                         .map_err(|e| {
                             error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build MLX generate request from responses");
@@ -268,42 +282,42 @@ impl PipelineStage for HarmonyRequestBuildingStage {
         // Inject Harmony stop token IDs into sampling params for ALL Harmony requests
         // These stop tokens (<|return|> and <|call|>) prevent the model from generating
         // malformed Harmony sequences
-        if let Some(harmony_stops) = &prep.harmony_stop_ids {
+        if !harmony_stop_ids.is_empty() {
             match &mut proto_request {
                 ProtoGenerateRequest::Sglang(req) => {
                     if let Some(params) = req.sampling_params.as_mut() {
-                        params.stop_token_ids.extend_from_slice(harmony_stops);
+                        params.stop_token_ids.extend_from_slice(&harmony_stop_ids);
                         debug!(
-                            stop_token_count = harmony_stops.len(),
+                            stop_token_count = harmony_stop_ids.len(),
                             "Injected Harmony stop tokens into SGLang sampling params"
                         );
                     }
                 }
                 ProtoGenerateRequest::Vllm(req) => {
                     if let Some(params) = req.sampling_params.as_mut() {
-                        params.stop_token_ids.extend_from_slice(harmony_stops);
+                        params.stop_token_ids.extend_from_slice(&harmony_stop_ids);
                         debug!(
-                            stop_token_count = harmony_stops.len(),
+                            stop_token_count = harmony_stop_ids.len(),
                             "Injected Harmony stop tokens into vLLM sampling params"
                         );
                     }
                 }
                 ProtoGenerateRequest::Trtllm(req) => {
-                    req.stop_token_ids.extend_from_slice(harmony_stops);
+                    req.stop_token_ids.extend_from_slice(&harmony_stop_ids);
                     // TRT-LLM strips stop tokens from output by default, but
                     // the Harmony parser needs them to detect channel boundaries
                     // (e.g. <|call|> marks the tool-call channel transition).
                     req.include_stop_token_in_output = true;
                     debug!(
-                        stop_token_count = harmony_stops.len(),
+                        stop_token_count = harmony_stop_ids.len(),
                         "Injected Harmony stop tokens into TensorRT-LLM stop_token_ids"
                     );
                 }
                 ProtoGenerateRequest::Mlx(req) => {
                     if let Some(ref mut params) = req.sampling_params {
-                        params.stop_token_ids.extend_from_slice(harmony_stops);
+                        params.stop_token_ids.extend_from_slice(&harmony_stop_ids);
                         debug!(
-                            stop_token_count = harmony_stops.len(),
+                            stop_token_count = harmony_stop_ids.len(),
                             "Injected Harmony stop tokens into MLX sampling params"
                         );
                     }

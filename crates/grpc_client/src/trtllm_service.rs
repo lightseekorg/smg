@@ -524,59 +524,69 @@ impl TrtllmServiceClient {
         request: &ChatCompletionRequest,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<Option<proto::GuidedDecodingParams>, String> {
-        // Handle tool call constraint first
-        if let Some((constraint_type, constraint_value)) = tool_call_constraint {
-            let guide_type = match constraint_type.as_str() {
-                "structural_tag" => proto::guided_decoding_params::GuideType::StructuralTag,
-                "json_schema" => proto::guided_decoding_params::GuideType::JsonSchema,
-                "ebnf" | "grammar" => proto::guided_decoding_params::GuideType::EbnfGrammar,
-                "regex" => proto::guided_decoding_params::GuideType::Regex,
-                _ => return Err(format!("Unknown constraint type: {constraint_type}")),
-            };
-            return Ok(Some(proto::GuidedDecodingParams {
-                guide_type: guide_type as i32,
-                guide: constraint_value,
-            }));
-        }
+        // Collect non-tool constraint (response_format, ebnf, regex)
+        let mut guided = None;
 
-        // Handle response_format
         match &request.response_format {
             Some(ResponseFormat::JsonObject) => {
                 let schema = serde_json::json!({"type": "object"});
                 let schema_str = serde_json::to_string(&schema)
                     .map_err(|e| format!("Failed to serialize JSON schema: {e}"))?;
-                return Ok(Some(proto::GuidedDecodingParams {
+                guided = Some(proto::GuidedDecodingParams {
                     guide_type: proto::guided_decoding_params::GuideType::JsonSchema as i32,
                     guide: schema_str,
-                }));
+                });
             }
             Some(ResponseFormat::JsonSchema { json_schema }) => {
                 let schema_str = serde_json::to_string(&json_schema.schema)
                     .map_err(|e| format!("Failed to serialize JSON schema: {e}"))?;
-                return Ok(Some(proto::GuidedDecodingParams {
+                guided = Some(proto::GuidedDecodingParams {
                     guide_type: proto::guided_decoding_params::GuideType::JsonSchema as i32,
                     guide: schema_str,
-                }));
+                });
             }
             Some(ResponseFormat::Text) | None => {}
         }
 
-        // Handle ebnf/regex from request
-        if let Some(ebnf) = &request.ebnf {
-            return Ok(Some(proto::GuidedDecodingParams {
-                guide_type: proto::guided_decoding_params::GuideType::EbnfGrammar as i32,
-                guide: ebnf.clone(),
-            }));
+        if guided.is_none() {
+            if let Some(ebnf) = &request.ebnf {
+                guided = Some(proto::GuidedDecodingParams {
+                    guide_type: proto::guided_decoding_params::GuideType::EbnfGrammar as i32,
+                    guide: ebnf.clone(),
+                });
+            }
         }
 
-        if let Some(regex) = &request.regex {
-            return Ok(Some(proto::GuidedDecodingParams {
-                guide_type: proto::guided_decoding_params::GuideType::Regex as i32,
-                guide: regex.clone(),
-            }));
+        if guided.is_none() {
+            if let Some(regex) = &request.regex {
+                guided = Some(proto::GuidedDecodingParams {
+                    guide_type: proto::guided_decoding_params::GuideType::Regex as i32,
+                    guide: regex.clone(),
+                });
+            }
         }
 
-        Ok(None)
+        // Tool call constraint — drop if another constraint already set
+        // (matches TRT-LLM HTTP behavior where response_format takes priority)
+        if let Some((constraint_type, constraint_value)) = tool_call_constraint {
+            if guided.is_some() {
+                warn!("Constrained decoding is not compatible with tool calls, dropping tool constraint");
+            } else {
+                let guide_type = match constraint_type.as_str() {
+                    "structural_tag" => proto::guided_decoding_params::GuideType::StructuralTag,
+                    "json_schema" => proto::guided_decoding_params::GuideType::JsonSchema,
+                    "ebnf" | "grammar" => proto::guided_decoding_params::GuideType::EbnfGrammar,
+                    "regex" => proto::guided_decoding_params::GuideType::Regex,
+                    _ => return Err(format!("Unknown constraint type: {constraint_type}")),
+                };
+                guided = Some(proto::GuidedDecodingParams {
+                    guide_type: guide_type as i32,
+                    guide: constraint_value,
+                });
+            }
+        }
+
+        Ok(guided)
     }
 
     /// Build SamplingConfig from ResponsesRequest
