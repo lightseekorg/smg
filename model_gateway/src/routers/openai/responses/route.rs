@@ -20,14 +20,12 @@ use super::{
         router::resolve_provider,
     },
     handle_non_streaming_response, handle_streaming_response,
+    header_utils::extract_conversation_memory_config,
 };
 use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
-        common::{
-            header_utils::extract_conversation_memory_config,
-            worker_selection::{SelectWorkerRequest, WorkerSelector},
-        },
+        common::worker_selection::{SelectWorkerRequest, WorkerSelector},
         error,
     },
     worker::{Endpoint, ProviderType, WorkerRegistry},
@@ -125,6 +123,17 @@ pub(in crate::routers::openai) async fn route_responses(
     };
 
     let memory_config = extract_conversation_memory_config(headers);
+    if memory_config.long_term_memory.enabled || memory_config.short_term_memory.enabled {
+        tracing::debug!(
+            ltm_enabled = memory_config.long_term_memory.enabled,
+            ltm_has_subject_id = memory_config.long_term_memory.subject_id.is_some(),
+            ltm_has_embedding_model = memory_config.long_term_memory.embedding_model_id.is_some(),
+            ltm_has_extraction_model = memory_config.long_term_memory.extraction_model_id.is_some(),
+            stm_enabled = memory_config.short_term_memory.enabled,
+            stm_has_condenser_model = memory_config.short_term_memory.condenser_model_id.is_some(),
+            "conversation memory requested"
+        );
+    }
     super::history::inject_memory_context(&memory_config, &mut request_body);
 
     request_body.store = Some(false);

@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 use super::super::context::ResponsesComponents;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::{common::header_utils::ConversationMemoryConfig, error},
+    routers::{error, openai::responses::header_utils::ConversationMemoryConfig},
 };
 
 const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
@@ -281,47 +281,27 @@ fn append_current_input(
     }
 }
 
-// ── Memory context injection ──────────────────────────────────────────────────
-
-/// Inject retrieved memories into the request body before dispatching upstream.
+/// Memory hook entrypoint for Responses API.
 ///
-/// Reads [`ConversationMemoryConfig`] parsed from the incoming headers and
-/// prepends a system message containing the relevant memories so the model
-/// has context for the current turn.
-///
-/// # Current status
-///
-/// This is a **stub**. The config is read and logged so that the call-site
-/// contract is established, but no retrieval is performed yet.
-///
-/// # TODO
-/// - Wire a `ConversationMemoryReader` through the storage layer.
-/// - On `ltm_enabled`: retrieve long-term memories for `subject_id` and
-///   prepend as a system message.
-/// - On `stm_enabled`: retrieve the short-term memory summary (STMO output)
-///   and prepend as a system message.
+/// This is intentionally a no-op in this PR: it confirms header parsing is
+/// connected to request flow and logs activation state for follow-up retrieval work.
 pub(crate) fn inject_memory_context(
     config: &ConversationMemoryConfig,
     _request_body: &mut ResponsesRequest,
 ) {
-    if config.ltm_enabled {
-        // TODO: retrieve long-term memories and prepend as system message
+    if config.long_term_memory.enabled {
         debug!(
-            has_subject_id = config.ltm_subject_id.is_some(),
-            embedding_model = config.ltm_embedding_model_id.as_deref().unwrap_or("<none>"),
-            extraction_model = config
-                .ltm_extraction_model_id
-                .as_deref()
-                .unwrap_or("<none>"),
-            "LTM recall requested — retrieval not yet implemented"
+            has_subject_id = config.long_term_memory.subject_id.is_some(),
+            has_embedding_model = config.long_term_memory.embedding_model_id.is_some(),
+            has_extraction_model = config.long_term_memory.extraction_model_id.is_some(),
+            "LTM recall requested - retrieval not yet implemented"
         );
     }
 
-    if config.stm_enabled {
-        // TODO: retrieve STMO condensation summary and prepend as system message
+    if config.short_term_memory.enabled {
         debug!(
-            condenser_model = config.stm_condenser_model_id.as_deref().unwrap_or("<none>"),
-            "STMO recall requested — retrieval not yet implemented"
+            has_condenser_model = config.short_term_memory.condenser_model_id.is_some(),
+            "STMO recall requested - retrieval not yet implemented"
         );
     }
 }
@@ -331,17 +311,23 @@ mod tests {
     use openai_protocol::responses::{ResponseInput, ResponsesRequest};
 
     use super::inject_memory_context;
-    use crate::routers::common::header_utils::ConversationMemoryConfig;
+    use crate::routers::openai::responses::header_utils::{
+        ConversationMemoryConfig, LongTermMemoryConfig, ShortTermMemoryConfig,
+    };
 
     #[test]
     fn inject_memory_context_is_no_op_for_now() {
         let config = ConversationMemoryConfig {
-            ltm_enabled: true,
-            ltm_subject_id: Some("subj-1".to_string()),
-            ltm_embedding_model_id: Some("embed-1".to_string()),
-            ltm_extraction_model_id: Some("extract-1".to_string()),
-            stm_enabled: true,
-            stm_condenser_model_id: Some("condense-1".to_string()),
+            long_term_memory: LongTermMemoryConfig {
+                enabled: true,
+                subject_id: Some("subj-1".to_string()),
+                embedding_model_id: Some("embed-1".to_string()),
+                extraction_model_id: Some("extract-1".to_string()),
+            },
+            short_term_memory: ShortTermMemoryConfig {
+                enabled: true,
+                condenser_model_id: Some("condense-1".to_string()),
+            },
         };
         let mut request = ResponsesRequest {
             input: ResponseInput::Text("hello".to_string()),
