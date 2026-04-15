@@ -1189,7 +1189,7 @@ mod tests {
 
     #[test]
     fn extract_openai_response_output_items_from_embedded_text_json() {
-        let output = r#"[{"type":"text","text":"{\"execution_id\":\"abc\",\"openai_response\":{\"content\":{\"type\":\"output_text\",\"annotations\":[],\"logprobs\":[],\"text\":\"intermediate summary\"}}}"}]"#;
+        let output = r#"[{"type":"text","text":"{\"execution_id\":\"abc\",\"openai_response\":{\"content\":{\"type\":\"output_text\",\"annotations\":[{\"type\":\"url_citation\",\"title\":\"Example citation\",\"url\":\"https://example.com/openai-result\",\"start_index\":0,\"end_index\":10}],\"logprobs\":[],\"text\":\"intermediate summary\"}}}"}]"#;
 
         let extracted = extract_openai_response_output_items(output);
         assert_eq!(extracted.len(), 1);
@@ -1197,6 +1197,20 @@ mod tests {
         assert_eq!(extracted[0]["role"], "assistant");
         assert_eq!(extracted[0]["content"][0]["type"], "output_text");
         assert_eq!(extracted[0]["content"][0]["text"], "intermediate summary");
+        assert_eq!(
+            extracted[0]["content"][0]["annotations"][0]["type"],
+            "url_citation"
+        );
+        assert_eq!(
+            extracted[0]["content"][0]["annotations"][0]["title"],
+            "Example citation"
+        );
+        assert_eq!(
+            extracted[0]["content"][0]["annotations"][0]["url"],
+            "https://example.com/openai-result"
+        );
+        assert_eq!(extracted[0]["content"][0]["annotations"][0]["start_index"], 0);
+        assert_eq!(extracted[0]["content"][0]["annotations"][0]["end_index"], 10);
     }
 
     #[test]
@@ -1208,7 +1222,7 @@ mod tests {
             "status": "completed",
             "action": {"type": "search"}
         });
-        let output = r#"[{"type":"text","text":"{\"openai_response\":{\"content\":{\"type\":\"output_text\",\"annotations\":[],\"logprobs\":[],\"text\":\"intermediate\"}}}"}]"#;
+        let output = r#"[{"type":"text","text":"{\"openai_response\":{\"content\":{\"type\":\"output_text\",\"annotations\":[{\"type\":\"url_citation\",\"title\":\"Example citation\",\"url\":\"https://example.com/openai-result\",\"start_index\":0,\"end_index\":10}],\"logprobs\":[],\"text\":\"intermediate\"}}}"}]"#;
 
         state.record_call(
             true,
@@ -1225,6 +1239,26 @@ mod tests {
         assert_eq!(
             state.mcp_call_items[1]["content"][0]["text"],
             "intermediate"
+        );
+        assert_eq!(
+            state.mcp_call_items[1]["content"][0]["annotations"][0]["type"],
+            "url_citation"
+        );
+        assert_eq!(
+            state.mcp_call_items[1]["content"][0]["annotations"][0]["title"],
+            "Example citation"
+        );
+        assert_eq!(
+            state.mcp_call_items[1]["content"][0]["annotations"][0]["url"],
+            "https://example.com/openai-result"
+        );
+        assert_eq!(
+            state.mcp_call_items[1]["content"][0]["annotations"][0]["start_index"],
+            0
+        );
+        assert_eq!(
+            state.mcp_call_items[1]["content"][0]["annotations"][0]["end_index"],
+            10
         );
     }
 

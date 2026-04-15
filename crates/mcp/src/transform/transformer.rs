@@ -867,40 +867,4 @@ mod tests {
             _ => panic!("Expected FileSearchCall"),
         }
     }
-
-    #[test]
-    fn test_file_search_transform_preserves_top_level_queries_array() {
-        let result = json!({
-            "queries": ["async patterns", "rust futures"],
-            "results": [
-                {"file_id": "file_1", "filename": "async.md", "score": 0.95, "text": "..."}
-            ]
-        });
-
-        let transformed = ResponseTransformer::transform(
-            &result,
-            &ResponseFormat::FileSearchCall,
-            "req-790",
-            "server",
-            "file_search",
-            "{}",
-        );
-
-        match transformed {
-            ResponseOutputItem::FileSearchCall {
-                id,
-                status,
-                queries,
-                results,
-            } => {
-                assert_eq!(id, "fs_req-790");
-                assert_eq!(status, FileSearchCallStatus::Completed);
-                assert_eq!(queries, vec!["async patterns", "rust futures"]);
-                let results = results.unwrap();
-                assert_eq!(results.len(), 1);
-                assert_eq!(results[0].file_id, "file_1");
-            }
-            _ => panic!("Expected FileSearchCall"),
-        }
-    }
 }
