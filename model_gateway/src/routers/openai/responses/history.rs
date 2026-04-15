@@ -301,7 +301,7 @@ pub(crate) fn inject_memory_context(
     if config.short_term_memory.enabled {
         debug!(
             has_condenser_model = config.short_term_memory.condenser_model_id.is_some(),
-            "STMO recall requested - retrieval not yet implemented"
+            "STM recall requested - retrieval not yet implemented"
         );
     }
 }
