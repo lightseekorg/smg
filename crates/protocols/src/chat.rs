@@ -11,6 +11,7 @@ use super::{
         StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference,
         Usage,
     },
+    messages::ThinkingConfig,
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
 use crate::{
@@ -200,6 +201,10 @@ pub struct ChatCompletionRequest {
 
     /// Effort level for reasoning models (low, medium, high)
     pub reasoning_effort: Option<String>,
+
+    /// Configuration for extended thinking (Anthropic-style).
+    /// Maps to chat_template_kwargs for thinking-capable models.
+    pub thinking: Option<ThinkingConfig>,
 
     /// An object specifying the format that the model must output
     pub response_format: Option<ResponseFormat>,
@@ -567,6 +572,31 @@ impl Normalizable for ChatCompletionRequest {
             self.function_call = None; // Clear deprecated field
         }
 
+        // Migrate thinking → chat_template_kwargs.
+        // Sets both keys: Qwen3 templates check `enable_thinking`, Kimi-K2.5 checks `thinking`.
+        // Uses or_insert to not override user-provided kwargs.
+        if let Some(ref thinking) = self.thinking {
+            let kwargs = self.chat_template_kwargs.get_or_insert_with(HashMap::new);
+            match thinking {
+                ThinkingConfig::Enabled { .. } => {
+                    kwargs
+                        .entry("enable_thinking".to_string())
+                        .or_insert(Value::Bool(true));
+                    kwargs
+                        .entry("thinking".to_string())
+                        .or_insert(Value::Bool(true));
+                }
+                ThinkingConfig::Disabled => {
+                    kwargs
+                        .entry("enable_thinking".to_string())
+                        .or_insert(Value::Bool(false));
+                    kwargs
+                        .entry("thinking".to_string())
+                        .or_insert(Value::Bool(false));
+                }
+            }
+        }
+
         // Apply tool_choice defaults
         if self.tool_choice.is_none() {
             if let Some(tools) = &self.tools {
@@ -751,4 +781,75 @@ pub struct ChatStreamChoice {
     pub finish_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_stop: Option<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::validated::Normalizable;
+
+    #[test]
+    fn test_thinking_enabled_normalizes_to_kwargs() {
+        let mut req: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled", "budget_tokens": 4096}
+        }))
+        .expect("parse");
+        req.normalize();
+        let kwargs = req.chat_template_kwargs.expect("kwargs set");
+        assert_eq!(kwargs["enable_thinking"], json!(true));
+        assert_eq!(kwargs["thinking"], json!(true));
+    }
+
+    #[test]
+    fn test_thinking_disabled_normalizes_to_kwargs() {
+        let mut req: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "disabled"}
+        }))
+        .expect("parse");
+        req.normalize();
+        let kwargs = req.chat_template_kwargs.expect("kwargs set");
+        assert_eq!(kwargs["enable_thinking"], json!(false));
+        assert_eq!(kwargs["thinking"], json!(false));
+    }
+
+    #[test]
+    fn test_thinking_does_not_override_existing_kwargs() {
+        let mut req: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+            "chat_template_kwargs": {"enable_thinking": false}
+        }))
+        .expect("parse");
+        req.normalize();
+        let kwargs = req.chat_template_kwargs.expect("kwargs set");
+        assert_eq!(
+            kwargs["enable_thinking"],
+            json!(false),
+            "should not override existing"
+        );
+    }
+
+    #[test]
+    fn test_no_thinking_field_leaves_kwargs_unchanged() {
+        let mut req: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .expect("parse");
+        req.normalize();
+        assert!(
+            req.chat_template_kwargs.is_none()
+                || !req
+                    .chat_template_kwargs
+                    .as_ref()
+                    .is_some_and(|k| k.contains_key("enable_thinking"))
+        );
+    }
 }
