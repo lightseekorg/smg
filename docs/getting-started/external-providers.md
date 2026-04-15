@@ -24,9 +24,9 @@ SMG auto-detects the provider from the model name in each request and applies th
 | Provider | Auto-Detection | Header Format |
 |----------|---------------|---------------|
 | OpenAI | `gpt-*`, `o1-*`, `o3-*` models | `Authorization: Bearer` |
-| Anthropic | `claude-*` models | `x-api-key` |
+| Anthropic | `claude-*` models | `x-api-key` (plus `anthropic-version`) |
 | xAI | `grok-*` models | `Authorization: Bearer` |
-| Google Gemini | `gemini-*` models | `Authorization: Bearer` |
+| Google Gemini | `gemini-*` models | `x-goog-api-key` |
 
 ---
 
@@ -70,7 +70,7 @@ SMG supports fan-out model discovery across all registered external workers. Whe
 
 1. Fans out the request to all healthy external workers concurrently
 2. Forwards the caller's token to each upstream provider
-3. Aggregates and returns the discovered models from all providers
+3. Returns the first non-empty model inventory from the fanned-out upstream responses
 
 ```bash
 curl http://localhost:30000/v1/models \
