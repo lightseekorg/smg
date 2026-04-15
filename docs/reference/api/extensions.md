@@ -69,7 +69,7 @@ These endpoints are for gateway operations and administration.
 | Method | Path |
 |---|---|
 | `GET`, `POST` | `/workers` |
-| `GET`, `PUT`, `DELETE` | `/workers/{worker_id}` |
+| `GET`, `PUT`, `PATCH`, `DELETE` | `/workers/{worker_id}` |
 
 ### Tokenizer Management
 

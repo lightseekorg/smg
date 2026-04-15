@@ -51,10 +51,11 @@ POST /v1/chat/completions
 |-------|------|----------|-------------|
 | `model` | string | Yes | Model identifier |
 | `messages` | array | Yes | Array of message objects |
-| `max_tokens` | integer | No | Maximum tokens to generate |
+| `max_completion_tokens` | integer | No | Upper bound on generated completion tokens |
+| `max_tokens` | integer | No | Deprecated — use `max_completion_tokens`. Still accepted and transparently migrated |
 | `temperature` | number | No | Sampling temperature (0-2) |
 | `top_p` | number | No | Nucleus sampling parameter |
-| `n` | integer | No | Number of completions to generate |
+| `n` | integer | No | Number of completions to generate (1-10) |
 | `stream` | boolean | No | Enable streaming responses |
 | `stop` | string/array | No | Stop sequences |
 | `presence_penalty` | number | No | Presence penalty (-2 to 2) |
@@ -65,7 +66,7 @@ POST /v1/chat/completions
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `role` | string | Yes | `system`, `user`, or `assistant` |
+| `role` | string | Yes | `system`, `user`, `assistant`, `tool`, `function`, or `developer` |
 | `content` | string | Yes | Message content |
 
 #### Example Request
@@ -220,39 +221,14 @@ curl http://localhost:30000/v1/models
     {
       "id": "meta-llama/Llama-3.1-8B-Instruct",
       "object": "model",
-      "created": 1705312345,
-      "owned_by": "organization"
+      "created": 0,
+      "owned_by": "self_hosted"
     }
   ]
 }
 ```
 
----
-
-### Retrieve Model
-
-Get details about a specific model.
-
-```
-GET /v1/models/{model_id}
-```
-
-#### Example Request
-
-```bash
-curl http://localhost:30000/v1/models/meta-llama/Llama-3.1-8B-Instruct
-```
-
-#### Response
-
-```json
-{
-  "id": "meta-llama/Llama-3.1-8B-Instruct",
-  "object": "model",
-  "created": 1705312345,
-  "owned_by": "organization"
-}
-```
+`owned_by` is `self_hosted` for locally hosted workers, or the provider name (for example `openai`, `anthropic`, `xai`, `gemini`) for upstream providers.
 
 ---
 
