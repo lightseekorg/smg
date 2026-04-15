@@ -142,20 +142,17 @@ impl HarmonyPreparationStage {
         })?;
 
         // Step 4: Store results
-        ctx.state.preparation = Some(PreparationOutput {
-            original_text: None,
+        ctx.state.preparation = Some(PreparationOutput::Harmony {
             token_ids: build_output.input_ids,
-            processed_messages: None,
+            selection_text: build_output.selection_text,
             tool_constraints: constraint,
             filtered_request: if matches!(body_ref, Cow::Owned(_)) {
-                Some(body_ref.into_owned())
+                Some(Box::new(body_ref.into_owned()))
             } else {
                 None
             },
-            harmony_mode: true,
-            selection_text: Some(build_output.selection_text),
-            harmony_messages: Some(build_output.harmony_messages),
-            harmony_stop_ids: Some(build_output.stop_token_ids),
+            harmony_messages: build_output.harmony_messages,
+            harmony_stop_ids: build_output.stop_token_ids,
         });
 
         Ok(None)
@@ -223,16 +220,13 @@ impl HarmonyPreparationStage {
         })?;
 
         // Step 4: Store results with constraint
-        ctx.state.preparation = Some(PreparationOutput {
-            original_text: None,
+        ctx.state.preparation = Some(PreparationOutput::Harmony {
             token_ids: build_output.input_ids,
-            processed_messages: None,
+            selection_text: build_output.selection_text,
             tool_constraints: constraint,
             filtered_request: None,
-            harmony_mode: true,
-            selection_text: Some(build_output.selection_text),
-            harmony_messages: Some(build_output.harmony_messages),
-            harmony_stop_ids: Some(build_output.stop_token_ids),
+            harmony_messages: build_output.harmony_messages,
+            harmony_stop_ids: build_output.stop_token_ids,
         });
 
         Ok(None)

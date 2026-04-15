@@ -67,16 +67,9 @@ impl PipelineStage for EmbeddingPreparationStage {
             .to_vec();
 
         // Store preparation output
-        ctx.state.preparation = Some(PreparationOutput {
-            original_text: Some(text),
+        ctx.state.preparation = Some(PreparationOutput::Embedding {
+            original_text: text,
             token_ids,
-            processed_messages: None,
-            tool_constraints: None,
-            filtered_request: None,
-            harmony_mode: false,
-            selection_text: None,
-            harmony_messages: None,
-            harmony_stop_ids: None,
         });
 
         Ok(None)

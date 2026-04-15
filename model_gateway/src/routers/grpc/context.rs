@@ -126,35 +126,74 @@ pub(crate) struct ProcessingState {
 }
 
 /// Output from preparation stage (Step 1)
-pub(crate) struct PreparationOutput {
-    /// Original text (for chat) or resolved text (for generate)
-    pub original_text: Option<String>,
+///
+/// Each request type produces its own variant, eliminating optional fields
+/// that are always None for certain pipelines.
+pub(crate) enum PreparationOutput {
+    Chat {
+        token_ids: Vec<u32>,
+        processed_messages: super::ProcessedMessages,
+        tool_constraints: Option<(String, String)>,
+        filtered_request: Option<Box<ChatCompletionRequest>>,
+    },
+    Messages {
+        token_ids: Vec<u32>,
+        processed_messages: super::ProcessedMessages,
+        tool_constraints: Option<(String, String)>,
+    },
+    Completion {
+        original_text: String,
+        token_ids: Vec<u32>,
+    },
+    Generate {
+        original_text: Option<String>,
+        token_ids: Vec<u32>,
+    },
+    Embedding {
+        original_text: String,
+        token_ids: Vec<u32>,
+    },
+    Harmony {
+        token_ids: Vec<u32>,
+        selection_text: String,
+        tool_constraints: Option<(String, String)>,
+        filtered_request: Option<Box<ChatCompletionRequest>>,
+        #[expect(dead_code, reason = "stored for future Harmony history tracking")]
+        harmony_messages: Vec<super::harmony::HarmonyMessage>,
+        harmony_stop_ids: Vec<u32>,
+    },
+}
 
-    /// Tokenized input
-    pub token_ids: Vec<u32>,
+impl PreparationOutput {
+    /// Token IDs (common to all variants)
+    pub fn token_ids(&self) -> &[u32] {
+        match self {
+            Self::Chat { token_ids, .. }
+            | Self::Messages { token_ids, .. }
+            | Self::Completion { token_ids, .. }
+            | Self::Generate { token_ids, .. }
+            | Self::Embedding { token_ids, .. }
+            | Self::Harmony { token_ids, .. } => token_ids,
+        }
+    }
 
-    /// Processed messages (chat only)
-    pub processed_messages: Option<super::ProcessedMessages>,
-
-    /// Tool call constraints (if applicable)
-    pub tool_constraints: Option<(String, String)>,
-
-    /// Filtered request (if tools were filtered)
-    pub filtered_request: Option<ChatCompletionRequest>,
-
-    // Harmony-specific fields
-    /// Whether this is a Harmony request (default: false)
-    pub harmony_mode: bool,
-
-    /// Selection text for worker routing (Harmony only)
-    pub selection_text: Option<String>,
-
-    /// Harmony messages for history tracking (Harmony only)
-    #[expect(dead_code)]
-    pub harmony_messages: Option<Vec<super::harmony::HarmonyMessage>>,
-
-    /// Stop token IDs for Harmony models
-    pub harmony_stop_ids: Option<Vec<u32>>,
+    /// Text for worker routing: original_text for regular pipelines, selection_text for Harmony.
+    /// Chat/Messages borrow from processed_messages.text to avoid a redundant clone.
+    pub fn routing_text(&self) -> Option<&str> {
+        match self {
+            Self::Chat {
+                processed_messages, ..
+            }
+            | Self::Messages {
+                processed_messages, ..
+            } => Some(&processed_messages.text),
+            Self::Completion { original_text, .. } | Self::Embedding { original_text, .. } => {
+                Some(original_text)
+            }
+            Self::Generate { original_text, .. } => original_text.as_deref(),
+            Self::Harmony { selection_text, .. } => Some(selection_text),
+        }
+    }
 }
 
 /// Worker selection (Step 2)

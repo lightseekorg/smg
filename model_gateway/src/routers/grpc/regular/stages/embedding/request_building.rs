@@ -63,25 +63,17 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
             _ => format!("embed-{}", Uuid::now_v7()), // fallback
         };
 
-        // Extract original text
-        let original_text = prep_output.original_text.clone();
-
         // Build backend-specific embed request
+        let original_text = prep_output.routing_text().map(String::from);
+        let token_ids = prep_output.token_ids().to_vec();
+
         let proto_req = match client {
             GrpcClient::Sglang(c) => {
-                let req = c.build_embed_request(
-                    request_id.clone(),
-                    original_text,
-                    prep_output.token_ids.clone(),
-                );
+                let req = c.build_embed_request(request_id.clone(), original_text, token_ids);
                 ProtoEmbedRequest::Sglang(Box::new(req))
             }
             GrpcClient::Vllm(c) => {
-                let req = c.build_embed_request(
-                    request_id.clone(),
-                    original_text,
-                    prep_output.token_ids.clone(),
-                );
+                let req = c.build_embed_request(request_id.clone(), original_text, token_ids);
                 ProtoEmbedRequest::Vllm(Box::new(req))
             }
             GrpcClient::Trtllm(_) => {

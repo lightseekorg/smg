@@ -202,21 +202,15 @@ impl ChatPreparationStage {
         processed_messages.multimodal_intermediate = multimodal_intermediate;
 
         // Store results in context
-        ctx.state.preparation = Some(PreparationOutput {
-            original_text: Some(processed_messages.text.clone()),
+        ctx.state.preparation = Some(PreparationOutput::Chat {
             token_ids,
-            processed_messages: Some(processed_messages),
+            processed_messages,
             tool_constraints: tool_call_constraint,
             filtered_request: if matches!(body_ref, Cow::Owned(_)) {
-                Some(body_ref.into_owned())
+                Some(Box::new(body_ref.into_owned()))
             } else {
                 None
             },
-            // Harmony fields (not used for regular preparation)
-            harmony_mode: false,
-            selection_text: None,
-            harmony_messages: None,
-            harmony_stop_ids: None,
         });
 
         // Store stop decoder for reuse in response processing

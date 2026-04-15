@@ -62,20 +62,11 @@ impl PipelineStage for WorkerSelectionStage {
             )
         })?;
 
-        // For Harmony, use selection_text produced during Harmony encoding
-        // Otherwise, use original_text from regular preparation
-        let text = if prep.harmony_mode {
-            prep.selection_text.as_deref()
-        } else {
-            prep.original_text.as_deref()
-        };
+        let text = prep.routing_text();
 
         // Get tokens for PrefixHash policy support
-        let tokens = if prep.token_ids.is_empty() {
-            None
-        } else {
-            Some(prep.token_ids.as_slice())
-        };
+        let ids = prep.token_ids();
+        let tokens = if ids.is_empty() { None } else { Some(ids) };
 
         let headers = ctx.input.headers.as_ref();
 
