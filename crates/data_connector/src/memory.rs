@@ -29,6 +29,7 @@ pub struct MemoryConversationStorage {
 }
 
 impl MemoryConversationStorage {
+    /// Create an empty in-memory conversation storage backend.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
@@ -98,6 +99,7 @@ pub struct MemoryConversationItemStorage {
 }
 
 impl MemoryConversationItemStorage {
+    /// Create an empty in-memory conversation item storage backend.
     pub fn new() -> Self {
         Self::default()
     }
@@ -274,7 +276,38 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
 }
 
 // ============================================================================
-// PART 3: MemoryResponseStorage
+// PART 3: MemoryConversationMemoryWriter
+// ============================================================================
+
+#[derive(Default, Clone)]
+/// In-memory conversation memory writer used only by `HistoryBackend::Memory`.
+pub struct MemoryConversationMemoryWriter {
+    inner: Arc<RwLock<HashMap<ConversationMemoryId, NewConversationMemory>>>,
+}
+
+impl MemoryConversationMemoryWriter {
+    /// Create a new in-memory conversation memory writer.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl ConversationMemoryWriter for MemoryConversationMemoryWriter {
+    async fn create_memory(
+        &self,
+        input: NewConversationMemory,
+    ) -> ConversationMemoryResult<ConversationMemoryId> {
+        let id = ConversationMemoryId(format!("mem_{}", ulid::Ulid::new()));
+        self.inner.write().insert(id.clone(), input);
+        Ok(id)
+    }
+}
+
+// ============================================================================
+// PART 4: MemoryResponseStorage
 // ============================================================================
 
 /// Internal store structure holding both maps together
@@ -293,6 +326,7 @@ pub struct MemoryResponseStorage {
 }
 
 impl MemoryResponseStorage {
+    /// Create an empty in-memory response storage backend.
     pub fn new() -> Self {
         Self {
             store: Arc::new(RwLock::new(InnerStore::default())),

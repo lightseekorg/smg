@@ -13,7 +13,7 @@ use axum::{
 };
 use smg_data_connector::{with_request_context, RequestContext as StorageRequestContext};
 
-use crate::{config::RouterConfig, server::AppState};
+use crate::{config::RouterConfig, memory::MemoryExecutionContext, server::AppState};
 
 fn extract_header_str(headers: &http::HeaderMap, name: &str) -> Option<String> {
     headers
@@ -44,6 +44,13 @@ fn build_storage_request_context(
     }
 
     (!ctx.data().is_empty()).then_some(ctx)
+}
+
+pub(crate) fn build_memory_execution_context(
+    config: &RouterConfig,
+    headers: &http::HeaderMap,
+) -> MemoryExecutionContext {
+    MemoryExecutionContext::from_http_headers(headers, &config.memory_runtime)
 }
 
 pub async fn storage_context_middleware(

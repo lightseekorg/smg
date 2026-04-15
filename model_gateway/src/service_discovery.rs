@@ -1267,6 +1267,7 @@ mod tests {
             conversation_item_storage: Arc::new(
                 smg_data_connector::MemoryConversationItemStorage::new(),
             ),
+            conversation_memory_writer: None,
             worker_monitor: None,
             configured_reasoning_parser: None,
             configured_tool_parser: None,

@@ -3,7 +3,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use axum::{
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -15,7 +15,7 @@ use smg_data_connector::{
 };
 use tracing::info;
 
-use crate::routers::common::persistence_utils::item_to_json;
+use crate::{config::RouterConfig, middleware, routers::common::persistence_utils::item_to_json};
 
 // ============================================================================
 // Constants
@@ -306,6 +306,29 @@ pub async fn create_conversation_items(
     conv_id: &str,
     body: Value,
 ) -> Response {
+    create_conversation_items_with_headers(
+        &RouterConfig::default(),
+        conversation_storage,
+        item_storage,
+        conv_id,
+        &HeaderMap::new(),
+        body,
+    )
+    .await
+}
+
+pub async fn create_conversation_items_with_headers(
+    router_config: &RouterConfig,
+    conversation_storage: &Arc<dyn ConversationStorage>,
+    item_storage: &Arc<dyn ConversationItemStorage>,
+    conv_id: &str,
+    headers: &HeaderMap,
+    body: Value,
+) -> Response {
+    // Scoped to this endpoint: only evaluate memory runtime/header intent here.
+    let _memory_execution_context =
+        middleware::build_memory_execution_context(router_config, headers);
+    // TODO: Consume `_memory_execution_context` when conversation item ingestion enables memory actions.
     let conversation_id = ConversationId::from(conv_id);
 
     if let Err(response) = ensure_conversation_exists(conversation_storage, &conversation_id).await

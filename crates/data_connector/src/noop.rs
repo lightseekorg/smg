@@ -21,6 +21,7 @@ use super::core::*;
 pub(super) struct NoOpConversationStorage;
 
 impl NoOpConversationStorage {
+    /// Create a no-op conversation storage backend.
     pub fn new() -> Self {
         Self
     }
@@ -64,6 +65,7 @@ impl ConversationStorage for NoOpConversationStorage {
 pub(super) struct NoOpConversationItemStorage;
 
 impl NoOpConversationItemStorage {
+    /// Create a no-op conversation item storage backend.
     pub fn new() -> Self {
         Self
     }
@@ -139,6 +141,7 @@ impl ConversationItemStorage for NoOpConversationItemStorage {
 pub(super) struct NoOpResponseStorage;
 
 impl NoOpResponseStorage {
+    /// Create a no-op response storage backend.
     pub fn new() -> Self {
         Self
     }

@@ -1,5 +1,6 @@
 pub mod app_context;
 pub mod config;
+pub mod memory;
 pub mod middleware;
 pub mod observability;
 pub mod policies;

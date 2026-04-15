@@ -4,8 +4,8 @@ use smg_mcp::McpConfig;
 
 use super::{
     CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
-    HistoryBackend, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig, RedisConfig,
-    RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig, TraceConfig,
+    HistoryBackend, MemoryRuntimeConfig, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig,
+    RedisConfig, RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig, TraceConfig,
 };
 use crate::worker::ConnectionMode;
 
@@ -348,6 +348,12 @@ impl RouterConfigBuilder {
 
     pub fn storage_context_headers(mut self, headers: HashMap<String, String>) -> Self {
         self.config.storage_context_headers = headers;
+        self
+    }
+
+    /// Configure memory runtime feature flags for store/recall behavior.
+    pub fn memory_runtime_config(mut self, config: MemoryRuntimeConfig) -> Self {
+        self.config.memory_runtime = config;
         self
     }
 

@@ -9,7 +9,6 @@ impl ConfigValidator {
         Self::validate_policy(&config.policy)?;
         Self::validate_server_settings(config)?;
         Self::validate_storage_context_headers(config)?;
-
         if let Some(discovery) = &config.discovery {
             Self::validate_discovery(discovery, &config.mode)?;
         }

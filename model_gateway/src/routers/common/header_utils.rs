@@ -8,12 +8,55 @@ use http::header::HeaderName;
 static HEADER_TARGET_WORKER: HeaderName = HeaderName::from_static("x-smg-target-worker");
 static HEADER_ROUTING_KEY: HeaderName = HeaderName::from_static("x-smg-routing-key");
 static HEADER_MCP: HeaderName = HeaderName::from_static("x-smg-mcp");
+static HEADER_LTM_MEMORY_POLICY: HeaderName = HeaderName::from_static("x-smg-ltm-memory-policy");
+static HEADER_LTM_MEMORY_SUBJECT_ID: HeaderName =
+    HeaderName::from_static("x-smg-ltm-memory-subject-id");
+static HEADER_LTM_MEMORY_EMBEDDING_MODEL: HeaderName =
+    HeaderName::from_static("x-smg-ltm-memory-embedding-model");
+static HEADER_LTM_MEMORY_EXTRACTION_MODEL: HeaderName =
+    HeaderName::from_static("x-smg-ltm-memory-extraction-model");
+
+/// Parsed and normalized memory-related request headers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryHeaderView {
+    pub policy: Option<String>,
+    pub subject_id: Option<String>,
+    pub embedding_model: Option<String>,
+    pub extraction_model: Option<String>,
+}
+
+impl MemoryHeaderView {
+    /// Extract known memory headers as trimmed non-empty strings.
+    pub fn from_http_headers(headers: &HeaderMap) -> Self {
+        Self {
+            policy: extract_header_value_owned(headers, &HEADER_LTM_MEMORY_POLICY),
+            subject_id: extract_header_value_owned(headers, &HEADER_LTM_MEMORY_SUBJECT_ID),
+            embedding_model: extract_header_value_owned(
+                headers,
+                &HEADER_LTM_MEMORY_EMBEDDING_MODEL,
+            ),
+            extraction_model: extract_header_value_owned(
+                headers,
+                &HEADER_LTM_MEMORY_EXTRACTION_MODEL,
+            ),
+        }
+    }
+}
 
 fn extract_header_value<'a>(headers: Option<&'a HeaderMap>, name: &HeaderName) -> Option<&'a str> {
     headers
         .and_then(|h| h.get(name))
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
+}
+
+fn extract_header_value_owned(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 pub fn extract_target_worker(headers: Option<&HeaderMap>) -> Option<&str> {
