@@ -1073,8 +1073,9 @@ mod tests {
     };
 
     use super::{
-        build_transformed_mcp_call_item, is_internal_mcp_response_item,
-        mcp_list_tools_bindings_to_emit,
+        build_transformed_mcp_call_item, extract_openai_response_output_items,
+        is_internal_mcp_response_item, mcp_list_tools_bindings_to_emit, ResponseInput,
+        ToolLoopState,
     };
 
     fn test_tool(name: &str) -> Tool {
@@ -1296,7 +1297,7 @@ mod tests {
 
     #[test]
     fn record_call_appends_openai_response_output_after_tool_item() {
-        let mut state = ToolLoopState::new(ResponseInput::Text("hello".to_string()));
+        let mut state = ToolLoopState::new(ResponseInput::Text("hello".to_string()), Vec::new());
         let transformed = json!({
             "type": "web_search_call",
             "id": "ws_test",
@@ -1345,7 +1346,7 @@ mod tests {
 
     #[test]
     fn record_call_does_not_append_openai_response_output_for_non_builtin_tools() {
-        let mut state = ToolLoopState::new(ResponseInput::Text("hello".to_string()));
+        let mut state = ToolLoopState::new(ResponseInput::Text("hello".to_string()), Vec::new());
         let transformed = json!({
             "type": "web_search_call",
             "id": "ws_test",
