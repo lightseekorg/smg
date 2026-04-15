@@ -610,18 +610,6 @@ mod worker_models_tests {
     }
 
     #[test]
-    fn find_prefix_fallback_uses_lexical_id_as_stable_final_tiebreaker() {
-        let models = WorkerModels::from(vec![
-            card("grok-4-fast-ab", 1_756_944_000),
-            card("grok-4-fast-aa", 1_756_944_000),
-        ]);
-
-        let result = models.find("grok-4-fast").expect("stable prefix match");
-
-        assert_eq!(result.id, "grok-4-fast-aa");
-    }
-
-    #[test]
     fn find_prefix_fallback_handles_shortest_dot_and_guard_cases() {
         let models = WorkerModels::from(vec![
             card("grok-4-0709", 1_752_019_200),

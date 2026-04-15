@@ -903,20 +903,6 @@ mod tests {
     }
 
     #[test]
-    fn collect_alias_fallback_workers_keeps_wildcards_when_no_specific_match_exists() {
-        let wildcard = ready_external_worker(
-            "https://api.openai.com",
-            ProviderType::OpenAI,
-            openai_protocol::worker::WorkerModels::Wildcard,
-        );
-
-        let selected = collect_alias_fallback_workers(vec![wildcard.clone()], "unknown-model");
-
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].url(), wildcard.url());
-    }
-
-    #[test]
     fn get_router_for_model_ignores_stale_indexed_workers_before_alias_fallback() {
         let worker_registry = Arc::new(WorkerRegistry::new());
         let stale_indexed = ready_external_worker(

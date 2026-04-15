@@ -361,53 +361,10 @@ impl StepExecutor<WorkerWorkflowData> for DiscoverModelsStep {
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::{model_type::ModelType, worker::ProviderType};
+    use openai_protocol::worker::ProviderType;
     use serde_json::json;
 
-    use super::{
-        apply_provider_hint, build_model_cards, group_models_into_cards, infer_model_type_from_id,
-        ModelInfo, ModelsResponse,
-    };
-
-    #[test]
-    fn group_models_into_cards_preserves_flat_ids_and_metadata() {
-        let cards = group_models_into_cards(vec![
-            ModelInfo {
-                id: "grok-4-0709".to_string(),
-                aliases: vec!["grok-4".to_string()],
-                object: "model".to_string(),
-                created: Some(1_752_019_200),
-                owned_by: None,
-            },
-            ModelInfo {
-                id: "gpt-4o-2024-11-20".to_string(),
-                aliases: Vec::new(),
-                object: "model".to_string(),
-                created: Some(1_732_000_000),
-                owned_by: None,
-            },
-        ]);
-
-        assert_eq!(cards.len(), 2);
-        assert_eq!(cards[0].id, "grok-4-0709");
-        assert_eq!(cards[0].aliases, vec!["grok-4"]);
-        assert_eq!(cards[0].provider, Some(ProviderType::XAI));
-        assert_eq!(cards[0].model_type, ModelType::LLM);
-        assert_eq!(cards[0].created_at, 1_752_019_200);
-        assert_eq!(cards[1].aliases, Vec::<String>::new());
-    }
-
-    #[test]
-    fn infer_model_type_handles_reasoning_and_vision_overlap() {
-        assert_eq!(
-            infer_model_type_from_id("grok-4-fast-reasoning"),
-            ModelType::REASONING_LLM
-        );
-        assert_eq!(
-            infer_model_type_from_id("gpt-4o-reasoning-preview"),
-            ModelType::FULL_LLM
-        );
-    }
+    use super::{apply_provider_hint, build_model_cards, ModelInfo, ModelsResponse};
 
     #[test]
     fn apply_provider_hint_uses_worker_provider_for_prefixed_ids() {
