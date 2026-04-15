@@ -550,11 +550,6 @@ impl SglangSchedulerClient {
         // Constraints come from Harmony preparation stage (structural_tag) or tool handling.
 
         let max_new_tokens = request.max_output_tokens;
-        let stop = match request.stop.as_ref() {
-            Some(StringOrArray::String(s)) => vec![s.clone()],
-            Some(StringOrArray::Array(arr)) => arr.clone(),
-            None => vec![],
-        };
 
         Ok(proto::SamplingParams {
             temperature: request.temperature.unwrap_or(1.0),
@@ -565,7 +560,7 @@ impl SglangSchedulerClient {
             presence_penalty: request.presence_penalty.unwrap_or(0.0),
             repetition_penalty: request.repetition_penalty,
             max_new_tokens,
-            stop,
+            stop: vec![],
             stop_token_ids: vec![],     // Handled by Harmony stop tokens
             skip_special_tokens: false, // Keep special tokens for Harmony
             spaces_between_special_tokens: true,
@@ -998,7 +993,7 @@ mod tests {
 
     #[test]
     fn test_responses_sampling_params_are_passed_through() {
-        use openai_protocol::{common::StringOrArray, responses::ResponsesRequest};
+        use openai_protocol::responses::ResponsesRequest;
 
         let request = ResponsesRequest {
             top_k: 40,
@@ -1009,7 +1004,6 @@ mod tests {
             temperature: Some(0.7),
             top_p: Some(0.9),
             max_output_tokens: Some(128),
-            stop: Some(StringOrArray::String("END".into())),
             ..Default::default()
         };
 
@@ -1022,7 +1016,6 @@ mod tests {
         assert!((params.repetition_penalty - 1.2).abs() < 1e-6);
         assert!((params.frequency_penalty - 0.3).abs() < 1e-6);
         assert!((params.presence_penalty - (-0.4)).abs() < 1e-6);
-        assert_eq!(params.stop, vec!["END".to_string()]);
     }
 
     #[test]
