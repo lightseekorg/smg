@@ -99,7 +99,6 @@ Reasoning parsers extract chain-of-thought content from model outputs. Essential
 
 | Option | `--reasoning-parser` |
 |--------|---------------------|
-| Environment | `SMG_REASONING_PARSER` |
 | Default | Auto-detected from model name |
 
 ### Supported Parsers
@@ -202,7 +201,6 @@ Tool call parsers extract function calls from model output and validate argument
 
 | Option | `--tool-call-parser` |
 |--------|----------------|
-| Environment | `SMG_TOOL_CALL_PARSER` |
 | Default | Auto-detected from model name |
 
 ### Supported Parsers
@@ -376,10 +374,7 @@ smg \
 
 | Metric | Description |
 |--------|-------------|
-| `smg_pipeline_stage_duration_seconds` | Time spent in each pipeline stage |
-| `smg_reasoning_extractions_total` | Reasoning tokens extracted |
-| `smg_tool_calls_total` | Tool calls parsed by type |
-| `smg_tool_execution_duration_seconds` | Tool execution time |
+| `smg_router_stage_duration_seconds` | Time spent in each pipeline stage |
 | `smg_mcp_tool_calls_total` | MCP tool invocations |
 
 ### Debug Logging
