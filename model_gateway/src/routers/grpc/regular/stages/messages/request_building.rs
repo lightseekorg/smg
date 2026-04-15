@@ -9,7 +9,7 @@ use crate::routers::{
     error,
     grpc::{
         common::stages::{helpers, PipelineStage},
-        context::{ClientSelection, RequestContext},
+        context::{ClientSelection, PreparationOutput, RequestContext},
         multimodal::assemble_multimodal_data,
         proto_wrapper::ProtoRequest,
     },
@@ -60,20 +60,21 @@ impl PipelineStage for MessageRequestBuildingStage {
             ClientSelection::Dual { prefill, .. } => prefill,
         };
 
+        let PreparationOutput::Messages {
+            token_ids,
+            processed_messages,
+            tool_constraints,
+        } = prep
+        else {
+            debug_assert!(false, "pipeline guarantees Messages variant");
+            return Err(error::internal_error(
+                "wrong_preparation_type",
+                "Expected Messages preparation output",
+            ));
+        };
+
         // Build message request
         let request_id = format!("msg_{}", Uuid::now_v7());
-
-        // Build proto request — take ownership of preparation fields (no clones needed)
-        let processed_messages = prep.processed_messages.ok_or_else(|| {
-            error!(
-                function = "MessageRequestBuildingStage::execute",
-                "processed_messages not set in preparation state"
-            );
-            error::internal_error(
-                "processed_messages_missing",
-                "processed_messages not set - this is a bug in the pipeline",
-            )
-        })?;
 
         // Reject multimodal for backends that don't support it, before assembling
         if processed_messages.multimodal_intermediate.is_some() && builder_client.is_mlx() {
@@ -93,9 +94,9 @@ impl PipelineStage for MessageRequestBuildingStage {
                 request_id,
                 &messages_request,
                 processed_messages.text,
-                prep.token_ids,
+                token_ids,
                 multimodal_data,
-                prep.tool_constraints,
+                tool_constraints,
             )
             .map_err(|e| {
                 error!(function = "MessageRequestBuildingStage::execute", error = %e, "Failed to build generate request");

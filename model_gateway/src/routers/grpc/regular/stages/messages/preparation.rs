@@ -235,17 +235,10 @@ impl MessagePreparationStage {
         processed_messages.multimodal_intermediate = multimodal_intermediate;
 
         // Store results in context
-        ctx.state.preparation = Some(PreparationOutput {
-            original_text: Some(processed_messages.text.clone()),
+        ctx.state.preparation = Some(PreparationOutput::Messages {
             token_ids,
-            processed_messages: Some(processed_messages),
+            processed_messages,
             tool_constraints: tool_call_constraint,
-            filtered_request: None, // Messages doesn't use Cow<ChatCompletionRequest> pattern
-            // Harmony fields (not used for messages)
-            harmony_mode: false,
-            selection_text: None,
-            harmony_messages: None,
-            harmony_stop_ids: None,
         });
 
         // Store stop decoder for reuse in response processing

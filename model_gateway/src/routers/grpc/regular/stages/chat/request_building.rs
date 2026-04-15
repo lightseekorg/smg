@@ -9,7 +9,7 @@ use crate::routers::{
     error,
     grpc::{
         common::stages::{helpers, PipelineStage},
-        context::{ClientSelection, RequestContext},
+        context::{ClientSelection, PreparationOutput, RequestContext},
         multimodal::assemble_multimodal_data,
         proto_wrapper::ProtoRequest,
     },
@@ -59,21 +59,23 @@ impl PipelineStage for ChatRequestBuildingStage {
             ClientSelection::Dual { prefill, .. } => prefill,
         };
 
+        let PreparationOutput::Chat {
+            token_ids,
+            processed_messages,
+            tool_constraints,
+            filtered_request,
+        } = prep
+        else {
+            debug_assert!(false, "pipeline guarantees Chat variant");
+            return Err(error::internal_error(
+                "wrong_preparation_type",
+                "Expected Chat preparation output",
+            ));
+        };
+
         // Build chat request
         let request_id = format!("chatcmpl-{}", Uuid::now_v7());
-        let body_ref = prep.filtered_request.as_ref().unwrap_or(&chat_request);
-
-        // Build proto request — take ownership of preparation fields (no clones needed)
-        let processed_messages = prep.processed_messages.ok_or_else(|| {
-            error!(
-                function = "ChatRequestBuildingStage::execute",
-                "processed_messages not set in preparation state"
-            );
-            error::internal_error(
-                "processed_messages_missing",
-                "processed_messages not set - this is a bug in the pipeline",
-            )
-        })?;
+        let body_ref = filtered_request.as_deref().unwrap_or(&chat_request);
 
         // Reject multimodal for backends that don't support it, before assembling
         if processed_messages.multimodal_intermediate.is_some() && builder_client.is_mlx() {
@@ -93,9 +95,9 @@ impl PipelineStage for ChatRequestBuildingStage {
                 request_id,
                 body_ref,
                 processed_messages.text,
-                prep.token_ids,
+                token_ids,
                 multimodal_data,
-                prep.tool_constraints,
+                tool_constraints,
             )
             .map_err(|e| {
                 error!(function = "ChatRequestBuildingStage::execute", error = %e, "Failed to build generate request");

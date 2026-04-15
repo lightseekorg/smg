@@ -67,8 +67,8 @@ impl PipelineStage for CompletionRequestBuildingStage {
             .build_completion_request(
                 request_id,
                 &completion_request,
-                prep.original_text.clone().unwrap_or_default(),
-                prep.token_ids.clone(),
+                prep.routing_text().unwrap_or_default().to_string(),
+                prep.token_ids().to_vec(),
             )
             .map_err(|e| {
                 error!(
