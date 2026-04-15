@@ -257,7 +257,7 @@ groups:
           description: "P95 TTFT is {{ $value }}s"
 
       - alert: SMGRateLimitRejections
-        expr: rate(smg_http_rate_limit_total{decision="rejected"}[5m]) > 10
+        expr: rate(smg_http_rate_limit_total{result="rejected"}[5m]) > 10
         for: 5m
         labels:
           severity: warning
