@@ -183,7 +183,7 @@ impl RequestContext {
     /// Recompute memory execution context from current headers and router runtime settings.
     /// Reserved for follow-up consumers that refresh request headers during pipeline mutation.
     pub fn refresh_memory_execution_context(&mut self) {
-        if matches!(self.input.request_type, RequestType::Responses(_)) {
+        if matches!(&self.input.request_type, RequestType::Responses(_)) {
             let empty_headers = HeaderMap::new();
             let headers = self.headers().unwrap_or(&empty_headers);
             self.memory_execution_context = middleware::build_memory_execution_context(

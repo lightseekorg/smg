@@ -352,6 +352,8 @@ impl RouterConfigBuilder {
     }
 
     /// Configure memory runtime feature flags for store/recall behavior.
+    /// Currently intended for staged rollout via config/programmatic construction.
+    /// CLI/Python wiring is intentionally not exposed yet.
     pub fn memory_runtime_config(mut self, config: MemoryRuntimeConfig) -> Self {
         self.config.memory_runtime = config;
         self

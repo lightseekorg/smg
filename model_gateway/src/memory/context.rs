@@ -3,12 +3,48 @@ use tracing::warn;
 
 use crate::{config::MemoryRuntimeConfig, routers::common::header_utils::MemoryHeaderView};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MemoryExecutionState {
+    #[default]
+    NotRequested,
+    GatedOff,
+    Active,
+}
+
+impl MemoryExecutionState {
+    fn from_requested_and_runtime(requested: bool, runtime_enabled: bool) -> Self {
+        match (requested, runtime_enabled) {
+            (false, _) => Self::NotRequested,
+            (true, false) => Self::GatedOff,
+            (true, true) => Self::Active,
+        }
+    }
+
+    pub fn requested(self) -> bool {
+        !matches!(self, Self::NotRequested)
+    }
+
+    pub fn active(self) -> bool {
+        matches!(self, Self::Active)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MemoryPolicyMode {
+    StoreOnly,
+    StoreAndRecall,
+    RecallOnly,
+    ExplicitNone,
+    #[default]
+    Unspecified,
+    Unrecognized,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryExecutionContext {
-    pub store_ltm_requested: bool,
-    pub store_ltm_active: bool,
-    pub recall_requested: bool,
-    pub recall_active: bool,
+    pub store_ltm: MemoryExecutionState,
+    pub recall: MemoryExecutionState,
+    pub policy_mode: MemoryPolicyMode,
     pub subject_id: Option<String>,
     pub embedding_model: Option<String>,
     pub extraction_model: Option<String>,
@@ -21,31 +57,28 @@ impl MemoryExecutionContext {
     }
 
     pub fn from_headers(headers: &MemoryHeaderView, runtime: &MemoryRuntimeConfig) -> Self {
-        let policy = Policy::from_value(headers.policy.as_deref());
-        if let Some(raw_policy) = headers.policy.as_deref() {
-            if matches!(policy, Policy::Unspecified) {
+        let (policy, policy_mode) = parse_policy(headers.policy.as_deref());
+        if matches!(policy_mode, MemoryPolicyMode::Unrecognized) {
+            if let Some(raw_policy) = headers.policy.as_deref() {
                 warn!(
                     policy = raw_policy,
                     "Unrecognized x-smg-ltm-memory-policy value; falling back to unspecified policy"
                 );
             }
         }
-        let store_ltm_requested = if policy.disables_ltm() {
-            false
-        } else {
-            policy.allows_ltm_store()
-        };
-        let recall_requested = if policy.disables_ltm() {
-            false
-        } else {
-            policy.allows_recall()
-        };
+        let store_ltm_requested = policy.allows_ltm_store();
+        let recall_requested = policy.allows_recall();
 
         Self {
-            store_ltm_active: store_ltm_requested && runtime.enabled,
-            store_ltm_requested,
-            recall_active: recall_requested && runtime.enabled,
-            recall_requested,
+            store_ltm: MemoryExecutionState::from_requested_and_runtime(
+                store_ltm_requested,
+                runtime.enabled,
+            ),
+            recall: MemoryExecutionState::from_requested_and_runtime(
+                recall_requested,
+                runtime.enabled,
+            ),
+            policy_mode,
             subject_id: headers.subject_id.clone(),
             embedding_model: headers.embedding_model.clone(),
             extraction_model: headers.extraction_model.clone(),
@@ -85,14 +118,27 @@ impl Policy {
     fn allows_recall(self) -> bool {
         matches!(self, Self::StoreAndRecall | Self::RecallOnly)
     }
-
-    fn disables_ltm(self) -> bool {
-        matches!(self, Self::None)
-    }
 }
 
 fn normalize(value: &str) -> &str {
     value.trim()
+}
+
+fn parse_policy(raw_value: Option<&str>) -> (Policy, MemoryPolicyMode) {
+    match raw_value {
+        None => (Policy::Unspecified, MemoryPolicyMode::Unspecified),
+        Some(value) => {
+            let parsed = Policy::from_value(Some(value));
+            let mode = match parsed {
+                Policy::StoreOnly => MemoryPolicyMode::StoreOnly,
+                Policy::StoreAndRecall => MemoryPolicyMode::StoreAndRecall,
+                Policy::RecallOnly => MemoryPolicyMode::RecallOnly,
+                Policy::None => MemoryPolicyMode::ExplicitNone,
+                Policy::Unspecified => MemoryPolicyMode::Unrecognized,
+            };
+            (parsed, mode)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -114,10 +160,9 @@ mod tests {
 
         let ctx = MemoryExecutionContext::from_headers(&headers, &runtime(false));
 
-        assert!(ctx.store_ltm_requested);
-        assert!(!ctx.store_ltm_active);
-        assert!(ctx.recall_requested);
-        assert!(!ctx.recall_active);
+        assert_eq!(ctx.store_ltm, MemoryExecutionState::GatedOff);
+        assert_eq!(ctx.recall, MemoryExecutionState::GatedOff);
+        assert_eq!(ctx.policy_mode, MemoryPolicyMode::StoreAndRecall);
     }
 
     #[test]
@@ -142,10 +187,9 @@ mod tests {
 
         let ctx = MemoryExecutionContext::from_http_headers(&headers, &runtime(true));
 
-        assert!(ctx.store_ltm_requested);
-        assert!(ctx.store_ltm_active);
-        assert!(!ctx.recall_requested);
-        assert!(!ctx.recall_active);
+        assert_eq!(ctx.store_ltm, MemoryExecutionState::Active);
+        assert_eq!(ctx.recall, MemoryExecutionState::NotRequested);
+        assert_eq!(ctx.policy_mode, MemoryPolicyMode::StoreOnly);
         assert_eq!(ctx.subject_id.as_deref(), Some("subject_abc"));
         assert_eq!(
             ctx.embedding_model.as_deref(),

@@ -399,6 +399,7 @@ async fn process_item(
     conversation_id: &ConversationId,
     item_val: &Value,
     added_at: chrono::DateTime<Utc>,
+    // TODO(memory): wire into ingestion flow; see issue #1149.
     _memory_execution_context: &MemoryExecutionContext,
 ) -> Result<(Value, ConversationItemId, Option<String>), Response> {
     let item_type = item_val

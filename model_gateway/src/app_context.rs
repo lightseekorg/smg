@@ -392,6 +392,8 @@ impl AppContextBuilder {
         webrtc_bind_addr: Option<std::net::IpAddr>,
         webrtc_stun_server: Option<String>,
     ) -> Result<Self, String> {
+        // Fail fast before storage initialization to avoid side effects
+        // (e.g., migrations) for invalid memory_runtime/backend combinations.
         validate_memory_writer_configuration(
             &router_config,
             backend_supports_memory_writer(&router_config.history_backend),
@@ -697,9 +699,17 @@ fn validate_memory_writer_configuration(
     config: &RouterConfig,
     memory_writer_available: bool,
 ) -> Result<(), String> {
+    let backend_supports_memory_writer = backend_supports_memory_writer(&config.history_backend);
+
+    if config.memory_runtime.enabled && !backend_supports_memory_writer {
+        return Err(
+            "memory_runtime.enabled is true but selected storage backend does not support conversation memory writer".to_string(),
+        );
+    }
+
     if config.memory_runtime.enabled && !memory_writer_available {
         return Err(
-            "memory_runtime.enabled is true but selected storage backend does not provide conversation memory writer".to_string(),
+            "memory_runtime.enabled is true but conversation memory writer is not available at runtime".to_string(),
         );
     }
 

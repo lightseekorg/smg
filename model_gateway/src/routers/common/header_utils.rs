@@ -19,6 +19,8 @@ static HEADER_LTM_MEMORY_EXTRACTION_MODEL: HeaderName =
 /// Parsed and normalized memory-related request headers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryHeaderView {
+    /// Trimmed policy header value.
+    /// `Some("")` means header was present but blank/whitespace.
     pub policy: Option<String>,
     pub subject_id: Option<String>,
     pub embedding_model: Option<String>,
@@ -26,10 +28,11 @@ pub struct MemoryHeaderView {
 }
 
 impl MemoryHeaderView {
-    /// Extract known memory headers as trimmed non-empty strings.
+    /// Extract known memory headers.
+    /// Policy preserves present-but-blank as `Some("")` for validation/warnings.
     pub fn from_http_headers(headers: &HeaderMap) -> Self {
         Self {
-            policy: extract_header_value_owned(headers, &HEADER_LTM_MEMORY_POLICY),
+            policy: extract_header_value_owned_allow_empty(headers, &HEADER_LTM_MEMORY_POLICY),
             subject_id: extract_header_value_owned(headers, &HEADER_LTM_MEMORY_SUBJECT_ID),
             embedding_model: extract_header_value_owned(
                 headers,
@@ -56,6 +59,17 @@ fn extract_header_value_owned(headers: &HeaderMap, name: &HeaderName) -> Option<
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn extract_header_value_owned_allow_empty(
+    headers: &HeaderMap,
+    name: &HeaderName,
+) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
         .map(ToOwned::to_owned)
 }
 
@@ -296,6 +310,8 @@ pub fn should_forward_request_header(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::HeaderValue;
+
     use super::*;
 
     #[test]
@@ -391,5 +407,80 @@ mod tests {
         let auth = ApiProvider::Anthropic.extract_auth_header(Some(&headers), None);
 
         assert_eq!(auth.unwrap(), "anthropic-key");
+    }
+
+    #[test]
+    fn test_memory_header_view_policy_empty_other_headers_absent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_LTM_MEMORY_POLICY.clone(),
+            HeaderValue::from_static(""),
+        );
+
+        let view = MemoryHeaderView::from_http_headers(&headers);
+
+        assert_eq!(view.policy.as_deref(), Some(""));
+        assert_eq!(view.subject_id, None);
+        assert_eq!(view.embedding_model, None);
+        assert_eq!(view.extraction_model, None);
+    }
+
+    #[test]
+    fn test_memory_header_view_policy_empty_other_headers_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_LTM_MEMORY_POLICY.clone(),
+            HeaderValue::from_static("   "),
+        );
+        headers.insert(
+            HEADER_LTM_MEMORY_SUBJECT_ID.clone(),
+            HeaderValue::from_static("  "),
+        );
+        headers.insert(
+            HEADER_LTM_MEMORY_EMBEDDING_MODEL.clone(),
+            HeaderValue::from_static(" "),
+        );
+        headers.insert(
+            HEADER_LTM_MEMORY_EXTRACTION_MODEL.clone(),
+            HeaderValue::from_static("   "),
+        );
+
+        let view = MemoryHeaderView::from_http_headers(&headers);
+
+        assert_eq!(view.policy.as_deref(), Some(""));
+        assert_eq!(view.subject_id, None);
+        assert_eq!(view.embedding_model, None);
+        assert_eq!(view.extraction_model, None);
+    }
+
+    #[test]
+    fn test_memory_header_view_all_headers_non_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_LTM_MEMORY_POLICY.clone(),
+            HeaderValue::from_static(" store_and_recall "),
+        );
+        headers.insert(
+            HEADER_LTM_MEMORY_SUBJECT_ID.clone(),
+            HeaderValue::from_static(" subject_1 "),
+        );
+        headers.insert(
+            HEADER_LTM_MEMORY_EMBEDDING_MODEL.clone(),
+            HeaderValue::from_static(" text-embedding-3-small "),
+        );
+        headers.insert(
+            HEADER_LTM_MEMORY_EXTRACTION_MODEL.clone(),
+            HeaderValue::from_static(" gpt-4.1-mini "),
+        );
+
+        let view = MemoryHeaderView::from_http_headers(&headers);
+
+        assert_eq!(view.policy.as_deref(), Some("store_and_recall"));
+        assert_eq!(view.subject_id.as_deref(), Some("subject_1"));
+        assert_eq!(
+            view.embedding_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+        assert_eq!(view.extraction_model.as_deref(), Some("gpt-4.1-mini"));
     }
 }

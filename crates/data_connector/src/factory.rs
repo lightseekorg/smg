@@ -247,6 +247,7 @@ mod tests {
             hook: None,
         };
         let bundle = create_storage(config).await.unwrap();
+        assert!(bundle.conversation_memory_writer.is_some());
         let (resp, conv, items) = (
             bundle.response_storage,
             bundle.conversation_storage,
@@ -296,6 +297,7 @@ mod tests {
             hook: None,
         };
         let bundle = create_storage(config).await.unwrap();
+        assert!(bundle.conversation_memory_writer.is_none());
         let (resp, conv) = (bundle.response_storage, bundle.conversation_storage);
 
         // NoOp storage should accept writes but return nothing on reads
@@ -399,6 +401,7 @@ mod tests {
             hook: Some(Arc::new(NoOpHook)),
         };
         let bundle = create_storage(config).await.unwrap();
+        assert!(bundle.conversation_memory_writer.is_some());
         let (resp, conv, items) = (
             bundle.response_storage,
             bundle.conversation_storage,
