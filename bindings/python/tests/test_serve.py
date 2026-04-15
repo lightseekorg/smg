@@ -1037,6 +1037,7 @@ def _make_args(**overrides):
         "router_policy": "cache_aware",
         "router_pd_disaggregation": False,
         "router_disable_retries": False,
+        "router_disable_circuit_breaker": False,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -1101,6 +1102,52 @@ class TestServeOrchestrator:
             "grpc://127.0.0.1:32000",
             "grpc://127.0.0.1:32003",
         ]
+
+    def test_build_router_args_dp1_disables_retries_and_cb(self):
+        """With dp<=1, router-level retries and circuit breaker are auto-disabled."""
+        from types import SimpleNamespace
+
+        args = _make_args(data_parallel_size=1)
+        orch = ServeOrchestrator("sglang", args, ["--model-path", "/tmp/model"])
+        orch.workers = [(MagicMock(), 31000)]
+
+        router_args = SimpleNamespace(disable_retries=False, disable_circuit_breaker=False)
+        with patch("smg.serve.RouterArgs.from_cli_args", return_value=router_args):
+            result = orch._build_router_args()
+
+        assert result.disable_retries is True
+        assert result.disable_circuit_breaker is True
+        assert result.worker_urls == ["grpc://127.0.0.1:31000"]
+
+    def test_build_router_args_dp2_preserves_retries_and_cb(self):
+        """With dp>1, router-level retries and circuit breaker are left untouched."""
+        from types import SimpleNamespace
+
+        args = _make_args(data_parallel_size=2)
+        orch = ServeOrchestrator("sglang", args, ["--model-path", "/tmp/model"])
+        orch.workers = [(MagicMock(), 31000), (MagicMock(), 31003)]
+
+        router_args = SimpleNamespace(disable_retries=False, disable_circuit_breaker=False)
+        with patch("smg.serve.RouterArgs.from_cli_args", return_value=router_args):
+            result = orch._build_router_args()
+
+        assert result.disable_retries is False
+        assert result.disable_circuit_breaker is False
+
+    def test_build_router_args_dp1_respects_explicit_disable(self):
+        """dp=1 auto-disable is a no-op when user already disabled retries/cb."""
+        from types import SimpleNamespace
+
+        args = _make_args(data_parallel_size=1)
+        orch = ServeOrchestrator("sglang", args, ["--model-path", "/tmp/model"])
+        orch.workers = [(MagicMock(), 31000)]
+
+        router_args = SimpleNamespace(disable_retries=True, disable_circuit_breaker=True)
+        with patch("smg.serve.RouterArgs.from_cli_args", return_value=router_args):
+            result = orch._build_router_args()
+
+        assert result.disable_retries is True
+        assert result.disable_circuit_breaker is True
 
     def test_cleanup_workers_handles_already_dead_process(self):
         args = _make_args()

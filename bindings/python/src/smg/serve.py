@@ -635,6 +635,22 @@ class ServeOrchestrator:
         ]
         router_args = RouterArgs.from_cli_args(self.args, use_router_prefix=True)
         router_args.worker_urls = worker_urls
+        # Router-level retries and circuit breaker are redundant when there is a
+        # single worker — per-worker resilience already handles failures — so
+        # disable them by default for dp<=1. Users who want them must run dp>1.
+        if self.args.data_parallel_size <= 1:
+            if not router_args.disable_retries:
+                logger.info(
+                    "dp=%d: disabling router-level retries (per-worker resilience handles failures)",
+                    self.args.data_parallel_size,
+                )
+                router_args.disable_retries = True
+            if not router_args.disable_circuit_breaker:
+                logger.info(
+                    "dp=%d: disabling router-level circuit breaker (per-worker resilience handles failures)",
+                    self.args.data_parallel_size,
+                )
+                router_args.disable_circuit_breaker = True
         return router_args
 
     def _signal_handler(self, signum: int, frame: object) -> None:
