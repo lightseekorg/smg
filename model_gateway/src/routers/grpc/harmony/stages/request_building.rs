@@ -44,7 +44,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
         let PreparationOutput::Harmony {
             token_ids,
             tool_constraints,
-            filtered_request,
+            modified_request,
             harmony_stop_ids,
             ..
         } = prep
@@ -101,7 +101,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             GrpcClient::Sglang(sglang_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
-                        let body = filtered_request.as_deref().unwrap_or_else(|| request.as_ref());
+                        let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
                         sglang_client
                             .build_generate_request_from_chat(
                                 request_id,
@@ -146,7 +146,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             GrpcClient::Vllm(vllm_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
-                        let body = filtered_request.as_deref().unwrap_or_else(|| request.as_ref());
+                        let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
                         vllm_client
                             .build_generate_request_from_chat(
                                 request_id,
@@ -191,7 +191,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             GrpcClient::Trtllm(trtllm_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
-                        let body = filtered_request.as_deref().unwrap_or_else(|| request.as_ref());
+                        let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
                         trtllm_client
                             .build_generate_request_from_chat(
                                 request_id,
@@ -236,7 +236,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             GrpcClient::Mlx(mlx_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
-                        let body = filtered_request.as_deref().unwrap_or_else(|| request.as_ref());
+                        let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
                         mlx_client
                             .build_generate_request_from_chat(
                                 request_id,

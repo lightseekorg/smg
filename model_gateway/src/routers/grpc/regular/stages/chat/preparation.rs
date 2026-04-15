@@ -1,7 +1,5 @@
 //! Chat preparation stage: Filter tools, process messages, tokenize, build constraints
 
-use std::borrow::Cow;
-
 use async_trait::async_trait;
 use axum::response::Response;
 use openai_protocol::chat::ChatCompletionRequest;
@@ -206,11 +204,6 @@ impl ChatPreparationStage {
             token_ids,
             processed_messages,
             tool_constraints: tool_call_constraint,
-            filtered_request: if matches!(body_ref, Cow::Owned(_)) {
-                Some(Box::new(body_ref.into_owned()))
-            } else {
-                None
-            },
         });
 
         // Store stop decoder for reuse in response processing

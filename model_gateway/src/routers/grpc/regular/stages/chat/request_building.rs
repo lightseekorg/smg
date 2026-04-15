@@ -63,7 +63,6 @@ impl PipelineStage for ChatRequestBuildingStage {
             token_ids,
             processed_messages,
             tool_constraints,
-            filtered_request,
         } = prep
         else {
             debug_assert!(false, "pipeline guarantees Chat variant");
@@ -75,7 +74,6 @@ impl PipelineStage for ChatRequestBuildingStage {
 
         // Build chat request
         let request_id = format!("chatcmpl-{}", Uuid::now_v7());
-        let body_ref = filtered_request.as_deref().unwrap_or(&chat_request);
 
         // Reject multimodal for backends that don't support it, before assembling
         if processed_messages.multimodal_intermediate.is_some() && builder_client.is_mlx() {
@@ -93,7 +91,7 @@ impl PipelineStage for ChatRequestBuildingStage {
         let mut proto_request = builder_client
             .build_chat_request(
                 request_id,
-                body_ref,
+                &chat_request,
                 processed_messages.text,
                 token_ids,
                 multimodal_data,

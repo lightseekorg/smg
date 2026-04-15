@@ -146,7 +146,7 @@ impl HarmonyPreparationStage {
             token_ids: build_output.input_ids,
             selection_text: build_output.selection_text,
             tool_constraints: constraint,
-            filtered_request: if matches!(body_ref, Cow::Owned(_)) {
+            modified_request: if matches!(body_ref, Cow::Owned(_)) {
                 Some(Box::new(body_ref.into_owned()))
             } else {
                 None
@@ -224,7 +224,7 @@ impl HarmonyPreparationStage {
             token_ids: build_output.input_ids,
             selection_text: build_output.selection_text,
             tool_constraints: constraint,
-            filtered_request: None,
+            modified_request: None,
             harmony_messages: build_output.harmony_messages,
             harmony_stop_ids: build_output.stop_token_ids,
         });
