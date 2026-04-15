@@ -1,8 +1,12 @@
 //! HTTP server for the Prometheus metrics endpoint (port 29000).
-//! Later PRs add `/ws/metrics` to this same server.
+//!
+//! The `/metrics` endpoint returns both SMG's own metrics (`smg_*`) and engine
+//! metrics (`vllm_*`, `sglang_*`, `nv_trt_*`) in a single Prometheus text
+//! response, so Prometheus only needs one scrape target per pod.
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -12,6 +16,28 @@ use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use super::metrics::UPKEEP_INTERVAL_SECS;
+use crate::core::{
+    worker_manager::{EngineMetricsResult, WorkerManager},
+    worker_registry::WorkerRegistry,
+};
+
+/// Shared references for engine metrics collection, populated after app init.
+pub struct EngineMetricsDeps {
+    pub worker_registry: Arc<WorkerRegistry>,
+    pub client: reqwest::Client,
+}
+
+/// Global handle set once after AppContext is built.
+static ENGINE_METRICS_DEPS: OnceLock<EngineMetricsDeps> = OnceLock::new();
+
+/// Register the worker registry and HTTP client for engine metrics collection.
+/// Called once after AppContext is initialized.
+pub fn register_engine_metrics_deps(worker_registry: Arc<WorkerRegistry>, client: reqwest::Client) {
+    let _ = ENGINE_METRICS_DEPS.set(EngineMetricsDeps {
+        worker_registry,
+        client,
+    });
+}
 
 #[derive(Clone)]
 struct MetricsState {
@@ -19,12 +45,23 @@ struct MetricsState {
 }
 
 async fn prometheus_handler(State(state): State<MetricsState>) -> impl IntoResponse {
+    let smg_text = state.handle.render();
+
+    let engine_text = if let Some(deps) = ENGINE_METRICS_DEPS.get() {
+        match WorkerManager::get_engine_metrics(&deps.worker_registry, &deps.client).await {
+            EngineMetricsResult::Ok(text) => text,
+            EngineMetricsResult::Err(_) => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
     (
         [(
             http::header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        state.handle.render(),
+        format!("{smg_text}\n{engine_text}"),
     )
 }
 
@@ -45,7 +82,10 @@ pub async fn start_metrics_server(
         Ok(l) => l,
         Err(e) => {
             error!("failed to bind metrics server on {addr}: {e} — metrics will be unavailable");
-            // Return a no-op handle so the router can still operate
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "no-op task for graceful degradation"
+            )]
             return tokio::spawn(async {});
         }
     };
@@ -66,9 +106,8 @@ pub async fn start_metrics_server(
     });
 
     let state = MetricsState { handle };
-    let app = Router::new()
-        .route("/metrics", get(prometheus_handler))
-        .with_state(state);
+
+    let app = Router::new().route("/metrics", get(prometheus_handler).with_state(state));
 
     #[expect(
         clippy::disallowed_methods,
