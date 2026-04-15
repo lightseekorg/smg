@@ -171,7 +171,6 @@ impl KvEventMonitor {
     /// Sends a graceful shutdown signal — the task cleans up its own
     /// `WorkerBlockMap` in the indexer before exiting.
     pub async fn on_worker_removed(&self, worker_url: &str) {
-        // Remove subscription from handles under lock.
         let subscription = {
             let mut handles = self.worker_handles.lock().await;
             handles.remove(worker_url)
@@ -840,7 +839,6 @@ mod tests {
         let w1 = indexer.intern_worker("http://w1:8000");
         let mut wb = WorkerBlockMap::default();
 
-        // Store first
         let stored_event = KvCacheEvent {
             event_id: 1,
             data: Some(kv_cache_event::Data::Stored(KvBlocksStored {
@@ -856,7 +854,6 @@ mod tests {
         };
         KvEventMonitor::apply_event(&stored_event, w1, &indexer, &mut wb);
 
-        // Remove
         let removed_event = KvCacheEvent {
             event_id: 2,
             data: Some(kv_cache_event::Data::Removed(KvBlocksRemoved {
@@ -874,7 +871,6 @@ mod tests {
         let w1 = indexer.intern_worker("http://w1:8000");
         let mut wb = WorkerBlockMap::default();
 
-        // Store first
         KvEventMonitor::apply_event(
             &KvCacheEvent {
                 event_id: 1,
