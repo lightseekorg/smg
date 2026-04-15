@@ -441,7 +441,7 @@ impl TrtllmServiceClient {
             output_config: Some(output_config),
             max_tokens,
             streaming: body.stream.unwrap_or(false),
-            stop: vec![],
+            stop: vec![], // Does not pass through body.stop yet (follow-up fix)
             stop_token_ids: vec![],
             ignore_eos: false,
             bad: vec![],

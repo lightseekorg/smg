@@ -497,8 +497,8 @@ impl VllmEngineClient {
             presence_penalty: request.presence_penalty.unwrap_or(0.0),
             repetition_penalty: request.repetition_penalty,
             max_tokens,
-            stop: vec![],
-            stop_token_ids: vec![],     // Handled by Harmony stop tokens
+            stop: vec![], // Does not pass through request.stop yet (follow-up fix)
+            stop_token_ids: vec![], // Handled by Harmony stop tokens
             skip_special_tokens: false, // Keep special tokens for Harmony
             spaces_between_special_tokens: true,
             ignore_eos: false,
