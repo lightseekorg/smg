@@ -449,10 +449,15 @@ impl VllmEngineClient {
             constraints.push(proto::sampling_params::Constraint::Regex(regex.clone()));
         }
 
-        // Handle tool call constraint from preparation stage
+        // Handle tool call constraint from preparation stage.
+        // If response_format already set a constraint, clear it — tool constraint wins
+        // (matches vLLM HTTP behavior where tool calling overrides response_format).
         if let Some((constraint_type, constraint_value)) = tool_call_constraint {
             if !constraints.is_empty() {
-                return Err("Constrained decoding is not compatible with tool calls.".to_string());
+                warn!(
+                    "Constrained decoding is not compatible with tool calls, using tool constraint"
+                );
+                constraints.clear();
             }
             let tool_constraint = match constraint_type.as_str() {
                 "structural_tag" => {

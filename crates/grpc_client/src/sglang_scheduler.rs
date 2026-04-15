@@ -512,21 +512,26 @@ impl SglangSchedulerClient {
             constraints.push(proto::sampling_params::Constraint::Regex(regex.clone()));
         }
 
-        // Handle tool call constraint from preparation stage
+        // Handle tool call constraint from preparation stage.
+        // If response_format already set a constraint, drop the tool constraint
+        // (matches SGLang HTTP behavior where response_format takes priority).
         if let Some((constraint_type, constraint_value)) = tool_call_constraint {
-            if !constraints.is_empty() {
-                return Err("Constrained decoding is not compatible with tool calls.".to_string());
+            if constraints.is_empty() {
+                let tool_constraint = match constraint_type.as_str() {
+                    "structural_tag" => {
+                        proto::sampling_params::Constraint::StructuralTag(constraint_value)
+                    }
+                    "json_schema" => {
+                        proto::sampling_params::Constraint::JsonSchema(constraint_value)
+                    }
+                    "ebnf" => proto::sampling_params::Constraint::EbnfGrammar(constraint_value),
+                    "regex" => proto::sampling_params::Constraint::Regex(constraint_value),
+                    _ => return Err(format!("Unknown constraint type: {constraint_type}")),
+                };
+                constraints.push(tool_constraint);
+            } else {
+                warn!("Constrained decoding is not compatible with tool calls, dropping tool constraint");
             }
-            let tool_constraint = match constraint_type.as_str() {
-                "structural_tag" => {
-                    proto::sampling_params::Constraint::StructuralTag(constraint_value)
-                }
-                "json_schema" => proto::sampling_params::Constraint::JsonSchema(constraint_value),
-                "ebnf" => proto::sampling_params::Constraint::EbnfGrammar(constraint_value),
-                "regex" => proto::sampling_params::Constraint::Regex(constraint_value),
-                _ => return Err(format!("Unknown constraint type: {constraint_type}")),
-            };
-            constraints.push(tool_constraint);
         }
 
         match constraints.len() {
