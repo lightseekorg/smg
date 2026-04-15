@@ -1,0 +1,25 @@
+//! HTTP middleware stack for the gateway server.
+//!
+//! Each submodule owns a single concern; this `mod.rs` re-exports the
+//! types and functions that `server.rs` and other call sites already
+//! reference, so this split is invisible to downstream callers.
+
+pub mod auth;
+pub mod concurrency;
+pub mod logging;
+pub mod metrics;
+pub mod request_id;
+pub mod storage_context;
+pub mod token_bucket;
+pub mod wasm;
+
+pub use auth::{auth_middleware, AuthConfig};
+pub use concurrency::{
+    concurrency_limit_middleware, ConcurrencyLimiter, QueueProcessor, QueuedRequest, TokenGuardBody,
+};
+pub use logging::{create_logging_layer, RequestLogger, RequestSpan, ResponseLogger};
+pub use metrics::{HttpMetricsLayer, HttpMetricsMiddleware};
+pub use request_id::{RequestId, RequestIdLayer, RequestIdMiddleware};
+pub use storage_context::storage_context_middleware;
+pub use token_bucket::TokenBucket;
+pub use wasm::wasm_middleware;
