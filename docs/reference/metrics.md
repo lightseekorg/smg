@@ -186,7 +186,7 @@ Duration of individual pipeline stages (gRPC mode only).
 |------|--------|
 | Histogram | `router_type`, `stage` |
 
-Stage names are emitted by the gRPC pipeline (e.g., tokenization, routing, inference, detokenization, tool parsing).
+Stage names are emitted by the gRPC pipeline (e.g., `tokenize`, `route`, `inference`, `detokenize`, `tool_parse`).
 
 ```promql
 # Tokenization latency

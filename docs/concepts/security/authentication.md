@@ -356,9 +356,16 @@ This is useful when:
 - Using DP-aware scheduling that requires authenticated worker queries
 - Workers are behind an authentication proxy
 
-`--api-key` is unrelated to the control plane (`--control-plane-api-keys` and
-`--jwt-*`), which protect admin routes like `/workers`, `/wasm`, and
-`/v1/tokenizers` instead.
+Control plane routes (`/workers`, `/wasm`, `/v1/tokenizers`, etc.) use
+their own middleware stack. When `--control-plane-api-keys` or
+`--jwt-*` are configured they take over as the admin auth backend
+(with role-based access control and audit logging); when neither is
+set, admin routes fall back to the same `--api-key` bearer check that
+guards the data plane. If you run with **only** `--api-key`, the same
+shared secret therefore gates both the data plane and the control
+plane — which is rarely what you want in production. See
+[Control Plane Auth](../../getting-started/control-plane-auth.md) for
+configuring JWT/OIDC or dedicated control-plane keys.
 
 ---
 
