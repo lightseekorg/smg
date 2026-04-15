@@ -708,7 +708,7 @@ impl PDRouter {
                     );
                     error::bad_gateway(
                         "decode_server_error",
-                        format!("Decode server error: {}", e),
+                        format!("Decode server error: {e}"),
                     )
                 }
             }
