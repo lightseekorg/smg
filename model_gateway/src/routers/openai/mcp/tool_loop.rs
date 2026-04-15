@@ -21,8 +21,8 @@ use openai_protocol::{
 };
 use serde_json::{json, to_value, Value};
 use smg_mcp::{
-    extract_embedded_openai_responses, mcp_response_item_id, McpServerBinding, McpToolSession, ResponseFormat,
-    ResponseTransformer, ToolExecutionInput,
+    extract_embedded_openai_responses, mcp_response_item_id, McpServerBinding, McpToolSession,
+    ResponseFormat, ResponseTransformer, ToolExecutionInput,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -1291,8 +1291,14 @@ mod tests {
             extracted[0]["content"][0]["annotations"][0]["url"],
             "https://example.com/openai-result"
         );
-        assert_eq!(extracted[0]["content"][0]["annotations"][0]["start_index"], 0);
-        assert_eq!(extracted[0]["content"][0]["annotations"][0]["end_index"], 10);
+        assert_eq!(
+            extracted[0]["content"][0]["annotations"][0]["start_index"],
+            0
+        );
+        assert_eq!(
+            extracted[0]["content"][0]["annotations"][0]["end_index"],
+            10
+        );
     }
 
     #[test]
