@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
-    http::HeaderMap,
+    body::Body,
+    http::{HeaderMap, Request, StatusCode},
     response::{IntoResponse, Response},
 };
 use openai_protocol::{
@@ -509,6 +510,36 @@ impl std::fmt::Debug for GrpcRouter {
 impl RouterTrait for GrpcRouter {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    async fn health_generate(&self, _req: Request<Body>) -> Response {
+        let workers = self.worker_registry.get_all();
+        if workers.is_empty() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "No workers registered").into_response();
+        }
+        let (healthy, unhealthy): (Vec<_>, Vec<_>) = workers.iter().partition(|w| w.is_healthy());
+        if unhealthy.is_empty() {
+            (
+                StatusCode::OK,
+                format!("OK - {} workers healthy", healthy.len()),
+            )
+                .into_response()
+        } else {
+            let info: Vec<_> = unhealthy
+                .iter()
+                .map(|w| format!("{} ({})", w.model_id(), w.url()))
+                .collect();
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "{}/{} workers unhealthy: {}",
+                    unhealthy.len(),
+                    workers.len(),
+                    info.join(", ")
+                ),
+            )
+                .into_response()
+        }
     }
 
     async fn route_generate(
