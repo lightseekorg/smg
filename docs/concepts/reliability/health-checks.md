@@ -72,18 +72,30 @@ SMG sends periodic HTTP requests to each worker's health endpoint:
   <img src="../../../assets/images/health-checks-flow.svg" alt="Health Check Sequence Diagram">
 </div>
 
-### Health States
+### Worker States
 
 | State | Meaning | Traffic |
 |-------|---------|---------|
-| **Healthy** | Passing health checks | Receives requests |
-| **Unhealthy** | Consecutive failures ≥ threshold | No requests |
+| **Pending** | Freshly registered, not yet verified | No requests |
+| **Ready** | Passing health checks | Receives requests |
+| **NotReady** | Consecutive probe failures reached the readiness threshold | No requests |
+| **Failed** | Consecutive failures reached the liveness threshold, or `Pending` ran out of probe attempts | Terminal — receives no requests and is not probed further |
+
+The `smg_worker_health` gauge collapses these to `1` (Ready) and `0` (anything else), so existing dashboards continue to work.
 
 ### State Transitions
 
-**Healthy → Unhealthy**: When consecutive failed health checks reach `--health-failure-threshold`
+**Pending → Ready**: When consecutive successful probes reach `--health-success-threshold`.
 
-**Unhealthy → Healthy**: When consecutive successful health checks reach `--health-success-threshold`
+**Pending → Failed**: If the worker accumulates `10 × failure_threshold` total probes without ever reaching the success threshold (prevents misconfigured URLs from lingering forever).
+
+**Ready → NotReady**: When consecutive failed probes reach `--health-failure-threshold`.
+
+**NotReady → Ready**: When consecutive successful probes reach `--health-success-threshold`.
+
+**NotReady → Failed**: When consecutive failures reach `3 × --health-failure-threshold` (the liveness threshold — analogous to a Kubernetes liveness probe, tolerating longer outages than the readiness threshold).
+
+**Failed is terminal**: Successful probes do not recover a `Failed` worker. A failed worker is removed via `--remove-unhealthy-workers` or requires manual re-registration.
 
 ---
 
@@ -109,7 +121,7 @@ smg \
 | `--health-check-timeout-secs` | `5` | Timeout for each health check request |
 | `--health-check-endpoint` | `/health` | Endpoint path for health checks |
 | `--disable-health-check` | `false` | Disable background health checks |
-| `--remove-unhealthy-workers` | `false` | Remove workers after being marked unhealthy |
+| `--remove-unhealthy-workers` | `false` | Submit a removal job when a worker reaches the terminal `Failed` state |
 
 ---
 

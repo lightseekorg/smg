@@ -74,11 +74,11 @@ With graceful shutdown:
 
 ### Shutdown Sequence
 
-1. **Shutdown signal received** (SIGTERM, SIGINT, or API call)
-2. **Stop accepting new requests** - New connections are rejected with 503
-3. **Drain in-flight requests** - Existing requests continue processing
-4. **Grace period timer starts** - After `shutdown-grace-period-secs`, force shutdown
-5. **Clean exit** - Once all requests complete (or grace period expires)
+1. **Shutdown signal received** (SIGTERM or SIGINT). The mesh-only `/ha/shutdown` API triggers a separate mesh-level broadcast path and is not part of this signal-driven sequence.
+2. **Stop accepting new connections** — `axum_server`'s handle stops the TCP accept loop and marks the in-flight tracker as draining; new connections are refused at the socket level rather than receiving a 503 response.
+3. **Drain in-flight requests** — existing requests continue processing while the server waits on the in-flight tracker.
+4. **Grace period timer starts** — after `--shutdown-grace-period-secs`, the drain wait times out and the server forces shutdown with any remaining requests still in-flight.
+5. **Clean exit** — once all requests complete (or the grace period expires), background components (MCP orchestrator, etc.) are cleaned up and the process exits.
 
 ---
 
@@ -180,9 +180,11 @@ kill -INT <pid>
 ### Via API
 
 ```bash
-# Trigger graceful shutdown via HTTP
-curl -X POST http://gateway:3001/ha/shutdown
+# Trigger graceful shutdown via HTTP (mesh mode only)
+curl -X POST http://gateway:30000/ha/shutdown
 ```
+
+The `/ha/shutdown` endpoint lives on the main gateway port (default `30000`) and requires mesh mode (`--mesh-*` flags). Without mesh enabled the endpoint returns `503 Service Unavailable`. The mesh handler broadcasts a `LEAVING` status to peer nodes and stops the mesh rate-limit task — it does not share the same in-flight drain path used by the signal handler.
 
 ### Kubernetes Integration
 
@@ -260,17 +262,14 @@ The sleep allows the load balancer to stop sending new traffic before SMG begins
 
 ### Health Check Coordination
 
-During shutdown, SMG's health endpoint can return unhealthy to signal load balancers:
+SMG's `/health` (liveness) endpoint always returns `200 OK` — it does not switch to an unhealthy response during shutdown. To drain traffic cleanly, remove the pod from the load balancer before SMG begins its own drain (for example, with the Kubernetes `preStop` hook above, or an external control-plane deregister step).
 
 ```bash
-# Health check during normal operation
-curl http://gateway:3001/health
-# Returns 200 OK
-
-# During graceful shutdown
-curl http://gateway:3001/health
-# Returns 503 Service Unavailable
+curl http://gateway:30000/health
+# Returns 200 OK both during normal operation and throughout the drain
 ```
+
+`/readiness` can still return `503 Service Unavailable` when no healthy workers remain, but it reacts to worker state rather than to the shutdown signal itself.
 
 ---
 
@@ -280,19 +279,24 @@ curl http://gateway:3001/health
 
 Watch logs for shutdown-related messages:
 
-```bash
-# Graceful shutdown initiated
-[INFO] Received shutdown signal, starting graceful shutdown
-[INFO] Stopping new request acceptance
-[INFO] Waiting for 5 in-flight requests to complete
+```text
+# Signal received
+INFO Received Ctrl+C, starting graceful shutdown
+# or
+INFO Received terminate signal, starting graceful shutdown
 
-# Requests completing
-[INFO] In-flight requests: 5 -> 4
-[INFO] In-flight requests: 4 -> 3
-...
+# Gate — in-flight tracker is marked draining and the accept loop stops
+INFO Beginning graceful shutdown: gating new connections in_flight=5
 
-# Clean exit
-[INFO] All requests completed, shutting down
+# Drain completes within the grace period
+INFO All in-flight requests drained
+
+# Or the grace period expires with requests still running
+WARN Drain timed out, forcing shutdown with requests still in-flight remaining=2 timeout_secs=180
+
+# Component teardown
+INFO HTTP server stopped. Starting component cleanup...
+INFO Cleanup complete. Process exiting.
 ```
 
 ### Metrics During Shutdown
