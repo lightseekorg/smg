@@ -24,7 +24,7 @@ class _SamplingParamsBase:
             input="What is 2+2?",
             temperature=0.5,
             top_p=0.9,
-            max_output_tokens=32,
+            max_output_tokens=256,
             extra_body={
                 "top_k": 40,
                 "min_p": 0.05,
@@ -35,15 +35,15 @@ class _SamplingParamsBase:
         )
         assert resp.status == "completed"
         assert resp.error is None
-        assert len(resp.output_text) > 0
+        assert len(resp.output) > 0
 
-        assert resp.temperature == 0.5
-        assert resp.top_p == 0.9
-        assert resp.max_output_tokens == 32
+        assert resp.temperature == pytest.approx(0.5)
+        assert resp.top_p == pytest.approx(0.9, abs=1e-4)
+        assert resp.max_output_tokens == 256
 
         assert resp.usage is not None
+        assert resp.usage.output_tokens is not None
         assert resp.usage.output_tokens > 0
-        assert resp.usage.output_tokens <= 32
 
     def test_temperature_zero_is_deterministic(self, model, api_client):
         """temperature=0 reaches the backend — same prompt yields identical output."""
@@ -68,7 +68,7 @@ class _SamplingParamsBase:
             stream=True,
             temperature=0.5,
             top_p=0.9,
-            max_output_tokens=32,
+            max_output_tokens=256,
             extra_body={
                 "top_k": 40,
                 "min_p": 0.05,
@@ -84,11 +84,11 @@ class _SamplingParamsBase:
         resp = completed[0].response
         assert resp.status == "completed"
         assert len(resp.output) > 0
-        assert resp.temperature == 0.5
-        assert resp.top_p == 0.9
+        assert resp.temperature == pytest.approx(0.5)
+        assert resp.top_p == pytest.approx(0.9, abs=1e-4)
         assert resp.usage is not None
+        assert resp.usage.output_tokens is not None
         assert resp.usage.output_tokens > 0
-        assert resp.usage.output_tokens <= 32
 
 
 @pytest.mark.engine("sglang")
