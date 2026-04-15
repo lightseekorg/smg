@@ -706,10 +706,7 @@ impl PDRouter {
                         error = %e,
                         "Decode request failed"
                     );
-                    error::bad_gateway(
-                        "decode_server_error",
-                        format!("Decode server error: {e}"),
-                    )
+                    error::bad_gateway("decode_server_error", format!("Decode server error: {e}"))
                 }
             }
         } else {
@@ -783,9 +780,7 @@ impl PDRouter {
                 let prefill_logprobs = prefill_body
                     .as_ref()
                     .and_then(|body| serde_json::from_slice::<Value>(body).ok())
-                    .and_then(|json| {
-                        json.pointer("/meta_info/input_token_logprobs").cloned()
-                    });
+                    .and_then(|json| json.pointer("/meta_info/input_token_logprobs").cloned());
 
                 let response_headers =
                     header_utils::preserve_response_headers(decode_response.headers());
@@ -824,10 +819,7 @@ impl PDRouter {
                         }
                         Err(e) => {
                             error!("Failed to read decode response: {}", e);
-                            error::internal_error(
-                                "read_response_failed",
-                                "Failed to read response",
-                            )
+                            error::internal_error("read_response_failed", "Failed to read response")
                         }
                     }
                 }
