@@ -1032,6 +1032,14 @@ mod tests {
         assert_eq!(cfg.repetition_penalty, Some(1.2));
         assert_eq!(cfg.frequency_penalty, Some(0.3));
         assert_eq!(cfg.presence_penalty, Some(-0.4));
+
+        // Negative top_k is clamped to 0 (TRT-LLM's disabled sentinel).
+        let disabled = ResponsesRequest {
+            top_k: -1,
+            ..Default::default()
+        };
+        let disabled_cfg = TrtllmServiceClient::build_sampling_config_from_responses(&disabled);
+        assert_eq!(disabled_cfg.top_k, Some(0));
     }
 
     #[tokio::test]

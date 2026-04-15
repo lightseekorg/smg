@@ -1016,6 +1016,16 @@ mod tests {
         assert!((params.repetition_penalty - 1.2).abs() < 1e-6);
         assert!((params.frequency_penalty - 0.3).abs() < 1e-6);
         assert!((params.presence_penalty - (-0.4)).abs() < 1e-6);
+
+        // Default top_k (-1) passes through as SGLang's disabled sentinel.
+        let disabled = ResponsesRequest {
+            top_k: -1,
+            ..Default::default()
+        };
+        let disabled_params =
+            SglangSchedulerClient::build_grpc_sampling_params_from_responses(&disabled, None)
+                .expect("build sampling params");
+        assert_eq!(disabled_params.top_k, -1);
     }
 
     #[test]
