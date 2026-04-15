@@ -31,15 +31,15 @@ pub struct ConversationMemoryConfig {
 
 /// Wire-format for the `x-conversation-memory-config` JSON header.
 #[derive(Deserialize, Default)]
-struct MemoryConfigJson {
+struct MemoryConfig {
     #[serde(default)]
-    long_term_memory: LongTermMemoryJson,
+    long_term_memory: LongTermMemoryConfig,
     #[serde(default)]
-    short_term_memory: ShortTermMemoryJson,
+    short_term_memory: ShortTermMemoryConfig,
 }
 
 #[derive(Deserialize, Default)]
-struct LongTermMemoryJson {
+struct LongTermMemoryConfig {
     #[serde(default)]
     enabled: bool,
     subject_id: Option<String>,
@@ -48,7 +48,7 @@ struct LongTermMemoryJson {
 }
 
 #[derive(Deserialize, Default)]
-struct ShortTermMemoryJson {
+struct ShortTermMemoryConfig {
     #[serde(default)]
     enabled: bool,
     condenser_model_id: Option<String>,
@@ -60,7 +60,7 @@ struct ShortTermMemoryJson {
 /// Returns defaults when the header is absent or invalid.
 pub fn extract_conversation_memory_config(headers: Option<&HeaderMap>) -> ConversationMemoryConfig {
     if let Some(raw) = extract_header_value(headers, &HEADER_CONVERSATION_MEMORY_CONFIG) {
-        if let Ok(cfg) = serde_json::from_str::<MemoryConfigJson>(raw) {
+        if let Ok(cfg) = serde_json::from_str::<MemoryConfig>(raw) {
             return ConversationMemoryConfig {
                 ltm_enabled: cfg.long_term_memory.enabled,
                 ltm_subject_id: normalize_optional_string(cfg.long_term_memory.subject_id),
