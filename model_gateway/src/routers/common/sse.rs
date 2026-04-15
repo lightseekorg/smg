@@ -433,7 +433,7 @@ fn parse_frame(frame: &str) -> Option<SseFrame<'_>> {
                 match data.take() {
                     None => data = Some(Cow::Borrowed(value)),
                     Some(Cow::Borrowed(first)) => {
-                        let mut joined = String::with_capacity(first.len() + 1 + value.len());
+                        let mut joined = String::with_capacity(frame.len());
                         joined.push_str(first);
                         joined.push('\n');
                         joined.push_str(value);
