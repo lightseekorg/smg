@@ -2,7 +2,10 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use openai_protocol::chat::ChatCompletionRequest;
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    common::{ToolChoice, ToolChoiceValue},
+};
 use tracing::{debug, error};
 
 use crate::routers::{
@@ -200,12 +203,28 @@ impl ChatPreparationStage {
             None
         };
 
+        // Derive skip_special_tokens from constraint type:
+        // - json_schema: backend forces JSON, no trigger tokens to preserve
+        // - structural_tag or no constraint (auto): parser needs trigger tokens
+        let skip_special_tokens = match &tool_call_constraint {
+            Some(c) if c.is_json_schema() => request.skip_special_tokens,
+            _ if request.tools.is_some()
+                && !matches!(
+                    request.tool_choice,
+                    Some(ToolChoice::Value(ToolChoiceValue::None))
+                ) =>
+            {
+                false
+            }
+            _ => request.skip_special_tokens,
+        };
+
         // Step 5: Create stop sequence decoder (build once, reuse in non-stream)
         let stop_decoder = utils::create_stop_decoder(
             &tokenizer,
             request.stop.as_ref(),
             request.stop_token_ids.as_ref(),
-            request.skip_special_tokens,
+            skip_special_tokens,
             request.no_stop_trim,
             request.ignore_eos,
         );
@@ -220,8 +239,11 @@ impl ChatPreparationStage {
             tool_constraints: tool_call_constraint,
         });
 
-        // Store stop decoder for reuse in response processing
+        // Store stop decoder and derived skip_special_tokens for response processing.
+        // Stored on ResponseState because PreparationOutput is consumed by
+        // request_building before response_processing runs.
         ctx.state.response.stop_decoder = Some(stop_decoder);
+        ctx.state.response.skip_special_tokens = Some(skip_special_tokens);
 
         Ok(())
     }

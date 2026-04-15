@@ -263,6 +263,11 @@ pub(crate) struct ResponseState {
     /// Stop sequence decoder
     pub stop_decoder: Option<StopSequenceDecoder>,
 
+    /// Derived skip_special_tokens for streaming (set in preparation, read in response_processing).
+    /// Stored here because PreparationOutput is consumed by request_building before
+    /// response_processing runs.
+    pub skip_special_tokens: Option<bool>,
+
     /// Execution result (streams from workers)
     pub execution_result: Option<ExecutionResult>,
 

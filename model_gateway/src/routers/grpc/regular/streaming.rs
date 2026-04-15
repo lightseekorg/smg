@@ -95,6 +95,7 @@ impl StreamingProcessor {
         chat_request: Arc<ChatCompletionRequest>,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
+        skip_special_tokens: bool,
     ) -> Response {
         use bytes::Bytes;
         use tokio::sync::mpsc;
@@ -102,7 +103,7 @@ impl StreamingProcessor {
         let stop_params = (
             chat_request.stop.clone(),
             chat_request.stop_token_ids.clone(),
-            chat_request.skip_special_tokens,
+            skip_special_tokens,
             chat_request.no_stop_trim,
             chat_request.ignore_eos,
         );
@@ -1451,6 +1452,7 @@ impl StreamingProcessor {
         messages_request: Arc<CreateMessageRequest>,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
+        skip_special_tokens: bool,
     ) -> Response {
         let stop_params = (
             messages_request
@@ -1458,9 +1460,9 @@ impl StreamingProcessor {
                 .clone()
                 .map(StringOrArray::Array),
             None::<Vec<u32>>, // No stop_token_ids in Messages API
-            true,             // always skip special tokens
-            false,            // no_stop_trim
-            false,            // ignore_eos — not available in Messages API
+            skip_special_tokens,
+            false, // no_stop_trim
+            false, // ignore_eos — not available in Messages API
         );
 
         let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
