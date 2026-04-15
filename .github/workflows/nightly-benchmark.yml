@@ -3,7 +3,6 @@ name: Nightly Benchmark
 on:
   schedule:
     - cron: '0 8 * * *'
-  pull_request:
   workflow_dispatch:
     inputs:
       models:
@@ -118,14 +117,14 @@ jobs:
       max-parallel: 8
       matrix:
         model:
-          # - { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bSingle }
-          # - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bSingle }
-          # - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle }
-          # - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bSingle }
+          - { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bSingle }
+          - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bSingle }
+          - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle }
+          - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bSingle }
           - { id: mistralai/Devstral-2-123B-Instruct-2512, slug: mistralai-Devstral-2-123B-Instruct-2512, test_class: TestNightlyDevstral2Single }
-          # - { id: meta-llama/Llama-4-Scout-17B-16E-Instruct, slug: meta-llama-Llama-4-Scout-17B-16E-Instruct, test_class: TestNightlyLlama4ScoutSingle }
-          # - { id: meta-llama/Llama-3.3-70B-Instruct, slug: meta-llama-Llama-3.3-70B-Instruct, test_class: TestNightlyLlama70bSingle }
-          # - { id: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic, slug: RedHatAI-Llama-3.3-70B-Instruct-FP8-dynamic, test_class: TestNightlyLlama70bFp8Single }
+          - { id: meta-llama/Llama-4-Scout-17B-16E-Instruct, slug: meta-llama-Llama-4-Scout-17B-16E-Instruct, test_class: TestNightlyLlama4ScoutSingle }
+          - { id: meta-llama/Llama-3.3-70B-Instruct, slug: meta-llama-Llama-3.3-70B-Instruct, test_class: TestNightlyLlama70bSingle }
+          - { id: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic, slug: RedHatAI-Llama-3.3-70B-Instruct-FP8-dynamic, test_class: TestNightlyLlama70bFp8Single }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false }
           - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false }
@@ -227,7 +226,7 @@ jobs:
   multi-worker:
     name: "${{ matrix.model.id }} / multi-${{ matrix.variant.id }}"
     needs: build-wheel
-    if: false
+    if: ${{ !cancelled() }}
     runs-on: 4-gpu-h100
     timeout-minutes: 1440
     strategy:
@@ -341,7 +340,7 @@ jobs:
   single-worker-h200:
     name: "${{ matrix.model.id }} / single-${{ matrix.variant.id }}"
     needs: build-wheel
-    if: false
+    if: ${{ !cancelled() }}
     runs-on: ["8-gpu-h200"]
     timeout-minutes: 1440
     strategy:
