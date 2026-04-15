@@ -193,6 +193,10 @@ impl ParserRegistry {
         tools: &[Tool],
         tool_choice: &ToolChoice,
     ) -> Result<Option<ToolConstraint>, String> {
+        if tools.is_empty() {
+            return Ok(None);
+        }
+
         let at_least_one = match tool_choice {
             ToolChoice::Value(ToolChoiceValue::Required) => true,
             ToolChoice::Function { .. } => true,
@@ -214,9 +218,6 @@ impl ParserRegistry {
         }
 
         // Fall back to generic JSON schema
-        if tools.is_empty() {
-            return Ok(None);
-        }
         match tool_choice {
             ToolChoice::Function { .. } => {
                 let params_schema = serde_json::to_string(&tools[0].function.parameters)

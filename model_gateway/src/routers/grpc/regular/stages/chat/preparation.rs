@@ -236,7 +236,7 @@ impl ChatPreparationStage {
         ctx.state.preparation = Some(PreparationOutput::Chat {
             token_ids,
             processed_messages,
-            tool_constraints: tool_call_constraint,
+            tool_constraints: tool_call_constraint.map(|c| c.to_tuple()),
         });
 
         // Store stop decoder and derived skip_special_tokens for response processing.
