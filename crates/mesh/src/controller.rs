@@ -31,7 +31,9 @@ use super::{
 };
 use crate::{
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
+    incremental::{CentralCollector, PeerWatermark, RoundBatch},
     metrics,
+    service::gossip::IncrementalUpdate,
 };
 
 pub struct MeshController {
@@ -45,10 +47,10 @@ pub struct MeshController {
     // Track active sync_stream connections
     sync_connections: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     /// Central collector that runs once per gossip round.
-    central_collector: Arc<super::incremental::CentralCollector>,
+    central_collector: Arc<CentralCollector>,
     /// Current round batch, updated once per round by the central collector.
     /// Per-peer senders read and apply their own watermark filtering.
-    current_batch: Arc<parking_lot::RwLock<Arc<super::incremental::RoundBatch>>>,
+    current_batch: Arc<parking_lot::RwLock<Arc<RoundBatch>>>,
 }
 
 impl MeshController {
@@ -62,10 +64,8 @@ impl MeshController {
         sync_manager: Arc<MeshSyncManager>,
         mtls_manager: Option<Arc<MTLSManager>>,
     ) -> Self {
-        let central_collector = Arc::new(super::incremental::CentralCollector::new(
-            stores.clone(),
-            self_name.to_string(),
-        ));
+        let central_collector =
+            Arc::new(CentralCollector::new(stores.clone(), self_name.to_string()));
         Self {
             state,
             self_name: self_name.to_string(),
@@ -76,15 +76,13 @@ impl MeshController {
             mtls_manager,
             sync_connections: Arc::new(Mutex::new(HashMap::new())),
             central_collector,
-            current_batch: Arc::new(parking_lot::RwLock::new(Arc::new(
-                super::incremental::RoundBatch::default(),
-            ))),
+            current_batch: Arc::new(parking_lot::RwLock::new(Arc::new(RoundBatch::default()))),
         }
     }
 
     /// Get a handle to the shared RoundBatch. Used by GossipService to
     /// share the centrally collected batch with server-side sync_stream handlers.
-    pub fn current_batch(&self) -> Arc<parking_lot::RwLock<Arc<super::incremental::RoundBatch>>> {
+    pub fn current_batch(&self) -> Arc<parking_lot::RwLock<Arc<RoundBatch>>> {
         self.current_batch.clone()
     }
 
@@ -486,10 +484,6 @@ impl MeshController {
                 // Spawn a task to periodically send incremental updates (client-side sender).
                 // Uses PeerWatermark to filter the centrally collected batch.
                 let incremental_sender_handle = {
-                    use super::{
-                        incremental::PeerWatermark, service::gossip::IncrementalUpdate,
-                    };
-
                     let mut watermark = PeerWatermark::new(peer_name.clone());
                     log::debug!(
                         peer = %peer_name,

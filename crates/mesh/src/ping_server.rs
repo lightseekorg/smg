@@ -39,6 +39,7 @@ use super::{
     stores::{StateStores, StoreType as LocalStoreType},
     sync::MeshSyncManager,
 };
+use crate::incremental::{PeerWatermark, RoundBatch};
 
 #[derive(Debug)]
 pub struct GossipService {
@@ -54,7 +55,7 @@ pub struct GossipService {
     /// Shared reference to the current RoundBatch, updated once per round by
     /// the MeshController's central collector. Server-side sync_stream handlers
     /// read from this and apply per-peer watermark filtering.
-    current_batch: Option<Arc<parking_lot::RwLock<Arc<super::incremental::RoundBatch>>>>,
+    current_batch: Option<Arc<parking_lot::RwLock<Arc<RoundBatch>>>>,
 }
 
 impl GossipService {
@@ -289,7 +290,7 @@ impl GossipService {
     /// their own IncrementalUpdateCollector.
     pub fn with_current_batch(
         mut self,
-        current_batch: Arc<parking_lot::RwLock<Arc<super::incremental::RoundBatch>>>,
+        current_batch: Arc<parking_lot::RwLock<Arc<RoundBatch>>>,
     ) -> Self {
         self.current_batch = Some(current_batch);
         self
@@ -454,8 +455,6 @@ impl Gossip for GossipService {
                 reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes or handle is aborted"
             )]
             Some(tokio::spawn(async move {
-                use super::incremental::PeerWatermark;
-
                 let mut watermark = PeerWatermark::new(peer_name_for_watermark);
                 let mut interval = tokio::time::interval(Duration::from_secs(1));
                 let mut sequence_counter: u64 = 0;
