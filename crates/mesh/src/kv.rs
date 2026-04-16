@@ -402,13 +402,11 @@ impl StreamNamespace {
     /// Drop broadcast buffer entries until within `max_buffer_bytes`.
     /// DashMap has no ordering, so dropped entries are arbitrary.
     fn enforce_broadcast_limit(&self) {
-        if self.buffer_bytes.load(Ordering::Relaxed) <= self.max_buffer_bytes {
-            return;
-        }
-        // Collect keys to remove, then remove them. Avoids holding DashMap
-        // iterator while mutating.
-        let keys_to_drop: Vec<String> = self.buffer.iter().map(|e| e.key().clone()).collect();
-        for key in keys_to_drop {
+        // Collect all keys upfront so the iterator is fully dropped before
+        // any remove() call. DashMap iter() and remove() can deadlock on the
+        // same shard if the iterator ref is held during remove.
+        let keys: Vec<String> = self.buffer.iter().map(|e| e.key().clone()).collect();
+        for key in keys {
             if self.buffer_bytes.load(Ordering::Relaxed) <= self.max_buffer_bytes {
                 break;
             }
