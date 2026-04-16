@@ -91,6 +91,10 @@ pub struct IncrementalUpdateCollector {
     collected_tree_gen: Arc<RwLock<u64>>,
     /// Counter for gossip rounds since last full structure snapshot per model.
     rounds_since_snapshot: Arc<RwLock<HashMap<String, u64>>>,
+    /// Pre-drained tenant deltas from the central drain. When set, the Policy
+    /// Phase 0 uses these instead of destructively draining from the shared
+    /// DashMap. This fixes the v1 bug where only the first peer receives deltas.
+    central_deltas: Arc<RwLock<Option<DrainedTenantDeltas>>>,
 }
 
 impl IncrementalUpdateCollector {
@@ -102,7 +106,29 @@ impl IncrementalUpdateCollector {
             last_scanned: Arc::new(RwLock::new(LastScannedGenerations::default())),
             collected_tree_gen: Arc::new(RwLock::new(0)),
             rounds_since_snapshot: Arc::new(RwLock::new(HashMap::new())),
+            central_deltas: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set pre-drained tenant deltas from the central drain. Called once per
+    /// gossip round BEFORE per-peer collection runs. All per-peer collectors
+    /// sharing this instance will use these deltas instead of draining the
+    /// shared DashMap.
+    #[expect(
+        dead_code,
+        reason = "wired up in controller.rs central drain (Step 2b)"
+    )]
+    pub fn set_central_deltas(&self, deltas: DrainedTenantDeltas) {
+        *self.central_deltas.write() = Some(deltas);
+    }
+
+    /// Clear the central deltas after all per-peer senders have consumed them.
+    #[expect(
+        dead_code,
+        reason = "wired up in controller.rs central drain (Step 2b)"
+    )]
+    pub fn clear_central_deltas(&self) {
+        *self.central_deltas.write() = None;
     }
 
     /// Get current timestamp in nanoseconds
@@ -239,118 +265,138 @@ impl IncrementalUpdateCollector {
                 if tree_changed {
                     let mut emitted_tree_keys = std::collections::HashSet::new();
 
-                    // Phase 0: Drain tenant delta buffers — lightweight per-gossip-round sync.
-                    // Each TenantDelta is ~100 bytes per insert vs ~200KB for full TreeOperation.
-                    // Models emitted here are skipped in Phase 1 (no need for heavy ops).
+                    // Phase 0: Tenant delta collection.
                     //
-                    // Every STRUCTURE_SNAPSHOT_INTERVAL rounds, skip Phase 0 for a model
-                    // and let Phase 1/2 emit a full TreeState for convergence.
+                    // v2 FIX: If central deltas are available (set by the gossip
+                    // event loop via set_central_deltas), use them directly instead
+                    // of destructively draining the shared DashMap. This fixes the
+                    // v1 bug where only the first per-peer collector receives
+                    // tenant deltas.
+                    //
+                    // When central_deltas is None (legacy path), fall back to the
+                    // per-collector destructive drain for backward compatibility.
                     {
-                        let models_with_inserts: Vec<String> = self
-                            .stores
-                            .tenant_delta_inserts
-                            .iter()
-                            .filter(|entry| !entry.value().is_empty())
-                            .map(|entry| entry.key().clone())
-                            .collect();
-                        let models_with_evictions: Vec<String> = self
-                            .stores
-                            .tenant_delta_evictions
-                            .iter()
-                            .filter(|entry| !entry.value().is_empty())
-                            .map(|entry| entry.key().clone())
-                            .collect();
+                        let central = self.central_deltas.read();
+                        if let Some(ref drained) = *central {
+                            // Use pre-drained deltas from central drain.
+                            updates.extend(drained.updates.clone());
+                            emitted_tree_keys.extend(drained.emitted_tree_keys.clone());
+                            // Use the central drain's tree_gen snapshot for mark_sent
+                            *self.collected_tree_gen.write() = drained.tree_gen_snapshot;
 
-                        let all_models: std::collections::HashSet<String> = models_with_inserts
-                            .into_iter()
-                            .chain(models_with_evictions)
-                            .collect();
-
-                        let mut rounds = self.rounds_since_snapshot.write();
-
-                        for model_id in all_models {
-                            let key = format!("tree:{model_id}");
-
-                            // Check if it's time for a full structure snapshot
-                            let round_count = rounds.entry(model_id.clone()).or_insert(0);
-                            *round_count += 1;
-                            // FIXME: When Layer 2 is implemented, skip tenant delta
-                            // every STRUCTURE_SNAPSHOT_INTERVAL rounds and emit a
-                            // full structure snapshot instead. Currently checkpoint
-                            // is a no-op, so never skip — always send tenant deltas.
-                            let _ = round_count; // tracked for future Layer 2
-
-                            let current_version = self.stores.tree_version(&key);
-
-                            let inserts = self
+                            let phase0_count = drained.updates.len();
+                            if phase0_count > 0 {
+                                let phase0_total_bytes: usize =
+                                    drained.updates.iter().map(|u| u.value.len()).sum();
+                                debug!(
+                                    phase0_updates = phase0_count,
+                                    phase0_total_bytes,
+                                    "Phase 0: used centrally drained tenant deltas"
+                                );
+                            }
+                        } else {
+                            // Legacy path: per-collector destructive drain.
+                            // TODO(v2): Remove this path once all callers use
+                            // set_central_deltas.
+                            let models_with_inserts: Vec<String> = self
                                 .stores
                                 .tenant_delta_inserts
-                                .remove(&model_id)
-                                .map(|(_, v)| v)
-                                .unwrap_or_default();
-                            let evictions = self
+                                .iter()
+                                .filter(|entry| !entry.value().is_empty())
+                                .map(|entry| entry.key().clone())
+                                .collect();
+                            let models_with_evictions: Vec<String> = self
                                 .stores
                                 .tenant_delta_evictions
-                                .remove(&model_id)
-                                .map(|(_, v)| v)
-                                .unwrap_or_default();
+                                .iter()
+                                .filter(|entry| !entry.value().is_empty())
+                                .map(|entry| entry.key().clone())
+                                .collect();
 
-                            if inserts.is_empty() && evictions.is_empty() {
-                                continue;
-                            }
+                            let all_models: std::collections::HashSet<String> = models_with_inserts
+                                .into_iter()
+                                .chain(models_with_evictions)
+                                .collect();
 
-                            let delta = TenantDelta {
-                                model_id: model_id.clone(),
-                                version: current_version,
-                                inserts,
-                                evictions,
-                            };
+                            let mut rounds = self.rounds_since_snapshot.write();
 
-                            if let Ok(delta_bytes) = delta.to_bytes() {
-                                let delta_policy = PolicyState {
+                            for model_id in all_models {
+                                let key = format!("tree:{model_id}");
+
+                                let round_count = rounds.entry(model_id.clone()).or_insert(0);
+                                *round_count += 1;
+                                let _ = round_count; // tracked for future Layer 2
+
+                                let current_version = self.stores.tree_version(&key);
+
+                                let inserts = self
+                                    .stores
+                                    .tenant_delta_inserts
+                                    .remove(&model_id)
+                                    .map(|(_, v)| v)
+                                    .unwrap_or_default();
+                                let evictions = self
+                                    .stores
+                                    .tenant_delta_evictions
+                                    .remove(&model_id)
+                                    .map(|(_, v)| v)
+                                    .unwrap_or_default();
+
+                                if inserts.is_empty() && evictions.is_empty() {
+                                    continue;
+                                }
+
+                                let delta = TenantDelta {
                                     model_id: model_id.clone(),
-                                    policy_type: "tenant_delta".to_string(),
-                                    config: delta_bytes,
                                     version: current_version,
+                                    inserts,
+                                    evictions,
                                 };
-                                if let Ok(serialized) = bincode::serialize(&delta_policy) {
-                                    updates.push(StateUpdate {
-                                        key: key.clone(),
-                                        value: serialized,
+
+                                if let Ok(delta_bytes) = delta.to_bytes() {
+                                    let delta_policy = PolicyState {
+                                        model_id: model_id.clone(),
+                                        policy_type: "tenant_delta".to_string(),
+                                        config: delta_bytes,
                                         version: current_version,
-                                        actor: self.self_name.clone(),
-                                        timestamp,
-                                    });
-                                    debug!(
-                                        "Collected tenant delta: {} ({} inserts, {} evictions, version: {})",
-                                        model_id,
-                                        delta.inserts.len(),
-                                        delta.evictions.len(),
-                                        current_version,
-                                    );
-                                    emitted_tree_keys.insert(key);
+                                    };
+                                    if let Ok(serialized) = bincode::serialize(&delta_policy) {
+                                        updates.push(StateUpdate {
+                                            key: key.clone(),
+                                            value: serialized,
+                                            version: current_version,
+                                            actor: self.self_name.clone(),
+                                            timestamp,
+                                        });
+                                        debug!(
+                                            "Collected tenant delta: {} ({} inserts, {} evictions, version: {})",
+                                            model_id,
+                                            delta.inserts.len(),
+                                            delta.evictions.len(),
+                                            current_version,
+                                        );
+                                        emitted_tree_keys.insert(key);
+                                    }
                                 }
                             }
-                        }
-                    }
 
-                    // Phase 0 summary: log total serialized size of tenant delta updates
-                    {
-                        let phase0_total_bytes: usize = updates
-                            .iter()
-                            .filter(|u| u.key.starts_with("tree:"))
-                            .map(|u| u.value.len())
-                            .sum();
-                        let phase0_count = updates
-                            .iter()
-                            .filter(|u| u.key.starts_with("tree:"))
-                            .count();
-                        if phase0_count > 0 {
-                            debug!(
-                                phase0_updates = phase0_count,
-                                phase0_total_bytes,
-                                "Phase 0: tenant delta buffer drain produced updates"
-                            );
+                            // Phase 0 summary
+                            let phase0_total_bytes: usize = updates
+                                .iter()
+                                .filter(|u| u.key.starts_with("tree:"))
+                                .map(|u| u.value.len())
+                                .sum();
+                            let phase0_count = updates
+                                .iter()
+                                .filter(|u| u.key.starts_with("tree:"))
+                                .count();
+                            if phase0_count > 0 {
+                                debug!(
+                                    phase0_updates = phase0_count,
+                                    phase0_total_bytes,
+                                    "Phase 0: tenant delta buffer drain produced updates (legacy path)"
+                                );
+                            }
                         }
                     }
 
@@ -597,6 +643,123 @@ impl IncrementalUpdateCollector {
                 }
             }
         }
+    }
+}
+
+// ============================================================================
+// Central Tenant Delta Drain (v2 bug fix)
+// ============================================================================
+
+/// Tenant delta updates drained once per gossip round. Shared with all per-peer
+/// collector instances so they all see the same deltas instead of racing to drain
+/// the shared DashMap (v1 bug where only the first peer receives deltas).
+#[derive(Debug, Clone, Default)]
+pub struct DrainedTenantDeltas {
+    /// Tenant delta StateUpdates collected from the destructive drain.
+    /// These are Policy-type updates with key "tree:{model_id}".
+    pub updates: Vec<StateUpdate>,
+    /// Set of tree keys emitted as deltas. Per-peer collectors use this to
+    /// skip these keys in Phase 2 (tree_configs full-state scan).
+    pub emitted_tree_keys: std::collections::HashSet<String>,
+    /// Tree generation snapshot at drain time. Per-peer collectors use this
+    /// for mark_sent to avoid advancing past the batch boundary.
+    pub tree_gen_snapshot: u64,
+}
+
+/// Drains tenant delta buffers exactly once per gossip round. The result is
+/// stored in a shared location so all per-peer collectors can include the
+/// same deltas without racing on the destructive DashMap remove.
+#[expect(dead_code, reason = "wired up in controller.rs event loop (Step 2b)")]
+pub fn drain_tenant_deltas_central(stores: &StateStores, self_name: &str) -> DrainedTenantDeltas {
+    let tree_gen = stores.tree_generation.load(Ordering::Acquire);
+    let timestamp = IncrementalUpdateCollector::current_timestamp();
+    let mut updates = Vec::new();
+    let mut emitted_tree_keys = std::collections::HashSet::new();
+
+    let models_with_inserts: Vec<String> = stores
+        .tenant_delta_inserts
+        .iter()
+        .filter(|entry| !entry.value().is_empty())
+        .map(|entry| entry.key().clone())
+        .collect();
+    let models_with_evictions: Vec<String> = stores
+        .tenant_delta_evictions
+        .iter()
+        .filter(|entry| !entry.value().is_empty())
+        .map(|entry| entry.key().clone())
+        .collect();
+
+    let all_models: std::collections::HashSet<String> = models_with_inserts
+        .into_iter()
+        .chain(models_with_evictions)
+        .collect();
+
+    for model_id in all_models {
+        let key = format!("tree:{model_id}");
+        let current_version = stores.tree_version(&key);
+
+        let inserts = stores
+            .tenant_delta_inserts
+            .remove(&model_id)
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+        let evictions = stores
+            .tenant_delta_evictions
+            .remove(&model_id)
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+
+        if inserts.is_empty() && evictions.is_empty() {
+            continue;
+        }
+
+        let delta = TenantDelta {
+            model_id: model_id.clone(),
+            version: current_version,
+            inserts,
+            evictions,
+        };
+
+        if let Ok(delta_bytes) = delta.to_bytes() {
+            let delta_policy = PolicyState {
+                model_id: model_id.clone(),
+                policy_type: "tenant_delta".to_string(),
+                config: delta_bytes,
+                version: current_version,
+            };
+            if let Ok(serialized) = bincode::serialize(&delta_policy) {
+                updates.push(StateUpdate {
+                    key: key.clone(),
+                    value: serialized,
+                    version: current_version,
+                    actor: self_name.to_string(),
+                    timestamp,
+                });
+                debug!(
+                    "Central drain: tenant delta {} ({} inserts, {} evictions, version: {})",
+                    model_id,
+                    delta.inserts.len(),
+                    delta.evictions.len(),
+                    current_version,
+                );
+                emitted_tree_keys.insert(key);
+            }
+        }
+    }
+
+    if !updates.is_empty() {
+        let total_bytes: usize = updates.iter().map(|u| u.value.len()).sum();
+        debug!(
+            "Central drain: {} tenant delta updates ({} bytes total)",
+            updates.len(),
+            total_bytes,
+        );
+    }
+
+    DrainedTenantDeltas {
+        updates,
+        emitted_tree_keys,
+        tree_gen_snapshot: tree_gen,
     }
 }
 
