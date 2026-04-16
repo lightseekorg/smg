@@ -441,15 +441,16 @@ impl StreamNamespace {
     /// resets the buffer. Called by the gossip loop once per round.
     pub fn drain_broadcast_buffer(&self) -> Vec<(String, Bytes)> {
         let mut entries = Vec::new();
-        // Collect all entries, then clear. DashMap doesn't have drain(),
-        // so we iterate and remove.
-        let keys: Vec<String> = self.buffer.iter().map(|e| e.key().clone()).collect();
-        for key in keys {
-            if let Some((k, v)) = self.buffer.remove(&key) {
-                entries.push((k, v));
-            }
-        }
-        self.buffer_bytes.store(0, Ordering::Relaxed);
+        let mut drained_bytes = 0usize;
+        // Use retain(false) to drain all entries atomically per shard,
+        // avoiding intermediate Vec<String> allocation for keys.
+        self.buffer.retain(|k, v| {
+            drained_bytes += v.len();
+            entries.push((k.clone(), v.clone()));
+            false // remove all
+        });
+        self.buffer_bytes
+            .fetch_sub(drained_bytes, Ordering::Relaxed);
         entries
     }
 
