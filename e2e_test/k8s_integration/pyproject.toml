@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+testpaths = ["."]
+markers = [
+    "slow: marks tests that wait for multiple reconciliation cycles (deselect with '-m \"not slow\"')",
+]

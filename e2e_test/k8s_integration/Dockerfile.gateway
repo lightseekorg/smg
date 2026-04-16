@@ -1,0 +1,20 @@
+FROM rust:1.90-bookworm AS builder
+
+RUN apt-get update && apt-get install -y \
+    libssl-dev pkg-config protobuf-compiler cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+# Use the ci profile for faster builds (thin LTO, more codegen units)
+RUN cargo build --profile ci --bin smg --features vendored-openssl \
+    && cp target/ci/smg /usr/local/bin/smg
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/bin/smg /usr/local/bin/smg
+
+ENTRYPOINT ["smg"]
