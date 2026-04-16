@@ -886,7 +886,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        incremental::CentralCollector,
+        collector::CentralCollector,
         service::gossip::StateUpdate,
         stores::{
             AppState, MembershipState, RateLimitConfig, StateStores, StoreType,

@@ -30,8 +30,8 @@ use super::{
     sync::MeshSyncManager,
 };
 use crate::{
+    collector::{CentralCollector, PeerWatermark, RoundBatch},
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
-    incremental::{CentralCollector, PeerWatermark, RoundBatch},
     metrics,
     service::gossip::IncrementalUpdate,
 };

@@ -39,7 +39,7 @@ use super::{
     stores::{StateStores, StoreType as LocalStoreType},
     sync::MeshSyncManager,
 };
-use crate::incremental::{PeerWatermark, RoundBatch};
+use crate::collector::{PeerWatermark, RoundBatch};
 
 #[derive(Debug)]
 pub struct GossipService {
