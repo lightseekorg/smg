@@ -476,9 +476,6 @@ impl StreamNamespace {
 // MeshKV
 // ============================================================================
 
-/// Generic, application-agnostic mesh transport. Provides explicit namespace
-/// handles for CRDT and stream modes. Application code MUST use namespace
-/// handles, not MeshKV directly.
 /// A batch of entries collected once per gossip round by the central collector.
 pub struct RoundBatch {
     /// Broadcast stream entries: (key, value). Sent to ALL connected peers.
@@ -489,6 +486,9 @@ pub struct RoundBatch {
     pub drain_entries: Vec<(String, Vec<u8>)>,
 }
 
+/// Generic, application-agnostic mesh transport. Provides explicit namespace
+/// handles for CRDT and stream modes. Application code MUST use namespace
+/// handles, not MeshKV directly.
 pub struct MeshKV {
     /// CRDT store shared across all CRDT namespaces.
     store: Arc<CrdtOrMap>,
