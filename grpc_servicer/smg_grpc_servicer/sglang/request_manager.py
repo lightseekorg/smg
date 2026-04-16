@@ -921,19 +921,14 @@ class GrpcRequestManager:
         self.event_loop = loop
 
         # We only add signal handler when the tokenizer manager is in the main thread
-        # due to the CPython limitation.
+        # due to the CPython limitation. The SIGTERM handler here is a startup-window
+        # fallback; once serve_grpc runs, it overrides SIGTERM with the drain-aware
+        # signal_handler in server.py. SIGQUIT stays owned here to forward scheduler
+        # crashes to a process-tree kill.
         if threading.current_thread() is threading.main_thread():
             signal_handler = GrpcSignalHandler(self)
             loop.add_signal_handler(signal.SIGTERM, signal_handler.sigterm_handler)
-            # Update the signal handler for the process. It overrides the sigquit handler in the launch phase.
             loop.add_signal_handler(signal.SIGQUIT, signal_handler.running_phase_sigquit_handler)
-
-        self.asyncio_tasks.add(loop.create_task(print_exception_wrapper(self.sigterm_watchdog)))
-
-    async def sigterm_watchdog(self):
-        """Watchdog to handle SIGTERM gracefully, matching TokenizerManager pattern."""
-        while not self.gracefully_exit:
-            await asyncio.sleep(1.0)
 
     def _req_stats_init(
         self,
