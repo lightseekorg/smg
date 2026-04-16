@@ -45,8 +45,11 @@ fi
 
 kubectl config use-context "$CONTEXT"
 
-# Step 2: Build the gateway Docker image
-log "Building gateway Docker image (this may take 10+ minutes on first run)..."
+# Step 2: Build the gateway Docker image.
+# Uses a lightweight test Dockerfile that builds just the Rust binary
+# with the "ci" cargo profile (~5 min), instead of the repo's production
+# Dockerfile which builds a full Python wheel (~30 min).
+log "Building gateway Docker image (this may take 5-10 minutes on first run)..."
 cd "$REPO_ROOT"
 docker build -f e2e_test/k8s_integration/Dockerfile.gateway -t smg-gateway:test .
 
