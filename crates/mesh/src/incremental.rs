@@ -604,8 +604,6 @@ impl PeerWatermark {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::Duration};
-
     use super::*;
     use crate::stores::{AppState, MembershipState, PolicyState, StateStores, WorkerState};
 
@@ -784,25 +782,54 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_limit_timestamp_filtering() {
+    fn test_rate_limit_version_dedup() {
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         stores.rate_limit.update_membership(&["node1".to_string()]);
 
         let test_key = "test_rate_limit_key".to_string();
-        if stores.rate_limit.is_owner(&test_key) {
-            stores
-                .rate_limit
-                .inc(test_key.clone(), "node1".to_string(), 1);
+        if !stores.rate_limit.is_owner(&test_key) {
+            return;
         }
 
-        let _updates = collect_store_updates(&stores, "node1", StoreType::RateLimit);
+        stores
+            .rate_limit
+            .inc(test_key.clone(), "node1".to_string(), 1);
 
-        thread::sleep(Duration::from_secs(2));
+        let central = CentralCollector::new(stores.clone(), "node1".to_string());
+        let mut watermark = PeerWatermark::new("peer".to_string());
 
-        let updates2 = collect_store_updates(&stores, "node1", StoreType::RateLimit);
-        if stores.rate_limit.is_owner(&test_key) {
-            let _ = updates2;
+        let batch1 = central.collect();
+        let filtered1 = watermark.filter(&batch1);
+        let rl1 = filtered1
+            .iter()
+            .find(|(t, _)| *t == StoreType::RateLimit)
+            .map(|(_, v)| v)
+            .expect("rate limit updates expected on first filter");
+        assert!(!rl1.is_empty());
+        for (store_type, updates) in &filtered1 {
+            watermark.mark_sent(*store_type, updates);
         }
+
+        let filtered2 = watermark.filter(&batch1);
+        let rl2_count = filtered2
+            .iter()
+            .find(|(t, _)| *t == StoreType::RateLimit)
+            .map(|(_, v)| v.len())
+            .unwrap_or(0);
+        assert_eq!(rl2_count, 0, "same batch should be fully deduped");
+
+        stores
+            .rate_limit
+            .inc(test_key.clone(), "node1".to_string(), 1);
+        central.advance_generations();
+        let batch3 = central.collect();
+        let filtered3 = watermark.filter(&batch3);
+        let rl3 = filtered3
+            .iter()
+            .find(|(t, _)| *t == StoreType::RateLimit)
+            .map(|(_, v)| v)
+            .expect("bumped rate-limit shard should re-appear in filter");
+        assert!(!rl3.is_empty());
     }
 
     #[test]
