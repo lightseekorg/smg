@@ -885,9 +885,13 @@ mod tests {
     };
 
     use super::*;
-    use crate::stores::{
-        AppState, MembershipState, RateLimitConfig, StateStores, GLOBAL_RATE_LIMIT_COUNTER_KEY,
-        GLOBAL_RATE_LIMIT_KEY,
+    use crate::{
+        incremental::CentralCollector,
+        service::gossip::StateUpdate,
+        stores::{
+            AppState, MembershipState, RateLimitConfig, StateStores, StoreType,
+            GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
+        },
     };
 
     fn create_test_sync_manager() -> MeshSyncManager {
@@ -1831,11 +1835,22 @@ mod tests {
         );
     }
 
+    /// Test-only helper: collect Policy updates via CentralCollector.
+    /// Skips PeerWatermark since these tests don't exercise watermark filtering.
+    fn collect_policy_updates(stores: Arc<StateStores>, self_name: &str) -> Vec<StateUpdate> {
+        let central = CentralCollector::new(stores, self_name.to_string());
+        let batch = central.collect();
+        batch
+            .updates
+            .into_iter()
+            .find(|(t, _)| *t == StoreType::Policy)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
+    }
+
     #[test]
     fn test_collector_sends_tenant_delta() {
-        use crate::{
-            incremental::IncrementalUpdateCollector, stores::StoreType, tree_ops::TenantDelta,
-        };
+        use crate::tree_ops::TenantDelta;
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         let manager = MeshSyncManager::new(stores.clone(), "node1".to_string());
@@ -1848,8 +1863,7 @@ mod tests {
             )
             .unwrap();
 
-        let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates = collector.collect_updates_for_store(StoreType::Policy);
+        let updates = collect_policy_updates(stores.clone(), "node1");
 
         assert!(!updates.is_empty(), "expected at least one policy update");
 
@@ -1881,8 +1895,6 @@ mod tests {
 
     #[test]
     fn test_collector_falls_back_to_full_state() {
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
-
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
 
         // Directly insert a tree state into tree_configs WITHOUT going through
@@ -1899,8 +1911,7 @@ mod tests {
         // Bump tree_generation so the collector's tree_changed check fires.
         stores.bump_tree_version("tree:model1");
 
-        let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates = collector.collect_updates_for_store(StoreType::Policy);
+        let updates = collect_policy_updates(stores.clone(), "node1");
 
         assert!(!updates.is_empty(), "expected at least one policy update");
 
@@ -1984,8 +1995,6 @@ mod tests {
         // Simulate a reconnected peer scenario: tree_configs has a materialized
         // tree state but tenant delta buffers are empty.  The collector should
         // produce a full PolicyState (lz4-compressed), not a delta.
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
-
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
 
         // Directly insert a tree state into tree_configs (simulating a
@@ -2005,9 +2014,8 @@ mod tests {
         stores.tenant_delta_inserts.remove("model1");
         stores.tenant_delta_evictions.remove("model1");
 
-        // New collector (simulating reconnected peer)
-        let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let updates = collector.collect_updates_for_store(StoreType::Policy);
+        // Collect via v2 central collector (simulating reconnected peer)
+        let updates = collect_policy_updates(stores.clone(), "node1");
 
         assert!(!updates.is_empty(), "expected at least one update");
 
@@ -2147,8 +2155,6 @@ mod tests {
         // Simultaneously run the collector.  The collector should get a
         // consistent snapshot — either some ops or all ops, but never
         // corrupted data.
-        use crate::{incremental::IncrementalUpdateCollector, stores::StoreType};
-
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         let manager = Arc::new(MeshSyncManager::new(stores.clone(), "node1".to_string()));
 
@@ -2167,8 +2173,7 @@ mod tests {
         // Collect multiple times while writer is active
         let mut collected_any = false;
         for _ in 0..10 {
-            let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-            let updates = collector.collect_updates_for_store(StoreType::Policy);
+            let updates = collect_policy_updates(stores.clone(), "node1");
             for update in &updates {
                 if update.key.starts_with("tree:") {
                     // Verify the data deserializes without corruption
@@ -2198,8 +2203,7 @@ mod tests {
         writer.join().unwrap();
 
         // After writer finishes, one final collect should succeed
-        let collector = IncrementalUpdateCollector::new(stores.clone(), "node1".to_string());
-        let final_updates = collector.collect_updates_for_store(StoreType::Policy);
+        let final_updates = collect_policy_updates(stores.clone(), "node1");
         if !collected_any {
             // Writer may have been too fast; at least final collection must succeed
             assert!(
