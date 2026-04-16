@@ -348,7 +348,8 @@ pub struct StreamNamespace {
 
 impl StreamNamespace {
     /// Publish a value to all connected peers (Broadcast namespaces only).
-    /// If the buffer exceeds `max_buffer_bytes`, the oldest entry is dropped.
+    /// If the buffer exceeds `max_buffer_bytes`, arbitrary entries are dropped
+    /// until within limit (DashMap iteration is unordered).
     pub fn publish(&self, key: &str, value: Bytes) {
         assert_eq!(
             self.routing,
