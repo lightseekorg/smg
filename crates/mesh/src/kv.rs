@@ -438,6 +438,30 @@ impl StreamNamespace {
         }
     }
 
+    /// Drain all broadcast buffer entries. Returns (key, value) pairs and
+    /// resets the buffer. Called by the gossip loop once per round.
+    pub fn drain_broadcast_buffer(&self) -> Vec<(String, Bytes)> {
+        let mut entries = Vec::new();
+        // Collect all entries, then clear. DashMap doesn't have drain(),
+        // so we iterate and remove.
+        let keys: Vec<String> = self.buffer.iter().map(|e| e.key().clone()).collect();
+        for key in keys {
+            if let Some((k, v)) = self.buffer.remove(&key) {
+                entries.push((k, v));
+            }
+        }
+        self.buffer_bytes.store(0, Ordering::Relaxed);
+        entries
+    }
+
+    /// Drain all targeted buffer entries. Returns (peer_id, key, value) tuples
+    /// and resets the buffer. Called by the gossip loop once per round.
+    pub fn drain_targeted_buffer(&self) -> Vec<(String, String, Bytes)> {
+        let mut buf = self.targeted_buffer.lock();
+        self.targeted_buffer_bytes.store(0, Ordering::Relaxed);
+        std::mem::take(&mut *buf)
+    }
+
     /// Get the routing mode for this namespace.
     pub fn routing(&self) -> StreamRouting {
         self.routing
