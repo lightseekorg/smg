@@ -814,10 +814,12 @@ impl CentralCollector {
                 )
             }
             StoreType::Policy => {
-                if snapshot.policy == last_scanned.policy && snapshot.tree == last_scanned.tree {
+                let policy_changed = snapshot.policy != last_scanned.policy;
+                let tree_changed = snapshot.tree != last_scanned.tree;
+                if !policy_changed && !tree_changed {
                     return vec![];
                 }
-                self.collect_policy_store(timestamp, snapshot.tree != last_scanned.tree)
+                self.collect_policy_store(timestamp, policy_changed, tree_changed)
             }
             StoreType::App => {
                 if snapshot.app == last_scanned.app {
@@ -897,24 +899,36 @@ impl CentralCollector {
 
     /// Collect policy store entries + tenant deltas + tree_configs.
     /// Tenant deltas are destructively drained (safe because this runs once).
-    fn collect_policy_store(&self, timestamp: u64, tree_changed: bool) -> Vec<StateUpdate> {
+    /// `policy_changed` gates the non-tree policy scan; `tree_changed` gates
+    /// the tenant delta drain + tree_configs scan. A tenant-delta-only round
+    /// skips the full policy.all() sweep, which can be expensive.
+    fn collect_policy_store(
+        &self,
+        timestamp: u64,
+        policy_changed: bool,
+        tree_changed: bool,
+    ) -> Vec<StateUpdate> {
         let mut updates = Vec::new();
         let mut emitted_tree_keys = std::collections::HashSet::new();
 
-        // Non-tree policy entries
-        let all_policies = self.stores.policy.all();
-        for (key, state) in &all_policies {
-            if key.starts_with("tree:") {
-                continue;
-            }
-            if let Ok(serialized) = bincode::serialize(state) {
-                updates.push(StateUpdate {
-                    key: key.clone(),
-                    value: serialized,
-                    version: state.version(),
-                    actor: self.self_name.clone(),
-                    timestamp,
-                });
+        // Non-tree policy entries — only scan when the policy CRDT generation
+        // has changed since last round. Gating avoids O(policy_count) work
+        // on every tenant-delta round.
+        if policy_changed {
+            let all_policies = self.stores.policy.all();
+            for (key, state) in &all_policies {
+                if key.starts_with("tree:") {
+                    continue;
+                }
+                if let Ok(serialized) = bincode::serialize(state) {
+                    updates.push(StateUpdate {
+                        key: key.clone(),
+                        value: serialized,
+                        version: state.version(),
+                        actor: self.self_name.clone(),
+                        timestamp,
+                    });
+                }
             }
         }
 
