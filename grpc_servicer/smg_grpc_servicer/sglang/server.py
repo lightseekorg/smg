@@ -21,7 +21,7 @@ from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST, DisaggregationMode
 from sglang.srt.managers.disagg_service import start_disagg_service
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import kill_process_tree
+from sglang.srt.utils import get_bool_env_var, kill_process_tree
 from sglang.utils import get_exception_traceback
 from smg_grpc_proto import sglang_scheduler_pb2, sglang_scheduler_pb2_grpc
 
@@ -276,6 +276,10 @@ async def serve_grpc(
 
     def signal_handler():
         logger.info("Received shutdown signal")
+        # Flip health to NOT_SERVING and mark the request manager as
+        # draining so K8s stops routing new traffic to this pod and
+        # in-flight requests are allowed to finish.
+        servicer.begin_drain()
         stop_event.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -284,6 +288,36 @@ async def serve_grpc(
     try:
         await stop_event.wait()
     finally:
+        # Drain phase: wait for in-flight requests to finish naturally.
+        # Mirrors tokenizer_manager.sigterm_watchdog. No in-process
+        # timeout; K8s terminationGracePeriodSeconds SIGKILL is the backstop.
+        # rid_to_state is only mutated from the event-loop thread, so a
+        # list() snapshot is safe without additional guarding.
+        while True:
+            if get_bool_env_var("SGL_FORCE_SHUTDOWN"):
+                logger.warning("SGL_FORCE_SHUTDOWN set; skipping drain")
+                break
+
+            # Finished requests linger in rid_to_state for 5 s via the
+            # cleanup() task in _handle_batch_output; exclude them so
+            # the drain loop exits promptly once real work is done.
+            remaining_rids = [
+                rid
+                for rid, state in servicer.request_manager.rid_to_state.items()
+                if not state.finished
+            ]
+            remain_num_req = len(remaining_rids)
+            if remain_num_req == 0:
+                logger.info("Drain complete; no in-flight requests")
+                break
+
+            logger.info(
+                "Gracefully exiting... Remaining number of requests %d. Remaining requests %s",
+                remain_num_req,
+                remaining_rids,
+            )
+            await asyncio.sleep(5)
+
         logger.info("Shutting down gRPC server")
 
         # Shutdown request manager first - this closes ZMQ sockets and stops background tasks

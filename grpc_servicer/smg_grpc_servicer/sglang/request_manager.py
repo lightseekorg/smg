@@ -479,8 +479,13 @@ class GrpcRequestManager:
         """
         Main event loop - processes outputs from scheduler.
         Mimics TokenizerManager's handle_loop.
+
+        Runs until the task is cancelled (by shutdown()) or an unrecoverable
+        ZMQ error. It must not gate on ``gracefully_exit`` — during drain
+        the health flag is set but scheduler outputs must still be forwarded
+        so in-flight streaming requests can finish their token sequences.
         """
-        while not self.gracefully_exit:
+        while True:
             try:
                 # Receive from scheduler
                 recv_obj = await self.recv_from_scheduler.recv_pyobj()
@@ -508,16 +513,14 @@ class GrpcRequestManager:
                     logger.warning(f"Unknown output type: {type(recv_obj)}")
 
             except zmq.error.Again:
-                # Timeout, check if we should exit
-                if self.gracefully_exit:
-                    break
+                # Timeout on non-blocking recv; keep polling.
                 continue
             except zmq.error.ZMQError as e:
-                # Socket closed or other ZMQ error - exit cleanly if shutting down
+                # Socket closed or unrecoverable ZMQ error.
                 if self.gracefully_exit:
                     logger.debug(f"ZMQ recv interrupted during shutdown: {e}")
-                    break
-                logger.error(f"ZMQ error in handle loop: {e}\n{get_exception_traceback()}")
+                else:
+                    logger.error(f"ZMQ error in handle loop: {e}\n{get_exception_traceback()}")
                 break
             except Exception as e:
                 logger.error(f"Handle loop error: {e}\n{get_exception_traceback()}")
@@ -816,6 +819,16 @@ class GrpcRequestManager:
                     "type": type(obj).__name__,
                 }
             )
+
+    def begin_drain(self) -> None:
+        """Mark the manager as draining.
+
+        Idempotent and non-destructive: flips gracefully_exit so the health
+        servicer reports NOT_SERVING and the server-side drain loop can
+        begin, but does not cancel tasks or enqueue shutdown errors on
+        in-flight requests. Safe to call from a synchronous signal handler.
+        """
+        self.gracefully_exit = True
 
     async def shutdown(self):
         """Gracefully shutdown the request manager."""

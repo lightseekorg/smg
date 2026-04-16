@@ -1098,6 +1098,17 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             ),
         )
 
+    def begin_drain(self) -> None:
+        """Mark the service as draining so health flips to NOT_SERVING.
+
+        Non-destructive: does not cancel in-flight requests. Safe to call
+        from a synchronous signal handler. Must be followed by shutdown()
+        (after the drain loop completes) for final cleanup.
+        """
+        if self.health_servicer:
+            self.health_servicer.set_not_serving()
+        self.request_manager.begin_drain()
+
     async def shutdown(self):
         """Shutdown the service."""
         logger.info("Shutting down gRPC service")
