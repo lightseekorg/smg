@@ -432,6 +432,7 @@ impl<'a> McpToolSession<'a> {
     /// Inject only client-visible MCP metadata and call items into response output.
     ///
     /// Visibility policy:
+    /// - Hide builtin `mcp_list_tools` (builtin tools surface under their own type)
     /// - Hide internal non-builtin `mcp_list_tools`
     /// - Hide internal non-builtin passthrough `mcp_call`/`mcp_approval_request`
     /// - Keep builtin-routed call items visible
@@ -443,9 +444,10 @@ impl<'a> McpToolSession<'a> {
         user_function_names: &HashSet<String>,
     ) {
         let existing = std::mem::take(output);
-        output.reserve(self.all_mcp_servers.len() + tool_call_items.len() + existing.len());
+        output.reserve(self.mcp_servers.len() + tool_call_items.len() + existing.len());
 
-        for binding in &self.all_mcp_servers {
+        // Use mcp_servers (excludes builtin) to match streaming path behavior.
+        for binding in &self.mcp_servers {
             if !self.is_internal_non_builtin_server_label(&binding.label) {
                 output.push(self.build_mcp_list_tools_item(&binding.label, &binding.server_key));
             }
@@ -469,7 +471,8 @@ impl<'a> McpToolSession<'a> {
 
         match item {
             ResponseOutputItem::McpListTools { server_label, .. } => {
-                !self.is_internal_non_builtin_server_label(server_label)
+                !self.is_builtin_server_label(server_label)
+                    && !self.is_internal_non_builtin_server_label(server_label)
             }
             ResponseOutputItem::McpCall {
                 server_label, name, ..
@@ -521,13 +524,14 @@ impl<'a> McpToolSession<'a> {
         user_function_names: &HashSet<String>,
     ) -> bool {
         match item.get("type").and_then(|value| value.as_str()) {
-            // mcp_list_tools is gateway-synthesized metadata and should always be hidden
-            // for internal non-builtin servers, while builtin call outputs remain visible.
+            // mcp_list_tools is gateway-synthesized metadata. Hide for builtin servers
+            // (implementation detail) and internal non-builtin servers (privacy).
             Some("mcp_list_tools") => item
                 .get("server_label")
                 .and_then(|value| value.as_str())
                 .is_some_and(|server_label| {
-                    self.is_internal_non_builtin_server_label(server_label)
+                    self.is_builtin_server_label(server_label)
+                        || self.is_internal_non_builtin_server_label(server_label)
                 }),
             Some("mcp_call") | Some("mcp_approval_request") => {
                 let matches_internal_server = item
