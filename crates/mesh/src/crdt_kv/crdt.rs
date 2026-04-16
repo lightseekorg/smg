@@ -323,6 +323,11 @@ impl CrdtOrMap {
         self.store.generation()
     }
 
+    /// Get all keys without cloning values.
+    pub fn keys(&self) -> Vec<String> {
+        self.store.keys()
+    }
+
     /// Get all key-value pairs
     pub fn all(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
         self.store.all()

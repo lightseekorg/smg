@@ -294,10 +294,9 @@ impl CrdtNamespace {
     pub fn keys(&self, sub_prefix: &str) -> Vec<String> {
         let full_prefix = format!("{}{}", self.prefix, sub_prefix);
         self.store
-            .all()
             .keys()
+            .into_iter()
             .filter(|k| k.starts_with(&full_prefix))
-            .cloned()
             .collect()
     }
 
@@ -344,8 +343,9 @@ pub struct StreamNamespace {
 impl StreamNamespace {
     /// Publish a value to all connected peers (Broadcast namespaces only).
     pub fn publish(&self, key: &str, value: Bytes) {
-        assert!(
-            self.routing == StreamRouting::Broadcast,
+        assert_eq!(
+            self.routing,
+            StreamRouting::Broadcast,
             "publish() is only valid on Broadcast namespaces, not Targeted (prefix: '{}')",
             self.prefix
         );
@@ -359,8 +359,9 @@ impl StreamNamespace {
 
     /// Publish a value to exactly one peer (Targeted namespaces only).
     pub fn publish_to(&self, peer_id: &str, key: &str, value: Bytes) {
-        assert!(
-            self.routing == StreamRouting::Targeted,
+        assert_eq!(
+            self.routing,
+            StreamRouting::Targeted,
             "publish_to() is only valid on Targeted namespaces, not Broadcast (prefix: '{}')",
             self.prefix
         );

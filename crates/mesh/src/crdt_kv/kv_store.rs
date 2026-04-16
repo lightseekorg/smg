@@ -82,6 +82,11 @@ impl KvStore {
         self.store.len()
     }
 
+    /// Get all keys without cloning values.
+    pub fn keys(&self) -> Vec<String> {
+        self.store.iter().map(|entry| entry.key().clone()).collect()
+    }
+
     /// Get all key-value pairs as a BTreeMap
     pub fn all(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
         self.store
