@@ -8,7 +8,7 @@ use openai_protocol::{
         ResponseReasoningContent, ResponsesRequest, ResponsesResponse, StringOrContentParts,
     },
 };
-use serde_json::{from_value, to_string, Value};
+use serde_json::{from_value, Value};
 use smg_data_connector::{ResponseId, ResponseStorageError};
 use smg_mcp::McpToolSession;
 use tracing::{debug, error, warn};
@@ -126,9 +126,9 @@ pub(super) fn build_next_request_with_tools(
 
     // Add tool results
     for tool_result in tool_results {
-        // Serialize tool output to string
-        let output_str = to_string(&tool_result.output)
-            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize tool output: {e}\"}}"));
+        let output_str = tool_result
+            .response_format
+            .compact_tool_output_for_model_context(tool_result.is_error, &tool_result.output);
 
         // Update the corresponding tool call with output and completed status
         // Find and update the matching FunctionToolCall

@@ -1,7 +1,9 @@
 //! Response transformation types.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use super::transformer::extract_image_generation_fallback_text;
 use crate::core::config::ResponseFormatConfig;
 
 /// Format for transforming MCP responses to API-specific formats.
@@ -19,6 +21,30 @@ pub enum ResponseFormat {
     ImageGenerationCall,
     /// Transform to OpenAI file_search_call format
     FileSearchCall,
+}
+
+impl ResponseFormat {
+    /// Compact tool output before feeding it back into model context.
+    pub fn compact_tool_output_for_model_context(&self, is_error: bool, output: &Value) -> String {
+        if matches!(self, ResponseFormat::ImageGenerationCall) && is_error {
+            if let Some(text) = extract_image_generation_fallback_text(output) {
+                return text;
+            }
+        }
+        if is_error {
+            match output {
+                Value::String(text) => text.clone(),
+                _ => serde_json::to_string(output).unwrap_or_else(|e| {
+                    format!("{{\"error\": \"Failed to serialize tool output: {e}\"}}")
+                }),
+            }
+        } else {
+            match output {
+                Value::String(text) => text.clone(),
+                _ => output.to_string(),
+            }
+        }
+    }
 }
 
 impl From<ResponseFormatConfig> for ResponseFormat {

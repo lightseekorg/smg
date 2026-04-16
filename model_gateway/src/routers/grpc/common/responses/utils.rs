@@ -28,7 +28,7 @@ use crate::{
 /// Ensure MCP connection succeeds if MCP tools or builtin tools are declared
 ///
 /// Checks if request declares MCP tools or builtin tool types (web_search_preview,
-/// code_interpreter), and if so, validates that the MCP clients can be created
+/// code_interpreter, image_generation), and if so, validates that the MCP clients can be created
 /// and connected.
 ///
 /// Returns Ok((has_mcp_tools, mcp_servers)) on success.
@@ -36,20 +36,6 @@ pub(crate) async fn ensure_mcp_connection(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: Option<&[ResponseTool]>,
 ) -> Result<(bool, Vec<McpServerBinding>), Response> {
-    // grpc Responses currently does not support image_generation tool calls.
-    if tools
-        .map(|t| {
-            t.iter()
-                .any(|tool| matches!(tool, ResponseTool::ImageGeneration(_)))
-        })
-        .unwrap_or(false)
-    {
-        return Err(error::bad_request(
-            "unsupported_tool",
-            "image_generation tool is not supported on grpc responses routes.",
-        ));
-    }
-
     // Check for explicit MCP tools (must error if connection fails)
     let has_explicit_mcp_tools = tools
         .map(|t| t.iter().any(|tool| matches!(tool, ResponseTool::Mcp(_))))
@@ -61,7 +47,9 @@ pub(crate) async fn ensure_mcp_connection(
             t.iter().any(|tool| {
                 matches!(
                     tool,
-                    ResponseTool::WebSearchPreview(_) | ResponseTool::CodeInterpreter(_)
+                    ResponseTool::WebSearchPreview(_)
+                        | ResponseTool::CodeInterpreter(_)
+                        | ResponseTool::ImageGeneration(_)
                 )
             })
         })

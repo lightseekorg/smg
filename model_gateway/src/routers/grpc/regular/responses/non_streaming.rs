@@ -24,7 +24,7 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+        common::{mcp_utils::DEFAULT_MAX_ITERATIONS, tool_overrides::apply_request_tool_overrides},
         error,
         grpc::common::responses::{
             ensure_mcp_connection, persist_response_if_needed, ResponsesContext,
@@ -331,10 +331,20 @@ pub(super) async fn execute_tool_loop(
             // Convert tool calls to execution inputs
             let inputs: Vec<ToolExecutionInput> = mcp_tool_calls
                 .into_iter()
-                .map(|tc| ToolExecutionInput {
-                    call_id: tc.call_id,
-                    tool_name: tc.name,
-                    arguments: serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({})),
+                .map(|tc| {
+                    let mut arguments =
+                        serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({}));
+                    let response_format = session.tool_response_format(&tc.name);
+                    apply_request_tool_overrides(
+                        &response_format,
+                        original_request,
+                        &mut arguments,
+                    );
+                    ToolExecutionInput {
+                        call_id: tc.call_id,
+                        tool_name: tc.name,
+                        arguments,
+                    }
                 })
                 .collect();
 

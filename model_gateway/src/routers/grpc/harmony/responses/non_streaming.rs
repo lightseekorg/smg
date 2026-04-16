@@ -14,7 +14,7 @@ use openai_protocol::{
         ResponsesResponse, ResponsesUsage,
     },
 };
-use serde_json::{json, to_string};
+use serde_json::json;
 use smg_mcp::{McpServerBinding, McpToolSession};
 use tracing::{debug, error, warn};
 
@@ -241,7 +241,7 @@ async fn execute_with_mcp_loop(
                         &session,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
-                        &current_request.model,
+                        &current_request,
                     )
                     .await?
                 };
@@ -412,8 +412,9 @@ fn build_tool_response(
 
     // Add MCP tool calls WITH output (these were executed)
     for (tool_call, result) in mcp_tool_calls.iter().zip(mcp_results.iter()) {
-        let output_str = to_string(&result.output)
-            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize tool output: {e}\"}}"));
+        let output_str = result
+            .response_format
+            .compact_tool_output_for_model_context(result.is_error, &result.output);
 
         output.push(ResponseOutputItem::FunctionToolCall {
             id: tool_call.id.clone(),

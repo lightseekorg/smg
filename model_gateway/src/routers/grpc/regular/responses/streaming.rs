@@ -50,7 +50,7 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+        common::{mcp_utils::DEFAULT_MAX_ITERATIONS, tool_overrides::apply_request_tool_overrides},
         grpc::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
@@ -703,8 +703,9 @@ async fn execute_tool_loop_streaming_internal(
                     tool_call.arguments
                 );
                 // Parse arguments to Value
-                let arguments: Value =
+                let mut arguments: Value =
                     serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| json!({}));
+                apply_request_tool_overrides(&response_format, original_request, &mut arguments);
 
                 // Execute the single tool via the normalized MCP execution API.
                 // This avoids custom serialization and manual re-transformation in streaming paths.

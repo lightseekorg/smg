@@ -22,4 +22,5 @@ pub mod header_utils;
 pub mod mcp_utils;
 pub mod persistence_utils;
 pub mod retry;
+pub mod tool_overrides;
 pub mod worker_selection;

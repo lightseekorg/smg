@@ -31,9 +31,11 @@ use super::tool_handler::FunctionCallInProgress;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::{header_utils::ApiProvider, mcp_utils::DEFAULT_MAX_ITERATIONS},
+        common::{
+            header_utils::ApiProvider, mcp_utils::DEFAULT_MAX_ITERATIONS,
+            tool_overrides::apply_request_tool_overrides,
+        },
         error,
-        tool_output_context::compact_tool_output_for_model_context,
     },
 };
 
@@ -201,11 +203,8 @@ pub(crate) async fn execute_streaming_tool_calls(
             },
         );
 
-        let model_context_output = compact_tool_output_for_model_context(
-            &response_format,
-            tool_output.is_error,
-            &tool_output.output,
-        );
+        let model_context_output = response_format
+            .compact_tool_output_for_model_context(tool_output.is_error, &tool_output.output);
         let mut mcp_call_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
             warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
             json!({})
@@ -270,58 +269,6 @@ pub(crate) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpT
     if !tools_json.is_empty() {
         obj.insert("tools".to_string(), Value::Array(tools_json));
         obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
-    }
-}
-
-/// Extract request-level builtin tool overrides to merge into tool-call arguments.
-///
-/// Currently this is intentionally scoped to image generation only.
-/// We can extend this to other builtin tools later if needed.
-fn request_tool_overrides(
-    response_format: &ResponseFormat,
-    original_body: &ResponsesRequest,
-) -> Option<Value> {
-    if !matches!(response_format, ResponseFormat::ImageGenerationCall) {
-        return None;
-    }
-
-    // Read request-defined tools and find the image_generation config.
-    let tools = original_body.tools.as_ref()?;
-
-    tools.iter().find_map(|tool| {
-        // Serialize image tool config into a JSON object for merge.
-        let mut serialized = match tool {
-            ResponseTool::ImageGeneration(image_tool) => match to_value(image_tool).ok()? {
-                Value::Object(obj) => obj,
-                _ => return None,
-            },
-            _ => return None,
-        };
-        // Drop nulls so absent fields do not overwrite generated call arguments.
-        serialized.retain(|_, v| !v.is_null());
-        if serialized.is_empty() {
-            None
-        } else {
-            Some(Value::Object(serialized))
-        }
-    })
-}
-
-fn apply_request_tool_overrides(
-    response_format: &ResponseFormat,
-    original_body: &ResponsesRequest,
-    arguments: &mut Value,
-) {
-    if let (Some(overrides), Some(args_obj)) = (
-        request_tool_overrides(response_format, original_body),
-        arguments.as_object_mut(),
-    ) {
-        let Some(override_obj) = overrides.as_object() else {
-            return;
-        };
-        for (k, v) in override_obj {
-            args_obj.insert(k.clone(), v.clone());
-        }
     }
 }
 
@@ -816,11 +763,8 @@ pub(crate) async fn execute_tool_loop(
             );
 
             let response_format = session.tool_response_format(&call.name);
-            let model_context_output = compact_tool_output_for_model_context(
-                &response_format,
-                tool_output.is_error,
-                &tool_output.output,
-            );
+            let model_context_output = response_format
+                .compact_tool_output_for_model_context(tool_output.is_error, &tool_output.output);
             let server_label = session.resolve_tool_server_label(&call.name);
             let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, &response_format);
             let transformed_item = build_transformed_mcp_call_item(

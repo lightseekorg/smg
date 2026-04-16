@@ -93,6 +93,7 @@ pub struct ImageGenerationTool {
     pub background: Option<String>,
     pub output_format: Option<String>,
     pub output_compression: Option<u32>,
+    pub partial_images: Option<u32>,
     pub moderation: Option<String>,
     pub model: Option<String>,
 }
