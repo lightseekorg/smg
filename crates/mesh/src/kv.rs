@@ -4,7 +4,6 @@
 //! - `CrdtNamespace` for durable, mergeable state (workers, policies, rate limits, config)
 //! - `StreamNamespace` for ephemeral, lossy, application-regenerated traffic (tenant deltas, tree repair)
 //!
-//! See mesh-v2-implementation-spec.md for the full design.
 
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
@@ -16,7 +15,8 @@ use tokio::sync::mpsc;
 use crate::crdt_kv::CrdtOrMap;
 
 // ============================================================================
-// Type Definitions// ============================================================================
+// Type Definitions
+// ============================================================================
 
 /// Merge strategy for CRDT namespaces. Determines how conflicts are resolved
 /// when two nodes write the same key concurrently.
@@ -86,7 +86,8 @@ pub(crate) struct ValueEntry {
 }
 
 // ============================================================================
-// Subscription// ============================================================================
+// Subscription
+// ============================================================================
 
 /// A subscription to changes for keys matching a prefix.
 /// Delivers via a bounded mpsc channel. Capacity is per-prefix:
@@ -238,7 +239,8 @@ fn subscriber_capacity_for_prefix(prefix: &str) -> usize {
 }
 
 // ============================================================================
-// CrdtNamespace// ============================================================================
+// CrdtNamespace
+// ============================================================================
 
 /// Handle for durable, mergeable state. Scoped to a key prefix.
 /// Provides put/get/delete/keys/subscribe.
@@ -316,7 +318,8 @@ impl CrdtNamespace {
 }
 
 // ============================================================================
-// StreamNamespace// ============================================================================
+// StreamNamespace
+// ============================================================================
 
 /// Handle for ephemeral, lossy, application-regenerated traffic. Scoped to a
 /// key prefix with a fixed routing mode (Broadcast or Targeted).
@@ -398,7 +401,8 @@ impl StreamNamespace {
 }
 
 // ============================================================================
-// MeshKV// ============================================================================
+// MeshKV
+// ============================================================================
 
 /// Generic, application-agnostic mesh transport. Provides explicit namespace
 /// handles for CRDT and stream modes. Application code MUST use namespace
