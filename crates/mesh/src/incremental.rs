@@ -83,6 +83,12 @@ struct LastScannedGenerations {
 #[expect(dead_code, reason = "Reserved for Layer 2 snapshot interval")]
 const STRUCTURE_SNAPSHOT_INTERVAL: u64 = 30;
 
+/// Maximum LZ4-compressed size for a single tree snapshot. Snapshots larger
+/// than this are skipped to prevent the infinite retry loop where an oversized
+/// snapshot is serialized, rejected by the gRPC size limit, and re-tried every
+/// round — ~23 MB/s of allocator churn that the OS never reclaims.
+const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+
 /// Get current timestamp in nanoseconds. Module-level so both the legacy
 /// IncrementalUpdateCollector and the new CentralCollector can use it.
 #[expect(
@@ -398,11 +404,6 @@ impl IncrementalUpdateCollector {
                         };
                         let compressed = lz4_compress(&config_bytes);
                         // Skip if compressed size exceeds the gRPC message limit.
-                        // This prevents the infinite retry loop where an oversized
-                        // snapshot is serialized every round, rejected by the
-                        // controller, and retried — causing ~23 MB/s of allocator
-                        // churn that the OS never reclaims.
-                        const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024; // 8 MB
                         if compressed.len() > MAX_SNAPSHOT_BYTES {
                             debug!(
                                 key = %key,
@@ -972,7 +973,6 @@ impl CentralCollector {
                 continue;
             };
             let compressed = lz4_compress(&config_bytes);
-            const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
             if compressed.len() > MAX_SNAPSHOT_BYTES {
                 debug!(
                     key = %key,
