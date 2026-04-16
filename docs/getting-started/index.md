@@ -10,7 +10,7 @@ Shepherd Model Gateway (SMG) routes and manages LLM traffic across workers. This
 
 === "pip (recommended)"
 
-    Pre-built wheels are available for Linux (x86_64, aarch64, musllinux), macOS (Apple Silicon), and Windows (x86_64), with Python 3.9–3.14.
+    Pre-built wheels are available for Linux (x86_64, aarch64, musllinux), macOS (Intel and Apple Silicon), and Windows (x86_64), with Python 3.9–3.14.
 
     ```bash
     pip install smg
@@ -37,7 +37,7 @@ Shepherd Model Gateway (SMG) routes and manages LLM traffic across workers. This
     docker pull lightseekorg/smg:latest
     ```
 
-    Available tags: `latest` (stable), `v1.3.x` (specific version), `nightly` (development, from `ghcr.io/lightseekorg/smg:nightly`).
+    Available tags: `latest` (stable), `v1.4.x` (specific version), `nightly` (development, from `ghcr.io/lightseekorg/smg:nightly`).
 
     **SMG + Engine** (all-in-one, ready to serve models):
 
@@ -45,13 +45,13 @@ Shepherd Model Gateway (SMG) routes and manages LLM traffic across workers. This
 
     ```bash
     # SGLang
-    docker pull ghcr.io/lightseekorg/smg:1.3.3-sglang-v0.5.9
+    docker pull ghcr.io/lightseekorg/smg:1.4.1-sglang-v0.5.10
 
     # vLLM
-    docker pull ghcr.io/lightseekorg/smg:1.3.3-vllm-v0.18.0
+    docker pull ghcr.io/lightseekorg/smg:1.4.1-vllm-v0.19.0
 
     # TensorRT-LLM
-    docker pull ghcr.io/lightseekorg/smg:1.3.3-trtllm-1.3.0rc8
+    docker pull ghcr.io/lightseekorg/smg:1.4.1-trtllm-1.3.0rc10
     ```
 
     Tag format: `{smg_version}-{engine}-{engine_version}`. Browse all tags at [ghcr.io/lightseekorg/smg](https://github.com/lightseekorg/smg/pkgs/container/smg).
@@ -247,7 +247,7 @@ Use these when workers are not started via `smg serve`.
 === "TensorRT-LLM (gRPC)"
 
     ```bash
-    python -m tensorrt_llm.commands.serve serve \
+    python -m tensorrt_llm.commands.serve \
       meta-llama/Llama-3.1-8B-Instruct \
       --grpc \
       --host 0.0.0.0 \
@@ -443,7 +443,7 @@ docker run -d --gpus all \
   --name smg \
   -p 30000:30000 \
   -v /path/to/models:/models \
-  ghcr.io/lightseekorg/smg:1.3.3-sglang-v0.5.9 \
+  ghcr.io/lightseekorg/smg:1.4.1-sglang-v0.5.10 \
   serve \
   --backend sglang \
   --model-path /models/meta-llama/Llama-3.1-8B-Instruct \

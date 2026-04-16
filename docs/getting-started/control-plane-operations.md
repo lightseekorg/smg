@@ -40,7 +40,7 @@ curl http://localhost:30000/workers \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   -d '{
     "url": "grpc://localhost:50051",
-    "model_id": "meta-llama/Llama-3.1-8B-Instruct",
+    "models": [{ "id": "meta-llama/Llama-3.1-8B-Instruct" }],
     "worker_type": "regular",
     "runtime": "sglang"
   }'
@@ -53,17 +53,30 @@ curl http://localhost:30000/workers \
   -H "Authorization: Bearer ${ADMIN_TOKEN}"
 ```
 
-Get/update/delete by worker ID:
+Get worker by ID:
 
 ```bash
 curl http://localhost:30000/workers/<worker_id> \
   -H "Authorization: Bearer ${ADMIN_TOKEN}"
+```
 
-curl -X PUT http://localhost:30000/workers/<worker_id> \
+Patch worker (partial update — only the fields you specify change):
+
+```bash
+curl -X PATCH http://localhost:30000/workers/<worker_id> \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   -d '{"priority": 100}'
+```
 
+`PUT /workers/<worker_id>` replaces the worker with a full `WorkerSpec`
+(including the original `url`) and re-runs the registration workflow. Use
+`PATCH` when you only need to change a few fields like `priority`, `cost`,
+`labels`, `api_key`, or `health`.
+
+Delete worker:
+
+```bash
 curl -X DELETE http://localhost:30000/workers/<worker_id> \
   -H "Authorization: Bearer ${ADMIN_TOKEN}"
 ```

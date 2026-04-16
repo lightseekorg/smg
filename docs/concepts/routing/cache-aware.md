@@ -152,8 +152,8 @@ Cache-aware routing operates in two states based on system load:
 When workers are evenly loaded:
 
 1. Search radix tree for longest matching prefix
-2. If match ratio ≥ `cache-threshold` → route to matched worker
-3. If match ratio < threshold → route to worker with most cache capacity
+2. If match ratio > `cache-threshold` → route to matched worker
+3. If match ratio ≤ threshold → route to least-loaded healthy worker
 
 **Goal**: Maximize KV cache hit rate
 

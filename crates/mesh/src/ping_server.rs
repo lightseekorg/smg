@@ -18,7 +18,6 @@ use tracing::instrument;
 
 use super::{
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
-    incremental::IncrementalUpdateCollector,
     metrics::{
         record_ack, record_batch_sent, record_nack, record_peer_reconnect, record_snapshot_bytes,
         record_snapshot_duration, record_snapshot_trigger, update_peer_connections,
@@ -40,6 +39,7 @@ use super::{
     stores::{StateStores, StoreType as LocalStoreType},
     sync::MeshSyncManager,
 };
+use crate::incremental::{PeerWatermark, RoundBatch};
 
 #[derive(Debug)]
 pub struct GossipService {
@@ -52,6 +52,10 @@ pub struct GossipService {
     state_machine: Option<Arc<NodeStateMachine>>,
     partition_detector: Option<Arc<PartitionDetector>>,
     mtls_manager: Option<Arc<MTLSManager>>,
+    /// Shared reference to the current RoundBatch, updated once per round by
+    /// the MeshController's central collector. Server-side sync_stream handlers
+    /// read from this and apply per-peer watermark filtering.
+    current_batch: Option<Arc<parking_lot::RwLock<Arc<RoundBatch>>>>,
 }
 
 impl GossipService {
@@ -277,7 +281,19 @@ impl GossipService {
             state_machine: None,
             partition_detector: None,
             mtls_manager: None,
+            current_batch: None,
         }
+    }
+
+    /// Attach the shared RoundBatch reference from the MeshController.
+    /// Server-side sync_stream handlers will use this instead of creating
+    /// their own IncrementalUpdateCollector.
+    pub fn with_current_batch(
+        mut self,
+        current_batch: Arc<parking_lot::RwLock<Arc<RoundBatch>>>,
+    ) -> Self {
+        self.current_batch = Some(current_batch);
+        self
     }
 
     pub fn with_stores(mut self, stores: Arc<StateStores>) -> Self {
@@ -425,33 +441,33 @@ impl Gossip for GossipService {
         let (tx, rx) = mpsc::channel::<Result<StreamMessage, Status>>(CHANNEL_CAPACITY);
         let size_validator = MessageSizeValidator::default();
 
-        // Create incremental update collector if stores are available
-        let collector = stores.as_ref().map(|stores| {
-            Arc::new(IncrementalUpdateCollector::new(
-                stores.clone(),
-                self_name.clone(),
-            ))
-        });
-
-        // Spawn task to periodically send incremental updates
-        let incremental_sender_handle = if let Some(collector) = collector {
+        // Spawn task to periodically send incremental updates.
+        // Uses PeerWatermark reading from the shared RoundBatch (central collector).
+        // If current_batch is not set (e.g., temporary GossipService for snapshots),
+        // skip the sender task.
+        let incremental_sender_handle = if let Some(batch_handle) = self.current_batch.clone() {
             let tx_incremental = tx.clone();
             let self_name_incremental = self_name.clone();
             let size_validator_clone = size_validator.clone();
+            // The remote peer's name isn't known until the first stream message
+            // arrives. Use a placeholder label for debug output — this doesn't
+            // affect filtering correctness (each task has its own watermark).
+            let peer_name_for_watermark = "server-inbound".to_string();
             #[expect(
                 clippy::disallowed_methods,
                 reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes or handle is aborted"
             )]
             Some(tokio::spawn(async move {
-                // Use 1 second interval for rate limit counter sync (faster than other stores)
-                let mut interval = tokio::time::interval(Duration::from_secs(1)); // Send every 1 second
+                let mut watermark = PeerWatermark::new(peer_name_for_watermark);
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
                 let mut sequence_counter: u64 = 0;
 
                 loop {
                     interval.tick().await;
 
-                    // Collect all incremental updates
-                    let all_updates = collector.collect_all_updates();
+                    // Read the centrally collected batch and filter by this peer's watermark.
+                    let batch = batch_handle.read().clone();
+                    let all_updates = watermark.filter(&batch);
 
                     if !all_updates.is_empty() {
                         for (store_type, updates) in all_updates {
@@ -469,10 +485,7 @@ impl Gossip for GossipService {
                                     size_validator_clone.max_size()
                                 );
                                 // Mark as sent to prevent infinite retry loop.
-                                // Without this, the same oversized update is re-collected,
-                                // re-serialized, and re-skipped every second forever,
-                                // burning CPU and memory.
-                                collector.mark_sent(store_type, &updates);
+                                watermark.mark_sent(store_type, &updates);
                                 continue;
                             }
 
@@ -489,20 +502,16 @@ impl Gossip for GossipService {
                                 peer_id: self_name_incremental.clone(),
                             };
 
-                            // Check backpressure using try_send (mpsc::Sender doesn't have len())
+                            // Check backpressure using try_send
                             match tx_incremental.try_send(Ok(incremental_update)) {
                                 Ok(()) => {
-                                    // Successfully queued
-                                    // Record metrics
                                     record_batch_sent(&self_name_incremental, batch_size);
-                                    // Mark as sent after successful transmission
-                                    collector.mark_sent(store_type, &updates);
+                                    watermark.mark_sent(store_type, &updates);
                                 }
                                 Err(mpsc::error::TrySendError::Full(_)) => {
                                     log::debug!(
                                         "Backpressure: channel full, skipping send (will retry next interval)"
                                     );
-                                    // Don't mark as sent, will retry next interval
                                     continue;
                                 }
                                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -932,6 +941,7 @@ impl Gossip for GossipService {
                                         state_machine: None,
                                         partition_detector: None,
                                         mtls_manager: None,
+                                        current_batch: None,
                                     };
                                     let chunks = service.create_snapshot_chunks(store_type, 100); // chunk_size = 100 entries
                                     let total_chunks = chunks.len() as u64;

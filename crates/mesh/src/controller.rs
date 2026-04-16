@@ -31,7 +31,9 @@ use super::{
 };
 use crate::{
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
+    incremental::{CentralCollector, PeerWatermark, RoundBatch},
     metrics,
+    service::gossip::IncrementalUpdate,
 };
 
 pub struct MeshController {
@@ -44,6 +46,11 @@ pub struct MeshController {
     mtls_manager: Option<Arc<MTLSManager>>,
     // Track active sync_stream connections
     sync_connections: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// Central collector that runs once per gossip round.
+    central_collector: Arc<CentralCollector>,
+    /// Current round batch, updated once per round by the central collector.
+    /// Per-peer senders read and apply their own watermark filtering.
+    current_batch: Arc<parking_lot::RwLock<Arc<RoundBatch>>>,
 }
 
 impl MeshController {
@@ -57,6 +64,8 @@ impl MeshController {
         sync_manager: Arc<MeshSyncManager>,
         mtls_manager: Option<Arc<MTLSManager>>,
     ) -> Self {
+        let central_collector =
+            Arc::new(CentralCollector::new(stores.clone(), self_name.to_string()));
         Self {
             state,
             self_name: self_name.to_string(),
@@ -66,7 +75,15 @@ impl MeshController {
             sync_manager,
             mtls_manager,
             sync_connections: Arc::new(Mutex::new(HashMap::new())),
+            central_collector,
+            current_batch: Arc::new(parking_lot::RwLock::new(Arc::new(RoundBatch::default()))),
         }
+    }
+
+    /// Get a handle to the shared RoundBatch. Used by GossipService to
+    /// share the centrally collected batch with server-side sync_stream handlers.
+    pub fn current_batch(&self) -> Arc<parking_lot::RwLock<Arc<RoundBatch>>> {
+        self.current_batch.clone()
     }
 
     #[instrument(fields(name = %self.self_name), skip(self, signal))]
@@ -195,6 +212,15 @@ impl MeshController {
 
                 // Clean up retry managers for peers no longer in cluster state
                 retry_managers.retain(|peer_name, _| map.contains_key(peer_name));
+            }
+
+            // Central collection: run once per round. Drains tenant deltas
+            // (destructive) and collects all store changes into one batch.
+            // Per-peer senders read this batch and filter by their watermarks.
+            {
+                let batch = self.central_collector.collect();
+                *self.current_batch.write() = Arc::new(batch);
+                self.central_collector.advance_generations();
             }
 
             tokio::select! {
@@ -414,6 +440,7 @@ impl MeshController {
         let stores = self.stores.clone();
         let sync_manager = self.sync_manager.clone();
         let sync_connections = self.sync_connections.clone();
+        let current_batch = self.current_batch.clone();
 
         // Log connection lifecycle: spawn
         log::debug!(
@@ -454,25 +481,20 @@ impl MeshController {
                     return;
                 }
 
-                // Spawn a task to periodically send incremental updates (client-side sender)
+                // Spawn a task to periodically send incremental updates (client-side sender).
+                // Uses PeerWatermark to filter the centrally collected batch.
                 let incremental_sender_handle = {
-                    use super::{
-                        incremental::IncrementalUpdateCollector, service::gossip::IncrementalUpdate,
-                    };
-
-                    let collector = Arc::new(IncrementalUpdateCollector::new(
-                        stores.clone(),
-                        self_name.clone(),
-                    ));
+                    let mut watermark = PeerWatermark::new(peer_name.clone());
                     log::debug!(
                         peer = %peer_name,
-                        "IncrementalUpdateCollector created"
+                        "PeerWatermark created for centralized gossip"
                     );
                     let tx_incremental = tx.clone();
                     let self_name_incremental = self_name.clone();
                     let peer_name_incremental = peer_name.clone();
                     let shared_sequence = sequence.clone();
                     let size_validator = MessageSizeValidator::default();
+                    let batch_handle = current_batch.clone();
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
@@ -483,8 +505,10 @@ impl MeshController {
 
                             let round_start = std::time::Instant::now();
 
-                            // Collect all incremental updates
-                            let all_updates = collector.collect_all_updates();
+                            // Read the centrally collected batch and filter by
+                            // this peer's watermark. No collection happens here.
+                            let batch = batch_handle.read().clone();
+                            let all_updates = watermark.filter(&batch);
 
                             let collect_elapsed = round_start.elapsed();
 
@@ -516,13 +540,11 @@ impl MeshController {
                                             size_validator.max_size()
                                         );
                                         // Mark non-tree stores as sent to prevent infinite
-                                        // retry loops (PR #808). Tree updates (tenant deltas,
-                                        // structure snapshots) are retried next round with
-                                        // updated data from the live tree.
+                                        // retry loops. Tree updates are retried next round.
                                         let is_tree_update =
                                             updates.iter().any(|u| u.key.starts_with("tree:"));
                                         if !is_tree_update {
-                                            collector.mark_sent(*store_type, updates);
+                                            watermark.mark_sent(*store_type, updates);
                                         }
                                         continue;
                                     }
@@ -552,7 +574,7 @@ impl MeshController {
                                     match tx_incremental.try_send(incremental_update) {
                                         Ok(()) => {
                                             // Mark as sent after successful transmission
-                                            collector.mark_sent(*store_type, updates);
+                                            watermark.mark_sent(*store_type, updates);
                                         }
                                         Err(mpsc::error::TrySendError::Full(_)) => {
                                             log::debug!(

@@ -85,15 +85,6 @@ smg \
 | `--service-discovery-namespace` | (all namespaces) | Kubernetes namespace to watch |
 | `--service-discovery-port` | `80` | Port to use for worker connections |
 
-### Environment Variables
-
-```bash
-export SMG_SERVICE_DISCOVERY=true
-export SMG_SELECTOR="app=sglang-worker"
-export SMG_SERVICE_DISCOVERY_NAMESPACE=inference
-export SMG_SERVICE_DISCOVERY_PORT=8000
-```
-
 ---
 
 ## Label Selectors
@@ -112,21 +103,13 @@ Matches pods with label `app=vllm`.
 
 ### Multiple Labels
 
-Match pods with multiple labels:
+Match pods that carry several labels by passing multiple `key=value` pairs:
 
 ```bash
-smg --service-discovery --selector "app=sglang,environment=production"
+smg --service-discovery --selector app=sglang environment=production
 ```
 
 Matches pods with both `app=sglang` AND `environment=production`.
-
-### Complex Selectors
-
-Use set-based selectors for more complex matching:
-
-```bash
-smg --service-discovery --selector "app in (sglang, vllm),tier=inference"
-```
 
 ---
 
@@ -140,8 +123,8 @@ For prefill-decode disaggregated deployments, use separate selectors for each wo
 smg \
   --service-discovery \
   --pd-disaggregation \
-  --prefill-selector "app=sglang,role=prefill" \
-  --decode-selector "app=sglang,role=decode" \
+  --prefill-selector app=sglang role=prefill \
+  --decode-selector app=sglang role=decode \
   --service-discovery-namespace inference
 ```
 
@@ -298,8 +281,6 @@ spec:
           ports:
             - containerPort: 8000
               name: http
-            - containerPort: 3001
-              name: admin
 ```
 
 !!! tip "Engine images"
@@ -342,7 +323,7 @@ spec:
 
 1. **Pod Created**: Kubernetes creates a new worker pod
 2. **Watch Event**: SMG receives the pod creation event
-3. **Capability Query**: SMG queries the worker's `/get_model_info` endpoint
+3. **Capability Query**: SMG queries the worker's `/model_info` endpoint (falling back to the deprecated `/get_model_info` if the new path returns 404)
 4. **Registration**: Worker is added to the registry
 5. **Health Check**: Background health checks begin
 
@@ -357,10 +338,10 @@ spec:
 
 | State | Description | Receives Traffic |
 |-------|-------------|------------------|
-| **Registering** | Querying capabilities | No |
-| **Ready** | Healthy and registered | Yes |
-| **Unhealthy** | Failing health checks | No |
-| **Draining** | Pending removal | No |
+| **Pending** | Just registered, not yet proven healthy locally | No |
+| **Ready** | Locally verified and passing health checks | Yes |
+| **NotReady** | Previously `Ready`, now failing readiness checks; not removed unless configured | No |
+| **Failed** | Sustained liveness failure; removed when `--remove-unhealthy-workers` is set | No |
 
 ---
 
@@ -373,6 +354,7 @@ spec:
 | `smg_discovery_workers_discovered` | Workers known via discovery |
 | `smg_discovery_registrations_total` | Worker registration events |
 | `smg_discovery_deregistrations_total` | Worker deregistration events |
+| `smg_discovery_sync_duration_seconds` | Duration of each periodic reconciliation cycle |
 
 ### Logs
 
@@ -406,7 +388,7 @@ Example log output:
 
 ```bash
 # Check discovered workers via admin API
-curl http://smg:3001/workers | jq
+curl http://smg:30000/workers | jq
 
 # Check pod labels match selector
 kubectl get pods -n inference -l app=sglang-worker

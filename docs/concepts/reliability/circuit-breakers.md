@@ -121,7 +121,7 @@ The circuit **opens** when:
 consecutive_failures >= failure_threshold
 ```
 
-Within the sliding window (`--cb-window-duration-secs`).
+A single successful request resets `consecutive_failures` to zero. `--cb-window-duration-secs` is accepted and validated but is not yet consumed by the state machine — failures are tracked via a running consecutive-failure counter rather than a sliding window.
 
 ### Open → Half-Open
 
@@ -155,7 +155,7 @@ smg \
 | `--cb-failure-threshold` | `10` | Consecutive failures before circuit opens |
 | `--cb-success-threshold` | `3` | Successes in half-open state to close circuit |
 | `--cb-timeout-duration-secs` | `60` | Seconds before open circuit transitions to half-open |
-| `--cb-window-duration-secs` | `120` | Sliding window for counting failures |
+| `--cb-window-duration-secs` | `120` | Accepted and validated (must be `> 0`) but not yet consumed by the state machine; see note under *Closed → Open* |
 | `--disable-circuit-breaker` | `false` | Disable circuit breakers entirely |
 
 ### Configuration Examples
