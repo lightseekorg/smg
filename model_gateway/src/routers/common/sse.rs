@@ -8,9 +8,8 @@
 //!   `serde_json::to_writer`, eliminating intermediate `String` allocations.
 //!
 //! - [`SseDecoder`]: Consumes incoming SSE byte streams from upstream workers.
-//!   Uses cursor tracking and borrow-based frame parsing to minimize allocations.
-
-use std::borrow::Cow;
+//!   Uses cursor tracking to avoid per-frame memmove. Returns owned [`SseFrame`]
+//!   values so callers can hold frames freely across decode calls.
 
 use axum::body::Body;
 use bytes::Bytes;
@@ -130,28 +129,23 @@ const DEFAULT_MAX_BUFFER_SIZE: usize = 1024 * 1024; // 1 MB
 ///
 /// - Defers UTF-8 validation to complete frames (handles multi-byte splits)
 /// - Uses cursor tracking to avoid per-frame memmove
-/// - Returns borrowed `SseFrame` references — zero allocation for single-line data
-///
-/// # Lifetime constraints
-///
-/// `SseFrame` borrows from the decoder's internal buffer. You must drop
-/// each frame before calling `next_frame()` or `compact()` again. The
-/// compiler enforces this statically.
+/// - Returns owned `SseFrame` values — callers can hold frames across
+///   `next_frame()` / `compact()` calls without lifetime concerns
 pub struct SseDecoder {
     buf: Vec<u8>,
     consumed: usize,
     max_size: usize,
 }
 
-/// A parsed SSE frame. Borrows from the decoder's buffer where possible.
-pub struct SseFrame<'a> {
-    /// The `event:` field value, if present. Borrowed from buffer.
-    pub event_type: Option<&'a str>,
-    /// The `data:` field value. Borrowed for single-line (common), owned for multi-line join.
-    pub data: Cow<'a, str>,
+/// A parsed SSE frame with owned data.
+pub struct SseFrame {
+    /// The `event:` field value, if present.
+    pub event_type: Option<String>,
+    /// The `data:` field value.
+    pub data: String,
 }
 
-impl SseFrame<'_> {
+impl SseFrame {
     /// Deserialize the data as JSON. Called on-demand (lazy deserialization).
     pub fn decode_data<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         serde_json::from_str(&self.data)
@@ -159,7 +153,7 @@ impl SseFrame<'_> {
 
     /// Check for `[DONE]` sentinel.
     pub fn is_done(&self) -> bool {
-        self.data.as_ref() == "[DONE]"
+        self.data == "[DONE]"
     }
 }
 
@@ -227,9 +221,8 @@ impl SseDecoder {
 
     /// Yield the next complete SSE frame.
     ///
-    /// Returns borrowed references into the internal buffer.
-    /// Call in a loop until `None`, then call `compact()`.
-    pub fn next_frame(&mut self) -> Option<Result<SseFrame<'_>, SseDecodeError>> {
+    /// Returns owned frames. Call in a loop until `None`, then call `compact()`.
+    pub fn next_frame(&mut self) -> Option<Result<SseFrame, SseDecodeError>> {
         loop {
             let remaining = &self.buf[self.consumed..];
             let (pos, delim_len) = find_frame_boundary(remaining)?;
@@ -265,7 +258,7 @@ impl SseDecoder {
     /// Returns `Err(SseDecodeError::IncompleteFlush)` if complete frames remain
     /// in the buffer. Callers must drain `next_frame()` to `None` before calling
     /// this method.
-    pub fn flush(&mut self) -> Option<Result<SseFrame<'_>, SseDecodeError>> {
+    pub fn flush(&mut self) -> Option<Result<SseFrame, SseDecodeError>> {
         if find_frame_boundary(&self.buf[self.consumed..]).is_some() {
             return Some(Err(SseDecodeError::IncompleteFlush));
         }
@@ -310,7 +303,7 @@ impl Default for SseDecoder {
 ///
 /// Use this when you already have a complete SSE block as a string (e.g. from
 /// an accumulator or rewrite path) and don't need the full [`SseDecoder`] machinery.
-pub fn parse_block(block: &str) -> Option<SseFrame<'_>> {
+pub fn parse_block(block: &str) -> Option<SseFrame> {
     parse_frame(block.trim_end_matches(['\r', '\n']))
 }
 
@@ -406,15 +399,15 @@ fn split_sse_lines(s: &str) -> impl Iterator<Item = &str> {
 
 /// Parse a complete SSE frame into event type and data.
 ///
-/// Returns borrowed references for zero-allocation in the common case
-/// (single `data:` line, `event:` present or absent).
+/// Returns an owned `SseFrame`. Allocation is deferred until the first
+/// `data:` line is encountered, so comment-only and control blocks are skipped
+/// without heap allocation.
 ///
 /// Per the SSE spec, each line is split at the first colon to determine
 /// the field name and value. A single leading space after the colon is stripped.
-fn parse_frame(frame: &str) -> Option<SseFrame<'_>> {
+fn parse_frame(frame: &str) -> Option<SseFrame> {
     let mut event_type: Option<&str> = None;
-    let mut data: Option<Cow<'_, str>> = None;
-    let mut saw_data = false;
+    let mut data: Option<String> = None;
 
     for line in split_sse_lines(frame) {
         if line.is_empty() || line.starts_with(':') {
@@ -429,22 +422,12 @@ fn parse_frame(frame: &str) -> Option<SseFrame<'_>> {
 
         match field {
             "data" => {
-                saw_data = true;
-                match data.take() {
-                    None => data = Some(Cow::Borrowed(value)),
-                    Some(Cow::Borrowed(first)) => {
-                        let mut joined = String::with_capacity(frame.len());
-                        joined.push_str(first);
-                        joined.push('\n');
-                        joined.push_str(value);
-                        data = Some(Cow::Owned(joined));
-                    }
-                    Some(Cow::Owned(mut joined)) => {
-                        joined.push('\n');
-                        joined.push_str(value);
-                        data = Some(Cow::Owned(joined));
-                    }
+                let is_first = data.is_none();
+                let buf = data.get_or_insert_with(|| String::with_capacity(frame.len()));
+                if !is_first {
+                    buf.push('\n');
                 }
+                buf.push_str(value);
             }
             "event" => {
                 event_type = Some(value);
@@ -455,13 +438,12 @@ fn parse_frame(frame: &str) -> Option<SseFrame<'_>> {
 
     // Per SSE spec: blocks without data lines (comments, event-only, id/retry)
     // should be silently skipped, not surfaced as empty frames.
-    if !saw_data {
-        return None;
-    }
+    let data = data?;
 
-    let data = data.unwrap_or(Cow::Borrowed(""));
-
-    Some(SseFrame { event_type, data })
+    Some(SseFrame {
+        event_type: event_type.map(|s| s.to_owned()),
+        data,
+    })
 }
 
 // ============================================================================
@@ -573,8 +555,7 @@ mod tests {
         dec.push(b"data: {\"type\":\"ping\"}\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
         assert_eq!(frame.event_type, None);
-        assert_eq!(frame.data.as_ref(), "{\"type\":\"ping\"}");
-        assert!(matches!(frame.data, Cow::Borrowed(_)));
+        assert_eq!(frame.data, "{\"type\":\"ping\"}");
     }
 
     #[test]
@@ -583,8 +564,8 @@ mod tests {
         dec.push(b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
             .unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.event_type, Some("message_start"));
-        assert_eq!(frame.data.as_ref(), "{\"type\":\"message_start\"}");
+        assert_eq!(frame.event_type.as_deref(), Some("message_start"));
+        assert_eq!(frame.data, "{\"type\":\"message_start\"}");
     }
 
     #[test]
@@ -593,12 +574,10 @@ mod tests {
         dec.push(b"data: first\n\ndata: second\n\n").unwrap();
 
         let f1 = dec.next_frame().unwrap().unwrap();
-        assert_eq!(f1.data.as_ref(), "first");
-        drop(f1);
+        assert_eq!(f1.data, "first");
 
         let f2 = dec.next_frame().unwrap().unwrap();
-        assert_eq!(f2.data.as_ref(), "second");
-        drop(f2);
+        assert_eq!(f2.data, "second");
 
         assert!(dec.next_frame().is_none());
     }
@@ -610,7 +589,7 @@ mod tests {
         assert!(dec.next_frame().is_none()); // incomplete
         dec.push(b"lo\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.data.as_ref(), "hello");
+        assert_eq!(frame.data, "hello");
     }
 
     #[test]
@@ -619,8 +598,7 @@ mod tests {
         dec.push(b"data: line1\ndata: line2\ndata: line3\n\n")
             .unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.data.as_ref(), "line1\nline2\nline3");
-        assert!(matches!(frame.data, Cow::Owned(_)));
+        assert_eq!(frame.data, "line1\nline2\nline3");
     }
 
     #[test]
@@ -629,8 +607,8 @@ mod tests {
         let mut dec = SseDecoder::new();
         dec.push(b"event: ping\r\ndata: {}\r\n\r\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.event_type, Some("ping"));
-        assert_eq!(frame.data.as_ref(), "{}");
+        assert_eq!(frame.event_type.as_deref(), Some("ping"));
+        assert_eq!(frame.data, "{}");
     }
 
     #[test]
@@ -639,8 +617,8 @@ mod tests {
         let mut dec = SseDecoder::new();
         dec.push(b"event: ping\r\ndata: {}\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.event_type, Some("ping"));
-        assert_eq!(frame.data.as_ref(), "{}");
+        assert_eq!(frame.event_type.as_deref(), Some("ping"));
+        assert_eq!(frame.data, "{}");
     }
 
     #[test]
@@ -649,7 +627,7 @@ mod tests {
         let mut dec = SseDecoder::new();
         dec.push(b"data: hello\r\r").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.data.as_ref(), "hello");
+        assert_eq!(frame.data, "hello");
     }
 
     #[test]
@@ -658,7 +636,7 @@ mod tests {
         let mut dec = SseDecoder::new();
         dec.push(b"data: mixed\n\r\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.data.as_ref(), "mixed");
+        assert_eq!(frame.data, "mixed");
     }
 
     #[test]
@@ -666,7 +644,7 @@ mod tests {
         let mut dec = SseDecoder::new();
         dec.push(b": this is a comment\ndata: hello\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.data.as_ref(), "hello");
+        assert_eq!(frame.data, "hello");
         assert_eq!(frame.event_type, None);
     }
 
@@ -684,8 +662,8 @@ mod tests {
         let mut dec = SseDecoder::new();
         dec.push(b"event: ping\ndata:\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.event_type, Some("ping"));
-        assert_eq!(frame.data.as_ref(), "");
+        assert_eq!(frame.event_type.as_deref(), Some("ping"));
+        assert_eq!(frame.data, "");
     }
 
     #[test]
@@ -720,14 +698,13 @@ mod tests {
         let mut dec = SseDecoder::with_max_size(32);
         dec.push(b"data: first\n\n").unwrap(); // 13 bytes
         let f = dec.next_frame().unwrap().unwrap();
-        assert_eq!(f.data.as_ref(), "first");
-        drop(f);
+        assert_eq!(f.data, "first");
         // Without auto-compact: buf.len()=13, consumed=13, unconsumed=0
         // New push of 14 bytes: buf.len()+chunk.len() = 27 <= 32, OK
         // But if we pushed 20 bytes: 13+20 = 33 > 32, auto-compact needed
         dec.push(b"data: second-longer\n\n").unwrap(); // 21 bytes, 13+21=34>32, auto-compacts
         let f = dec.next_frame().unwrap().unwrap();
-        assert_eq!(f.data.as_ref(), "second-longer");
+        assert_eq!(f.data, "second-longer");
     }
 
     #[test]
@@ -736,12 +713,10 @@ mod tests {
         dec.push(b"data: first\n\ndata: second\n\npartial").unwrap();
 
         let f1 = dec.next_frame().unwrap().unwrap();
-        assert_eq!(f1.data.as_ref(), "first");
-        drop(f1);
+        assert_eq!(f1.data, "first");
 
         let f2 = dec.next_frame().unwrap().unwrap();
-        assert_eq!(f2.data.as_ref(), "second");
-        drop(f2);
+        assert_eq!(f2.data, "second");
 
         assert!(dec.next_frame().is_none());
         assert_eq!(dec.buffered_len(), 7); // "partial"
@@ -757,7 +732,7 @@ mod tests {
         dec.push(b"data: final").unwrap();
         assert!(dec.next_frame().is_none());
         let frame = dec.flush().unwrap().unwrap();
-        assert_eq!(frame.data.as_ref(), "final");
+        assert_eq!(frame.data, "final");
     }
 
     #[test]
@@ -799,7 +774,7 @@ mod tests {
         let mut dec = SseDecoder::new();
         dec.push(b"id: 123\nretry: 5000\ndata: hello\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.data.as_ref(), "hello");
+        assert_eq!(frame.data, "hello");
         assert_eq!(frame.event_type, None);
     }
 
@@ -810,7 +785,7 @@ mod tests {
         dec.push(b"data:  two spaces\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
         // Strip one space, leaving " two spaces"
-        assert_eq!(frame.data.as_ref(), " two spaces");
+        assert_eq!(frame.data, " two spaces");
     }
 
     #[test]
@@ -818,7 +793,7 @@ mod tests {
         let mut dec = SseDecoder::new();
         dec.push(b"data:nospace\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.data.as_ref(), "nospace");
+        assert_eq!(frame.data, "nospace");
     }
 
     #[test]
@@ -827,7 +802,7 @@ mod tests {
         let mut dec = SseDecoder::new();
         dec.push(b"data\n\n").unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.data.as_ref(), "");
+        assert_eq!(frame.data, "");
     }
 
     #[test]
@@ -842,7 +817,7 @@ mod tests {
         assert!(dec.next_frame().is_none()); // incomplete frame
         dec.push(&bytes[mid..]).unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.data.as_ref(), "日本");
+        assert_eq!(frame.data, "日本");
     }
 
     #[test]
@@ -852,7 +827,7 @@ mod tests {
         // First block (event: test) has no data line — skipped per SSE spec
         // Second block (data: value) is returned as the first frame
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.data.as_ref(), "value");
+        assert_eq!(frame.data, "value");
         assert_eq!(frame.event_type, None);
     }
 
@@ -880,7 +855,7 @@ mod tests {
         let mut dec = SseDecoder::new();
         dec.push(&bytes).unwrap();
         let frame = dec.next_frame().unwrap().unwrap();
-        assert_eq!(frame.event_type, Some("content_block_delta"));
+        assert_eq!(frame.event_type.as_deref(), Some("content_block_delta"));
         let decoded: serde_json::Value = frame.decode_data().unwrap();
         assert_eq!(decoded, original);
     }
@@ -925,10 +900,9 @@ mod tests {
 
         for (expected_type, expected_val) in &events {
             let frame = dec.next_frame().unwrap().unwrap();
-            assert_eq!(frame.event_type, Some(*expected_type));
+            assert_eq!(frame.event_type.as_deref(), Some(*expected_type));
             let decoded: serde_json::Value = frame.decode_data().unwrap();
             assert_eq!(&decoded, expected_val);
-            drop(frame);
         }
 
         assert!(dec.next_frame().is_none());
@@ -940,15 +914,15 @@ mod tests {
     fn test_parse_frame_basic() {
         let frame =
             parse_frame("event: message_start\ndata: {\"type\":\"message_start\"}").unwrap();
-        assert_eq!(frame.event_type, Some("message_start"));
-        assert_eq!(frame.data.as_ref(), "{\"type\":\"message_start\"}");
+        assert_eq!(frame.event_type.as_deref(), Some("message_start"));
+        assert_eq!(frame.data, "{\"type\":\"message_start\"}");
     }
 
     #[test]
     fn test_parse_frame_data_only() {
         let frame = parse_frame("data: hello").unwrap();
         assert_eq!(frame.event_type, None);
-        assert_eq!(frame.data.as_ref(), "hello");
+        assert_eq!(frame.data, "hello");
     }
 
     #[test]
@@ -959,7 +933,18 @@ mod tests {
     #[test]
     fn test_parse_frame_multiline_data() {
         let frame = parse_frame("data: line1\ndata: line2").unwrap();
-        assert_eq!(frame.data.as_ref(), "line1\nline2");
+        assert_eq!(frame.data, "line1\nline2");
+    }
+
+    #[test]
+    fn test_parse_frame_empty_data_lines() {
+        // Empty data: lines must produce newlines per SSE spec
+        let frame = parse_frame("data:\ndata: hello").unwrap();
+        assert_eq!(frame.data, "\nhello");
+
+        // Two consecutive empty data: lines
+        let frame = parse_frame("data:\ndata:").unwrap();
+        assert_eq!(frame.data, "\n");
     }
 
     #[test]
@@ -972,15 +957,15 @@ mod tests {
     fn test_parse_frame_field_without_colon() {
         // "data" with no colon = field name "data", empty value — still has a data line
         let frame = parse_frame("data").unwrap();
-        assert_eq!(frame.data.as_ref(), "");
+        assert_eq!(frame.data, "");
     }
 
     #[test]
     fn test_parse_frame_bare_cr_lines() {
         // Lines separated by bare \r — str::lines() would fail here
         let frame = parse_frame("event: ping\rdata: {}").unwrap();
-        assert_eq!(frame.event_type, Some("ping"));
-        assert_eq!(frame.data.as_ref(), "{}");
+        assert_eq!(frame.event_type.as_deref(), Some("ping"));
+        assert_eq!(frame.data, "{}");
     }
 
     // --- split_sse_lines tests ---
