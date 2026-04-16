@@ -1387,4 +1387,243 @@ mod tests {
         let version3 = updates3[0].version;
         assert_eq!(version3, 3);
     }
+
+    // ========================================================================
+    // Multi-peer delivery tests (v2 bug fix verification)
+    // ========================================================================
+
+    use crate::tree_ops::TenantInsert;
+
+    fn insert_tenant_delta(stores: &StateStores, model_id: &str, hash: u64) {
+        stores
+            .tenant_delta_inserts
+            .entry(model_id.to_string())
+            .or_default()
+            .push(TenantInsert {
+                node_path_hash: hash,
+                worker_url: "http://w1:8000".to_string(),
+                epoch: 0,
+            });
+        stores.bump_tree_version(&format!("tree:{model_id}"));
+    }
+
+    /// Regression test for v1 per-peer collector bug: tenant deltas were
+    /// destructively drained from the shared DashMap, so only the first peer's
+    /// collector received them. This test verifies that with CentralCollector
+    /// + PeerWatermark, ALL peers see the same deltas.
+    #[test]
+    fn test_all_peers_receive_tenant_deltas() {
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+
+        // Simulate a tree insert producing a tenant delta
+        insert_tenant_delta(&stores, "model-x", 0xABCD);
+        insert_tenant_delta(&stores, "model-x", 0xBEEF);
+        insert_tenant_delta(&stores, "model-y", 0xDEAD);
+
+        // Central collector runs once per round
+        let central = CentralCollector::new(stores.clone(), "node1".to_string());
+        let batch = central.collect();
+
+        // Three simulated peers, each with their own watermark
+        let mut peer_a = PeerWatermark::new("peer-a".to_string());
+        let mut peer_b = PeerWatermark::new("peer-b".to_string());
+        let mut peer_c = PeerWatermark::new("peer-c".to_string());
+
+        // All three peers see the same tenant delta updates from the batch
+        let a_updates = peer_a.filter(&batch);
+        let b_updates = peer_b.filter(&batch);
+        let c_updates = peer_c.filter(&batch);
+
+        // Helper: count tree:* entries (tenant deltas)
+        let count_tree_updates = |updates: &[(StoreType, Vec<StateUpdate>)]| -> usize {
+            updates
+                .iter()
+                .flat_map(|(_, v)| v.iter())
+                .filter(|u| u.key.starts_with("tree:"))
+                .count()
+        };
+
+        let a_tree = count_tree_updates(&a_updates);
+        let b_tree = count_tree_updates(&b_updates);
+        let c_tree = count_tree_updates(&c_updates);
+
+        assert_eq!(
+            a_tree, 2,
+            "peer-a should see 2 tenant deltas (model-x and model-y)"
+        );
+        assert_eq!(
+            b_tree, 2,
+            "peer-b should see 2 tenant deltas (v1 bug: only peer-a would see them)"
+        );
+        assert_eq!(c_tree, 2, "peer-c should see 2 tenant deltas");
+
+        // After each peer marks their updates as sent, a second collect
+        // (no new changes) should return nothing for those peers.
+        for (store_type, updates) in &a_updates {
+            peer_a.mark_sent(*store_type, updates);
+        }
+        for (store_type, updates) in &b_updates {
+            peer_b.mark_sent(*store_type, updates);
+        }
+        for (store_type, updates) in &c_updates {
+            peer_c.mark_sent(*store_type, updates);
+        }
+    }
+
+    #[test]
+    fn test_peer_watermark_filters_by_version() {
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+
+        let _ = stores.worker.insert(
+            "worker:1".to_string(),
+            WorkerState {
+                worker_id: "worker:1".to_string(),
+                model_id: "model1".to_string(),
+                url: "http://localhost:8000".to_string(),
+                health: true,
+                load: 0.0,
+                version: 5,
+                spec: vec![],
+            },
+        );
+
+        let central = CentralCollector::new(stores.clone(), "node1".to_string());
+        let batch = central.collect();
+
+        let mut peer_a = PeerWatermark::new("peer-a".to_string());
+
+        // First filter: peer-a has no watermark, gets the update
+        let updates1 = peer_a.filter(&batch);
+        assert_eq!(updates1.len(), 1);
+        assert_eq!(updates1[0].1.len(), 1);
+        assert_eq!(updates1[0].1[0].version, 5);
+
+        // Mark sent: peer-a's watermark is now at version 5
+        for (store_type, updates) in &updates1 {
+            peer_a.mark_sent(*store_type, updates);
+        }
+
+        // Second filter: peer-a already has version 5, filtered out
+        let updates2 = peer_a.filter(&batch);
+        assert_eq!(
+            updates2.iter().flat_map(|(_, v)| v.iter()).count(),
+            0,
+            "peer-a should filter out already-sent versions"
+        );
+    }
+
+    #[test]
+    fn test_peers_with_different_watermarks() {
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+
+        // Two workers, one at version 3, one at version 7
+        let _ = stores.worker.insert(
+            "worker:1".to_string(),
+            WorkerState {
+                worker_id: "worker:1".to_string(),
+                model_id: "m1".to_string(),
+                url: "http://w1:8000".to_string(),
+                health: true,
+                load: 0.0,
+                version: 3,
+                spec: vec![],
+            },
+        );
+        let _ = stores.worker.insert(
+            "worker:2".to_string(),
+            WorkerState {
+                worker_id: "worker:2".to_string(),
+                model_id: "m2".to_string(),
+                url: "http://w2:8000".to_string(),
+                health: true,
+                load: 0.0,
+                version: 7,
+                spec: vec![],
+            },
+        );
+
+        let central = CentralCollector::new(stores.clone(), "node1".to_string());
+        let batch = central.collect();
+
+        // peer-a is at worker:1 v=3, worker:2 v=0 (new)
+        // peer-b is at worker:1 v=0 (new), worker:2 v=7 (caught up)
+        let mut peer_a = PeerWatermark::new("peer-a".to_string());
+        let mut peer_b = PeerWatermark::new("peer-b".to_string());
+
+        // Seed peer_a's watermark: already has worker:1 v=3, missing worker:2
+        peer_a.mark_sent(
+            StoreType::Worker,
+            &[StateUpdate {
+                key: "worker:1".to_string(),
+                value: vec![],
+                version: 3,
+                actor: "node1".to_string(),
+                timestamp: 0,
+            }],
+        );
+        // Seed peer_b's watermark: already has worker:2 v=7, missing worker:1
+        peer_b.mark_sent(
+            StoreType::Worker,
+            &[StateUpdate {
+                key: "worker:2".to_string(),
+                value: vec![],
+                version: 7,
+                actor: "node1".to_string(),
+                timestamp: 0,
+            }],
+        );
+
+        let a_updates = peer_a.filter(&batch);
+        let b_updates = peer_b.filter(&batch);
+
+        // peer_a: only worker:2 is new (v=7 > 0)
+        let a_keys: Vec<String> = a_updates
+            .iter()
+            .flat_map(|(_, v)| v.iter().map(|u| u.key.clone()))
+            .collect();
+        assert_eq!(a_keys, vec!["worker:2"], "peer-a should only get worker:2");
+
+        // peer_b: only worker:1 is new (v=3 > 0)
+        let b_keys: Vec<String> = b_updates
+            .iter()
+            .flat_map(|(_, v)| v.iter().map(|u| u.key.clone()))
+            .collect();
+        assert_eq!(b_keys, vec!["worker:1"], "peer-b should only get worker:1");
+    }
+
+    #[test]
+    fn test_central_collector_drains_tenant_deltas_once() {
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+        insert_tenant_delta(&stores, "model-x", 0xABCD);
+
+        let central = CentralCollector::new(stores.clone(), "node1".to_string());
+
+        // First collect: drains tenant deltas
+        let batch1 = central.collect();
+        let tree_updates_1: usize = batch1
+            .updates
+            .iter()
+            .flat_map(|(_, v)| v.iter())
+            .filter(|u| u.key.starts_with("tree:"))
+            .count();
+        assert_eq!(
+            tree_updates_1, 1,
+            "first collect should drain the tenant delta"
+        );
+
+        // Second collect (no new changes): tenant deltas already drained, so no tree updates
+        // (but generation hasn't changed, so Policy store is skipped entirely)
+        central.advance_generations();
+        let batch2 = central.collect();
+        let tree_updates_2: usize = batch2
+            .updates
+            .iter()
+            .flat_map(|(_, v)| v.iter())
+            .filter(|u| u.key.starts_with("tree:"))
+            .count();
+        assert_eq!(
+            tree_updates_2, 0,
+            "second collect should have no tenant deltas"
+        );
+    }
 }
