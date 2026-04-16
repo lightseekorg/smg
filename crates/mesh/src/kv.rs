@@ -164,16 +164,18 @@ impl SubscriberRegistry {
         }
     }
 
-    /// Remove closed senders (adapter dropped its Subscription).
+    /// Remove closed senders individually. If all senders for a prefix are
+    /// gone, remove the prefix entry entirely.
     #[expect(dead_code)] // Called by gossip GC cycle in later steps
     fn gc_closed(&self) {
-        let mut closed_prefixes = Vec::new();
-        for entry in &self.subscribers {
-            if entry.value().iter().all(|tx| tx.is_closed()) {
-                closed_prefixes.push(entry.key().clone());
+        let mut empty_prefixes = Vec::new();
+        for mut entry in self.subscribers.iter_mut() {
+            entry.value_mut().retain(|tx| !tx.is_closed());
+            if entry.value().is_empty() {
+                empty_prefixes.push(entry.key().clone());
             }
         }
-        for prefix in closed_prefixes {
+        for prefix in empty_prefixes {
             self.subscribers.remove(&prefix);
         }
     }
