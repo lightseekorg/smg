@@ -311,6 +311,7 @@ impl ParserFactory {
         );
         registry.register_parser("qwen", || Box::new(QwenParser::new()));
         registry.register_parser("qwen_xml", || Box::new(QwenXmlParser::new()));
+        registry.register_parser("qwen_coder", || Box::new(QwenXmlParser::new()));
         registry.register_parser("pythonic", || Box::new(PythonicParser::new()));
         registry.register_parser("llama", || Box::new(LlamaParser::new()));
         registry.register_parser("deepseek", || Box::new(DeepSeekParser::new()));
