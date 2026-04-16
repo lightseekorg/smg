@@ -8,7 +8,7 @@
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use bytes::Bytes;
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
@@ -194,11 +194,12 @@ impl DrainRegistry {
     }
 
     fn register(&self, prefix: &str, drain: StreamDrainFn) {
+        let entry = self.drains.entry(prefix.to_string());
         assert!(
-            !self.drains.contains_key(prefix),
+            matches!(&entry, DashMapEntry::Vacant(_)),
             "drain already registered for prefix '{prefix}'"
         );
-        self.drains.insert(prefix.to_string(), Arc::new(drain));
+        entry.or_insert(Arc::new(drain));
     }
 
     fn remove(&self, prefix: &str) {
