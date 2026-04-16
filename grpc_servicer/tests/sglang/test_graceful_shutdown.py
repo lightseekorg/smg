@@ -5,6 +5,7 @@ manager's begin_drain() method and the health servicer's response to the
 gracefully_exit flag.
 """
 
+import inspect
 from unittest.mock import MagicMock
 
 import pytest
@@ -52,6 +53,26 @@ def test_begin_drain_idempotent():
     assert mgr.gracefully_exit is True
     assert _SENTINEL_RID in mgr.rid_to_state
     assert mgr.asyncio_tasks == {_SENTINEL_TASK}
+
+
+def test_handle_loop_not_gated_on_gracefully_exit():
+    """Regression guard for the drain invariant.
+
+    handle_loop must run `while True:`, not `while not self.gracefully_exit:`.
+    If it gates on the flag, begin_drain() exits the loop on the next ZMQ
+    recv, stalling in-flight streaming requests and defeating the drain.
+    See docs/superpowers/specs/2026-04-16-grpc-graceful-shutdown-design.md.
+    """
+    src = inspect.getsource(GrpcRequestManager.handle_loop)
+
+    assert "while True:" in src, (
+        "handle_loop must run `while True:` so scheduler outputs keep "
+        "flowing to in-flight streams during drain"
+    )
+    assert "while not self.gracefully_exit" not in src, (
+        "handle_loop must not gate on gracefully_exit; doing so stalls "
+        "streaming requests after begin_drain() is called"
+    )
 
 
 @pytest.mark.asyncio
