@@ -64,7 +64,7 @@ struct LastSentVersions {
 }
 
 /// Tracks store generation to skip unchanged stores
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 struct LastScannedGenerations {
     worker: u64,
     policy: u64,
@@ -715,8 +715,11 @@ pub struct CentralCollector {
     self_name: String,
     /// Generation tracking to skip unchanged stores between rounds.
     last_scanned: RwLock<LastScannedGenerations>,
-    /// Snapshot of tree_generation from the last collection.
-    collected_tree_gen: RwLock<u64>,
+    /// Generations observed during the most recent `collect()`. Used by
+    /// `advance_generations()` to avoid a TOCTOU race where a concurrent
+    /// write between collect and advance would cause the new entries to
+    /// be skipped on the next round.
+    collected_generations: RwLock<LastScannedGenerations>,
 }
 
 impl CentralCollector {
@@ -725,7 +728,7 @@ impl CentralCollector {
             stores,
             self_name,
             last_scanned: RwLock::new(LastScannedGenerations::default()),
-            collected_tree_gen: RwLock::new(0),
+            collected_generations: RwLock::new(LastScannedGenerations::default()),
         }
     }
 
@@ -734,6 +737,19 @@ impl CentralCollector {
     pub fn collect(&self) -> RoundBatch {
         let mut all_updates = Vec::new();
 
+        // Snapshot all generations UP FRONT, before any reads. This locks in
+        // the values we'll use for skip checks AND for advance_generations,
+        // so concurrent writes between here and advance() aren't silently
+        // skipped on the next round.
+        let snapshot = LastScannedGenerations {
+            worker: self.stores.worker.generation(),
+            policy: self.stores.policy.generation(),
+            app: self.stores.app.generation(),
+            membership: self.stores.membership.generation(),
+            tree: self.stores.tree_generation.load(Ordering::Acquire),
+        };
+        *self.collected_generations.write() = snapshot;
+
         for store_type in [
             StoreType::Worker,
             StoreType::Policy,
@@ -741,7 +757,7 @@ impl CentralCollector {
             StoreType::Membership,
             StoreType::RateLimit,
         ] {
-            let updates = self.collect_store(store_type);
+            let updates = self.collect_store(store_type, &snapshot);
             if !updates.is_empty() {
                 all_updates.push((store_type, updates));
             }
@@ -752,27 +768,29 @@ impl CentralCollector {
         }
     }
 
-    /// Record the current generation after a successful round so the next
-    /// round can skip unchanged stores.
+    /// Record the generations observed during the last `collect()` so the next
+    /// round can skip unchanged stores. Uses the captured snapshot (not a
+    /// re-read) to avoid a TOCTOU race.
     pub fn advance_generations(&self) {
-        let mut last_scanned = self.last_scanned.write();
-        last_scanned.worker = self.stores.worker.generation();
-        last_scanned.policy = self.stores.policy.generation();
-        last_scanned.app = self.stores.app.generation();
-        last_scanned.membership = self.stores.membership.generation();
-        last_scanned.tree = *self.collected_tree_gen.read();
+        let collected = *self.collected_generations.read();
+        *self.last_scanned.write() = collected;
     }
 
     /// Collect all entries for a store type. No watermark filtering — includes
-    /// ALL current entries from stores that changed since last round.
-    fn collect_store(&self, store_type: StoreType) -> Vec<StateUpdate> {
+    /// ALL current entries from stores that changed since last round. Uses
+    /// the pre-captured `snapshot` for skip checks so the values are consistent
+    /// with what `advance_generations` will record.
+    fn collect_store(
+        &self,
+        store_type: StoreType,
+        snapshot: &LastScannedGenerations,
+    ) -> Vec<StateUpdate> {
         let last_scanned = self.last_scanned.read();
         let timestamp = current_timestamp();
 
         match store_type {
             StoreType::Worker => {
-                let gen = self.stores.worker.generation();
-                if gen == last_scanned.worker {
+                if snapshot.worker == last_scanned.worker {
                     return vec![];
                 }
                 self.collect_serializable_store(
@@ -783,17 +801,13 @@ impl CentralCollector {
                 )
             }
             StoreType::Policy => {
-                let policy_gen = self.stores.policy.generation();
-                let tree_gen = self.stores.tree_generation.load(Ordering::Acquire);
-                if policy_gen == last_scanned.policy && tree_gen == last_scanned.tree {
+                if snapshot.policy == last_scanned.policy && snapshot.tree == last_scanned.tree {
                     return vec![];
                 }
-                *self.collected_tree_gen.write() = tree_gen;
-                self.collect_policy_store(timestamp, tree_gen != last_scanned.tree)
+                self.collect_policy_store(timestamp, snapshot.tree != last_scanned.tree)
             }
             StoreType::App => {
-                let gen = self.stores.app.generation();
-                if gen == last_scanned.app {
+                if snapshot.app == last_scanned.app {
                     return vec![];
                 }
                 self.collect_serializable_store(
@@ -804,8 +818,7 @@ impl CentralCollector {
                 )
             }
             StoreType::Membership => {
-                let gen = self.stores.membership.generation();
-                if gen == last_scanned.membership {
+                if snapshot.membership == last_scanned.membership {
                     return vec![];
                 }
                 self.collect_serializable_store(
