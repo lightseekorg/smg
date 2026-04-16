@@ -391,7 +391,8 @@ impl CrdtOrMap {
                         .iter()
                         .max_by_key(|v| v.version_key())
                         .is_none_or(|winner| {
-                            winner.is_tombstone && now.duration_since(winner.created_at) >= grace
+                            winner.is_tombstone
+                                && now.saturating_duration_since(winner.created_at) >= grace
                         })
             });
             if was_removed.is_some() {
