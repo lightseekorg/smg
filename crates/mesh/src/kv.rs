@@ -383,9 +383,16 @@ impl StreamNamespace {
     }
 
     /// Register a drain callback. Called exactly once per gossip round by the
-    /// centralized collector. Returns a DrainHandle for
-    /// unregistration.
+    /// centralized collector. Only valid on Broadcast namespaces — drain entries
+    /// carry (key, value) without peer_id, so targeted routing is not possible.
+    /// Returns a DrainHandle for unregistration.
     pub fn register_drain(&self, drain: StreamDrainFn) -> DrainHandle {
+        assert_eq!(
+            self.routing,
+            StreamRouting::Broadcast,
+            "register_drain() is only valid on Broadcast namespaces (prefix: '{}')",
+            self.prefix
+        );
         self.drain_registry.register(&self.prefix, drain);
         DrainHandle {
             prefix: self.prefix.clone(),
