@@ -168,16 +168,12 @@ impl SubscriberRegistry {
     /// gone, remove the prefix entry entirely.
     #[expect(dead_code)] // Called by gossip GC cycle in later steps
     fn gc_closed(&self) {
-        let mut empty_prefixes = Vec::new();
         for mut entry in self.subscribers.iter_mut() {
             entry.value_mut().retain(|tx| !tx.is_closed());
-            if entry.value().is_empty() {
-                empty_prefixes.push(entry.key().clone());
-            }
         }
-        for prefix in empty_prefixes {
-            self.subscribers.remove(&prefix);
-        }
+        // Atomically remove only if still empty, avoiding a race where
+        // a concurrent register() adds a sender between iter_mut and remove.
+        self.subscribers.retain(|_, senders| !senders.is_empty());
     }
 }
 
