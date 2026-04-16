@@ -927,18 +927,29 @@ impl CentralCollector {
         updates.extend(drained.updates);
         emitted_tree_keys.extend(drained.emitted_tree_keys);
 
-        // Phase 2: tree_configs scan for keys not emitted as deltas
-        for entry in &self.stores.tree_configs {
-            let key = entry.key();
+        // Phase 2: tree_configs scan for keys not emitted as deltas.
+        //
+        // Collect (key, value) snapshots FIRST so DashMap shard locks are
+        // released before the slow per-entry work (TreeSnapshot/TreeState
+        // parsing + lz4_compress). Holding shard locks across those would
+        // block concurrent writers to tree_configs and risk deadlock on any
+        // nested map operation.
+        let tree_entries: Vec<(String, Vec<u8>)> = self
+            .stores
+            .tree_configs
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+
+        for (key, config_bytes) in tree_entries {
             if emitted_tree_keys.contains(key.as_str()) {
                 continue;
             }
-            let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
-            let config_bytes = entry.value().clone();
             if config_bytes.is_empty() {
                 continue;
             }
-            let current_version = self.stores.tree_version(key);
+            let model_id = key.strip_prefix("tree:").unwrap_or(&key).to_string();
+            let current_version = self.stores.tree_version(&key);
             let tree_version = if let Ok(ts) = TreeState::from_bytes(&config_bytes) {
                 ts.version
             } else if kv_index::snapshot::TreeSnapshot::from_bytes(&config_bytes).is_ok() {
@@ -964,7 +975,7 @@ impl CentralCollector {
             };
             if let Ok(serialized) = bincode::serialize(&full_state) {
                 updates.push(StateUpdate {
-                    key: key.clone(),
+                    key,
                     value: serialized,
                     version: current_version,
                     actor: self.self_name.clone(),
