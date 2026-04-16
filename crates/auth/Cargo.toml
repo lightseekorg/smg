@@ -1,6 +1,6 @@
 [package]
 name = "smg-auth"
-version = "1.1.1"
+version = "1.0.0"
 edition = "2021"
 description = "Authentication and authorization for control plane APIs"
 license = "Apache-2.0"
