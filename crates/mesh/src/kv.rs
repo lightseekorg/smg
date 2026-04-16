@@ -16,8 +16,7 @@ use tokio::sync::mpsc;
 use crate::crdt_kv::CrdtOrMap;
 
 // ============================================================================
-// Type Definitions (Spec Section 1.1 - 1.3)
-// ============================================================================
+// Type Definitions// ============================================================================
 
 /// Merge strategy for CRDT namespaces. Determines how conflicts are resolved
 /// when two nodes write the same key concurrently.
@@ -69,7 +68,7 @@ enum StoreMode {
     },
 }
 
-/// CRDT mode entry metadata (Spec Section 1.1).
+/// CRDT mode entry metadata.
 #[derive(Debug, Clone)]
 #[expect(dead_code)] // Constructed in later steps (CRDT merge integration)
 pub(crate) struct ValueEntry {
@@ -87,8 +86,7 @@ pub(crate) struct ValueEntry {
 }
 
 // ============================================================================
-// Subscription (Spec Section 6.1 - 6.3)
-// ============================================================================
+// Subscription// ============================================================================
 
 /// A subscription to changes for keys matching a prefix.
 /// Delivers via a bounded mpsc channel. Capacity is per-prefix:
@@ -154,7 +152,7 @@ impl SubscriberRegistry {
     }
 
     /// Notify all subscribers whose prefix matches the given key.
-    /// Uses try_send to never block the gossip loop (Spec Section 6.3).
+    /// Uses try_send to never block the gossip loop.
     fn notify(&self, key: &str, value: Bytes) {
         for entry in &self.subscribers {
             let prefix = entry.key();
@@ -209,7 +207,7 @@ impl DrainRegistry {
     }
 
     /// Call all registered drains. Returns accumulated entries.
-    /// Called exactly once per gossip round (Spec Section 5.4).
+    /// Called exactly once per gossip round.
     #[expect(dead_code)] // Called by centralized gossip loop in Step 2
     fn drain_all(&self) -> Vec<(String, Vec<u8>)> {
         let mut all_entries = Vec::new();
@@ -225,7 +223,7 @@ impl DrainRegistry {
 // Prefix Configuration (internal)
 // ============================================================================
 
-/// Per-prefix subscriber channel capacity (Spec Section 6.3).
+/// Per-prefix subscriber channel capacity.
 fn subscriber_capacity_for_prefix(prefix: &str) -> usize {
     match prefix {
         "worker:" => 1000,
@@ -240,8 +238,7 @@ fn subscriber_capacity_for_prefix(prefix: &str) -> usize {
 }
 
 // ============================================================================
-// CrdtNamespace (Spec Section 1.2, 2)
-// ============================================================================
+// CrdtNamespace// ============================================================================
 
 /// Handle for durable, mergeable state. Scoped to a key prefix.
 /// Provides put/get/delete/keys/subscribe.
@@ -298,7 +295,7 @@ impl CrdtNamespace {
     }
 
     /// Subscribe to changes for keys matching a sub-prefix within this namespace.
-    /// Channel capacity is determined by the namespace prefix (Spec Section 6.3).
+    /// Channel capacity is determined by the namespace prefix.
     pub fn subscribe(&self, sub_prefix: &str) -> Subscription {
         let full_prefix = format!("{}{}", self.prefix, sub_prefix);
         let capacity = subscriber_capacity_for_prefix(&self.prefix);
@@ -319,8 +316,7 @@ impl CrdtNamespace {
 }
 
 // ============================================================================
-// StreamNamespace (Spec Section 1.2, 3)
-// ============================================================================
+// StreamNamespace// ============================================================================
 
 /// Handle for ephemeral, lossy, application-regenerated traffic. Scoped to a
 /// key prefix with a fixed routing mode (Broadcast or Targeted).
@@ -380,7 +376,7 @@ impl StreamNamespace {
     }
 
     /// Register a drain callback. Called exactly once per gossip round by the
-    /// centralized collector (Spec Section 5.4). Returns a DrainHandle for
+    /// centralized collector. Returns a DrainHandle for
     /// unregistration.
     pub fn register_drain(&self, drain: StreamDrainFn) -> DrainHandle {
         self.drain_registry.register(&self.prefix, drain);
@@ -402,8 +398,7 @@ impl StreamNamespace {
 }
 
 // ============================================================================
-// MeshKV (Spec Section 1.2)
-// ============================================================================
+// MeshKV// ============================================================================
 
 /// Generic, application-agnostic mesh transport. Provides explicit namespace
 /// handles for CRDT and stream modes. Application code MUST use namespace
@@ -438,7 +433,7 @@ impl MeshKV {
     }
 
     /// Derive replica_id from server_name using blake3 hash truncated to u64.
-    /// Collision risk: 2^-64 per pair — negligible (Spec Section 1.1).
+    /// Collision risk: 2^-64 per pair — negligible.
     fn derive_replica_id(server_name: &str) -> u64 {
         let hash = blake3::hash(server_name.as_bytes());
         // blake3::Hash::as_bytes() returns &[u8; 32], so first_chunk is infallible.
@@ -450,7 +445,7 @@ impl MeshKV {
     /// that prefix.
     ///
     /// # Panics
-    /// Panics if the prefix is already configured (fail-closed, Spec Section 1.3).
+    /// Panics if the prefix is already configured (fail-closed).
     pub fn configure_crdt_prefix(
         &self,
         prefix: &str,
@@ -482,7 +477,7 @@ impl MeshKV {
     /// that prefix.
     ///
     /// # Panics
-    /// Panics if the prefix is already configured (fail-closed, Spec Section 1.3).
+    /// Panics if the prefix is already configured (fail-closed).
     pub fn configure_stream_prefix(
         &self,
         prefix: &str,
