@@ -362,11 +362,28 @@ impl StreamNamespace {
             self.prefix
         );
         let value_len = value.len();
-        // If this key already exists, subtract the old value's size.
-        if let Some(old) = self.buffer.insert(key.to_string(), value) {
-            self.buffer_bytes.fetch_sub(old.len(), Ordering::Relaxed);
+        // Use entry API to couple byte accounting with the map mutation,
+        // preventing concurrent publishes to the same key from underflowing
+        // the counter via unsynchronized subtract-then-add.
+        match self.buffer.entry(key.to_string()) {
+            DashMapEntry::Occupied(mut entry) => {
+                let old_len = entry.get().len();
+                entry.insert(value);
+                // Net change: add new, subtract old. Single atomic update
+                // avoids transient underflow.
+                if value_len >= old_len {
+                    self.buffer_bytes
+                        .fetch_add(value_len - old_len, Ordering::Relaxed);
+                } else {
+                    self.buffer_bytes
+                        .fetch_sub(old_len - value_len, Ordering::Relaxed);
+                }
+            }
+            DashMapEntry::Vacant(entry) => {
+                entry.insert(value);
+                self.buffer_bytes.fetch_add(value_len, Ordering::Relaxed);
+            }
         }
-        self.buffer_bytes.fetch_add(value_len, Ordering::Relaxed);
         self.enforce_broadcast_limit();
     }
 
