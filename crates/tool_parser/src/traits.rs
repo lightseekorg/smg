@@ -13,6 +13,20 @@ pub trait ToolParser: Send + Sync {
     /// Returns (remaining_normal_text, tool_calls) tuple
     async fn parse_complete(&self, output: &str) -> ParserResult<(String, Vec<ToolCall>)>;
 
+    /// Parse complete tool calls with access to tool schemas for type-aware
+    /// value conversion (e.g. keep `"546382"` as string when schema says string,
+    /// parse `"[1,2,3]"` as array when schema says array).
+    ///
+    /// Default implementation falls back to `parse_complete` so parsers that
+    /// don't need schema awareness stay unchanged.
+    async fn parse_complete_with_tools(
+        &self,
+        output: &str,
+        _tools: &[Tool],
+    ) -> ParserResult<(String, Vec<ToolCall>)> {
+        self.parse_complete(output).await
+    }
+
     /// Parse tool calls from model output (streaming)
     /// Parsers now maintain internal state, so self is mutable
     ///

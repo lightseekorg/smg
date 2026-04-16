@@ -175,6 +175,7 @@ impl ResponseProcessor {
                         &processed_text,
                         &original_request.model,
                         history_tool_calls_count,
+                        original_request.tools.as_deref(),
                     )
                     .await;
             }
@@ -318,6 +319,7 @@ impl ResponseProcessor {
         processed_text: &str,
         model: &str,
         history_tool_calls_count: usize,
+        tools: Option<&[openai_protocol::common::Tool]>,
     ) -> (Option<Vec<ToolCall>>, String) {
         // Get pooled parser for this model
         let pooled_parser = utils::get_tool_parser(
@@ -326,10 +328,16 @@ impl ResponseProcessor {
             model,
         );
 
-        // Try parsing directly (parser will handle detection internally)
+        // Try parsing directly (parser will handle detection internally).
+        // When the tool schema is available, pass it in so parsers like
+        // MinimaxM2 can preserve declared types (e.g. keep `"546382"` as a
+        // string when the schema says string rather than coercing to number).
+        let tools_slice = tools.unwrap_or(&[]);
         let result = {
             let parser = pooled_parser.lock().await;
-            parser.parse_complete(processed_text).await
+            parser
+                .parse_complete_with_tools(processed_text, tools_slice)
+                .await
             // Lock is dropped here
         };
 
@@ -654,6 +662,9 @@ impl ResponseProcessor {
                     utils::message_utils::get_history_tool_calls_count_messages(&messages_request),
                 );
             } else if tool_parser_available {
+                // Messages API uses Anthropic's Tool type which differs from
+                // OpenAI's — skip schema-aware parsing here. The OpenAI chat
+                // path (used by fc-dash) already passes tools through.
                 (tool_calls, processed_text) = self
                     .parse_tool_calls(
                         &processed_text,
@@ -661,6 +672,7 @@ impl ResponseProcessor {
                         utils::message_utils::get_history_tool_calls_count_messages(
                             &messages_request,
                         ),
+                        None,
                     )
                     .await;
             }

@@ -464,26 +464,130 @@ impl StreamingProcessor {
                 ProtoResponseVariant::Complete(complete) => {
                     let index = complete.index();
 
-                    // Flush any remaining text for this index's stop_decoder
+                    // Flush any remaining text held back by the stop_decoder.
+                    // These trailing bytes (e.g. `}` that closes JSON args, or
+                    // the final `<invoke>...</invoke></minimax:tool_call>`
+                    // block) must be fed into the tool parser when one is
+                    // active — otherwise fc-dash sees truncated arguments or
+                    // missing tool calls. See analysis of HTTP vs gRPC fc-dash
+                    // diff for details.
                     if let Some(decoder) = stop_decoders.get_mut(&index) {
-                        if let SequenceDecoderOutput::Text(text) = decoder.flush() {
-                            if !text.is_empty() {
+                        if let SequenceDecoderOutput::Text(mut flushed_text) = decoder.flush() {
+                            if !flushed_text.is_empty() {
                                 let stream_buffer = stream_buffers.entry(index).or_default();
-                                stream_buffer.push_str(&text);
+                                stream_buffer.push_str(&flushed_text);
 
-                                let content_chunk =
-                                    ChatCompletionStreamResponse::builder(request_id, model)
+                                // If the reasoning parser is active, let it
+                                // peel off any reasoning content first so it
+                                // doesn't leak into content/tool_calls.
+                                if separate_reasoning && reasoning_parser_available {
+                                    let (normal_text, reasoning_chunk, _in_reasoning) = self
+                                        .process_reasoning_stream(
+                                            &flushed_text,
+                                            index,
+                                            &mut reasoning_parsers,
+                                            thinking_override,
+                                            think_in_prefill,
+                                            request_id,
+                                            model,
+                                            created,
+                                            system_fingerprint,
+                                        )
+                                        .await;
+                                    if let Some(chunk) = reasoning_chunk {
+                                        Self::format_sse_chunk_into(&mut sse_buffer, &chunk);
+                                        tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                                            .map_err(|_| {
+                                                "Failed to send flushed reasoning"
+                                                    .to_string()
+                                            })?;
+                                    }
+                                    flushed_text = normal_text;
+                                }
+
+                                if flushed_text.is_empty() {
+                                    // Nothing left after reasoning extraction.
+                                } else if let Some(tools_ref) = tools.as_ref() {
+                                    let tool_choice_enabled = !matches!(
+                                        tool_choice,
+                                        Some(ToolChoice::Value(ToolChoiceValue::None))
+                                    );
+                                    if tool_choice_enabled
+                                        && (tool_parser_available || used_json_schema)
+                                    {
+                                        let tool_chunks = if is_specific_function {
+                                            Self::process_specific_function_stream(
+                                                &flushed_text,
+                                                index,
+                                                &mut has_tool_calls,
+                                                tool_choice.as_ref(),
+                                                request_id,
+                                                model,
+                                                created,
+                                                system_fingerprint,
+                                                history_tool_calls_count,
+                                            )
+                                        } else {
+                                            self.process_tool_calls_stream(
+                                                &flushed_text,
+                                                index,
+                                                &mut tool_parsers,
+                                                &mut has_tool_calls,
+                                                tools_ref,
+                                                request_id,
+                                                model,
+                                                created,
+                                                system_fingerprint,
+                                                history_tool_calls_count,
+                                                used_json_schema,
+                                            )
+                                            .await
+                                        };
+
+                                        for chunk in tool_chunks {
+                                            Self::format_sse_chunk_into(
+                                                &mut sse_buffer,
+                                                &chunk,
+                                            );
+                                            tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                                                .map_err(|_| {
+                                                    "Failed to send flushed tool chunk"
+                                                        .to_string()
+                                                })?;
+                                        }
+                                    } else {
+                                        // Tool parsing not active — emit as content.
+                                        let content_chunk = ChatCompletionStreamResponse::builder(
+                                            request_id, model,
+                                        )
                                         .created(created)
-                                        .add_choice_content(index, "assistant", text)
+                                        .add_choice_content(index, "assistant", flushed_text)
                                         .maybe_system_fingerprint(system_fingerprint)
                                         .build();
-
-                                let sse_chunk =
-                                    serde_json::to_string(&content_chunk).map_err(|e| {
-                                        format!("Failed to serialize content chunk: {e}")
-                                    })?;
-                                tx.send(Ok(Bytes::from(format!("data: {sse_chunk}\n\n"))))
-                                    .map_err(|_| "Failed to send flushed content".to_string())?;
+                                        Self::format_sse_chunk_into(
+                                            &mut sse_buffer,
+                                            &content_chunk,
+                                        );
+                                        tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                                            .map_err(|_| {
+                                                "Failed to send flushed content".to_string()
+                                            })?;
+                                    }
+                                } else {
+                                    // No tools on the request — treat as content.
+                                    let content_chunk = ChatCompletionStreamResponse::builder(
+                                        request_id, model,
+                                    )
+                                    .created(created)
+                                    .add_choice_content(index, "assistant", flushed_text)
+                                    .maybe_system_fingerprint(system_fingerprint)
+                                    .build();
+                                    Self::format_sse_chunk_into(&mut sse_buffer, &content_chunk);
+                                    tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                                        .map_err(|_| {
+                                            "Failed to send flushed content".to_string()
+                                        })?;
+                                }
                             }
                         }
                     }
@@ -1265,8 +1369,12 @@ impl StreamingProcessor {
 
             match parser.parse_incremental(delta, tools).await {
                 Ok(StreamingParseResult { normal_text, calls }) => {
-                    // Emit normal text if present
-                    if !normal_text.is_empty() {
+                    // Emit normal text if present and non-trivial.
+                    // Suppress whitespace-only fragments that appear between
+                    // </think> and <minimax:tool_call> (or similar tags) —
+                    // emitting them as content confuses the OpenAI SDK into
+                    // treating the response as text instead of tool_calls.
+                    if !normal_text.is_empty() && !normal_text.trim().is_empty() {
                         chunks.push(
                             ChatCompletionStreamResponse::builder(request_id, model)
                                 .created(created)

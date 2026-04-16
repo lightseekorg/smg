@@ -109,20 +109,178 @@ impl MinimaxM2Parser {
         }
     }
 
-    /// Parse parameters from parameter tags
-    fn parse_parameters(&self, params_text: &str) -> serde_json::Map<String, Value> {
+    /// Extract the set of JSON-schema types for a given parameter of a given
+    /// function from the tool list. Returns empty slice if not found — caller
+    /// should fall back to the schema-unaware `parse_value`.
+    fn schema_types_for_param(
+        tools: &[Tool],
+        func_name: &str,
+        param_name: &str,
+    ) -> Vec<String> {
+        let Some(tool) = tools.iter().find(|t| t.function.name == func_name) else {
+            return Vec::new();
+        };
+
+        let params: &Value = &tool.function.parameters;
+        let Some(properties) = params.get("properties").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        let Some(schema) = properties.get(param_name) else {
+            return Vec::new();
+        };
+
+        Self::extract_types_from_schema(schema)
+    }
+
+    /// Collect every type name that a JSON-schema definition can represent.
+    /// Handles `type`, `type: [..]`, `enum`, `anyOf`, `oneOf`, `allOf`.
+    fn extract_types_from_schema(schema: &Value) -> Vec<String> {
+        let mut types = std::collections::BTreeSet::new();
+        let Some(obj) = schema.as_object() else {
+            return vec!["string".to_string()];
+        };
+
+        if let Some(t) = obj.get("type") {
+            match t {
+                Value::String(s) => {
+                    types.insert(s.clone());
+                }
+                Value::Array(arr) => {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            types.insert(s.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(Value::Array(enum_vals)) = obj.get("enum") {
+            for v in enum_vals {
+                let t = match v {
+                    Value::Null => "null",
+                    Value::Bool(_) => "boolean",
+                    Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+                    Value::Number(_) => "number",
+                    Value::String(_) => "string",
+                    Value::Array(_) => "array",
+                    Value::Object(_) => "object",
+                };
+                types.insert(t.to_string());
+            }
+        }
+
+        for key in ["anyOf", "oneOf", "allOf"] {
+            if let Some(Value::Array(arr)) = obj.get(key) {
+                for sub in arr {
+                    for t in Self::extract_types_from_schema(sub) {
+                        types.insert(t);
+                    }
+                }
+            }
+        }
+
+        if types.is_empty() {
+            vec!["string".to_string()]
+        } else {
+            types.into_iter().collect()
+        }
+    }
+
+    /// Convert a parameter's raw string value to the JSON type declared in the
+    /// tool schema. Mirrors sglang's `_convert_param_value_with_types` so
+    /// schema-aware parsing behaves identically across HTTP and gRPC paths.
+    fn convert_with_schema(value: &str, param_types: &[String]) -> Value {
+        if value.eq_ignore_ascii_case("null") {
+            return Value::Null;
+        }
+
+        let normalized: Vec<String> =
+            param_types.iter().map(|t| t.to_lowercase()).collect();
+
+        if normalized.iter().any(|t| t == "null")
+            && (value.eq_ignore_ascii_case("null")
+                || value.eq_ignore_ascii_case("none")
+                || value.eq_ignore_ascii_case("nil"))
+        {
+            return Value::Null;
+        }
+
+        // Priority: integer > number > boolean > object > array > string
+        let priority: &[&str] = &[
+            "integer", "int", "number", "float", "boolean", "bool", "object",
+            "array", "string", "str", "text",
+        ];
+
+        for pt in priority {
+            if !normalized.iter().any(|t| t == pt) {
+                continue;
+            }
+            match *pt {
+                "string" | "str" | "text" => return Value::String(value.to_string()),
+                "integer" | "int" => {
+                    if let Ok(n) = value.parse::<i64>() {
+                        return Value::Number(n.into());
+                    }
+                }
+                "number" | "float" => {
+                    if let Ok(n) = value.parse::<f64>() {
+                        if let Some(nn) = serde_json::Number::from_f64(n) {
+                            return Value::Number(nn);
+                        }
+                    }
+                }
+                "boolean" | "bool" => {
+                    let lo = value.to_lowercase();
+                    match lo.trim() {
+                        "true" | "1" | "yes" | "on" => return Value::Bool(true),
+                        "false" | "0" | "no" | "off" => return Value::Bool(false),
+                        _ => {}
+                    }
+                }
+                "object" | "array" => {
+                    if let Ok(v) = serde_json::from_str::<Value>(value) {
+                        return v;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Final fallback: try json, else plain string
+        if let Ok(v) = serde_json::from_str::<Value>(value) {
+            return v;
+        }
+        Value::String(value.to_string())
+    }
+
+    /// Parse parameters from parameter tags. When `tools` is non-empty the
+    /// tool schema is consulted to preserve declared types (e.g. keep
+    /// numeric-looking strings as strings when the schema says string).
+    fn parse_parameters(
+        &self,
+        params_text: &str,
+        func_name: &str,
+        tools: &[Tool],
+    ) -> serde_json::Map<String, Value> {
         let mut parameters = serde_json::Map::new();
 
         for capture in self.param_extractor.captures_iter(params_text) {
             let key = capture.get(1).map_or("", |m| m.as_str()).trim();
             let value_str = capture.get(2).map_or("", |m| m.as_str());
+            let decoded = Self::decode_xml_entities(value_str);
 
-            // Decode XML entities and parse value
-            let decoded_value = Self::decode_xml_entities(value_str);
-
-            // Note: We keep JSON-like strings as strings (not parsed JSON)
-            // This matches the behavior of other parsers like GLM4 MOE
-            let value = Self::parse_value(&decoded_value);
+            let value = if tools.is_empty() {
+                Self::parse_value(&decoded)
+            } else {
+                let types = Self::schema_types_for_param(tools, func_name, key);
+                if types.is_empty() {
+                    Self::parse_value(&decoded)
+                } else {
+                    Self::convert_with_schema(&decoded, &types)
+                }
+            };
 
             parameters.insert(key.to_string(), value);
         }
@@ -139,60 +297,68 @@ impl MinimaxM2Parser {
             .replace("&apos;", "'")
     }
 
-    /// Parse a single tool call block
-    fn parse_tool_call(&self, block: &str) -> ParserResult<Option<ToolCall>> {
-        if let Some(captures) = self.invoke_extractor.captures(block) {
-            // Get function name from invoke tag attribute
+    /// Parse all `<invoke>` elements inside a single `<minimax:tool_call>` block.
+    ///
+    /// MiniMax wraps parallel tool calls in a **single** `<minimax:tool_call>`
+    /// block with multiple `<invoke>` children, so we must iterate all matches.
+    fn parse_tool_call_block(
+        &self,
+        block: &str,
+        tools: &[Tool],
+    ) -> ParserResult<Vec<ToolCall>> {
+        let mut results = Vec::new();
+
+        for captures in self.invoke_extractor.captures_iter(block) {
             let func_name = captures.get(1).map_or("", |m| m.as_str()).trim();
-
-            // Get parameters text
             let params_text = captures.get(2).map_or("", |m| m.as_str());
-
-            // Parse parameters
-            let parameters = self.parse_parameters(params_text);
+            let parameters = self.parse_parameters(params_text, func_name, tools);
 
             let arguments_str = serde_json::to_string(&parameters)
                 .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
 
-            Ok(Some(ToolCall {
+            results.push(ToolCall {
                 function: FunctionCall {
                     name: func_name.to_string(),
                     arguments: arguments_str,
                 },
-            }))
-        } else {
-            Ok(None)
+            });
         }
+
+        Ok(results)
     }
 
     /// Parse all tool calls from text and return first valid position
-    fn parse_tool_calls_from_text(&self, text: &str) -> (Vec<ToolCall>, Option<usize>) {
-        let mut tools = Vec::new();
+    fn parse_tool_calls_from_text(
+        &self,
+        text: &str,
+        tools: &[Tool],
+    ) -> (Vec<ToolCall>, Option<usize>) {
+        let mut results = Vec::new();
         let mut first_valid_pos = None;
 
         for mat in self.tool_call_extractor.find_iter(text) {
-            match self.parse_tool_call(mat.as_str()) {
-                Ok(Some(tool)) => {
-                    if first_valid_pos.is_none() {
+            match self.parse_tool_call_block(mat.as_str(), tools) {
+                Ok(block_tools) => {
+                    if !block_tools.is_empty() && first_valid_pos.is_none() {
                         first_valid_pos = Some(mat.start());
                     }
-                    tools.push(tool);
+                    results.extend(block_tools);
                 }
-                Ok(None) => continue,
                 Err(e) => {
-                    tracing::debug!("Failed to parse tool call: {}", e);
+                    tracing::debug!("Failed to parse tool call block: {}", e);
                     continue;
                 }
             }
         }
 
-        (tools, first_valid_pos)
+        (results, first_valid_pos)
     }
 
     /// Parse and stream parameters incrementally
-    fn parse_and_stream_parameters(&mut self, text: &str, _tools: &[Tool]) -> Vec<ToolCallItem> {
+    fn parse_and_stream_parameters(&mut self, text: &str, tools: &[Tool]) -> Vec<ToolCallItem> {
         let mut calls = Vec::new();
 
+        let func_name = self.current_function_name.clone();
         // Find all complete parameter patterns in the buffer
         let param_matches: Vec<_> = self
             .param_extractor
@@ -202,13 +368,23 @@ impl MinimaxM2Parser {
                 let value_str = cap.get(2).map_or("", |m| m.as_str());
                 let decoded = Self::decode_xml_entities(value_str);
 
-                // Try parsing as JSON first (for nested objects/arrays)
-                let value = if decoded.starts_with('{') || decoded.starts_with('[') {
-                    if let Ok(json_val) = serde_json::from_str::<Value>(&decoded) {
-                        json_val
+                // Schema-aware conversion when tools are available
+                let value = if !tools.is_empty() {
+                    let types = Self::schema_types_for_param(tools, &func_name, &name);
+                    if types.is_empty() {
+                        // Fallback: JSON parse for arrays/objects, else parse_value
+                        if decoded.starts_with('{') || decoded.starts_with('[') {
+                            serde_json::from_str::<Value>(&decoded)
+                                .unwrap_or_else(|_| Self::parse_value(&decoded))
+                        } else {
+                            Self::parse_value(&decoded)
+                        }
                     } else {
-                        Self::parse_value(&decoded)
+                        Self::convert_with_schema(&decoded, &types)
                     }
+                } else if decoded.starts_with('{') || decoded.starts_with('[') {
+                    serde_json::from_str::<Value>(&decoded)
+                        .unwrap_or_else(|_| Self::parse_value(&decoded))
                 } else {
                     Self::parse_value(&decoded)
                 };
@@ -311,29 +487,32 @@ impl Default for MinimaxM2Parser {
 #[async_trait]
 impl ToolParser for MinimaxM2Parser {
     async fn parse_complete(&self, text: &str) -> ParserResult<(String, Vec<ToolCall>)> {
-        // Check if text contains MiniMax M2 format
+        // Without a schema, fall back to string/number/bool coercion.
+        self.parse_complete_with_tools(text, &[]).await
+    }
+
+    async fn parse_complete_with_tools(
+        &self,
+        text: &str,
+        tools: &[Tool],
+    ) -> ParserResult<(String, Vec<ToolCall>)> {
         if !self.has_tool_markers(text) {
             return Ok((text.to_string(), vec![]));
         }
 
-        // Parse all tool calls and get first valid position
-        let (tools, first_valid_tool_pos) = self.parse_tool_calls_from_text(text);
+        let (results, first_valid_tool_pos) = self.parse_tool_calls_from_text(text, tools);
 
-        // If no tools were successfully parsed, return entire text as fallback
-        if tools.is_empty() {
+        if results.is_empty() {
             return Ok((text.to_string(), vec![]));
         }
 
-        // Determine what text to return as normal_text
         let normal_text = if let Some(pos) = first_valid_tool_pos {
-            // Return text up to the first valid tool call
             text[..pos].to_string()
         } else {
-            // No valid tool calls found, return entire text
             text.to_string()
         };
 
-        Ok((normal_text, tools))
+        Ok((normal_text, results))
     }
 
     async fn parse_incremental(
@@ -349,22 +528,35 @@ impl ToolParser for MinimaxM2Parser {
         let tool_indices = helpers::get_tool_indices(tools);
 
         loop {
-            // If we're waiting for the tool call end tag, check for it first
+            // After </invoke>, we're waiting for either another <invoke> or
+            // the closing </minimax:tool_call>.
             if self.waiting_for_tool_call_end {
-                if let Some(end_pos) = self.buffer.find(self.tool_call_end_token) {
-                    // Complete tool call found
-                    self.buffer =
-                        self.buffer[end_pos + self.tool_call_end_token.len()..].to_string();
-                    self.in_tool_call = false;
-                    self.waiting_for_tool_call_end = false;
-                    self.function_name_sent = false;
-                    self.current_function_name.clear();
-                    self.current_parameters.clear();
-                    self.current_tool_id += 1;
-                    continue;
-                } else {
-                    // End tag not complete yet, wait for more text
-                    break;
+                let next_invoke = self.buffer.find("<invoke");
+                let end_tag = self.buffer.find(self.tool_call_end_token);
+
+                match (next_invoke, end_tag) {
+                    (Some(inv), Some(end)) if inv < end => {
+                        // Another <invoke> before end tag — continue parsing
+                        self.waiting_for_tool_call_end = false;
+                        self.in_tool_call = true;
+                        continue;
+                    }
+                    (_, Some(end_pos)) => {
+                        self.buffer =
+                            self.buffer[end_pos + self.tool_call_end_token.len()..].to_string();
+                        self.in_tool_call = false;
+                        self.waiting_for_tool_call_end = false;
+                        continue;
+                    }
+                    (Some(_), None) => {
+                        // Another invoke but no end tag yet — keep parsing
+                        self.waiting_for_tool_call_end = false;
+                        self.in_tool_call = true;
+                        continue;
+                    }
+                    (None, None) => {
+                        break;
+                    }
                 }
             }
 
@@ -495,21 +687,39 @@ impl ToolParser for MinimaxM2Parser {
                     self.buffer =
                         self.buffer[invoke_end + self.invoke_end_token.len()..].to_string();
 
-                    // Check if we have the closing </minimax:tool_call>
-                    if let Some(end_pos) = self.buffer.find(self.tool_call_end_token) {
-                        // Complete tool call found
-                        self.buffer =
-                            self.buffer[end_pos + self.tool_call_end_token.len()..].to_string();
-                        self.in_tool_call = false;
-                        self.function_name_sent = false;
-                        self.current_function_name.clear();
-                        self.current_parameters.clear();
-                        self.current_tool_id += 1;
-                        continue;
-                    } else {
-                        // End tag not complete yet, mark that we're waiting for it
-                        self.waiting_for_tool_call_end = true;
-                        break;
+                    // Advance tool_id and reset per-invoke state for the next
+                    // tool call within the same <minimax:tool_call> block.
+                    self.current_tool_id += 1;
+                    self.function_name_sent = false;
+                    self.current_function_name.clear();
+                    self.current_parameters.clear();
+
+                    // Check if there's another <invoke> before </minimax:tool_call>.
+                    // MiniMax puts multiple <invoke> blocks inside one wrapper.
+                    let next_invoke = self.buffer.find("<invoke");
+                    let end_tag = self.buffer.find(self.tool_call_end_token);
+
+                    match (next_invoke, end_tag) {
+                        (Some(inv), Some(end)) if inv < end => {
+                            // Another invoke coming — stay in_tool_call, loop
+                            continue;
+                        }
+                        (_, Some(end_pos)) => {
+                            // End tag found, no more invokes
+                            self.buffer =
+                                self.buffer[end_pos + self.tool_call_end_token.len()..].to_string();
+                            self.in_tool_call = false;
+                            continue;
+                        }
+                        (Some(_), None) => {
+                            // Another invoke exists but end tag not received yet — keep parsing
+                            continue;
+                        }
+                        (None, None) => {
+                            // Neither found yet — wait for more data
+                            self.waiting_for_tool_call_end = true;
+                            break;
+                        }
                     }
                 }
                 // Tool call not complete yet, wait for more text
