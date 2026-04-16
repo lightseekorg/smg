@@ -267,7 +267,7 @@ Qwen Coder XML format with parameter tags.
 | `json` | `gpt-*`, `claude-*`, `gemini-*` | Standard JSON function calls |
 | `mistral` | `mistral-*`, `mixtral-*` | Mistral-specific format |
 | `qwen` | `qwen*`, `Qwen*` | JSON tool calls |
-| `qwen_coder` | `Qwen*-Coder*`, `qwen*-coder*` | XML with parameter tags |
+| `qwen_xml` | `Qwen3-Coder*`, `Qwen3.5*` | XML with parameter tags |
 | `pythonic` | `llama-4*`, `deepseek-*` | Python-style function syntax |
 | `llama` | `llama-3.2*` | Python tag with JSON |
 | `deepseek` | `deepseek-v3*` | XML with function syntax |

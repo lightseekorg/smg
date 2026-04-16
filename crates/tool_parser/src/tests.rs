@@ -2,7 +2,7 @@ use openai_protocol::common::{Function, Tool};
 
 use super::*;
 use crate::{
-    parsers::{JsonParser, QwenCoderParser},
+    parsers::{JsonParser, QwenXmlParser},
     partial_json::PartialJson,
     traits::ToolParser,
 };
@@ -574,7 +574,7 @@ mod stress_tests {
 }
 
 #[cfg(test)]
-mod qwen_coder_tests {
+mod qwen_xml_tests {
     use super::*;
 
     fn create_test_tools() -> Vec<Tool> {
@@ -596,8 +596,8 @@ mod qwen_coder_tests {
     }
 
     #[tokio::test]
-    async fn test_qwen_coder_incremental_parameter_streaming() {
-        let mut parser = QwenCoderParser::new();
+    async fn test_qwen_xml_incremental_parameter_streaming() {
+        let mut parser = QwenXmlParser::new();
         let tools = create_test_tools();
 
         let chunks = [
@@ -651,8 +651,8 @@ mod qwen_coder_tests {
     }
 
     #[tokio::test]
-    async fn test_qwen_coder_incremental_parameter_streaming_with_partial_values() {
-        let mut parser = QwenCoderParser::new();
+    async fn test_qwen_xml_incremental_parameter_streaming_with_partial_values() {
+        let mut parser = QwenXmlParser::new();
         let tools = create_test_tools();
 
         // Test with parameter values that arrive in multiple chunks
@@ -691,8 +691,8 @@ mod qwen_coder_tests {
     }
 
     #[tokio::test]
-    async fn test_qwen_coder_nested_json_parameter() {
-        let mut parser = QwenCoderParser::new();
+    async fn test_qwen_xml_nested_json_parameter() {
+        let mut parser = QwenXmlParser::new();
         let tools = vec![Tool {
             tool_type: "function".to_string(),
             function: Function {
