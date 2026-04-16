@@ -107,19 +107,11 @@ pub struct Subscription {
 /// round. Returns accumulated entries to be sent in this round's batch.
 pub type StreamDrainFn = Box<dyn Fn() -> Vec<(String, Vec<u8>)> + Send + Sync>;
 
-/// Handle returned by `register_drain`. Drop or call `unregister()` to remove
-/// the drain callback.
+/// Handle returned by `register_drain`. Dropping unregisters the drain callback.
+/// Use `drop(handle)` to explicitly unregister.
 pub struct DrainHandle {
     prefix: String,
     drain_registry: Arc<DrainRegistry>,
-}
-
-impl DrainHandle {
-    /// Unregister the drain callback. After this call, the callback will not
-    /// be invoked on future gossip rounds.
-    pub fn unregister(self) {
-        self.drain_registry.remove(&self.prefix);
-    }
 }
 
 impl Drop for DrainHandle {
