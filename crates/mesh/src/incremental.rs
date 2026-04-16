@@ -841,7 +841,8 @@ impl CentralCollector {
                 )
             }
             StoreType::RateLimit => {
-                let current_timestamp = current_timestamp();
+                // Reuse outer `timestamp` — the RateLimit branch previously
+                // called current_timestamp() again for no meaningful difference.
                 let mut updates = Vec::new();
                 for (key, actor, counter_value) in self.stores.rate_limit.all_shards() {
                     if !self.stores.rate_limit.is_owner(&key) {
@@ -851,9 +852,9 @@ impl CentralCollector {
                         updates.push(StateUpdate {
                             key,
                             value: serialized,
-                            version: current_timestamp,
+                            version: timestamp,
                             actor,
-                            timestamp: current_timestamp,
+                            timestamp,
                         });
                     }
                 }
