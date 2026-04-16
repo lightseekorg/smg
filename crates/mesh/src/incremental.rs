@@ -91,9 +91,10 @@ pub struct IncrementalUpdateCollector {
     collected_tree_gen: Arc<RwLock<u64>>,
     /// Counter for gossip rounds since last full structure snapshot per model.
     rounds_since_snapshot: Arc<RwLock<HashMap<String, u64>>>,
-    /// Pre-drained tenant deltas from the central drain. When set, the Policy
-    /// Phase 0 uses these instead of destructively draining from the shared
-    /// DashMap. This fixes the v1 bug where only the first peer receives deltas.
+    /// Shared reference to centrally drained tenant deltas. When the inner
+    /// Option is Some, Policy Phase 0 uses these instead of destructively
+    /// draining from the shared DashMap. Set by the gossip event loop once
+    /// per round, read by all per-peer collectors.
     central_deltas: Arc<RwLock<Option<DrainedTenantDeltas>>>,
 }
 
@@ -110,25 +111,23 @@ impl IncrementalUpdateCollector {
         }
     }
 
-    /// Set pre-drained tenant deltas from the central drain. Called once per
-    /// gossip round BEFORE per-peer collection runs. All per-peer collectors
-    /// sharing this instance will use these deltas instead of draining the
-    /// shared DashMap.
-    #[expect(
-        dead_code,
-        reason = "wired up in controller.rs central drain (Step 2b)"
-    )]
-    pub fn set_central_deltas(&self, deltas: DrainedTenantDeltas) {
-        *self.central_deltas.write() = Some(deltas);
-    }
-
-    /// Clear the central deltas after all per-peer senders have consumed them.
-    #[expect(
-        dead_code,
-        reason = "wired up in controller.rs central drain (Step 2b)"
-    )]
-    pub fn clear_central_deltas(&self) {
-        *self.central_deltas.write() = None;
+    /// Create a collector that shares a central deltas reference with other
+    /// collectors. The gossip event loop sets deltas on the shared reference
+    /// once per round; all collectors see the same data.
+    pub fn with_shared_central_deltas(
+        stores: Arc<StateStores>,
+        self_name: String,
+        central_deltas: Arc<RwLock<Option<DrainedTenantDeltas>>>,
+    ) -> Self {
+        Self {
+            stores,
+            self_name,
+            last_sent: Arc::new(RwLock::new(LastSentVersions::default())),
+            last_scanned: Arc::new(RwLock::new(LastScannedGenerations::default())),
+            collected_tree_gen: Arc::new(RwLock::new(0)),
+            rounds_since_snapshot: Arc::new(RwLock::new(HashMap::new())),
+            central_deltas,
+        }
     }
 
     /// Get current timestamp in nanoseconds
@@ -669,7 +668,6 @@ pub struct DrainedTenantDeltas {
 /// Drains tenant delta buffers exactly once per gossip round. The result is
 /// stored in a shared location so all per-peer collectors can include the
 /// same deltas without racing on the destructive DashMap remove.
-#[expect(dead_code, reason = "wired up in controller.rs event loop (Step 2b)")]
 pub fn drain_tenant_deltas_central(stores: &StateStores, self_name: &str) -> DrainedTenantDeltas {
     let tree_gen = stores.tree_generation.load(Ordering::Acquire);
     let timestamp = IncrementalUpdateCollector::current_timestamp();

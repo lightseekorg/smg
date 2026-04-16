@@ -44,6 +44,9 @@ pub struct MeshController {
     mtls_manager: Option<Arc<MTLSManager>>,
     // Track active sync_stream connections
     sync_connections: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// Shared central deltas reference. The event loop writes drained tenant
+    /// deltas here once per round; all per-peer collectors read from it.
+    central_deltas: Arc<parking_lot::RwLock<Option<super::incremental::DrainedTenantDeltas>>>,
 }
 
 impl MeshController {
@@ -66,6 +69,7 @@ impl MeshController {
             sync_manager,
             mtls_manager,
             sync_connections: Arc::new(Mutex::new(HashMap::new())),
+            central_deltas: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -195,6 +199,15 @@ impl MeshController {
 
                 // Clean up retry managers for peers no longer in cluster state
                 retry_managers.retain(|peer_name, _| map.contains_key(peer_name));
+            }
+
+            // Central tenant delta drain: run once per round, before per-peer
+            // senders collect. All per-peer collectors read from the shared
+            // central_deltas instead of destructively draining the DashMap.
+            {
+                let drained =
+                    super::incremental::drain_tenant_deltas_central(&self.stores, &self.self_name);
+                *self.central_deltas.write() = Some(drained);
             }
 
             tokio::select! {
@@ -414,6 +427,7 @@ impl MeshController {
         let stores = self.stores.clone();
         let sync_manager = self.sync_manager.clone();
         let sync_connections = self.sync_connections.clone();
+        let central_deltas = self.central_deltas.clone();
 
         // Log connection lifecycle: spawn
         log::debug!(
@@ -460,9 +474,10 @@ impl MeshController {
                         incremental::IncrementalUpdateCollector, service::gossip::IncrementalUpdate,
                     };
 
-                    let collector = Arc::new(IncrementalUpdateCollector::new(
+                    let collector = Arc::new(IncrementalUpdateCollector::with_shared_central_deltas(
                         stores.clone(),
                         self_name.clone(),
+                        central_deltas.clone(),
                     ));
                     log::debug!(
                         peer = %peer_name,
