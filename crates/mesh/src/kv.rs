@@ -334,10 +334,6 @@ pub struct StreamNamespace {
     prefix: String,
     routing: StreamRouting,
     max_buffer_bytes: usize,
-    /// Ephemeral send buffer, drained every gossip round.
-    buffer: DashMap<String, Bytes>,
-    /// Current total bytes in the broadcast buffer.
-    buffer_bytes: AtomicUsize,
     /// Targeted entries: (target_peer_id, key, value). VecDeque for O(1) FIFO eviction.
     targeted_buffer: parking_lot::Mutex<VecDeque<(String, String, Bytes)>>,
     /// Current total bytes in the targeted buffer.
@@ -347,50 +343,6 @@ pub struct StreamNamespace {
 }
 
 impl StreamNamespace {
-    /// Publish a value to all connected peers (Broadcast namespaces only).
-    /// If the buffer exceeds `max_buffer_bytes`, arbitrary entries are dropped
-    /// until within limit (DashMap iteration is unordered).
-    pub fn publish(&self, key: &str, value: Bytes) {
-        assert_eq!(
-            self.routing,
-            StreamRouting::Broadcast,
-            "publish() is only valid on Broadcast namespaces, not Targeted (prefix: '{}')",
-            self.prefix
-        );
-        assert!(
-            key.starts_with(&self.prefix),
-            "key '{key}' does not match prefix '{}'",
-            self.prefix
-        );
-        let value_len = value.len();
-        // Use entry API to couple byte accounting with the map mutation,
-        // preventing concurrent publishes to the same key from underflowing
-        // the counter via unsynchronized subtract-then-add.
-        match self.buffer.entry(key.to_string()) {
-            DashMapEntry::Occupied(mut entry) => {
-                let old_len = entry.get().len();
-                entry.insert(value);
-                // Net change: add new, subtract old. Single atomic update
-                // avoids transient underflow.
-                if value_len >= old_len {
-                    self.buffer_bytes
-                        .fetch_add(value_len - old_len, Ordering::Relaxed);
-                } else {
-                    self.buffer_bytes
-                        .fetch_sub(old_len - value_len, Ordering::Relaxed);
-                }
-            }
-            DashMapEntry::Vacant(entry) => {
-                // Increment counter BEFORE insert. entry.insert() releases
-                // the shard lock, so a concurrent drain could see the key
-                // and fetch_sub before we fetch_add — underflowing the counter.
-                self.buffer_bytes.fetch_add(value_len, Ordering::Relaxed);
-                entry.insert(value);
-            }
-        }
-        self.enforce_broadcast_limit();
-    }
-
     /// Publish a value to exactly one peer (Targeted namespaces only).
     /// If the buffer exceeds `max_buffer_bytes`, the oldest entries are dropped.
     pub fn publish_to(&self, peer_id: &str, key: &str, value: Bytes) {
@@ -421,27 +373,6 @@ impl StreamNamespace {
         }
     }
 
-    /// Drop broadcast buffer entries until within `max_buffer_bytes`.
-    /// DashMap has no ordering, so dropped entries are arbitrary.
-    fn enforce_broadcast_limit(&self) {
-        if self.buffer_bytes.load(Ordering::Relaxed) <= self.max_buffer_bytes {
-            return;
-        }
-        // Collect all keys upfront so the iterator is fully dropped before
-        // any remove() call. DashMap iter() and remove() can deadlock on the
-        // same shard if the iterator ref is held during remove.
-        let keys: Vec<String> = self.buffer.iter().map(|e| e.key().clone()).collect();
-        for key in keys {
-            if self.buffer_bytes.load(Ordering::Relaxed) <= self.max_buffer_bytes {
-                break;
-            }
-            if let Some((_, removed)) = self.buffer.remove(&key) {
-                self.buffer_bytes
-                    .fetch_sub(removed.len(), Ordering::Relaxed);
-            }
-        }
-    }
-
     /// Subscribe to messages for keys matching a sub-prefix within this namespace.
     pub fn subscribe(&self, sub_prefix: &str) -> Subscription {
         let full_prefix = format!("{}{}", self.prefix, sub_prefix);
@@ -460,23 +391,6 @@ impl StreamNamespace {
             prefix: self.prefix.clone(),
             drain_registry: self.drain_registry.clone(),
         }
-    }
-
-    /// Drain all broadcast buffer entries. Returns (key, value) pairs and
-    /// resets the buffer. Called by the gossip loop once per round.
-    pub fn drain_broadcast_buffer(&self) -> Vec<(String, Bytes)> {
-        let mut entries = Vec::new();
-        let mut drained_bytes = 0usize;
-        // Use retain(false) to drain all entries atomically per shard,
-        // avoiding intermediate Vec<String> allocation for keys.
-        self.buffer.retain(|k, v| {
-            drained_bytes += v.len();
-            entries.push((k.clone(), v.clone()));
-            false // remove all
-        });
-        self.buffer_bytes
-            .fetch_sub(drained_bytes, Ordering::Relaxed);
-        entries
     }
 
     /// Drain all targeted buffer entries. Returns (peer_id, key, value) tuples
@@ -505,11 +419,10 @@ impl StreamNamespace {
 /// A batch of entries collected once per gossip round by the central collector.
 #[derive(Debug)]
 pub struct RoundBatch {
-    /// Broadcast stream entries: (key, value). Sent to ALL connected peers.
-    pub broadcast_entries: Vec<(String, Bytes)>,
     /// Targeted stream entries: (peer_id, key, value). Sent to one specific peer.
     pub targeted_entries: Vec<(String, String, Bytes)>,
     /// Entries from registered drain callbacks (e.g., TreeSyncAdapter pending deltas).
+    /// Broadcast traffic (td:*) flows through this path, not through a buffer.
     pub drain_entries: Vec<(String, Vec<u8>)>,
 }
 
@@ -618,8 +531,6 @@ impl MeshKV {
             prefix: prefix.to_string(),
             routing: config.routing,
             max_buffer_bytes: config.max_buffer_bytes,
-            buffer: DashMap::new(),
-            buffer_bytes: AtomicUsize::new(0),
             targeted_buffer: parking_lot::Mutex::new(VecDeque::new()),
             targeted_buffer_bytes: AtomicUsize::new(0),
             subscriber_registry: self.subscriber_registry.clone(),
@@ -643,20 +554,18 @@ impl MeshKV {
     /// per round by the centralized gossip loop. Drains all stream buffers
     /// and calls all registered drain callbacks.
     pub fn collect_round_batch(&self) -> RoundBatch {
-        let mut broadcast_entries = Vec::new();
         let mut targeted_entries = Vec::new();
 
-        // Drain all stream namespace buffers.
+        // Drain targeted stream namespace buffers.
         for ns in self.stream_namespaces.read().iter() {
-            broadcast_entries.extend(ns.drain_broadcast_buffer());
             targeted_entries.extend(ns.drain_targeted_buffer());
         }
 
-        // Call registered drain callbacks (e.g., adapter pending deltas).
+        // Call registered drain callbacks (e.g., TreeSyncAdapter pending deltas).
+        // Broadcast traffic (td:*) flows through this path.
         let drain_entries = self.drain_registry.drain_all();
 
         RoundBatch {
-            broadcast_entries,
             targeted_entries,
             drain_entries,
         }
@@ -779,20 +688,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "only valid on Broadcast")]
-    fn test_stream_publish_on_targeted_panics() {
-        let kv = MeshKV::new("test-node".to_string());
-        let ns = kv.configure_stream_prefix(
-            "tree:req:",
-            StreamConfig {
-                max_buffer_bytes: 1024,
-                routing: StreamRouting::Targeted,
-            },
-        );
-        ns.publish("tree:req:model-x", Bytes::from("data")); // panics
-    }
-
-    #[test]
     #[should_panic(expected = "only valid on Targeted")]
     fn test_stream_publish_to_on_broadcast_panics() {
         let kv = MeshKV::new("test-node".to_string());
@@ -850,31 +745,6 @@ mod tests {
     }
 
     #[test]
-    fn test_broadcast_backpressure_drops_entries() {
-        let kv = MeshKV::new("test-node".to_string());
-        let ns = kv.configure_stream_prefix(
-            "td:",
-            StreamConfig {
-                max_buffer_bytes: 20, // tiny limit
-                routing: StreamRouting::Broadcast,
-            },
-        );
-
-        // Publish entries that exceed the buffer limit.
-        ns.publish("td:model-1", Bytes::from("aaaaaaaaaa")); // 10 bytes
-        ns.publish("td:model-2", Bytes::from("bbbbbbbbbb")); // 10 bytes, total=20, at limit
-        ns.publish("td:model-3", Bytes::from("cccccccccc")); // 10 bytes, total=30, over limit
-
-        // Buffer should have dropped an entry to stay within 20 bytes.
-        let drained = ns.drain_broadcast_buffer();
-        let total_bytes: usize = drained.iter().map(|(_, v)| v.len()).sum();
-        assert!(
-            total_bytes <= 20,
-            "buffer should be within limit, got {total_bytes}"
-        );
-    }
-
-    #[test]
     fn test_targeted_backpressure_drops_oldest() {
         let kv = MeshKV::new("test-node".to_string());
         let ns = kv.configure_stream_prefix(
@@ -899,28 +769,6 @@ mod tests {
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].1, "tree:page:m2");
         assert_eq!(drained[1].1, "tree:page:m3");
-    }
-
-    #[test]
-    fn test_drain_broadcast_buffer() {
-        let kv = MeshKV::new("test-node".to_string());
-        let ns = kv.configure_stream_prefix(
-            "td:",
-            StreamConfig {
-                max_buffer_bytes: 1024,
-                routing: StreamRouting::Broadcast,
-            },
-        );
-
-        ns.publish("td:model-1", Bytes::from("delta1"));
-        ns.publish("td:model-2", Bytes::from("delta2"));
-
-        let entries = ns.drain_broadcast_buffer();
-        assert_eq!(entries.len(), 2);
-
-        // Buffer should be empty after drain.
-        let entries2 = ns.drain_broadcast_buffer();
-        assert!(entries2.is_empty());
     }
 
     #[test]
@@ -950,13 +798,6 @@ mod tests {
     #[test]
     fn test_collect_round_batch() {
         let kv = MeshKV::new("test-node".to_string());
-        let broadcast_ns = kv.configure_stream_prefix(
-            "td:",
-            StreamConfig {
-                max_buffer_bytes: 1024,
-                routing: StreamRouting::Broadcast,
-            },
-        );
         let targeted_ns = kv.configure_stream_prefix(
             "tree:page:",
             StreamConfig {
@@ -965,18 +806,14 @@ mod tests {
             },
         );
 
-        broadcast_ns.publish("td:model-1", Bytes::from("delta"));
         targeted_ns.publish_to("peer-A", "tree:page:m1", Bytes::from("page"));
 
         let batch = kv.collect_round_batch();
-        assert_eq!(batch.broadcast_entries.len(), 1);
         assert_eq!(batch.targeted_entries.len(), 1);
-        assert_eq!(batch.broadcast_entries[0].0, "td:model-1");
         assert_eq!(batch.targeted_entries[0].0, "peer-A");
 
         // Second collect should be empty (buffers drained).
         let batch2 = kv.collect_round_batch();
-        assert!(batch2.broadcast_entries.is_empty());
         assert!(batch2.targeted_entries.is_empty());
     }
 
