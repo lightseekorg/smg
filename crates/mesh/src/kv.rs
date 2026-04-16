@@ -6,7 +6,7 @@
 //!
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -338,8 +338,8 @@ pub struct StreamNamespace {
     buffer: Arc<DashMap<String, Bytes>>,
     /// Current total bytes in the broadcast buffer.
     buffer_bytes: Arc<AtomicUsize>,
-    /// Targeted entries: (target_peer_id, key, value).
-    targeted_buffer: Arc<parking_lot::Mutex<Vec<(String, String, Bytes)>>>,
+    /// Targeted entries: (target_peer_id, key, value). VecDeque for O(1) FIFO eviction.
+    targeted_buffer: Arc<parking_lot::Mutex<VecDeque<(String, String, Bytes)>>>,
     /// Current total bytes in the targeted buffer.
     targeted_buffer_bytes: Arc<AtomicUsize>,
     subscriber_registry: Arc<SubscriberRegistry>,
@@ -386,16 +386,17 @@ impl StreamNamespace {
         );
         let value_len = value.len();
         let mut buf = self.targeted_buffer.lock();
-        buf.push((peer_id.to_string(), key.to_string(), value));
+        buf.push_back((peer_id.to_string(), key.to_string(), value));
         self.targeted_buffer_bytes
             .fetch_add(value_len, Ordering::Relaxed);
-        // Drop oldest entries while over limit.
+        // Drop the oldest entries (FIFO) while over limit. O(1) per pop_front.
         while self.targeted_buffer_bytes.load(Ordering::Relaxed) > self.max_buffer_bytes
             && !buf.is_empty()
         {
-            let (_, _, dropped) = buf.remove(0);
-            self.targeted_buffer_bytes
-                .fetch_sub(dropped.len(), Ordering::Relaxed);
+            if let Some((_, _, dropped)) = buf.pop_front() {
+                self.targeted_buffer_bytes
+                    .fetch_sub(dropped.len(), Ordering::Relaxed);
+            }
         }
     }
 
@@ -459,7 +460,7 @@ impl StreamNamespace {
     pub fn drain_targeted_buffer(&self) -> Vec<(String, String, Bytes)> {
         let mut buf = self.targeted_buffer.lock();
         self.targeted_buffer_bytes.store(0, Ordering::Relaxed);
-        std::mem::take(&mut *buf)
+        std::mem::take(&mut *buf).into()
     }
 
     /// Get the routing mode for this namespace.
@@ -594,7 +595,7 @@ impl MeshKV {
             max_buffer_bytes: config.max_buffer_bytes,
             buffer: Arc::new(DashMap::new()),
             buffer_bytes: Arc::new(AtomicUsize::new(0)),
-            targeted_buffer: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            targeted_buffer: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             targeted_buffer_bytes: Arc::new(AtomicUsize::new(0)),
             subscriber_registry: self.subscriber_registry.clone(),
             drain_registry: self.drain_registry.clone(),
