@@ -459,7 +459,14 @@ impl<'a> McpToolSession<'a> {
             }
         }
 
-        output.extend(existing);
+        // Apply the same visibility policy to existing items (e.g. FunctionToolCall
+        // for executed MCP tools emitted by build_tool_response in the mixed
+        // function+MCP early-exit path).
+        for item in existing {
+            if self.is_client_visible_output_item(&item, user_function_names) {
+                output.push(item);
+            }
+        }
     }
 
     fn is_client_visible_output_item(

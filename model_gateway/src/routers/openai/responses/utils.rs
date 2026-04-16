@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_original_tools_keeps_builtin_list_tools_and_passthrough_call_visible() {
+    async fn restore_original_tools_hides_builtin_list_tools_keeps_passthrough_call() {
         let original_body = ResponsesRequest {
             model: "gpt-5.4".to_string(),
             input: ResponseInput::Text("hello".to_string()),
@@ -1210,14 +1210,12 @@ mod tests {
 
         restore_original_tools(&mut response, &original_body, Some(&session));
 
+        // Builtin mcp_list_tools is hidden — clients don't see the underlying
+        // MCP server for builtin-routed tools like web_search_preview.
+        // Builtin passthrough mcp_call remains visible.
         assert_eq!(
             response["output"],
             serde_json::json!([
-                {
-                    "type": "mcp_list_tools",
-                    "server_label": "internal-label",
-                    "tools": []
-                },
                 {
                     "type": "mcp_call",
                     "name": "brave_web_search",
