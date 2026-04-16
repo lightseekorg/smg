@@ -449,7 +449,10 @@ impl Gossip for GossipService {
             let tx_incremental = tx.clone();
             let self_name_incremental = self_name.clone();
             let size_validator_clone = size_validator.clone();
-            let peer_name_for_watermark = self_name.clone();
+            // The remote peer's name isn't known until the first stream message
+            // arrives. Use a placeholder label for debug output — this doesn't
+            // affect filtering correctness (each task has its own watermark).
+            let peer_name_for_watermark = "server-inbound".to_string();
             #[expect(
                 clippy::disallowed_methods,
                 reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes or handle is aborted"
