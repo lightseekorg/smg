@@ -399,20 +399,22 @@ impl StreamNamespace {
         }
     }
 
-    /// Drop oldest broadcast buffer entries until within `max_buffer_bytes`.
+    /// Drop broadcast buffer entries until within `max_buffer_bytes`.
+    /// DashMap has no ordering, so dropped entries are arbitrary.
     fn enforce_broadcast_limit(&self) {
-        while self.buffer_bytes.load(Ordering::Relaxed) > self.max_buffer_bytes {
-            // DashMap doesn't have ordered iteration, so pick an arbitrary entry to drop.
-            // This is acceptable — broadcast entries are ephemeral and at-most-once.
-            if let Some(entry) = self.buffer.iter().next() {
-                let key = entry.key().clone();
-                drop(entry);
-                if let Some((_, removed)) = self.buffer.remove(&key) {
-                    self.buffer_bytes
-                        .fetch_sub(removed.len(), Ordering::Relaxed);
-                }
-            } else {
+        if self.buffer_bytes.load(Ordering::Relaxed) <= self.max_buffer_bytes {
+            return;
+        }
+        // Collect keys to remove, then remove them. Avoids holding DashMap
+        // iterator while mutating.
+        let keys_to_drop: Vec<String> = self.buffer.iter().map(|e| e.key().clone()).collect();
+        for key in keys_to_drop {
+            if self.buffer_bytes.load(Ordering::Relaxed) <= self.max_buffer_bytes {
                 break;
+            }
+            if let Some((_, removed)) = self.buffer.remove(&key) {
+                self.buffer_bytes
+                    .fetch_sub(removed.len(), Ordering::Relaxed);
             }
         }
     }
@@ -820,5 +822,172 @@ mod tests {
             .expect("channel closed");
         assert_eq!(key, "worker:7");
         assert!(value.is_none(), "delete should notify with None");
+    }
+
+    #[test]
+    fn test_broadcast_backpressure_drops_entries() {
+        let kv = MeshKV::new("test-node".to_string());
+        let ns = kv.configure_stream_prefix(
+            "td:",
+            StreamConfig {
+                max_buffer_bytes: 20, // tiny limit
+                routing: StreamRouting::Broadcast,
+            },
+        );
+
+        // Publish entries that exceed the buffer limit.
+        ns.publish("td:model-1", Bytes::from("aaaaaaaaaa")); // 10 bytes
+        ns.publish("td:model-2", Bytes::from("bbbbbbbbbb")); // 10 bytes, total=20, at limit
+        ns.publish("td:model-3", Bytes::from("cccccccccc")); // 10 bytes, total=30, over limit
+
+        // Buffer should have dropped an entry to stay within 20 bytes.
+        let drained = ns.drain_broadcast_buffer();
+        let total_bytes: usize = drained.iter().map(|(_, v)| v.len()).sum();
+        assert!(
+            total_bytes <= 20,
+            "buffer should be within limit, got {total_bytes}"
+        );
+    }
+
+    #[test]
+    fn test_targeted_backpressure_drops_oldest() {
+        let kv = MeshKV::new("test-node".to_string());
+        let ns = kv.configure_stream_prefix(
+            "tree:page:",
+            StreamConfig {
+                max_buffer_bytes: 20, // tiny limit
+                routing: StreamRouting::Targeted,
+            },
+        );
+
+        ns.publish_to("peer-A", "tree:page:m1", Bytes::from("aaaaaaaaaa")); // 10 bytes
+        ns.publish_to("peer-A", "tree:page:m2", Bytes::from("bbbbbbbbbb")); // 10 bytes
+        ns.publish_to("peer-A", "tree:page:m3", Bytes::from("cccccccccc")); // over limit
+
+        let drained = ns.drain_targeted_buffer();
+        let total_bytes: usize = drained.iter().map(|(_, _, v)| v.len()).sum();
+        assert!(
+            total_bytes <= 20,
+            "buffer should be within limit, got {total_bytes}"
+        );
+        // Oldest entry (m1) should have been dropped, keeping m2 and m3.
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].1, "tree:page:m2");
+        assert_eq!(drained[1].1, "tree:page:m3");
+    }
+
+    #[test]
+    fn test_drain_broadcast_buffer() {
+        let kv = MeshKV::new("test-node".to_string());
+        let ns = kv.configure_stream_prefix(
+            "td:",
+            StreamConfig {
+                max_buffer_bytes: 1024,
+                routing: StreamRouting::Broadcast,
+            },
+        );
+
+        ns.publish("td:model-1", Bytes::from("delta1"));
+        ns.publish("td:model-2", Bytes::from("delta2"));
+
+        let entries = ns.drain_broadcast_buffer();
+        assert_eq!(entries.len(), 2);
+
+        // Buffer should be empty after drain.
+        let entries2 = ns.drain_broadcast_buffer();
+        assert!(entries2.is_empty());
+    }
+
+    #[test]
+    fn test_drain_targeted_buffer() {
+        let kv = MeshKV::new("test-node".to_string());
+        let ns = kv.configure_stream_prefix(
+            "tree:page:",
+            StreamConfig {
+                max_buffer_bytes: 1024,
+                routing: StreamRouting::Targeted,
+            },
+        );
+
+        ns.publish_to("peer-A", "tree:page:m1", Bytes::from("page1"));
+        ns.publish_to("peer-B", "tree:page:m2", Bytes::from("page2"));
+
+        let entries = ns.drain_targeted_buffer();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "peer-A");
+        assert_eq!(entries[1].0, "peer-B");
+
+        // Buffer should be empty after drain.
+        let entries2 = ns.drain_targeted_buffer();
+        assert!(entries2.is_empty());
+    }
+
+    #[test]
+    fn test_collect_round_batch() {
+        let kv = MeshKV::new("test-node".to_string());
+        let broadcast_ns = kv.configure_stream_prefix(
+            "td:",
+            StreamConfig {
+                max_buffer_bytes: 1024,
+                routing: StreamRouting::Broadcast,
+            },
+        );
+        let targeted_ns = kv.configure_stream_prefix(
+            "tree:page:",
+            StreamConfig {
+                max_buffer_bytes: 1024,
+                routing: StreamRouting::Targeted,
+            },
+        );
+
+        broadcast_ns.publish("td:model-1", Bytes::from("delta"));
+        targeted_ns.publish_to("peer-A", "tree:page:m1", Bytes::from("page"));
+
+        let batch = kv.collect_round_batch();
+        assert_eq!(batch.broadcast_entries.len(), 1);
+        assert_eq!(batch.targeted_entries.len(), 1);
+        assert_eq!(batch.broadcast_entries[0].0, "td:model-1");
+        assert_eq!(batch.targeted_entries[0].0, "peer-A");
+
+        // Second collect should be empty (buffers drained).
+        let batch2 = kv.collect_round_batch();
+        assert!(batch2.broadcast_entries.is_empty());
+        assert!(batch2.targeted_entries.is_empty());
+    }
+
+    #[test]
+    fn test_collect_round_batch_with_drain_callback() {
+        let kv = MeshKV::new("test-node".to_string());
+        let ns = kv.configure_stream_prefix(
+            "td:",
+            StreamConfig {
+                max_buffer_bytes: 1024,
+                routing: StreamRouting::Broadcast,
+            },
+        );
+
+        let _handle = ns.register_drain(Box::new(|| {
+            vec![("td:from-drain".to_string(), b"drain-data".to_vec())]
+        }));
+
+        let batch = kv.collect_round_batch();
+        assert_eq!(batch.drain_entries.len(), 1);
+        assert_eq!(batch.drain_entries[0].0, "td:from-drain");
+    }
+
+    #[test]
+    #[should_panic(expected = "drain already registered")]
+    fn test_duplicate_drain_registration_panics() {
+        let kv = MeshKV::new("test-node".to_string());
+        let ns = kv.configure_stream_prefix(
+            "td:",
+            StreamConfig {
+                max_buffer_bytes: 1024,
+                routing: StreamRouting::Broadcast,
+            },
+        );
+
+        let _h1 = ns.register_drain(Box::new(Vec::new));
+        let _h2 = ns.register_drain(Box::new(Vec::new)); // panics
     }
 }
