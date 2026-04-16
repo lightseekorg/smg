@@ -1,8 +1,11 @@
 //! Shared MCP utilities for routers.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
-use openai_protocol::responses::ResponseTool;
+use openai_protocol::responses::{ResponseTool, ResponsesRequest};
 use smg_mcp::{
     BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpTransport,
     ResponseFormat,
@@ -195,6 +198,20 @@ pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
         .filter_map(|t| match t {
             ResponseTool::WebSearchPreview(_) => Some(BuiltinToolType::WebSearchPreview),
             ResponseTool::CodeInterpreter(_) => Some(BuiltinToolType::CodeInterpreter),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Collect user-declared function tool names from a Responses request.
+pub(crate) fn collect_user_function_names(request: &ResponsesRequest) -> HashSet<String> {
+    request
+        .tools
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|tool| match tool {
+            ResponseTool::Function(function_tool) => Some(function_tool.function.name.clone()),
             _ => None,
         })
         .collect()
