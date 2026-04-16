@@ -198,7 +198,11 @@ impl DrainRegistry {
     }
 
     fn register(&self, prefix: &str, drain: StreamDrainFn) {
-        self.drains.insert(prefix.to_string(), Arc::new(drain));
+        let previous = self.drains.insert(prefix.to_string(), Arc::new(drain));
+        assert!(
+            previous.is_none(),
+            "drain already registered for prefix '{prefix}'"
+        );
     }
 
     fn remove(&self, prefix: &str) {
