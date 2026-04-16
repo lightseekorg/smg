@@ -4,10 +4,7 @@
 //!
 //! v1 `IncrementalUpdateCollector` is kept only for tests in sync.rs until
 //! Step 2c migrates them. Production code uses `CentralCollector` +
-//! `PeerWatermark`. The module-level allow below silences dead-code warnings
-//! for the legacy collector without disabling the lint elsewhere.
-
-#![cfg_attr(not(test), allow(dead_code, clippy::allow_attributes))]
+//! `PeerWatermark`.
 
 use std::{
     collections::HashMap,
@@ -107,6 +104,14 @@ pub(crate) fn rate_limit_last_sent_key(key: &str, actor: &str) -> String {
 /// Incremental update collector (v1 legacy, kept for sync.rs and incremental.rs tests).
 /// v2 production code uses `CentralCollector` + `PeerWatermark` instead.
 /// TODO(Step 2c): migrate tests to CentralCollector, then delete this struct.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        clippy::allow_attributes,
+        reason = "v1 legacy kept for tests"
+    )
+)]
 pub struct IncrementalUpdateCollector {
     stores: Arc<StateStores>,
     self_name: String,
@@ -120,6 +125,14 @@ pub struct IncrementalUpdateCollector {
     rounds_since_snapshot: Arc<RwLock<HashMap<String, u64>>>,
 }
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        clippy::allow_attributes,
+        reason = "v1 legacy kept for tests"
+    )
+)]
 impl IncrementalUpdateCollector {
     pub fn new(stores: Arc<StateStores>, self_name: String) -> Self {
         Self {
