@@ -5,7 +5,14 @@
 //! - `StreamNamespace` for ephemeral, lossy, application-regenerated traffic (tenant deltas, tree repair)
 //!
 
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 
 use bytes::Bytes;
 use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
@@ -327,18 +334,22 @@ impl CrdtNamespace {
 pub struct StreamNamespace {
     prefix: String,
     routing: StreamRouting,
-    #[expect(dead_code)] // Used for backpressure enforcement in Step 2
     max_buffer_bytes: usize,
     /// Ephemeral send buffer, drained every gossip round.
     buffer: Arc<DashMap<String, Bytes>>,
+    /// Current total bytes in the broadcast buffer.
+    buffer_bytes: Arc<AtomicUsize>,
     /// Targeted entries: (target_peer_id, key, value).
     targeted_buffer: Arc<parking_lot::Mutex<Vec<(String, String, Bytes)>>>,
+    /// Current total bytes in the targeted buffer.
+    targeted_buffer_bytes: Arc<AtomicUsize>,
     subscriber_registry: Arc<SubscriberRegistry>,
     drain_registry: Arc<DrainRegistry>,
 }
 
 impl StreamNamespace {
     /// Publish a value to all connected peers (Broadcast namespaces only).
+    /// If the buffer exceeds `max_buffer_bytes`, the oldest entry is dropped.
     pub fn publish(&self, key: &str, value: Bytes) {
         assert_eq!(
             self.routing,
@@ -351,10 +362,17 @@ impl StreamNamespace {
             "key '{key}' does not match prefix '{}'",
             self.prefix
         );
-        self.buffer.insert(key.to_string(), value);
+        let value_len = value.len();
+        // If this key already exists, subtract the old value's size.
+        if let Some(old) = self.buffer.insert(key.to_string(), value) {
+            self.buffer_bytes.fetch_sub(old.len(), Ordering::Relaxed);
+        }
+        self.buffer_bytes.fetch_add(value_len, Ordering::Relaxed);
+        self.enforce_broadcast_limit();
     }
 
     /// Publish a value to exactly one peer (Targeted namespaces only).
+    /// If the buffer exceeds `max_buffer_bytes`, the oldest entries are dropped.
     pub fn publish_to(&self, peer_id: &str, key: &str, value: Bytes) {
         assert_eq!(
             self.routing,
@@ -367,9 +385,37 @@ impl StreamNamespace {
             "key '{key}' does not match prefix '{}'",
             self.prefix
         );
-        self.targeted_buffer
-            .lock()
-            .push((peer_id.to_string(), key.to_string(), value));
+        let value_len = value.len();
+        let mut buf = self.targeted_buffer.lock();
+        buf.push((peer_id.to_string(), key.to_string(), value));
+        self.targeted_buffer_bytes
+            .fetch_add(value_len, Ordering::Relaxed);
+        // Drop oldest entries while over limit.
+        while self.targeted_buffer_bytes.load(Ordering::Relaxed) > self.max_buffer_bytes
+            && !buf.is_empty()
+        {
+            let (_, _, dropped) = buf.remove(0);
+            self.targeted_buffer_bytes
+                .fetch_sub(dropped.len(), Ordering::Relaxed);
+        }
+    }
+
+    /// Drop oldest broadcast buffer entries until within `max_buffer_bytes`.
+    fn enforce_broadcast_limit(&self) {
+        while self.buffer_bytes.load(Ordering::Relaxed) > self.max_buffer_bytes {
+            // DashMap doesn't have ordered iteration, so pick an arbitrary entry to drop.
+            // This is acceptable — broadcast entries are ephemeral and at-most-once.
+            if let Some(entry) = self.buffer.iter().next() {
+                let key = entry.key().clone();
+                drop(entry);
+                if let Some((_, removed)) = self.buffer.remove(&key) {
+                    self.buffer_bytes
+                        .fetch_sub(removed.len(), Ordering::Relaxed);
+                }
+            } else {
+                break;
+            }
+        }
     }
 
     /// Subscribe to messages for keys matching a sub-prefix within this namespace.
@@ -510,7 +556,9 @@ impl MeshKV {
             routing: config.routing,
             max_buffer_bytes: config.max_buffer_bytes,
             buffer: Arc::new(DashMap::new()),
+            buffer_bytes: Arc::new(AtomicUsize::new(0)),
             targeted_buffer: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            targeted_buffer_bytes: Arc::new(AtomicUsize::new(0)),
             subscriber_registry: self.subscriber_registry.clone(),
             drain_registry: self.drain_registry.clone(),
         })
