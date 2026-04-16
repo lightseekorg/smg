@@ -82,6 +82,12 @@ impl MeshController {
         }
     }
 
+    /// Get a handle to the shared RoundBatch. Used by GossipService to
+    /// share the centrally collected batch with server-side sync_stream handlers.
+    pub fn current_batch(&self) -> Arc<parking_lot::RwLock<Arc<super::incremental::RoundBatch>>> {
+        self.current_batch.clone()
+    }
+
     #[instrument(fields(name = %self.self_name), skip(self, signal))]
     pub async fn event_loop(self, mut signal: watch::Receiver<bool>) -> Result<()> {
         let init_state = self.state.clone();

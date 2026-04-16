@@ -1,6 +1,13 @@
 //! Incremental update collection and batching
 //!
-//! Collects local state changes and batches them for efficient transmission
+//! Collects local state changes and batches them for efficient transmission.
+//!
+//! v1 `IncrementalUpdateCollector` is kept only for tests in sync.rs until
+//! Step 2c migrates them. Production code uses `CentralCollector` +
+//! `PeerWatermark`. The module-level allow below silences dead-code warnings
+//! for the legacy collector without disabling the lint elsewhere.
+
+#![cfg_attr(not(test), allow(dead_code, clippy::allow_attributes))]
 
 use std::{
     collections::HashMap,
@@ -79,7 +86,27 @@ struct LastScannedGenerations {
 #[expect(dead_code, reason = "Reserved for Layer 2 snapshot interval")]
 const STRUCTURE_SNAPSHOT_INTERVAL: u64 = 30;
 
-/// Incremental update collector
+/// Get current timestamp in nanoseconds. Module-level so both the legacy
+/// IncrementalUpdateCollector and the new CentralCollector can use it.
+#[expect(
+    clippy::expect_used,
+    reason = "system clock before UNIX epoch is a fatal misconfiguration that must not silently produce timestamp=0"
+)]
+pub(crate) fn current_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before UNIX_EPOCH; cannot generate valid timestamps")
+        .as_nanos() as u64
+}
+
+/// Build the per-actor last-sent key for rate limit shards.
+pub(crate) fn rate_limit_last_sent_key(key: &str, actor: &str) -> String {
+    format!("{key}::actor:{actor}")
+}
+
+/// Incremental update collector (v1 legacy, kept for sync.rs and incremental.rs tests).
+/// v2 production code uses `CentralCollector` + `PeerWatermark` instead.
+/// TODO(Step 2c): migrate tests to CentralCollector, then delete this struct.
 pub struct IncrementalUpdateCollector {
     stores: Arc<StateStores>,
     self_name: String,
@@ -111,22 +138,6 @@ impl IncrementalUpdateCollector {
         }
     }
 
-    /// Get current timestamp in nanoseconds
-    #[expect(
-        clippy::expect_used,
-        reason = "system clock before UNIX epoch is a fatal misconfiguration that must not silently produce timestamp=0"
-    )]
-    fn current_timestamp() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX_EPOCH; cannot generate valid timestamps")
-            .as_nanos() as u64
-    }
-
-    pub(crate) fn rate_limit_last_sent_key(key: &str, actor: &str) -> String {
-        format!("{key}::actor:{actor}")
-    }
-
     /// Helper function to collect updates for stores with serializable state
     fn collect_serializable_updates<S>(
         &self,
@@ -139,7 +150,7 @@ impl IncrementalUpdateCollector {
         S: serde::Serialize + Versioned,
     {
         let mut updates = Vec::new();
-        let timestamp = Self::current_timestamp();
+        let timestamp = current_timestamp();
 
         for (key, state) in all_items {
             let current_version = state.version();
@@ -202,7 +213,7 @@ impl IncrementalUpdateCollector {
                 // between collection and mark_sent.
                 *self.collected_tree_gen.write() = tree_gen;
 
-                let timestamp = Self::current_timestamp();
+                let timestamp = current_timestamp();
 
                 // --- Policy store scan (only if CRDT generation changed) ---
                 // Handles non-tree policy keys only. Tree keys are stored
@@ -514,14 +525,14 @@ impl IncrementalUpdateCollector {
                 );
             }
             StoreType::RateLimit => {
-                let current_timestamp = Self::current_timestamp();
+                let current_timestamp = current_timestamp();
 
                 for (key, actor, counter_value) in self.stores.rate_limit.all_shards() {
                     if !self.stores.rate_limit.is_owner(&key) {
                         continue;
                     }
 
-                    let shard_last_sent_key = Self::rate_limit_last_sent_key(&key, &actor);
+                    let shard_last_sent_key = rate_limit_last_sent_key(&key, &actor);
                     let last_sent_timestamp = last_sent
                         .rate_limit
                         .get(&shard_last_sent_key)
@@ -618,7 +629,7 @@ impl IncrementalUpdateCollector {
                         .insert(update.key.clone(), update.version);
                 }
                 StoreType::RateLimit => {
-                    let shard_key = Self::rate_limit_last_sent_key(&update.key, &update.actor);
+                    let shard_key = rate_limit_last_sent_key(&update.key, &update.actor);
                     last_sent.rate_limit.insert(shard_key, update.version);
                 }
             }
@@ -651,7 +662,7 @@ pub struct DrainedTenantDeltas {
 /// same deltas without racing on the destructive DashMap remove.
 pub fn drain_tenant_deltas_central(stores: &StateStores, self_name: &str) -> DrainedTenantDeltas {
     let tree_gen = stores.tree_generation.load(Ordering::Acquire);
-    let timestamp = IncrementalUpdateCollector::current_timestamp();
+    let timestamp = current_timestamp();
     let mut updates = Vec::new();
     let mut emitted_tree_keys = std::collections::HashSet::new();
 
@@ -815,7 +826,7 @@ impl CentralCollector {
     /// ALL current entries from stores that changed since last round.
     fn collect_store(&self, store_type: StoreType) -> Vec<StateUpdate> {
         let last_scanned = self.last_scanned.read();
-        let timestamp = IncrementalUpdateCollector::current_timestamp();
+        let timestamp = current_timestamp();
 
         match store_type {
             StoreType::Worker => {
@@ -864,7 +875,7 @@ impl CentralCollector {
                 )
             }
             StoreType::RateLimit => {
-                let current_timestamp = IncrementalUpdateCollector::current_timestamp();
+                let current_timestamp = current_timestamp();
                 let mut updates = Vec::new();
                 for (key, actor, counter_value) in self.stores.rate_limit.all_shards() {
                     if !self.stores.rate_limit.is_owner(&key) {
@@ -1060,10 +1071,7 @@ impl PeerWatermark {
                         .insert(update.key.clone(), update.version);
                 }
                 StoreType::RateLimit => {
-                    let shard_key = IncrementalUpdateCollector::rate_limit_last_sent_key(
-                        &update.key,
-                        &update.actor,
-                    );
+                    let shard_key = rate_limit_last_sent_key(&update.key, &update.actor);
                     self.last_sent.rate_limit.insert(shard_key, update.version);
                 }
             }
@@ -1082,10 +1090,7 @@ impl PeerWatermark {
                 .copied()
                 .unwrap_or(0),
             StoreType::RateLimit => {
-                let shard_key = IncrementalUpdateCollector::rate_limit_last_sent_key(
-                    &update.key,
-                    &update.actor,
-                );
+                let shard_key = rate_limit_last_sent_key(&update.key, &update.actor);
                 self.last_sent
                     .rate_limit
                     .get(&shard_key)

@@ -435,6 +435,12 @@ impl MeshServer {
             .clone()
             .expect("partition detector missing");
 
+        // Build controller first so we can share its current_batch with the
+        // server-side sync_stream handlers. This ensures both client-side
+        // (outgoing connections) and server-side (incoming connections) use
+        // the same centrally collected RoundBatch.
+        let controller = self.build_controller();
+
         let mut service = self.build_ping_server();
         service = service.with_stores(self.stores.clone());
 
@@ -442,12 +448,14 @@ impl MeshServer {
 
         service = service.with_partition_detector(partition_detector);
 
+        // Share the controller's current_batch so server-side sync_stream
+        // handlers use the same centrally collected data as client-side.
+        service = service.with_current_batch(controller.current_batch());
+
         // Add mTLS support if configured
         if let Some(mtls_manager) = self.mtls_manager.clone() {
             service = service.with_mtls_manager(mtls_manager);
         }
-
-        let controller = self.build_controller();
 
         let mut service_shutdown = self.signal_rx.clone();
 
