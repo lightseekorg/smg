@@ -215,7 +215,6 @@ impl DrainRegistry {
 
     /// Call all registered drains. Returns accumulated entries.
     /// Called exactly once per gossip round.
-    #[expect(dead_code)] // Called by centralized gossip loop in Step 2
     fn drain_all(&self) -> Vec<(String, Vec<u8>)> {
         let mut all_entries = Vec::new();
         for entry in &self.drains {
@@ -480,11 +479,23 @@ impl StreamNamespace {
 /// Generic, application-agnostic mesh transport. Provides explicit namespace
 /// handles for CRDT and stream modes. Application code MUST use namespace
 /// handles, not MeshKV directly.
+/// A batch of entries collected once per gossip round by the central collector.
+pub struct RoundBatch {
+    /// Broadcast stream entries: (key, value). Sent to ALL connected peers.
+    pub broadcast_entries: Vec<(String, Bytes)>,
+    /// Targeted stream entries: (peer_id, key, value). Sent to one specific peer.
+    pub targeted_entries: Vec<(String, String, Bytes)>,
+    /// Entries from registered drain callbacks (e.g., TreeSyncAdapter pending deltas).
+    pub drain_entries: Vec<(String, Vec<u8>)>,
+}
+
 pub struct MeshKV {
     /// CRDT store shared across all CRDT namespaces.
     store: Arc<CrdtOrMap>,
     /// Tracks configured prefixes to enforce fail-closed semantics.
     configured_prefixes: RwLock<HashMap<String, StoreMode>>,
+    /// Stream namespaces, stored for round batch collection.
+    stream_namespaces: RwLock<Vec<Arc<StreamNamespace>>>,
     /// Shared subscriber registry.
     subscriber_registry: Arc<SubscriberRegistry>,
     /// Shared drain registry.
@@ -502,6 +513,7 @@ impl MeshKV {
         Self {
             store: Arc::new(CrdtOrMap::new()),
             configured_prefixes: RwLock::new(HashMap::new()),
+            stream_namespaces: RwLock::new(Vec::new()),
             subscriber_registry: Arc::new(SubscriberRegistry::new()),
             drain_registry: Arc::new(DrainRegistry::new()),
             server_name,
@@ -575,7 +587,7 @@ impl MeshKV {
             );
         }
 
-        Arc::new(StreamNamespace {
+        let ns = Arc::new(StreamNamespace {
             prefix: prefix.to_string(),
             routing: config.routing,
             max_buffer_bytes: config.max_buffer_bytes,
@@ -585,7 +597,9 @@ impl MeshKV {
             targeted_buffer_bytes: Arc::new(AtomicUsize::new(0)),
             subscriber_registry: self.subscriber_registry.clone(),
             drain_registry: self.drain_registry.clone(),
-        })
+        });
+        self.stream_namespaces.write().push(ns.clone());
+        ns
     }
 
     /// Get the server name for this node.
@@ -596,6 +610,29 @@ impl MeshKV {
     /// Get the replica ID for this node.
     pub fn replica_id(&self) -> u64 {
         self.replica_id
+    }
+
+    /// Collect all stream entries for one gossip round. Called exactly once
+    /// per round by the centralized gossip loop. Drains all stream buffers
+    /// and calls all registered drain callbacks.
+    pub fn collect_round_batch(&self) -> RoundBatch {
+        let mut broadcast_entries = Vec::new();
+        let mut targeted_entries = Vec::new();
+
+        // Drain all stream namespace buffers.
+        for ns in self.stream_namespaces.read().iter() {
+            broadcast_entries.extend(ns.drain_broadcast_buffer());
+            targeted_entries.extend(ns.drain_targeted_buffer());
+        }
+
+        // Call registered drain callbacks (e.g., adapter pending deltas).
+        let drain_entries = self.drain_registry.drain_all();
+
+        RoundBatch {
+            broadcast_entries,
+            targeted_entries,
+            drain_entries,
+        }
     }
 
     /// Check if a prefix has been configured.
