@@ -111,25 +111,6 @@ impl IncrementalUpdateCollector {
         }
     }
 
-    /// Create a collector that shares a central deltas reference with other
-    /// collectors. The gossip event loop sets deltas on the shared reference
-    /// once per round; all collectors see the same data.
-    pub fn with_shared_central_deltas(
-        stores: Arc<StateStores>,
-        self_name: String,
-        central_deltas: Arc<RwLock<Option<DrainedTenantDeltas>>>,
-    ) -> Self {
-        Self {
-            stores,
-            self_name,
-            last_sent: Arc::new(RwLock::new(LastSentVersions::default())),
-            last_scanned: Arc::new(RwLock::new(LastScannedGenerations::default())),
-            collected_tree_gen: Arc::new(RwLock::new(0)),
-            rounds_since_snapshot: Arc::new(RwLock::new(HashMap::new())),
-            central_deltas,
-        }
-    }
-
     /// Get current timestamp in nanoseconds
     #[expect(
         clippy::expect_used,
@@ -142,7 +123,7 @@ impl IncrementalUpdateCollector {
             .as_nanos() as u64
     }
 
-    fn rate_limit_last_sent_key(key: &str, actor: &str) -> String {
+    pub(crate) fn rate_limit_last_sent_key(key: &str, actor: &str) -> String {
         format!("{key}::actor:{actor}")
     }
 
@@ -758,6 +739,361 @@ pub fn drain_tenant_deltas_central(stores: &StateStores, self_name: &str) -> Dra
         updates,
         emitted_tree_keys,
         tree_gen_snapshot: tree_gen,
+    }
+}
+
+// ============================================================================
+// CentralCollector + PeerWatermark (v2 architecture)
+// ============================================================================
+
+/// A round batch produced by the central collector. Contains ALL updates from
+/// this round, organized by store type. Per-peer watermark filtering happens
+/// at send time via `PeerWatermark::filter()`.
+#[derive(Debug, Clone, Default)]
+pub struct RoundBatch {
+    pub updates: Vec<(StoreType, Vec<StateUpdate>)>,
+}
+
+/// Central collector that runs once per gossip round. Produces a `RoundBatch`
+/// containing all changed entries across all stores. Destructive operations
+/// (tenant delta drain) happen here exactly once. Per-peer watermark filtering
+/// is NOT done here — that's `PeerWatermark`'s job.
+pub struct CentralCollector {
+    stores: Arc<StateStores>,
+    self_name: String,
+    /// Generation tracking to skip unchanged stores between rounds.
+    last_scanned: RwLock<LastScannedGenerations>,
+    /// Snapshot of tree_generation from the last collection.
+    collected_tree_gen: RwLock<u64>,
+}
+
+impl CentralCollector {
+    pub fn new(stores: Arc<StateStores>, self_name: String) -> Self {
+        Self {
+            stores,
+            self_name,
+            last_scanned: RwLock::new(LastScannedGenerations::default()),
+            collected_tree_gen: RwLock::new(0),
+        }
+    }
+
+    /// Collect all changes for this round. Called exactly once per gossip round
+    /// by the event loop. Returns a `RoundBatch` that per-peer watermarks filter.
+    pub fn collect(&self) -> RoundBatch {
+        let mut all_updates = Vec::new();
+
+        for store_type in [
+            StoreType::Worker,
+            StoreType::Policy,
+            StoreType::App,
+            StoreType::Membership,
+            StoreType::RateLimit,
+        ] {
+            let updates = self.collect_store(store_type);
+            if !updates.is_empty() {
+                all_updates.push((store_type, updates));
+            }
+        }
+
+        RoundBatch {
+            updates: all_updates,
+        }
+    }
+
+    /// Record the current generation after a successful round so the next
+    /// round can skip unchanged stores.
+    pub fn advance_generations(&self) {
+        let mut last_scanned = self.last_scanned.write();
+        last_scanned.worker = self.stores.worker.generation();
+        last_scanned.policy = self.stores.policy.generation();
+        last_scanned.app = self.stores.app.generation();
+        last_scanned.membership = self.stores.membership.generation();
+        last_scanned.tree = *self.collected_tree_gen.read();
+    }
+
+    /// Collect all entries for a store type. No watermark filtering — includes
+    /// ALL current entries from stores that changed since last round.
+    fn collect_store(&self, store_type: StoreType) -> Vec<StateUpdate> {
+        let last_scanned = self.last_scanned.read();
+        let timestamp = IncrementalUpdateCollector::current_timestamp();
+
+        match store_type {
+            StoreType::Worker => {
+                let gen = self.stores.worker.generation();
+                if gen == last_scanned.worker {
+                    return vec![];
+                }
+                self.collect_serializable_store(
+                    self.stores.worker.all(),
+                    "worker",
+                    timestamp,
+                    |s: &WorkerState| s.worker_id.clone(),
+                )
+            }
+            StoreType::Policy => {
+                let policy_gen = self.stores.policy.generation();
+                let tree_gen = self.stores.tree_generation.load(Ordering::Acquire);
+                if policy_gen == last_scanned.policy && tree_gen == last_scanned.tree {
+                    return vec![];
+                }
+                *self.collected_tree_gen.write() = tree_gen;
+                self.collect_policy_store(timestamp, tree_gen != last_scanned.tree)
+            }
+            StoreType::App => {
+                let gen = self.stores.app.generation();
+                if gen == last_scanned.app {
+                    return vec![];
+                }
+                self.collect_serializable_store(
+                    self.stores.app.all(),
+                    "app",
+                    timestamp,
+                    |s: &AppState| s.key.clone(),
+                )
+            }
+            StoreType::Membership => {
+                let gen = self.stores.membership.generation();
+                if gen == last_scanned.membership {
+                    return vec![];
+                }
+                self.collect_serializable_store(
+                    self.stores.membership.all(),
+                    "membership",
+                    timestamp,
+                    |s: &MembershipState| s.name.clone(),
+                )
+            }
+            StoreType::RateLimit => {
+                let current_timestamp = IncrementalUpdateCollector::current_timestamp();
+                let mut updates = Vec::new();
+                for (key, actor, counter_value) in self.stores.rate_limit.all_shards() {
+                    if !self.stores.rate_limit.is_owner(&key) {
+                        continue;
+                    }
+                    if let Ok(serialized) = bincode::serialize(&counter_value) {
+                        updates.push(StateUpdate {
+                            key,
+                            value: serialized,
+                            version: current_timestamp,
+                            actor,
+                            timestamp: current_timestamp,
+                        });
+                    }
+                }
+                updates
+            }
+        }
+    }
+
+    /// Collect all entries from a serializable store. No watermark filtering.
+    fn collect_serializable_store<S>(
+        &self,
+        all_items: std::collections::BTreeMap<String, S>,
+        store_name: &str,
+        timestamp: u64,
+        get_id: impl Fn(&S) -> String,
+    ) -> Vec<StateUpdate>
+    where
+        S: serde::Serialize + Versioned,
+    {
+        let mut updates = Vec::new();
+        for (key, state) in all_items {
+            if let Ok(serialized) = bincode::serialize(&state) {
+                debug!(
+                    "Central collect {} update: {} (version: {})",
+                    store_name,
+                    get_id(&state),
+                    state.version(),
+                );
+                updates.push(StateUpdate {
+                    key,
+                    value: serialized,
+                    version: state.version(),
+                    actor: self.self_name.clone(),
+                    timestamp,
+                });
+            }
+        }
+        updates
+    }
+
+    /// Collect policy store entries + tenant deltas + tree_configs.
+    /// Tenant deltas are destructively drained (safe because this runs once).
+    fn collect_policy_store(&self, timestamp: u64, tree_changed: bool) -> Vec<StateUpdate> {
+        let mut updates = Vec::new();
+        let mut emitted_tree_keys = std::collections::HashSet::new();
+
+        // Non-tree policy entries
+        let all_policies = self.stores.policy.all();
+        for (key, state) in &all_policies {
+            if key.starts_with("tree:") {
+                continue;
+            }
+            if let Ok(serialized) = bincode::serialize(state) {
+                updates.push(StateUpdate {
+                    key: key.clone(),
+                    value: serialized,
+                    version: state.version(),
+                    actor: self.self_name.clone(),
+                    timestamp,
+                });
+            }
+        }
+
+        if !tree_changed {
+            return updates;
+        }
+
+        // Phase 0: Drain tenant deltas (destructive, runs once)
+        let drained = drain_tenant_deltas_central(&self.stores, &self.self_name);
+        updates.extend(drained.updates);
+        emitted_tree_keys.extend(drained.emitted_tree_keys);
+
+        // Phase 2: tree_configs scan for keys not emitted as deltas
+        for entry in &self.stores.tree_configs {
+            let key = entry.key();
+            if emitted_tree_keys.contains(key.as_str()) {
+                continue;
+            }
+            let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
+            let config_bytes = entry.value().clone();
+            if config_bytes.is_empty() {
+                continue;
+            }
+            let current_version = self.stores.tree_version(key);
+            let tree_version = if let Ok(ts) = TreeState::from_bytes(&config_bytes) {
+                ts.version
+            } else if kv_index::snapshot::TreeSnapshot::from_bytes(&config_bytes).is_ok() {
+                current_version
+            } else {
+                continue;
+            };
+            let compressed = lz4_compress(&config_bytes);
+            const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+            if compressed.len() > MAX_SNAPSHOT_BYTES {
+                debug!(
+                    key = %key,
+                    compressed_bytes = compressed.len(),
+                    "Skipping oversized tree snapshot"
+                );
+                continue;
+            }
+            let full_state = PolicyState {
+                model_id,
+                policy_type: "tree_state_lz4".to_string(),
+                config: compressed,
+                version: tree_version,
+            };
+            if let Ok(serialized) = bincode::serialize(&full_state) {
+                updates.push(StateUpdate {
+                    key: key.clone(),
+                    value: serialized,
+                    version: current_version,
+                    actor: self.self_name.clone(),
+                    timestamp,
+                });
+            }
+        }
+
+        updates
+    }
+}
+
+/// Per-peer watermark tracker. Filters a centrally collected `RoundBatch` to
+/// include only entries this peer hasn't seen yet, and tracks what was sent.
+#[derive(Debug)]
+pub struct PeerWatermark {
+    /// Peer name, used for Debug output.
+    _peer_name: String,
+    last_sent: LastSentVersions,
+}
+
+impl PeerWatermark {
+    pub fn new(peer_name: String) -> Self {
+        Self {
+            _peer_name: peer_name,
+            last_sent: LastSentVersions::default(),
+        }
+    }
+
+    /// Filter a round batch to include only entries this peer hasn't received.
+    /// Returns updates organized by store type, ready to send.
+    pub fn filter(&self, batch: &RoundBatch) -> Vec<(StoreType, Vec<StateUpdate>)> {
+        let mut filtered = Vec::new();
+
+        for (store_type, updates) in &batch.updates {
+            let peer_updates: Vec<StateUpdate> = updates
+                .iter()
+                .filter(|u| self.should_send(*store_type, u))
+                .cloned()
+                .collect();
+            if !peer_updates.is_empty() {
+                filtered.push((*store_type, peer_updates));
+            }
+        }
+
+        filtered
+    }
+
+    /// Mark updates as successfully sent to this peer. Advances watermark.
+    pub fn mark_sent(&mut self, store_type: StoreType, updates: &[StateUpdate]) {
+        for update in updates {
+            match store_type {
+                StoreType::Worker => {
+                    self.last_sent
+                        .worker
+                        .insert(update.key.clone(), update.version);
+                }
+                StoreType::Policy => {
+                    self.last_sent
+                        .policy
+                        .insert(update.key.clone(), update.version);
+                }
+                StoreType::App => {
+                    self.last_sent
+                        .app
+                        .insert(update.key.clone(), update.version);
+                }
+                StoreType::Membership => {
+                    self.last_sent
+                        .membership
+                        .insert(update.key.clone(), update.version);
+                }
+                StoreType::RateLimit => {
+                    let shard_key = IncrementalUpdateCollector::rate_limit_last_sent_key(
+                        &update.key,
+                        &update.actor,
+                    );
+                    self.last_sent.rate_limit.insert(shard_key, update.version);
+                }
+            }
+        }
+    }
+
+    fn should_send(&self, store_type: StoreType, update: &StateUpdate) -> bool {
+        let last_sent_version = match store_type {
+            StoreType::Worker => self.last_sent.worker.get(&update.key).copied().unwrap_or(0),
+            StoreType::Policy => self.last_sent.policy.get(&update.key).copied().unwrap_or(0),
+            StoreType::App => self.last_sent.app.get(&update.key).copied().unwrap_or(0),
+            StoreType::Membership => self
+                .last_sent
+                .membership
+                .get(&update.key)
+                .copied()
+                .unwrap_or(0),
+            StoreType::RateLimit => {
+                let shard_key = IncrementalUpdateCollector::rate_limit_last_sent_key(
+                    &update.key,
+                    &update.actor,
+                );
+                self.last_sent
+                    .rate_limit
+                    .get(&shard_key)
+                    .copied()
+                    .unwrap_or(0)
+            }
+        };
+        update.version > last_sent_version
     }
 }
 
