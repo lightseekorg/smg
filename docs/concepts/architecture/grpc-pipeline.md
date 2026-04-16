@@ -247,9 +247,9 @@ Qwen model JSON tool calling format.
 
 <div class="card" markdown>
 
-**Qwen Coder**
+**Qwen XML**
 
-Qwen Coder XML format with parameter tags.
+Qwen3-Coder / Qwen3.5+ XML format with parameter tags.
 
 ```xml
 <tool_call><function=get_weather><parameter=location>NYC</parameter></function></tool_call>

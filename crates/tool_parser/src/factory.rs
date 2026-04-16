@@ -351,9 +351,11 @@ impl ParserFactory {
         registry.map_model("Qwen/Qwen3.5*", "qwen_xml");
         registry.map_model("Qwen3.5*", "qwen_xml");
         registry.map_model("qwen3.5*", "qwen_xml");
+        registry.map_model("qwen/qwen3.5*", "qwen_xml");
         registry.map_model("Qwen/Qwen3-Coder*", "qwen_xml");
         registry.map_model("Qwen3-Coder*", "qwen_xml");
         registry.map_model("qwen3-coder*", "qwen_xml");
+        registry.map_model("qwen/qwen3-coder*", "qwen_xml");
         // Qwen3 and earlier (including Qwen2.5-Coder) use JSON format
         registry.map_model("qwen*", "qwen");
         registry.map_model("Qwen*", "qwen");
