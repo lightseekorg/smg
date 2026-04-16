@@ -576,18 +576,21 @@ async fn test_multi_peer_tenant_delta_broadcast() {
 
     #[derive(Debug)]
     struct CountingSubscriber {
+        target_model_id: String,
         inserts_received: Arc<AtomicUsize>,
     }
     impl TreeStateSubscriber for CountingSubscriber {
         fn apply_remote_tree_state(&self, _model_id: &str, _tree_state: &TreeState) {}
         fn apply_tenant_delta(
             &self,
-            _model_id: &str,
+            model_id: &str,
             inserts: &[TenantInsert],
             _evictions: &[TenantEvict],
         ) {
-            self.inserts_received
-                .fetch_add(inserts.len(), Ordering::SeqCst);
+            if model_id == self.target_model_id {
+                self.inserts_received
+                    .fetch_add(inserts.len(), Ordering::SeqCst);
+            }
         }
     }
 
@@ -614,23 +617,26 @@ async fn test_multi_peer_tenant_delta_broadcast() {
     )
     .await;
 
+    let model_id = "test-model".to_string();
     let count_b = Arc::new(AtomicUsize::new(0));
     let count_c = Arc::new(AtomicUsize::new(0));
     handler_b
         .sync_manager
         .register_tree_state_subscriber(Arc::new(CountingSubscriber {
+            target_model_id: model_id.clone(),
             inserts_received: count_b.clone(),
         }));
     handler_c
         .sync_manager
         .register_tree_state_subscriber(Arc::new(CountingSubscriber {
+            target_model_id: model_id.clone(),
             inserts_received: count_c.clone(),
         }));
 
     handler_a
         .sync_manager
         .sync_tree_operation(
-            "test-model".to_string(),
+            model_id,
             TreeOperation::Insert(TreeInsertOp {
                 key: TreeKey::Text("multi-peer-prompt".to_string()),
                 tenant: "http://worker:8000".to_string(),
