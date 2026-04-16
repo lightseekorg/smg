@@ -562,6 +562,104 @@ async fn test_multi_node_data_propagation() {
     log::info!("Multi-node data propagation test completed");
 }
 
+/// Regression test: one publish of a tenant delta on node A must land on
+/// BOTH connected peers (B and C), not just the first peer whose collector
+/// drains the shared buffer.
+#[tokio::test]
+async fn test_multi_peer_tenant_delta_broadcast() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::{
+        sync::TreeStateSubscriber,
+        tree_ops::{TenantEvict, TenantInsert, TreeInsertOp, TreeKey, TreeOperation, TreeState},
+    };
+
+    #[derive(Debug)]
+    struct CountingSubscriber {
+        inserts_received: Arc<AtomicUsize>,
+    }
+    impl TreeStateSubscriber for CountingSubscriber {
+        fn apply_remote_tree_state(&self, _model_id: &str, _tree_state: &TreeState) {}
+        fn apply_tenant_delta(
+            &self,
+            _model_id: &str,
+            inserts: &[TenantInsert],
+            _evictions: &[TenantEvict],
+        ) {
+            self.inserts_received
+                .fetch_add(inserts.len(), Ordering::SeqCst);
+        }
+    }
+
+    init_test_logging();
+    log::info!("Starting test_multi_peer_tenant_delta_broadcast");
+
+    let (listener_a, addr_a) = bind_node().await;
+    let handler_a = crate::mesh_run!("td_a", listener_a, addr_a, None);
+
+    let (listener_b, addr_b) = bind_node().await;
+    let handler_b = crate::mesh_run!("td_b", listener_b, addr_b, Some(addr_a));
+
+    let (listener_c, addr_c) = bind_node().await;
+    let handler_c = crate::mesh_run!("td_c", listener_c, addr_c, Some(addr_a));
+
+    wait_for(
+        || {
+            handler_a.state.read().len() == 3
+                && handler_b.state.read().len() == 3
+                && handler_c.state.read().len() == 3
+        },
+        Duration::from_secs(60),
+        "all 3 nodes see each other",
+    )
+    .await;
+
+    let count_b = Arc::new(AtomicUsize::new(0));
+    let count_c = Arc::new(AtomicUsize::new(0));
+    handler_b
+        .sync_manager
+        .register_tree_state_subscriber(Arc::new(CountingSubscriber {
+            inserts_received: count_b.clone(),
+        }));
+    handler_c
+        .sync_manager
+        .register_tree_state_subscriber(Arc::new(CountingSubscriber {
+            inserts_received: count_c.clone(),
+        }));
+
+    handler_a
+        .sync_manager
+        .sync_tree_operation(
+            "test-model".to_string(),
+            TreeOperation::Insert(TreeInsertOp {
+                key: TreeKey::Text("multi-peer-prompt".to_string()),
+                tenant: "http://worker:8000".to_string(),
+            }),
+        )
+        .unwrap();
+
+    wait_for(
+        || count_b.load(Ordering::SeqCst) > 0 && count_c.load(Ordering::SeqCst) > 0,
+        Duration::from_secs(30),
+        "tenant delta reached BOTH B and C (v1 bug would leave one at 0)",
+    )
+    .await;
+
+    assert!(
+        count_b.load(Ordering::SeqCst) > 0,
+        "B did not receive the tenant delta"
+    );
+    assert!(
+        count_c.load(Ordering::SeqCst) > 0,
+        "C did not receive the tenant delta"
+    );
+
+    handler_a.shutdown();
+    handler_b.shutdown();
+    handler_c.shutdown();
+    log::info!("test_multi_peer_tenant_delta_broadcast completed");
+}
+
 #[tokio::test]
 #[ignore = "SWIM failure detection for hard-shutdown nodes needs many gossip rounds; flaky under parallel CI load"]
 async fn test_five_node_cluster_with_failure() {
