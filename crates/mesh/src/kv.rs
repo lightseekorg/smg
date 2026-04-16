@@ -335,13 +335,13 @@ pub struct StreamNamespace {
     routing: StreamRouting,
     max_buffer_bytes: usize,
     /// Ephemeral send buffer, drained every gossip round.
-    buffer: Arc<DashMap<String, Bytes>>,
+    buffer: DashMap<String, Bytes>,
     /// Current total bytes in the broadcast buffer.
-    buffer_bytes: Arc<AtomicUsize>,
+    buffer_bytes: AtomicUsize,
     /// Targeted entries: (target_peer_id, key, value). VecDeque for O(1) FIFO eviction.
-    targeted_buffer: Arc<parking_lot::Mutex<VecDeque<(String, String, Bytes)>>>,
+    targeted_buffer: parking_lot::Mutex<VecDeque<(String, String, Bytes)>>,
     /// Current total bytes in the targeted buffer.
-    targeted_buffer_bytes: Arc<AtomicUsize>,
+    targeted_buffer_bytes: AtomicUsize,
     subscriber_registry: Arc<SubscriberRegistry>,
     drain_registry: Arc<DrainRegistry>,
 }
@@ -614,10 +614,10 @@ impl MeshKV {
             prefix: prefix.to_string(),
             routing: config.routing,
             max_buffer_bytes: config.max_buffer_bytes,
-            buffer: Arc::new(DashMap::new()),
-            buffer_bytes: Arc::new(AtomicUsize::new(0)),
-            targeted_buffer: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
-            targeted_buffer_bytes: Arc::new(AtomicUsize::new(0)),
+            buffer: DashMap::new(),
+            buffer_bytes: AtomicUsize::new(0),
+            targeted_buffer: parking_lot::Mutex::new(VecDeque::new()),
+            targeted_buffer_bytes: AtomicUsize::new(0),
             subscriber_registry: self.subscriber_registry.clone(),
             drain_registry: self.drain_registry.clone(),
         });
