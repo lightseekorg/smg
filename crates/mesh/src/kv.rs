@@ -99,8 +99,8 @@ pub(crate) struct ValueEntry {
 /// - tree:req: 100
 /// - tree:page: 32
 pub struct Subscription {
-    /// Receives (key, value) pairs as they are written or received from peers.
-    pub receiver: mpsc::Receiver<(String, Bytes)>,
+    /// Receives (key, value) pairs. `None` value means the key was deleted.
+    pub receiver: mpsc::Receiver<SubscriptionEvent>,
 }
 
 /// Function signature for stream drain callbacks. Called exactly once per gossip
@@ -124,10 +124,13 @@ impl Drop for DrainHandle {
 // Subscriber Registry (internal)
 // ============================================================================
 
+/// A single subscription event: (key, value). `None` value means deletion.
+type SubscriptionEvent = (String, Option<Bytes>);
+
 /// Tracks all active subscriptions by prefix.
 struct SubscriberRegistry {
     /// prefix -> list of senders. Multiple subscribers can watch the same prefix.
-    subscribers: DashMap<String, Vec<mpsc::Sender<(String, Bytes)>>>,
+    subscribers: DashMap<String, Vec<mpsc::Sender<SubscriptionEvent>>>,
 }
 
 impl SubscriberRegistry {
@@ -137,7 +140,7 @@ impl SubscriberRegistry {
         }
     }
 
-    fn register(&self, prefix: &str, tx: mpsc::Sender<(String, Bytes)>) {
+    fn register(&self, prefix: &str, tx: mpsc::Sender<SubscriptionEvent>) {
         self.subscribers
             .entry(prefix.to_string())
             .or_default()
@@ -146,7 +149,8 @@ impl SubscriberRegistry {
 
     /// Notify all subscribers whose prefix matches the given key.
     /// Uses try_send to never block the gossip loop.
-    fn notify(&self, key: &str, value: Bytes) {
+    /// `value` is `Some(bytes)` for puts, `None` for deletes.
+    fn notify(&self, key: &str, value: Option<Bytes>) {
         for entry in &self.subscribers {
             let prefix = entry.key();
             if key.starts_with(prefix.as_str()) {
@@ -253,7 +257,8 @@ impl CrdtNamespace {
             self.prefix
         );
         self.store.insert(key.to_string(), value.clone());
-        self.subscriber_registry.notify(key, Bytes::from(value));
+        self.subscriber_registry
+            .notify(key, Some(Bytes::from(value)));
     }
 
     /// Get the current value for a key, or None if not present or tombstoned.
@@ -268,6 +273,7 @@ impl CrdtNamespace {
 
     /// Delete a key by writing a tombstone. The tombstone propagates via gossip
     /// and wins by higher version. Actual removal happens after GC grace period.
+    /// Subscribers receive `(key, None)` to indicate deletion.
     pub fn delete(&self, key: &str) {
         assert!(
             key.starts_with(&self.prefix),
@@ -275,6 +281,7 @@ impl CrdtNamespace {
             self.prefix
         );
         self.store.remove(key);
+        self.subscriber_registry.notify(key, None);
     }
 
     /// List all live keys matching a sub-prefix within this namespace.
@@ -673,6 +680,32 @@ mod tests {
             .expect("channel closed");
 
         assert_eq!(key, "worker:7");
-        assert_eq!(value.as_ref(), b"healthy");
+        assert_eq!(value.as_deref(), Some(b"healthy".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn test_crdt_subscribe_delete() {
+        let kv = MeshKV::new("test-node".to_string());
+        let ns = kv.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+
+        let mut sub = ns.subscribe("");
+        ns.put("worker:7", b"healthy".to_vec());
+        ns.delete("worker:7");
+
+        // First event: put
+        let (key, value) = tokio::time::timeout(Duration::from_millis(100), sub.receiver.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+        assert_eq!(key, "worker:7");
+        assert!(value.is_some());
+
+        // Second event: delete
+        let (key, value) = tokio::time::timeout(Duration::from_millis(100), sub.receiver.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+        assert_eq!(key, "worker:7");
+        assert!(value.is_none(), "delete should notify with None");
     }
 }
