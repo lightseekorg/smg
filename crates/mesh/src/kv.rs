@@ -380,8 +380,11 @@ impl StreamNamespace {
                 }
             }
             DashMapEntry::Vacant(entry) => {
-                entry.insert(value);
+                // Increment counter BEFORE insert. entry.insert() releases
+                // the shard lock, so a concurrent drain could see the key
+                // and fetch_sub before we fetch_add — underflowing the counter.
                 self.buffer_bytes.fetch_add(value_len, Ordering::Relaxed);
+                entry.insert(value);
             }
         }
         self.enforce_broadcast_limit();
