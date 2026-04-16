@@ -499,6 +499,7 @@ impl StreamNamespace {
 // ============================================================================
 
 /// A batch of entries collected once per gossip round by the central collector.
+#[derive(Debug)]
 pub struct RoundBatch {
     /// Broadcast stream entries: (key, value). Sent to ALL connected peers.
     pub broadcast_entries: Vec<(String, Bytes)>,
