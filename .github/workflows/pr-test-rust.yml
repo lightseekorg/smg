@@ -103,6 +103,14 @@ jobs:
           python -c "from smg_grpc_proto import sglang_scheduler_pb2; print('OK')"
 
   build-wheel:
+    # Fork PRs must be labeled with 'ci-approved' for expensive jobs to run.
+    # Internal PRs (non-fork) run unconditionally. build-wheel is the
+    # first-tier expensive job; benchmarks, e2e-*, e2e-vendor, python-unit-tests,
+    # go-unit-tests, and go-bindings-e2e all chain off it via `needs:` and
+    # inherit the gate transitively.
+    if: >-
+      !github.event.pull_request.head.repo.fork ||
+      contains(github.event.pull_request.labels.*.name, 'ci-approved')
     runs-on: k8s-runner-gpu
     permissions:
       contents: read
