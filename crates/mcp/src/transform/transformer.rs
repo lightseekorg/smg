@@ -5,6 +5,7 @@ use openai_protocol::responses::{
     ImageGenerationCallStatus, ResponseOutputItem, WebSearchAction, WebSearchCallStatus,
     WebSearchSource,
 };
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::ResponseFormat;
@@ -45,6 +46,17 @@ pub fn extract_image_generation_fallback_text(value: &Value) -> Option<String> {
 
 /// Transforms MCP CallToolResult to OpenAI Responses API output items.
 pub struct ResponseTransformer;
+
+#[derive(Deserialize, Default)]
+struct ImagePayload {
+    result: Option<String>,
+    revised_prompt: Option<String>,
+    background: Option<String>,
+    output_format: Option<String>,
+    quality: Option<String>,
+    size: Option<String>,
+    action: Option<String>,
+}
 
 impl ResponseTransformer {
     /// Returns true when a parsed wrapped `text` JSON object matches
@@ -255,46 +267,21 @@ impl ResponseTransformer {
 
     /// Transform MCP image generation results to OpenAI image_generation_call format.
     fn to_image_generation_call(result: &Value, tool_call_id: &str) -> ResponseOutputItem {
-        let obj = Self::image_payload_from_wrapped_content(result);
+        let payload = Self::image_payload_from_wrapped_content(result)
+            .map(Value::Object)
+            .and_then(|value| serde_json::from_value::<ImagePayload>(value).ok())
+            .unwrap_or_default();
 
         ResponseOutputItem::ImageGenerationCall {
             id: format!("ig_{tool_call_id}"),
             status: ImageGenerationCallStatus::Completed,
-            result: obj
-                .as_ref()
-                .and_then(|o| o.get("result"))
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            revised_prompt: obj
-                .as_ref()
-                .and_then(|o| o.get("revised_prompt"))
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            background: obj
-                .as_ref()
-                .and_then(|o| o.get("background"))
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            output_format: obj
-                .as_ref()
-                .and_then(|o| o.get("output_format"))
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            quality: obj
-                .as_ref()
-                .and_then(|o| o.get("quality"))
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            size: obj
-                .as_ref()
-                .and_then(|o| o.get("size"))
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            action: obj
-                .as_ref()
-                .and_then(|o| o.get("action"))
-                .and_then(|v| v.as_str())
-                .map(String::from),
+            result: payload.result,
+            revised_prompt: payload.revised_prompt,
+            background: payload.background,
+            output_format: payload.output_format,
+            quality: payload.quality,
+            size: payload.size,
+            action: payload.action,
         }
     }
 

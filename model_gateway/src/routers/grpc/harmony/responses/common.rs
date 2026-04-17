@@ -128,7 +128,7 @@ pub(super) fn build_next_request_with_tools(
     for tool_result in tool_results {
         let output_str = tool_result
             .response_format
-            .compact_tool_output_for_model_context(tool_result.is_error, &tool_result.output);
+            .compact_tool_output_for_model_context(&tool_result.output);
 
         // Update the corresponding tool call with output and completed status
         // Find and update the matching FunctionToolCall

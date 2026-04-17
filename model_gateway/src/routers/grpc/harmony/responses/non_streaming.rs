@@ -414,7 +414,7 @@ fn build_tool_response(
     for (tool_call, result) in mcp_tool_calls.iter().zip(mcp_results.iter()) {
         let output_str = result
             .response_format
-            .compact_tool_output_for_model_context(result.is_error, &result.output);
+            .compact_tool_output_for_model_context(&result.output);
 
         output.push(ResponseOutputItem::FunctionToolCall {
             id: tool_call.id.clone(),

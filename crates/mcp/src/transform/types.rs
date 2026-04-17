@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::debug;
 
-use super::transformer::extract_image_generation_fallback_text;
 use crate::core::config::ResponseFormatConfig;
 
 /// Format for transforming MCP responses to API-specific formats.
@@ -25,25 +25,47 @@ pub enum ResponseFormat {
 
 impl ResponseFormat {
     /// Compact tool output before feeding it back into model context.
-    pub fn compact_tool_output_for_model_context(&self, is_error: bool, output: &Value) -> String {
-        if matches!(self, ResponseFormat::ImageGenerationCall) && is_error {
-            if let Some(text) = extract_image_generation_fallback_text(output) {
-                return text;
+    pub fn compact_tool_output_for_model_context(&self, output: &Value) -> String {
+        let input = output.to_string();
+        let result = if matches!(self, ResponseFormat::ImageGenerationCall) {
+            // image tool outputs are wrapped as content blocks
+            // [{"type":"text","text":"{\"result\":\"<base64>\",\"status\":\"completed\"}"}]
+            // Parse each `text` JSON payload and remove `result` to avoid large base64 in model context.
+            let items = output
+                .as_array()
+                .expect("ImageGenerationCall output must be a wrapped content array");
+            let mut sanitized = items.clone();
+            for item in &mut sanitized {
+                let Some(item_obj) = item.as_object_mut() else {
+                    continue;
+                };
+                if item_obj.remove("result").is_some() {
+                    continue;
+                }
+                let Some(text) = item_obj.get("text").and_then(Value::as_str) else {
+                    continue;
+                };
+                if let Ok(Value::Object(mut obj)) = serde_json::from_str::<Value>(text) {
+                    obj.remove("result");
+                    item_obj.insert(
+                        "text".to_string(),
+                        Value::String(Value::Object(obj).to_string()),
+                    );
+                }
             }
-        }
-        if is_error {
-            match output {
-                Value::String(text) => text.clone(),
-                _ => serde_json::to_string(output).unwrap_or_else(|e| {
-                    format!("{{\"error\": \"Failed to serialize tool output: {e}\"}}")
-                }),
-            }
+            Value::Array(sanitized).to_string()
         } else {
-            match output {
-                Value::String(text) => text.clone(),
-                _ => output.to_string(),
-            }
-        }
+            output.to_string()
+        };
+
+        debug!(
+            response_format = ?self,
+            input = %input,
+            compressed_result = %result,
+            "compact_tool_output_for_model_context"
+        );
+
+        result
     }
 }
 
