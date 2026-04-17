@@ -56,6 +56,10 @@ pub struct GossipService {
     /// the MeshController's central collector. Server-side sync_stream handlers
     /// read from this and apply per-peer watermark filtering.
     current_batch: Option<Arc<parking_lot::RwLock<Arc<RoundBatch>>>>,
+    /// Node-wide MeshKV handle. Owns the stream buffers, subscriber
+    /// registry, and chunk assembler shared with the client-side
+    /// SyncStream handlers.
+    mesh_kv: Option<Arc<crate::kv::MeshKV>>,
 }
 
 impl GossipService {
@@ -282,6 +286,7 @@ impl GossipService {
             partition_detector: None,
             mtls_manager: None,
             current_batch: None,
+            mesh_kv: None,
         }
     }
 
@@ -293,6 +298,15 @@ impl GossipService {
         current_batch: Arc<parking_lot::RwLock<Arc<RoundBatch>>>,
     ) -> Self {
         self.current_batch = Some(current_batch);
+        self
+    }
+
+    /// Attach the node-wide MeshKV handle. Plumbed from the server
+    /// builder so stream buffers, subscribers, and the chunk assembler
+    /// are shared between the client-side (outbound) and server-side
+    /// (inbound) SyncStream handlers.
+    pub fn with_mesh_kv(mut self, mesh_kv: Arc<crate::kv::MeshKV>) -> Self {
+        self.mesh_kv = Some(mesh_kv);
         self
     }
 
@@ -942,6 +956,7 @@ impl Gossip for GossipService {
                                         partition_detector: None,
                                         mtls_manager: None,
                                         current_batch: None,
+                                        mesh_kv: None,
                                     };
                                     let chunks = service.create_snapshot_chunks(store_type, 100); // chunk_size = 100 entries
                                     let total_chunks = chunks.len() as u64;

@@ -51,6 +51,10 @@ pub struct MeshController {
     /// Current round batch, updated once per round by the central collector.
     /// Per-peer senders read and apply their own watermark filtering.
     current_batch: Arc<parking_lot::RwLock<Arc<RoundBatch>>>,
+    /// Node-wide MeshKV handle. Owns the stream buffers, subscriber
+    /// registry, and chunk assembler shared with the server-side
+    /// SyncStream handlers.
+    mesh_kv: Option<Arc<crate::kv::MeshKV>>,
 }
 
 impl MeshController {
@@ -77,7 +81,17 @@ impl MeshController {
             sync_connections: Arc::new(Mutex::new(HashMap::new())),
             central_collector,
             current_batch: Arc::new(parking_lot::RwLock::new(Arc::new(RoundBatch::default()))),
+            mesh_kv: None,
         }
+    }
+
+    /// Attach the node-wide MeshKV handle. Plumbed from the server
+    /// builder so stream buffers, subscribers, and the chunk assembler
+    /// are shared between client-side (outbound) and server-side
+    /// (inbound) SyncStream handlers.
+    pub fn with_mesh_kv(mut self, mesh_kv: Arc<crate::kv::MeshKV>) -> Self {
+        self.mesh_kv = Some(mesh_kv);
+        self
     }
 
     /// Get a handle to the shared RoundBatch. Used by GossipService to

@@ -19,7 +19,7 @@ use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
-use crate::crdt_kv::CrdtOrMap;
+use crate::{chunk_assembler::ChunkAssembler, crdt_kv::CrdtOrMap};
 
 // ============================================================================
 // Type Definitions
@@ -436,6 +436,15 @@ pub struct RoundBatch {
 /// Generic, application-agnostic mesh transport. Provides explicit namespace
 /// handles for CRDT and stream modes. Application code MUST use namespace
 /// handles, not MeshKV directly.
+impl std::fmt::Debug for MeshKV {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeshKV")
+            .field("server_name", &self.server_name)
+            .field("replica_id", &self.replica_id)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct MeshKV {
     /// CRDT store shared across all CRDT namespaces.
     store: Arc<CrdtOrMap>,
@@ -447,6 +456,9 @@ pub struct MeshKV {
     subscriber_registry: Arc<SubscriberRegistry>,
     /// Shared drain registry.
     drain_registry: Arc<DrainRegistry>,
+    /// Receiver-side chunk reassembly buffer shared across all inbound
+    /// SyncStream connections on this node.
+    chunk_assembler: Arc<ChunkAssembler>,
     /// Server name for this node (used to derive replica_id).
     server_name: String,
     /// Replica ID: hash(server_name) as u64.
@@ -463,9 +475,25 @@ impl MeshKV {
             stream_namespaces: RwLock::new(Vec::new()),
             subscriber_registry: Arc::new(SubscriberRegistry::new()),
             drain_registry: Arc::new(DrainRegistry::new()),
+            chunk_assembler: Arc::new(ChunkAssembler::new()),
             server_name,
             replica_id,
         }
+    }
+
+    /// Handle to the node-wide chunk reassembly buffer. Used by the
+    /// gossip receive path to route `StreamBatch` chunks through
+    /// reassembly before firing subscribers.
+    pub fn chunk_assembler(&self) -> Arc<ChunkAssembler> {
+        self.chunk_assembler.clone()
+    }
+
+    /// Fire subscribers whose prefix matches `key`. Used by the gossip
+    /// receive path when a chunked value completes (or a single-chunk
+    /// entry arrives), so handlers can deliver into adapter-owned
+    /// mpsc channels without reaching into internal registries.
+    pub fn notify_subscribers(&self, key: &str, value: Option<Bytes>) {
+        self.subscriber_registry.notify(key, value);
     }
 
     /// Derive replica_id from server_name using blake3 hash truncated to u64.

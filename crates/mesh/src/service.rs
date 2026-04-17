@@ -321,6 +321,7 @@ impl MeshServerBuilder {
         ));
         // Initialize rate-limit hash ring with current membership
         sync_manager.update_rate_limit_membership();
+        let mesh_kv = Arc::new(crate::kv::MeshKV::new(self.self_name.clone()));
         (
             MeshServer {
                 state: self.state.clone(),
@@ -333,6 +334,7 @@ impl MeshServerBuilder {
                 signal_rx,
                 partition_detector: Some(partition_detector.clone()),
                 mtls_manager: self.mtls_manager.clone(),
+                mesh_kv,
             },
             MeshServerHandler {
                 state: self.state.clone(),
@@ -375,6 +377,8 @@ pub struct MeshServer {
     signal_rx: watch::Receiver<bool>,
     partition_detector: Option<Arc<PartitionDetector>>,
     mtls_manager: Option<Arc<MTLSManager>>,
+    /// Node-wide MeshKV handle shared by controller + ping_server.
+    mesh_kv: Arc<crate::kv::MeshKV>,
 }
 
 impl MeshServer {
@@ -385,6 +389,7 @@ impl MeshServer {
             self.advertise_addr,
             &self.self_name,
         )
+        .with_mesh_kv(self.mesh_kv.clone())
     }
 
     fn build_controller(&self) -> MeshController {
@@ -397,6 +402,7 @@ impl MeshServer {
             self.sync_manager.clone(),
             self.mtls_manager.clone(),
         )
+        .with_mesh_kv(self.mesh_kv.clone())
     }
 
     pub async fn start(self) -> Result<()> {
