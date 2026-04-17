@@ -15,7 +15,10 @@
 // items, which makes `#[expect(dead_code)]` unfulfilled under test cfg.
 #![allow(dead_code)]
 
-use std::time::{Duration, Instant};
+use std::{
+    cmp::Ordering,
+    time::{Duration, Instant},
+};
 
 use dashmap::DashMap;
 
@@ -119,8 +122,18 @@ impl ChunkAssembler {
                 .entry(key.to_string())
                 .or_insert_with(|| AssemblyState::new(generation, total));
 
-            if entry.generation != generation || entry.chunks.len() != total as usize {
-                *entry = AssemblyState::new(generation, total);
+            match generation.cmp(&entry.generation) {
+                Ordering::Greater => {
+                    *entry = AssemblyState::new(generation, total);
+                }
+                Ordering::Less => {
+                    return None;
+                }
+                Ordering::Equal => {
+                    if entry.chunks.len() != total as usize {
+                        return None;
+                    }
+                }
             }
 
             entry.received[index as usize] = true;
@@ -256,6 +269,25 @@ mod tests {
         assert!(asm.receive_chunk("k", 6, 0, 2, b"new-0".to_vec()).is_none());
         let out = asm.receive_chunk("k", 6, 1, 2, b"new-1".to_vec()).unwrap();
         assert_eq!(out, b"new-0new-1");
+    }
+
+    #[test]
+    fn test_delayed_older_generation_chunk_is_dropped() {
+        let asm = ChunkAssembler::new();
+        // gen=6 starts and records one chunk.
+        assert!(asm.receive_chunk("k", 6, 0, 2, b"new-0".to_vec()).is_none());
+
+        // A delayed gen=5 chunk arrives — must NOT reset the gen=6 state.
+        assert!(asm
+            .receive_chunk("k", 5, 0, 3, b"stale-0".to_vec())
+            .is_none());
+
+        // Completing gen=6 must still yield the gen=6 payload.
+        let out = asm.receive_chunk("k", 6, 1, 2, b"new-1".to_vec()).unwrap();
+        assert_eq!(
+            out, b"new-0new-1",
+            "stale older chunk must not overwrite newer state"
+        );
     }
 
     #[test]
