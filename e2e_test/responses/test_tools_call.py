@@ -127,6 +127,11 @@ DEEPWIKI_MCP_TOOL = {
     "require_approval": "never",
 }
 
+BRAVE_MCP_TOOL_REQUIRE_APPROVAL_ALWAYS = {
+    **BRAVE_MCP_TOOL,
+    "require_approval": "always",
+}
+
 MCP_TEST_PROMPT = (
     "Search the web for 'Python programming language'. Set count to 1 to "
     "get only one result and return one sentence response."
@@ -203,6 +208,41 @@ def streaming_added_mcp_list_tools_labels(events):
         and event.item is not None
         and event.item.type == "mcp_list_tools"
     ]
+
+
+def assert_mcp_approval_interruption_non_streaming(resp):
+    assert resp.error is None
+    assert resp.id is not None
+    assert resp.status == "completed"
+    assert resp.output is not None
+
+    output_types = [item.type for item in resp.output]
+    assert "mcp_call" in output_types
+    assert "mcp_approval_request" in output_types
+
+    mcp_calls = [item for item in resp.output if item.type == "mcp_call"]
+    deepwiki_calls = [item for item in mcp_calls if item.server_label == "deepwiki"]
+    assert len(deepwiki_calls) > 0, "Expected at least one deepwiki mcp_call item"
+    for mcp_call in deepwiki_calls:
+        assert mcp_call.id is not None
+        assert mcp_call.id.startswith("mcp_")
+        assert mcp_call.name is not None
+        assert mcp_call.arguments is not None
+        assert mcp_call.output is not None
+
+    approval_requests = [item for item in resp.output if item.type == "mcp_approval_request"]
+    brave_approval_requests = [item for item in approval_requests if item.server_label == "brave"]
+    assert len(brave_approval_requests) > 0, "Expected at least one brave mcp_approval_request"
+    for approval_request in brave_approval_requests:
+        assert approval_request.id is not None
+        assert approval_request.id.startswith("mcpr_")
+        assert approval_request.name is not None
+        assert approval_request.arguments is not None
+
+    assert all(item.server_label != "brave" for item in mcp_calls), (
+        "Expected approval-required brave tools to stop at mcp_approval_request "
+        "instead of emitting mcp_call"
+    )
 
 
 def assert_previous_response_id_mcp_binding_behavior_non_streaming(model, api_client):
@@ -517,6 +557,30 @@ class TestToolCallingCloud:
 
         final_text = text_done_events[0].text
         assert len(final_text) > 0, "Final text should not be empty"
+
+    def test_mcp_approval_required_interrupts_and_resumes(self, model, api_client):
+        """Test MCP approval-required workflow eventually supports interruption and resume."""
+
+        time.sleep(2)  # Avoid rate limiting
+
+        resp = api_client.responses.create(
+            model=model,
+            input=(
+                "First use deepwiki's ask_question tool with repoName "
+                "'modelcontextprotocol/specification' to answer: 'According to the 2025-03-26 "
+                "MCP specification, what transport protocols are supported?' in one short "
+                "sentence. Then use brave_web_search to search for 'Python programming "
+                "language' with count set to 1."
+            ),
+            tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL_REQUIRE_APPROVAL_ALWAYS],
+            stream=False,
+            reasoning={"effort": "low"},
+        )
+
+        assert_mcp_approval_interruption_non_streaming(resp)
+
+        # TODO: extend this same test in a follow-up PR with the approval continuation
+        # request and assert the resumed turn emits mcp_call plus the final assistant output.
 
     def test_mcp_multi_server_tool_call(self, model, api_client):
         """Test MCP tool call with multiple MCP servers (non-streaming)."""
