@@ -787,9 +787,10 @@ mod tests {
         stores.rate_limit.update_membership(&["node1".to_string()]);
 
         let test_key = "test_rate_limit_key".to_string();
-        if !stores.rate_limit.is_owner(&test_key) {
-            return;
-        }
+        assert!(
+            stores.rate_limit.is_owner(&test_key),
+            "single-node membership should own every rate-limit shard"
+        );
 
         stores
             .rate_limit
