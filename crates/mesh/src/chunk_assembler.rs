@@ -184,12 +184,16 @@ impl ChunkAssembler {
         // Eviction candidates: only partial assemblies. Completed ones are
         // owned by a concurrent receive_chunk that is about to extract
         // them via remove_if; evicting them here would silently swallow a
-        // fully-assembled payload.
+        // fully-assembled payload. The remove_if predicate additionally
+        // gates on the generation observed at selection time, so a
+        // concurrent generation bump that substitutes a new incomplete
+        // state does not get evicted by mistake.
         while self.assemblies.len() > self.max_concurrent {
-            match self.oldest_incomplete_key() {
-                Some(k) => {
-                    self.assemblies
-                        .remove_if(&k, |_, state| !state.is_complete());
+            match self.oldest_incomplete() {
+                Some((k, gen)) => {
+                    self.assemblies.remove_if(&k, |_, state| {
+                        state.generation == gen && !state.is_complete()
+                    });
                 }
                 None => break,
             }
@@ -199,30 +203,31 @@ impl ChunkAssembler {
             if total <= self.max_bytes {
                 break;
             }
-            match self.largest_incomplete_key() {
-                Some(k) => {
-                    self.assemblies
-                        .remove_if(&k, |_, state| !state.is_complete());
+            match self.largest_incomplete() {
+                Some((k, gen)) => {
+                    self.assemblies.remove_if(&k, |_, state| {
+                        state.generation == gen && !state.is_complete()
+                    });
                 }
                 None => break,
             }
         }
     }
 
-    fn oldest_incomplete_key(&self) -> Option<String> {
+    fn oldest_incomplete(&self) -> Option<(String, u64)> {
         self.assemblies
             .iter()
             .filter(|e| !e.value().is_complete())
             .min_by_key(|e| e.value().created_at)
-            .map(|e| e.key().clone())
+            .map(|e| (e.key().clone(), e.value().generation))
     }
 
-    fn largest_incomplete_key(&self) -> Option<String> {
+    fn largest_incomplete(&self) -> Option<(String, u64)> {
         self.assemblies
             .iter()
             .filter(|e| !e.value().is_complete())
             .max_by_key(|e| e.value().bytes_held())
-            .map(|e| e.key().clone())
+            .map(|e| (e.key().clone(), e.value().generation))
     }
 
     /// Drop partial assemblies older than `timeout`. Collect-then-remove
@@ -504,6 +509,57 @@ mod tests {
         assert!(
             !asm.assemblies.contains_key("partial"),
             "partial (the only incomplete candidate) should be evicted"
+        );
+    }
+
+    #[test]
+    fn test_enforce_bounds_spares_newer_generation_replacement() {
+        // Simulate the race: enforce_bounds selects key "k" with
+        // generation 5, but before the remove_if fires, another thread
+        // resets "k" to generation 6. The generation-gated predicate
+        // must spare the replacement. We emulate the race in-process
+        // by splitting selection from removal via the private helper.
+        let asm = ChunkAssembler::with_limits(1, usize::MAX);
+
+        // Insert a stale generation-5 partial as the eviction target.
+        asm.assemblies.insert(
+            "k".to_string(),
+            AssemblyState {
+                generation: 5,
+                received_count: 0,
+                chunks: vec![None, None],
+                created_at: Instant::now() - Duration::from_secs(60),
+            },
+        );
+
+        // Enforcement picks this key + generation.
+        let (k, gen) = asm.oldest_incomplete().expect("have an incomplete");
+        assert_eq!(k, "k");
+        assert_eq!(gen, 5);
+
+        // Racing thread replaces the state with a fresh generation-6.
+        asm.assemblies.insert(
+            "k".to_string(),
+            AssemblyState {
+                generation: 6,
+                received_count: 0,
+                chunks: vec![None, None],
+                created_at: Instant::now(),
+            },
+        );
+
+        // The delayed remove_if must NOT evict the generation-6 state.
+        asm.assemblies.remove_if(&k, |_, state| {
+            state.generation == gen && !state.is_complete()
+        });
+
+        let survived = asm
+            .assemblies
+            .get("k")
+            .expect("newer-generation replacement must survive");
+        assert_eq!(
+            survived.generation, 6,
+            "evicted stale gen 5 instead of sparing gen 6"
         );
     }
 
