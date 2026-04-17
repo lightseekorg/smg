@@ -32,8 +32,8 @@ pub const DEFAULT_MAX_CONCURRENT_ASSEMBLIES: usize = 20;
 pub const DEFAULT_MAX_ASSEMBLER_BYTES: usize = 512 * 1024 * 1024;
 
 /// Hard cap on the chunk count advertised by a single chunk header.
-/// AssemblyState allocates `received`/`chunks` vectors sized to `total`,
-/// so an unvalidated peer-supplied `total = u32::MAX` would trigger a
+/// AssemblyState allocates a `chunks` vector sized to `total`, so an
+/// unvalidated peer-supplied `total = u32::MAX` would trigger a
 /// multi-GB allocation before the byte-cap enforcer can react. 1024
 /// chunks × 10 MB/chunk is 10 GB of assembled payload — well past the
 /// byte cap, so bounds still catch any realistic traffic, while the
