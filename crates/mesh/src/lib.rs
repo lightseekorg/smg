@@ -7,6 +7,7 @@
 //! - Partition detection and recovery
 
 mod chunk_assembler;
+mod chunking;
 mod collector;
 mod consistent_hash;
 mod controller;
