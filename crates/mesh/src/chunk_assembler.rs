@@ -17,6 +17,7 @@
 
 use std::{
     cmp::Ordering,
+    mem::size_of,
     time::{Duration, Instant},
 };
 
@@ -67,8 +68,14 @@ impl AssemblyState {
         self.received.iter().all(|&r| r)
     }
 
+    /// Total receiver-side memory footprint of this assembly — chunk
+    /// payloads plus the per-slot overhead of the `received` and
+    /// `chunks` vectors. Included in the byte cap so the cap bounds
+    /// real memory, not just payload bytes.
     fn bytes_held(&self) -> usize {
-        self.chunks.iter().flatten().map(|c| c.len()).sum()
+        let payload: usize = self.chunks.iter().flatten().map(|c| c.len()).sum();
+        let overhead = self.chunks.len() * (size_of::<bool>() + size_of::<Option<Vec<u8>>>());
+        payload + overhead
     }
 
     fn assemble(self) -> Vec<u8> {
@@ -361,17 +368,22 @@ mod tests {
 
     #[test]
     fn test_bounds_evict_largest_when_over_byte_cap() {
-        let asm = ChunkAssembler::with_limits(usize::MAX, 100);
-        // Build three partials: k_big is the largest (60 bytes),
-        // k_med is 30, k_small is 20. Total 110 > cap 100.
+        // Use payloads large enough that per-assembly vec overhead
+        // (~25 bytes × total_chunks) is negligible relative to payload.
+        let cap = 10_000;
+        let asm = ChunkAssembler::with_limits(usize::MAX, cap);
         assert!(asm
-            .receive_chunk("k_small", 1, 0, 2, vec![0u8; 20])
+            .receive_chunk("k_small", 1, 0, 2, vec![0u8; 2_000])
             .is_none());
-        assert!(asm.receive_chunk("k_med", 1, 0, 2, vec![0u8; 30]).is_none());
-        assert!(asm.receive_chunk("k_big", 1, 0, 2, vec![0u8; 60]).is_none());
+        assert!(asm
+            .receive_chunk("k_med", 1, 0, 2, vec![0u8; 3_000])
+            .is_none());
+        assert!(asm
+            .receive_chunk("k_big", 1, 0, 2, vec![0u8; 6_000])
+            .is_none());
 
         assert!(
-            asm.total_bytes() <= 100,
+            asm.total_bytes() <= cap,
             "byte cap enforced, total = {}",
             asm.total_bytes()
         );
