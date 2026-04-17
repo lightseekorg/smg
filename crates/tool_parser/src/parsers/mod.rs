@@ -35,6 +35,4 @@ pub(crate) use passthrough::PassthroughParser;
 pub use pythonic::PythonicParser;
 pub use qwen::QwenParser;
 pub use qwen_xml::QwenXmlParser;
-#[deprecated(note = "Renamed to QwenXmlParser")]
-pub use qwen_xml::QwenXmlParser as QwenCoderParser;
 pub use step3::Step3Parser;
