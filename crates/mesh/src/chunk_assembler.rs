@@ -174,10 +174,15 @@ impl ChunkAssembler {
     /// after each non-completing receive; the completing path removes its
     /// own entry before returning, so no enforcement is needed there.
     fn enforce_bounds(&self) {
+        // Eviction candidates: only partial assemblies. Completed ones are
+        // owned by a concurrent receive_chunk that is about to extract
+        // them via remove_if; evicting them here would silently swallow a
+        // fully-assembled payload.
         while self.assemblies.len() > self.max_concurrent {
-            match self.oldest_key() {
+            match self.oldest_incomplete_key() {
                 Some(k) => {
-                    self.assemblies.remove(&k);
+                    self.assemblies
+                        .remove_if(&k, |_, state| !state.is_complete());
                 }
                 None => break,
             }
@@ -187,25 +192,28 @@ impl ChunkAssembler {
             if total <= self.max_bytes {
                 break;
             }
-            match self.largest_key() {
+            match self.largest_incomplete_key() {
                 Some(k) => {
-                    self.assemblies.remove(&k);
+                    self.assemblies
+                        .remove_if(&k, |_, state| !state.is_complete());
                 }
                 None => break,
             }
         }
     }
 
-    fn oldest_key(&self) -> Option<String> {
+    fn oldest_incomplete_key(&self) -> Option<String> {
         self.assemblies
             .iter()
+            .filter(|e| !e.value().is_complete())
             .min_by_key(|e| e.value().created_at)
             .map(|e| e.key().clone())
     }
 
-    fn largest_key(&self) -> Option<String> {
+    fn largest_incomplete_key(&self) -> Option<String> {
         self.assemblies
             .iter()
+            .filter(|e| !e.value().is_complete())
             .max_by_key(|e| e.value().bytes_held())
             .map(|e| e.key().clone())
     }
@@ -390,6 +398,39 @@ mod tests {
         assert!(
             !asm.assemblies.contains_key("k_big"),
             "largest partial (k_big) should be evicted"
+        );
+    }
+
+    #[test]
+    fn test_enforce_bounds_skips_complete_assemblies() {
+        // Simulate the race window: a just-completed assembly sits in
+        // the map (before the owning receive_chunk extracts it), and a
+        // concurrent receive_chunk on a different key triggers
+        // enforce_bounds. The complete one must survive.
+        let asm = ChunkAssembler::with_limits(1, usize::MAX);
+        let old = Instant::now() - Duration::from_secs(60);
+        asm.assemblies.insert(
+            "complete".to_string(),
+            AssemblyState {
+                generation: 1,
+                received: vec![true, true],
+                chunks: vec![Some(vec![0u8; 10]), Some(vec![0u8; 10])],
+                created_at: old,
+            },
+        );
+        // Add a partial — this is over the cap=1, so enforce_bounds runs
+        // (via the !completed branch of receive_chunk).
+        assert!(asm
+            .receive_chunk("partial", 1, 0, 2, vec![0u8; 10])
+            .is_none());
+
+        assert!(
+            asm.assemblies.contains_key("complete"),
+            "complete assembly must not be evicted"
+        );
+        assert!(
+            !asm.assemblies.contains_key("partial"),
+            "partial (the only incomplete candidate) should be evicted"
         );
     }
 
