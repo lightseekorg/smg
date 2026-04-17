@@ -183,43 +183,38 @@ impl ChunkAssembler {
     fn enforce_bounds(&self) {
         // Cap checks and eviction target only incomplete assemblies;
         // transiently-complete entries awaiting remove_if must not count.
-        loop {
-            let incomplete = self
-                .assemblies
-                .iter()
-                .filter(|e| !e.value().is_complete())
-                .count();
-            if incomplete <= self.max_concurrent {
+        while self.incomplete_count() > self.max_concurrent {
+            let Some((k, gen)) = self.oldest_incomplete() else {
                 break;
-            }
-            match self.oldest_incomplete() {
-                Some((k, gen)) => {
-                    self.assemblies.remove_if(&k, |_, state| {
-                        state.generation == gen && !state.is_complete()
-                    });
-                }
-                None => break,
-            }
+            };
+            self.try_evict_stale(&k, gen);
         }
-        loop {
-            let total: usize = self
-                .assemblies
-                .iter()
-                .filter(|e| !e.value().is_complete())
-                .map(|e| e.value().bytes_held())
-                .sum();
-            if total <= self.max_bytes {
+        while self.incomplete_bytes() > self.max_bytes {
+            let Some((k, gen)) = self.largest_incomplete() else {
                 break;
-            }
-            match self.largest_incomplete() {
-                Some((k, gen)) => {
-                    self.assemblies.remove_if(&k, |_, state| {
-                        state.generation == gen && !state.is_complete()
-                    });
-                }
-                None => break,
-            }
+            };
+            self.try_evict_stale(&k, gen);
         }
+    }
+
+    fn incomplete_count(&self) -> usize {
+        self.assemblies
+            .iter()
+            .filter(|e| !e.value().is_complete())
+            .count()
+    }
+
+    fn incomplete_bytes(&self) -> usize {
+        self.assemblies
+            .iter()
+            .filter(|e| !e.value().is_complete())
+            .map(|e| e.value().bytes_held())
+            .sum()
+    }
+
+    fn try_evict_stale(&self, key: &str, gen: u64) {
+        self.assemblies
+            .remove_if(key, |_, s| s.generation == gen && !s.is_complete());
     }
 
     fn oldest_incomplete(&self) -> Option<(String, u64)> {
