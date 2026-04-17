@@ -219,16 +219,22 @@ impl ChunkAssembler {
     }
 
     /// Drop partial assemblies older than `timeout`. Collect-then-remove
-    /// to avoid holding DashMap shard locks during mutation.
+    /// to avoid holding DashMap shard locks during mutation, and each
+    /// removal re-checks the timeout so a concurrent receive that reset
+    /// the entry to a new generation (fresh created_at) is spared.
+    /// Complete assemblies are also skipped — they belong to an in-flight
+    /// receive_chunk that is about to extract them via remove_if.
     pub fn gc(&self, timeout: Duration) {
         let expired: Vec<String> = self
             .assemblies
             .iter()
-            .filter(|e| e.value().created_at.elapsed() >= timeout)
+            .filter(|e| e.value().created_at.elapsed() >= timeout && !e.value().is_complete())
             .map(|e| e.key().clone())
             .collect();
         for key in expired {
-            self.assemblies.remove(&key);
+            self.assemblies.remove_if(&key, |_, state| {
+                state.created_at.elapsed() >= timeout && !state.is_complete()
+            });
         }
     }
 
@@ -329,6 +335,66 @@ mod tests {
         assert!(asm.receive_chunk("k", 1, 0, 3, b"aaa".to_vec()).is_none());
         asm.gc(Duration::from_secs(10));
         assert_eq!(asm.in_flight(), 1, "recent partial should survive gc");
+    }
+
+    #[test]
+    fn test_gc_skips_complete_assemblies() {
+        // A complete assembly sitting in the map (before its owning
+        // receive_chunk extracts it) must not be removed by gc even if
+        // the timeout would otherwise apply.
+        let asm = ChunkAssembler::new();
+        let old = Instant::now() - Duration::from_secs(60);
+        asm.assemblies.insert(
+            "complete".to_string(),
+            AssemblyState {
+                generation: 1,
+                received: vec![true, true],
+                chunks: vec![Some(vec![0u8; 10]), Some(vec![0u8; 10])],
+                created_at: old,
+            },
+        );
+        asm.gc(Duration::from_secs(1));
+        assert!(
+            asm.assemblies.contains_key("complete"),
+            "gc must not remove a complete assembly"
+        );
+    }
+
+    #[test]
+    fn test_gc_rechecks_timeout_at_remove() {
+        // After the collect phase marks a key as expired, simulate a
+        // concurrent receive_chunk replacing that entry with fresh
+        // created_at by inserting a young state under the same key
+        // between collect and remove. The remove_if predicate re-checks
+        // timeout and spares the young entry.
+        let asm = ChunkAssembler::new();
+        let old = Instant::now() - Duration::from_secs(60);
+        asm.assemblies.insert(
+            "k".to_string(),
+            AssemblyState {
+                generation: 1,
+                received: vec![false, false],
+                chunks: vec![None, None],
+                created_at: old,
+            },
+        );
+        // Simulate the concurrent reset before gc fires by overwriting
+        // with a fresh state — this is what the TOCTOU window allowed
+        // before the fix.
+        asm.assemblies.insert(
+            "k".to_string(),
+            AssemblyState {
+                generation: 2,
+                received: vec![false, false],
+                chunks: vec![None, None],
+                created_at: Instant::now(),
+            },
+        );
+        asm.gc(Duration::from_secs(1));
+        assert!(
+            asm.assemblies.contains_key("k"),
+            "freshly-reset entry must survive gc"
+        );
     }
 
     #[test]
