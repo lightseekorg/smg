@@ -138,6 +138,7 @@ pub struct SseDecoder {
 }
 
 /// A parsed SSE frame with owned data.
+#[derive(Debug)]
 pub struct SseFrame {
     /// The `event:` field value, if present.
     pub event_type: Option<String>,
