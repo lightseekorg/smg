@@ -245,14 +245,21 @@ impl ChunkAssembler {
     /// Complete assemblies are also skipped — they belong to an in-flight
     /// receive_chunk that is about to extract them via remove_if.
     pub fn gc(&self, timeout: Duration) {
-        let expired: Vec<String> = self
-            .assemblies
+        let expired = self.collect_expired(timeout);
+        self.remove_stale(&expired, timeout);
+    }
+
+    fn collect_expired(&self, timeout: Duration) -> Vec<String> {
+        self.assemblies
             .iter()
             .filter(|e| e.value().created_at.elapsed() >= timeout && !e.value().is_complete())
             .map(|e| e.key().clone())
-            .collect();
-        for key in expired {
-            self.assemblies.remove_if(&key, |_, state| {
+            .collect()
+    }
+
+    fn remove_stale(&self, keys: &[String], timeout: Duration) {
+        for key in keys {
+            self.assemblies.remove_if(key, |_, state| {
                 state.created_at.elapsed() >= timeout && !state.is_complete()
             });
         }
@@ -382,25 +389,28 @@ mod tests {
 
     #[test]
     fn test_gc_rechecks_timeout_at_remove() {
-        // After the collect phase marks a key as expired, simulate a
-        // concurrent receive_chunk replacing that entry with fresh
-        // created_at by inserting a young state under the same key
-        // between collect and remove. The remove_if predicate re-checks
-        // timeout and spares the young entry.
+        // Exercise the real collect→remove race window by driving the
+        // two phases manually. Overwrite the entry between phases; the
+        // remove_if timeout re-check must spare the fresh state.
         let asm = ChunkAssembler::new();
-        let old = Instant::now() - Duration::from_secs(60);
+        let timeout = Duration::from_secs(1);
+
         asm.assemblies.insert(
             "k".to_string(),
             AssemblyState {
                 generation: 1,
                 received_count: 0,
                 chunks: vec![None, None],
-                created_at: old,
+                created_at: Instant::now() - Duration::from_secs(60),
             },
         );
-        // Simulate the concurrent reset before gc fires by overwriting
-        // with a fresh state — this is what the TOCTOU window allowed
-        // before the fix.
+
+        // Phase 1: collect sees the expired entry.
+        let expired = asm.collect_expired(timeout);
+        assert_eq!(expired, vec!["k".to_string()]);
+
+        // Race: a concurrent receive_chunk resets "k" to a fresh
+        // generation before gc's remove phase fires.
         asm.assemblies.insert(
             "k".to_string(),
             AssemblyState {
@@ -410,10 +420,16 @@ mod tests {
                 created_at: Instant::now(),
             },
         );
-        asm.gc(Duration::from_secs(1));
-        assert!(
-            asm.assemblies.contains_key("k"),
-            "freshly-reset entry must survive gc"
+
+        // Phase 2: remove_stale re-checks the timeout predicate; the
+        // fresh entry's created_at is <1s ago, so the predicate fails
+        // and the fresh state is spared.
+        asm.remove_stale(&expired, timeout);
+
+        let survived = asm.assemblies.get("k").expect("fresh entry must survive");
+        assert_eq!(
+            survived.generation, 2,
+            "gc evicted the fresh replacement instead of sparing it"
         );
     }
 
