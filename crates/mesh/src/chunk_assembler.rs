@@ -71,11 +71,11 @@ impl AssemblyState {
         self.chunks.iter().flatten().map(|c| c.len()).sum()
     }
 
-    fn assemble(&self) -> Vec<u8> {
-        let total_size: usize = self.bytes_held();
+    fn assemble(self) -> Vec<u8> {
+        let total_size: usize = self.chunks.iter().flatten().map(|c| c.len()).sum();
         let mut out = Vec::with_capacity(total_size);
-        for chunk in self.chunks.iter().flatten() {
-            out.extend_from_slice(chunk);
+        for chunk in self.chunks.into_iter().flatten() {
+            out.extend_from_slice(&chunk);
         }
         out
     }
@@ -116,7 +116,10 @@ impl ChunkAssembler {
             return None;
         }
 
-        let assembled = {
+        // Record the chunk under the shard lock. Assembly happens outside
+        // the guard so the lock is not held during the allocation+copy of
+        // the full reassembled buffer.
+        let completed = {
             let mut entry = self
                 .assemblies
                 .entry(key.to_string())
@@ -139,19 +142,23 @@ impl ChunkAssembler {
             entry.received[index as usize] = true;
             entry.chunks[index as usize] = Some(data);
 
-            if entry.is_complete() {
-                Some(entry.assemble())
-            } else {
-                None
-            }
+            entry.is_complete()
         };
 
-        if assembled.is_some() {
-            self.assemblies.remove(key);
-        } else {
+        if !completed {
             self.enforce_bounds();
+            return None;
         }
-        assembled
+
+        // Atomically take ownership only if the state is still our
+        // generation and still complete. If another thread has moved on
+        // (newer generation reset the state after our chunk landed), we
+        // return None — the newer generation is what matters now.
+        self.assemblies
+            .remove_if(key, |_, state| {
+                state.generation == generation && state.is_complete()
+            })
+            .map(|(_, state)| state.assemble())
     }
 
     /// Evict partials until the receiver-side memory bounds are satisfied.
