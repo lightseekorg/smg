@@ -48,7 +48,11 @@ pub struct ChunkAssembler {
 
 struct AssemblyState {
     generation: u64,
-    received: Vec<bool>,
+    /// Count of distinct chunk indices recorded so far. Incremented only
+    /// when a previously-empty slot is filled, so repeated receives of
+    /// the same (generation, index) don't over-count. Completion is
+    /// `received_count == chunks.len()`.
+    received_count: u32,
     chunks: Vec<Option<Vec<u8>>>,
     created_at: Instant,
 }
@@ -58,23 +62,23 @@ impl AssemblyState {
         let n = total as usize;
         Self {
             generation,
-            received: vec![false; n],
+            received_count: 0,
             chunks: vec![None; n],
             created_at: Instant::now(),
         }
     }
 
     fn is_complete(&self) -> bool {
-        self.received.iter().all(|&r| r)
+        self.received_count as usize == self.chunks.len()
     }
 
     /// Total receiver-side memory footprint of this assembly — chunk
-    /// payloads plus the per-slot overhead of the `received` and
-    /// `chunks` vectors. Included in the byte cap so the cap bounds
-    /// real memory, not just payload bytes.
+    /// payloads plus the per-slot overhead of the `chunks` vector.
+    /// Included in the byte cap so the cap bounds real memory, not
+    /// just payload bytes.
     fn bytes_held(&self) -> usize {
         let payload: usize = self.chunks.iter().flatten().map(|c| c.len()).sum();
-        let overhead = self.chunks.len() * (size_of::<bool>() + size_of::<Option<Vec<u8>>>());
+        let overhead = self.chunks.len() * size_of::<Option<Vec<u8>>>();
         payload + overhead
     }
 
@@ -147,7 +151,9 @@ impl ChunkAssembler {
                 }
             }
 
-            entry.received[index as usize] = true;
+            if entry.chunks[index as usize].is_none() {
+                entry.received_count += 1;
+            }
             entry.chunks[index as usize] = Some(data);
 
             entry.is_complete()
@@ -349,7 +355,7 @@ mod tests {
             "complete".to_string(),
             AssemblyState {
                 generation: 1,
-                received: vec![true, true],
+                received_count: 2,
                 chunks: vec![Some(vec![0u8; 10]), Some(vec![0u8; 10])],
                 created_at: old,
             },
@@ -374,7 +380,7 @@ mod tests {
             "k".to_string(),
             AssemblyState {
                 generation: 1,
-                received: vec![false, false],
+                received_count: 0,
                 chunks: vec![None, None],
                 created_at: old,
             },
@@ -386,7 +392,7 @@ mod tests {
             "k".to_string(),
             AssemblyState {
                 generation: 2,
-                received: vec![false, false],
+                received_count: 0,
                 chunks: vec![None, None],
                 created_at: Instant::now(),
             },
@@ -480,7 +486,7 @@ mod tests {
             "complete".to_string(),
             AssemblyState {
                 generation: 1,
-                received: vec![true, true],
+                received_count: 2,
                 chunks: vec![Some(vec![0u8; 10]), Some(vec![0u8; 10])],
                 created_at: old,
             },
