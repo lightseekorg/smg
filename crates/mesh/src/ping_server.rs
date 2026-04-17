@@ -18,7 +18,9 @@ use tracing as log;
 use tracing::instrument;
 
 use super::{
-    chunking::{build_stream_batches, chunk_value, DEFAULT_MAX_CHUNKS_PER_ROUND},
+    chunking::{
+        build_stream_batches, chunk_value, dispatch_stream_batch, DEFAULT_MAX_CHUNKS_PER_ROUND,
+    },
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
     metrics::{
         record_ack, record_batch_sent, record_nack, record_peer_reconnect, record_snapshot_bytes,
@@ -468,6 +470,7 @@ impl Gossip for GossipService {
         let state = self.state.clone();
         let stores = self.stores.clone();
         let sync_manager = self.sync_manager.clone();
+        let mesh_kv = self.mesh_kv.clone();
 
         // Create output stream with flow control
         const CHANNEL_CAPACITY: usize = 128;
@@ -1334,12 +1337,13 @@ impl Gossip for GossipService {
                                 }
                             }
                             StreamMessageType::StreamBatch => {
-                                // Wiring lands in Step 3.5.
-                                log::trace!(
-                                    "Received StreamBatch from {} (seq: {}) — handler not yet wired",
-                                    peer_id,
-                                    msg.sequence
-                                );
+                                if let (
+                                    Some(gossip::stream_message::Payload::StreamBatch(batch)),
+                                    Some(mesh_kv),
+                                ) = (&msg.payload, &mesh_kv)
+                                {
+                                    dispatch_stream_batch(mesh_kv, batch.entries.iter());
+                                }
                             }
                             _ => {
                                 log::warn!(

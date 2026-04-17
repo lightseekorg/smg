@@ -132,7 +132,15 @@ impl Drop for DrainHandle {
 // ============================================================================
 
 /// A single subscription event: (key, value). `None` value means deletion.
-type SubscriptionEvent = (String, Option<Bytes>);
+///
+/// Values are a `Vec<Bytes>` — a list of zero-copy buffer fragments. For
+/// single-value writes this is a 1-element Vec; for reassembled chunked
+/// stream receives it is an N-element Vec where each element wraps one
+/// chunk's original allocation. Subscribers that need a contiguous buffer
+/// can concat; those that fan out further can clone the Bytes cheaply.
+/// The fragmented shape avoids the 2× peak a contiguous reassembly would
+/// impose when a near-cap multi-chunk value completes.
+type SubscriptionEvent = (String, Option<Vec<Bytes>>);
 
 /// Tracks all active subscriptions by prefix.
 struct SubscriberRegistry {
@@ -157,7 +165,7 @@ impl SubscriberRegistry {
     /// Notify all subscribers whose prefix matches the given key.
     /// Uses try_send to never block the gossip loop.
     /// `value` is `Some(bytes)` for puts, `None` for deletes.
-    fn notify(&self, key: &str, value: Option<Bytes>) {
+    fn notify(&self, key: &str, value: Option<Vec<Bytes>>) {
         for entry in &self.subscribers {
             let prefix = entry.key();
             if key.starts_with(prefix.as_str()) {
@@ -267,7 +275,7 @@ impl CrdtNamespace {
         );
         self.store.insert(key.to_string(), value.clone());
         self.subscriber_registry
-            .notify(key, Some(Bytes::from(value)));
+            .notify(key, Some(vec![Bytes::from(value)]));
     }
 
     /// Get the current value for a key, or None if not present or tombstoned.
@@ -492,7 +500,7 @@ impl MeshKV {
     /// receive path when a chunked value completes (or a single-chunk
     /// entry arrives), so handlers can deliver into adapter-owned
     /// mpsc channels without reaching into internal registries.
-    pub fn notify_subscribers(&self, key: &str, value: Option<Bytes>) {
+    pub fn notify_subscribers(&self, key: &str, value: Option<Vec<Bytes>>) {
         self.subscriber_registry.notify(key, value);
     }
 
@@ -750,7 +758,9 @@ mod tests {
             .expect("channel closed");
 
         assert_eq!(key, "worker:7");
-        assert_eq!(value.as_deref(), Some(b"healthy".as_slice()));
+        let frags = value.expect("put yields Some");
+        assert_eq!(frags.len(), 1, "single local write is a single fragment");
+        assert_eq!(frags[0].as_ref(), b"healthy");
     }
 
     #[tokio::test]

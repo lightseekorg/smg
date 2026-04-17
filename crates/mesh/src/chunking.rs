@@ -10,11 +10,12 @@
 //! single-chunk fast path. A debug assertion in [`chunk_value`] catches
 //! any regression that would route a tree page through the split path.
 
-#![allow(dead_code)]
-
 use bytes::Bytes;
 
-use crate::service::gossip::{StreamBatch, StreamEntry};
+use crate::{
+    kv::MeshKV,
+    service::gossip::{StreamBatch, StreamEntry},
+};
 
 /// Per-round cap on chunks emitted across all stream entries. Prevents
 /// a burst of large values from monopolising the gossip channel.
@@ -72,6 +73,31 @@ pub fn chunk_value(
         });
     }
     entries
+}
+
+/// Receiver-side dispatch for `StreamBatch` entries. Single-chunk
+/// entries (`total_chunks == 1`) fire subscribers directly — no state
+/// in the chunk assembler. Multi-chunk entries route through the
+/// assembler and fire subscribers only on full reassembly. Fires go
+/// through `MeshKV::notify_subscribers` with a fragmented `Vec<Bytes>`
+/// payload so fan-out is zero-copy.
+pub fn dispatch_stream_batch<'a>(
+    mesh_kv: &MeshKV,
+    entries: impl IntoIterator<Item = &'a StreamEntry>,
+) {
+    for entry in entries {
+        if entry.total_chunks == 1 {
+            mesh_kv.notify_subscribers(&entry.key, Some(vec![Bytes::from(entry.data.clone())]));
+        } else if let Some(fragments) = mesh_kv.chunk_assembler().receive_chunk(
+            &entry.key,
+            entry.generation,
+            entry.chunk_index,
+            entry.total_chunks,
+            entry.data.clone(),
+        ) {
+            mesh_kv.notify_subscribers(&entry.key, Some(fragments));
+        }
+    }
 }
 
 /// Pack `StreamEntry`s into `StreamBatch`es respecting a per-round

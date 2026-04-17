@@ -10,17 +10,13 @@
 //! is GC'd after `timeout`, and the application regenerates the value
 //! on its next retry cycle. No retries or watermarks.
 
-// Items are wired into the gossip receive path in a follow-up commit in
-// this Step 3 PR. Allow (not expect) because tests already exercise the
-// items, which makes `#[expect(dead_code)]` unfulfilled under test cfg.
-#![allow(dead_code)]
-
 use std::{
     cmp::Ordering,
     mem::size_of,
     time::{Duration, Instant},
 };
 
+use bytes::Bytes;
 use dashmap::DashMap;
 
 /// Max concurrent in-flight assemblies. Prevents a peer from flooding
@@ -82,13 +78,14 @@ impl AssemblyState {
         payload + overhead
     }
 
-    fn assemble(self) -> Vec<u8> {
-        let total_size: usize = self.chunks.iter().flatten().map(|c| c.len()).sum();
-        let mut out = Vec::with_capacity(total_size);
-        for chunk in self.chunks.into_iter().flatten() {
-            out.extend_from_slice(&chunk);
-        }
-        out
+    /// Return the assembled chunks as a fragmented buffer: each chunk
+    /// is zero-copy wrapped in a `Bytes` (no contiguous memcpy of the
+    /// full payload). Avoids the ~2× peak that a `Vec<u8>` concat path
+    /// imposed — the byte cap now bounds real memory, not payload-plus-
+    /// contiguous-copy. Subscribers that need contiguous bytes can
+    /// concat at their own discretion.
+    fn assemble(self) -> Vec<Bytes> {
+        self.chunks.into_iter().flatten().map(Bytes::from).collect()
     }
 }
 
@@ -123,7 +120,7 @@ impl ChunkAssembler {
         index: u32,
         total: u32,
         data: Vec<u8>,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<Vec<Bytes>> {
         if total == 0 || total > MAX_TOTAL_CHUNKS || index >= total {
             return None;
         }
@@ -283,11 +280,18 @@ mod tests {
 
     use super::*;
 
+    /// Flatten a fragmented assembly result into a contiguous Vec<u8>
+    /// for test assertions only. Production callers handle fragments
+    /// directly (zero-copy fan-out).
+    fn flatten(bs: &[Bytes]) -> Vec<u8> {
+        bs.iter().flat_map(|b| b.iter().copied()).collect()
+    }
+
     #[test]
     fn test_single_chunk_round_trip() {
         let asm = ChunkAssembler::new();
-        let out = asm.receive_chunk("k", 1, 0, 1, b"hello".to_vec());
-        assert_eq!(out.as_deref(), Some(b"hello".as_slice()));
+        let out = asm.receive_chunk("k", 1, 0, 1, b"hello".to_vec()).unwrap();
+        assert_eq!(flatten(&out), b"hello");
         assert_eq!(asm.in_flight(), 0, "completed assembly should be removed");
     }
 
@@ -297,7 +301,7 @@ mod tests {
         assert!(asm.receive_chunk("k", 1, 0, 3, b"aaa".to_vec()).is_none());
         assert!(asm.receive_chunk("k", 1, 1, 3, b"bbb".to_vec()).is_none());
         let out = asm.receive_chunk("k", 1, 2, 3, b"ccc".to_vec()).unwrap();
-        assert_eq!(out, b"aaabbbccc");
+        assert_eq!(flatten(&out), b"aaabbbccc");
         assert_eq!(asm.in_flight(), 0);
     }
 
@@ -307,7 +311,11 @@ mod tests {
         assert!(asm.receive_chunk("k", 1, 2, 3, b"ccc".to_vec()).is_none());
         assert!(asm.receive_chunk("k", 1, 0, 3, b"aaa".to_vec()).is_none());
         let out = asm.receive_chunk("k", 1, 1, 3, b"bbb".to_vec()).unwrap();
-        assert_eq!(out, b"aaabbbccc", "chunks must assemble in index order");
+        assert_eq!(
+            flatten(&out),
+            b"aaabbbccc",
+            "chunks must assemble in index order"
+        );
     }
 
     #[test]
@@ -318,7 +326,7 @@ mod tests {
 
         assert!(asm.receive_chunk("k", 6, 0, 2, b"new-0".to_vec()).is_none());
         let out = asm.receive_chunk("k", 6, 1, 2, b"new-1".to_vec()).unwrap();
-        assert_eq!(out, b"new-0new-1");
+        assert_eq!(flatten(&out), b"new-0new-1");
     }
 
     #[test]
@@ -335,7 +343,8 @@ mod tests {
         // Completing gen=6 must still yield the gen=6 payload.
         let out = asm.receive_chunk("k", 6, 1, 2, b"new-1".to_vec()).unwrap();
         assert_eq!(
-            out, b"new-0new-1",
+            flatten(&out),
+            b"new-0new-1",
             "stale older chunk must not overwrite newer state"
         );
     }
@@ -667,7 +676,8 @@ mod tests {
         let out = asm
             .receive_chunk("k", 1, 0, 1, vec![0u8; 500])
             .expect("single-chunk completion returns bytes");
-        assert_eq!(out.len(), 500);
+        assert_eq!(out.len(), 1, "single-chunk result is one Bytes fragment");
+        assert_eq!(out[0].len(), 500);
         assert_eq!(asm.in_flight(), 0);
     }
 
@@ -679,11 +689,11 @@ mod tests {
         assert_eq!(asm.in_flight(), 2);
 
         let a = asm.receive_chunk("a", 1, 1, 2, b"a1".to_vec()).unwrap();
-        assert_eq!(a, b"a0a1");
+        assert_eq!(flatten(&a), b"a0a1");
         assert_eq!(asm.in_flight(), 1, "completing a should not touch b");
 
         let b = asm.receive_chunk("b", 1, 1, 2, b"b1".to_vec()).unwrap();
-        assert_eq!(b, b"b0b1");
+        assert_eq!(flatten(&b), b"b0b1");
         assert_eq!(asm.in_flight(), 0);
     }
 }

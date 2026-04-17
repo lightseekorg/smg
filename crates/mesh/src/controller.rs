@@ -31,7 +31,9 @@ use super::{
     sync::MeshSyncManager,
 };
 use crate::{
-    chunking::{build_stream_batches, chunk_value, DEFAULT_MAX_CHUNKS_PER_ROUND},
+    chunking::{
+        build_stream_batches, chunk_value, dispatch_stream_batch, DEFAULT_MAX_CHUNKS_PER_ROUND,
+    },
     collector::{CentralCollector, PeerWatermark, RoundBatch},
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
     metrics,
@@ -174,6 +176,17 @@ impl MeshController {
             // This keeps the periodic structure snapshot fresh.
             if cnt.is_multiple_of(10) {
                 self.sync_manager.checkpoint_tree_states();
+            }
+
+            // Chunk assembler GC: every 5 rounds (~5s), drop partial
+            // assemblies older than 30s per spec §4.4. Partial chunks
+            // the receiver has been holding for a full assembly timeout
+            // are assumed lost; the sender will re-publish on its own
+            // retry cycle with a fresh generation.
+            if cnt.is_multiple_of(5) {
+                if let Some(mesh_kv) = &self.mesh_kv {
+                    mesh_kv.chunk_assembler().gc(Duration::from_secs(30));
+                }
             }
 
             // Periodic GC: clean up tombstoned CRDT metadata every 60 rounds (~60s)
@@ -482,6 +495,7 @@ impl MeshController {
         let sync_connections = self.sync_connections.clone();
         let current_batch = self.current_batch.clone();
         let current_stream_batch = self.current_stream_batch.clone();
+        let mesh_kv = self.mesh_kv.clone();
 
         // Log connection lifecycle: spawn
         log::debug!(
@@ -1120,12 +1134,13 @@ impl MeshController {
                                     );
                                 }
                                 StreamMessageType::StreamBatch => {
-                                    // Wiring lands in Step 3.5.
-                                    log::trace!(
-                                        "Received StreamBatch from {} (seq: {}) — handler not yet wired",
-                                        peer_name,
-                                        msg.sequence
-                                    );
+                                    if let (
+                                        Some(StreamPayload::StreamBatch(batch)),
+                                        Some(mesh_kv),
+                                    ) = (&msg.payload, &mesh_kv)
+                                    {
+                                        dispatch_stream_batch(mesh_kv, batch.entries.iter());
+                                    }
                                 }
                             }
                         }
