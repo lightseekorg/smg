@@ -17,11 +17,13 @@
 // dead server is the correct way to fail.
 #![expect(clippy::expect_used)]
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
-use std::time::Duration;
 
 use futures::StreamExt;
 use smg_grpc_client::{
