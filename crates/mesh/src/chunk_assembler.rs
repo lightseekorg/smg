@@ -27,6 +27,15 @@ pub const DEFAULT_MAX_CONCURRENT_ASSEMBLIES: usize = 20;
 /// receiver-side memory independently of any sender-side payload choice.
 pub const DEFAULT_MAX_ASSEMBLER_BYTES: usize = 512 * 1024 * 1024;
 
+/// Hard cap on the chunk count advertised by a single chunk header.
+/// AssemblyState allocates `received`/`chunks` vectors sized to `total`,
+/// so an unvalidated peer-supplied `total = u32::MAX` would trigger a
+/// multi-GB allocation before the byte-cap enforcer can react. 1024
+/// chunks × 10 MB/chunk is 10 GB of assembled payload — well past the
+/// byte cap, so bounds still catch any realistic traffic, while the
+/// per-assembly vector overhead stays under ~25 KB.
+pub const MAX_TOTAL_CHUNKS: u32 = 1024;
+
 pub struct ChunkAssembler {
     assemblies: DashMap<String, AssemblyState>,
     max_concurrent: usize,
@@ -90,8 +99,8 @@ impl ChunkAssembler {
     ///
     /// A chunk whose `generation` differs from the in-flight state resets
     /// the assembly — older-generation partials are discarded in favour
-    /// of the new version. Malformed chunks (total == 0, index >= total)
-    /// are dropped silently.
+    /// of the new version. Malformed chunks are dropped silently:
+    /// `total == 0`, `total > MAX_TOTAL_CHUNKS`, or `index >= total`.
     pub fn receive_chunk(
         &self,
         key: &str,
@@ -100,7 +109,7 @@ impl ChunkAssembler {
         total: u32,
         data: Vec<u8>,
     ) -> Option<Vec<u8>> {
-        if total == 0 || index >= total {
+        if total == 0 || total > MAX_TOTAL_CHUNKS || index >= total {
             return None;
         }
 
@@ -274,6 +283,24 @@ mod tests {
         assert!(asm.receive_chunk("k", 1, 0, 0, b"x".to_vec()).is_none());
         assert!(asm.receive_chunk("k", 1, 5, 3, b"x".to_vec()).is_none());
         assert_eq!(asm.in_flight(), 0);
+    }
+
+    #[test]
+    fn test_oversized_total_chunks_is_rejected() {
+        let asm = ChunkAssembler::new();
+        // total = u32::MAX would trigger multi-GB allocation if admitted.
+        assert!(asm
+            .receive_chunk("k", 1, 0, u32::MAX, b"x".to_vec())
+            .is_none());
+        // Just past the cap is also rejected.
+        assert!(asm
+            .receive_chunk("k", 1, 0, MAX_TOTAL_CHUNKS + 1, b"x".to_vec())
+            .is_none());
+        assert_eq!(
+            asm.in_flight(),
+            0,
+            "oversized total must not allocate an AssemblyState"
+        );
     }
 
     #[test]
