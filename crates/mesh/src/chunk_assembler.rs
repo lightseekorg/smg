@@ -23,8 +23,8 @@ use std::{
 
 use dashmap::DashMap;
 
-/// Max concurrent in-flight assemblies. Caps the fan-out a misbehaving
-/// peer can induce by streaming chunks for unlimited unique keys.
+/// Max concurrent in-flight assemblies. Prevents a peer from flooding
+/// the map with partial assemblies for unique keys that never complete.
 pub const DEFAULT_MAX_CONCURRENT_ASSEMBLIES: usize = 20;
 
 /// Max total bytes held across all in-flight assemblies. Caps the
@@ -107,10 +107,11 @@ impl ChunkAssembler {
     /// Record an incoming chunk. Returns `Some(assembled)` once all chunks
     /// for the current generation have arrived; returns `None` otherwise.
     ///
-    /// A chunk whose `generation` differs from the in-flight state resets
-    /// the assembly — older-generation partials are discarded in favour
-    /// of the new version. Malformed chunks are dropped silently:
-    /// `total == 0`, `total > MAX_TOTAL_CHUNKS`, or `index >= total`.
+    /// Generation handling is a three-way compare: a newer generation
+    /// resets the state (older partials discarded), an older generation
+    /// is dropped (newer state kept), equal continues recording.
+    /// Malformed chunks are dropped silently: `total == 0`,
+    /// `total > MAX_TOTAL_CHUNKS`, or `index >= total`.
     pub fn receive_chunk(
         &self,
         key: &str,
