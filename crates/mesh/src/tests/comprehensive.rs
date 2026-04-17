@@ -633,6 +633,32 @@ async fn test_multi_peer_tenant_delta_broadcast() {
             inserts_received: count_c.clone(),
         }));
 
+    // SWIM membership converges on a separate channel from sync_stream.
+    // Tenant delta is at-most-once — if the stream isn't up when the
+    // collector drains, the delta is gone. Warm the pipe with a CRDT app
+    // write first (retried via watermark until it lands on both peers);
+    // once both observe it, sync_stream is proven active in both directions.
+    handler_a
+        .write_data("td-sync-ready".into(), "1".into())
+        .unwrap();
+    wait_for(
+        || {
+            handler_b
+                .stores
+                .app
+                .get("td-sync-ready")
+                .is_some_and(|v| v.value == b"1")
+                && handler_c
+                    .stores
+                    .app
+                    .get("td-sync-ready")
+                    .is_some_and(|v| v.value == b"1")
+        },
+        Duration::from_secs(30),
+        "sync_stream is active on both B and C",
+    )
+    .await;
+
     handler_a
         .sync_manager
         .sync_tree_operation(
