@@ -19,8 +19,18 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
+/// Max concurrent in-flight assemblies. Caps the fan-out a misbehaving
+/// peer can induce by streaming chunks for unlimited unique keys.
+pub const DEFAULT_MAX_CONCURRENT_ASSEMBLIES: usize = 20;
+
+/// Max total bytes held across all in-flight assemblies. Caps the
+/// receiver-side memory independently of any sender-side payload choice.
+pub const DEFAULT_MAX_ASSEMBLER_BYTES: usize = 512 * 1024 * 1024;
+
 pub struct ChunkAssembler {
     assemblies: DashMap<String, AssemblyState>,
+    max_concurrent: usize,
+    max_bytes: usize,
 }
 
 struct AssemblyState {
@@ -45,8 +55,12 @@ impl AssemblyState {
         self.received.iter().all(|&r| r)
     }
 
+    fn bytes_held(&self) -> usize {
+        self.chunks.iter().flatten().map(|c| c.len()).sum()
+    }
+
     fn assemble(&self) -> Vec<u8> {
-        let total_size: usize = self.chunks.iter().flatten().map(|c| c.len()).sum();
+        let total_size: usize = self.bytes_held();
         let mut out = Vec::with_capacity(total_size);
         for chunk in self.chunks.iter().flatten() {
             out.extend_from_slice(chunk);
@@ -57,8 +71,17 @@ impl AssemblyState {
 
 impl ChunkAssembler {
     pub fn new() -> Self {
+        Self::with_limits(
+            DEFAULT_MAX_CONCURRENT_ASSEMBLIES,
+            DEFAULT_MAX_ASSEMBLER_BYTES,
+        )
+    }
+
+    pub fn with_limits(max_concurrent: usize, max_bytes: usize) -> Self {
         Self {
             assemblies: DashMap::new(),
+            max_concurrent,
+            max_bytes,
         }
     }
 
@@ -103,8 +126,52 @@ impl ChunkAssembler {
 
         if assembled.is_some() {
             self.assemblies.remove(key);
+        } else {
+            self.enforce_bounds();
         }
         assembled
+    }
+
+    /// Evict partials until the receiver-side memory bounds are satisfied.
+    /// Over the concurrent-assembly cap: drop the oldest (by created_at).
+    /// Over the byte cap: drop the largest (by total bytes held). Checked
+    /// after each non-completing receive; the completing path removes its
+    /// own entry before returning, so no enforcement is needed there.
+    fn enforce_bounds(&self) {
+        while self.assemblies.len() > self.max_concurrent {
+            match self.oldest_key() {
+                Some(k) => {
+                    self.assemblies.remove(&k);
+                }
+                None => break,
+            }
+        }
+        loop {
+            let total: usize = self.assemblies.iter().map(|e| e.value().bytes_held()).sum();
+            if total <= self.max_bytes {
+                break;
+            }
+            match self.largest_key() {
+                Some(k) => {
+                    self.assemblies.remove(&k);
+                }
+                None => break,
+            }
+        }
+    }
+
+    fn oldest_key(&self) -> Option<String> {
+        self.assemblies
+            .iter()
+            .min_by_key(|e| e.value().created_at)
+            .map(|e| e.key().clone())
+    }
+
+    fn largest_key(&self) -> Option<String> {
+        self.assemblies
+            .iter()
+            .max_by_key(|e| e.value().bytes_held())
+            .map(|e| e.key().clone())
     }
 
     /// Drop partial assemblies older than `timeout`. Collect-then-remove
@@ -124,6 +191,11 @@ impl ChunkAssembler {
     #[cfg(test)]
     pub(crate) fn in_flight(&self) -> usize {
         self.assemblies.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn total_bytes(&self) -> usize {
+        self.assemblies.iter().map(|e| e.value().bytes_held()).sum()
     }
 }
 
@@ -201,6 +273,58 @@ mod tests {
         let asm = ChunkAssembler::new();
         assert!(asm.receive_chunk("k", 1, 0, 0, b"x".to_vec()).is_none());
         assert!(asm.receive_chunk("k", 1, 5, 3, b"x".to_vec()).is_none());
+        assert_eq!(asm.in_flight(), 0);
+    }
+
+    #[test]
+    fn test_bounds_evict_oldest_when_too_many_concurrent() {
+        let asm = ChunkAssembler::with_limits(3, usize::MAX);
+        // 4 partials against a cap of 3 — oldest must be evicted.
+        for i in 0..4 {
+            assert!(asm
+                .receive_chunk(&format!("k{i}"), 1, 0, 2, vec![0u8; 10])
+                .is_none());
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(asm.in_flight(), 3, "concurrent cap enforced");
+        assert!(
+            !asm.assemblies.contains_key("k0"),
+            "oldest partial (k0) should be evicted"
+        );
+    }
+
+    #[test]
+    fn test_bounds_evict_largest_when_over_byte_cap() {
+        let asm = ChunkAssembler::with_limits(usize::MAX, 100);
+        // Build three partials: k_big is the largest (60 bytes),
+        // k_med is 30, k_small is 20. Total 110 > cap 100.
+        assert!(asm
+            .receive_chunk("k_small", 1, 0, 2, vec![0u8; 20])
+            .is_none());
+        assert!(asm.receive_chunk("k_med", 1, 0, 2, vec![0u8; 30]).is_none());
+        assert!(asm.receive_chunk("k_big", 1, 0, 2, vec![0u8; 60]).is_none());
+
+        assert!(
+            asm.total_bytes() <= 100,
+            "byte cap enforced, total = {}",
+            asm.total_bytes()
+        );
+        assert!(
+            !asm.assemblies.contains_key("k_big"),
+            "largest partial (k_big) should be evicted"
+        );
+    }
+
+    #[test]
+    fn test_bounds_not_enforced_on_completion() {
+        // If receive_chunk completes an assembly, the entry leaves the
+        // map before bounds are checked — the just-completed value must
+        // still be returned regardless of size.
+        let asm = ChunkAssembler::with_limits(usize::MAX, 10);
+        let out = asm
+            .receive_chunk("k", 1, 0, 1, vec![0u8; 500])
+            .expect("single-chunk completion returns bytes");
+        assert_eq!(out.len(), 500);
         assert_eq!(asm.in_flight(), 0);
     }
 
