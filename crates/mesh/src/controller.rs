@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::Result;
+use bytes::Bytes;
 use rand::seq::{IndexedRandom, SliceRandom};
 use tokio::sync::{mpsc, watch, Mutex};
 use tonic::transport::{ClientTlsConfig, Endpoint};
@@ -30,6 +31,7 @@ use super::{
     sync::MeshSyncManager,
 };
 use crate::{
+    chunking::{build_stream_batches, chunk_value, DEFAULT_MAX_CHUNKS_PER_ROUND},
     collector::{CentralCollector, PeerWatermark, RoundBatch},
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
     metrics,
@@ -51,6 +53,10 @@ pub struct MeshController {
     /// Current round batch, updated once per round by the central collector.
     /// Per-peer senders read and apply their own watermark filtering.
     current_batch: Arc<parking_lot::RwLock<Arc<RoundBatch>>>,
+    /// Current stream round batch, drained once per round from MeshKV.
+    /// Per-peer senders read this and filter targeted entries to their
+    /// own peer; drain_entries are broadcast to every peer.
+    current_stream_batch: Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>>,
     /// Node-wide MeshKV handle. Owns the stream buffers, subscriber
     /// registry, and chunk assembler shared with the server-side
     /// SyncStream handlers.
@@ -81,6 +87,9 @@ impl MeshController {
             sync_connections: Arc::new(Mutex::new(HashMap::new())),
             central_collector,
             current_batch: Arc::new(parking_lot::RwLock::new(Arc::new(RoundBatch::default()))),
+            current_stream_batch: Arc::new(parking_lot::RwLock::new(Arc::new(
+                crate::kv::RoundBatch::default(),
+            ))),
             mesh_kv: None,
         }
     }
@@ -98,6 +107,13 @@ impl MeshController {
     /// share the centrally collected batch with server-side sync_stream handlers.
     pub fn current_batch(&self) -> Arc<parking_lot::RwLock<Arc<RoundBatch>>> {
         self.current_batch.clone()
+    }
+
+    /// Get a handle to the shared stream RoundBatch. Used by GossipService
+    /// so server-side sync_stream handlers see the same drained stream
+    /// entries as client-side handlers.
+    pub fn current_stream_batch(&self) -> Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>> {
+        self.current_stream_batch.clone()
     }
 
     #[instrument(fields(name = %self.self_name), skip(self, signal))]
@@ -235,6 +251,16 @@ impl MeshController {
                 let batch = self.central_collector.collect();
                 *self.current_batch.write() = Arc::new(batch);
                 self.central_collector.advance_generations();
+            }
+
+            // Stream round collection: drain stream namespace buffers and
+            // drain callbacks exactly once per round (destructive). Per-peer
+            // senders filter targeted_entries by their own peer_id and
+            // broadcast drain_entries to all peers. Empty batch if no
+            // MeshKV is attached (legacy path pre-Step 3).
+            if let Some(mesh_kv) = &self.mesh_kv {
+                let stream_batch = mesh_kv.collect_round_batch();
+                *self.current_stream_batch.write() = Arc::new(stream_batch);
             }
 
             tokio::select! {
@@ -455,6 +481,7 @@ impl MeshController {
         let sync_manager = self.sync_manager.clone();
         let sync_connections = self.sync_connections.clone();
         let current_batch = self.current_batch.clone();
+        let current_stream_batch = self.current_stream_batch.clone();
 
         // Log connection lifecycle: spawn
         log::debug!(
@@ -509,10 +536,14 @@ impl MeshController {
                     let shared_sequence = sequence.clone();
                     let size_validator = MessageSizeValidator::default();
                     let batch_handle = current_batch.clone();
+                    let stream_batch_handle = current_stream_batch.clone();
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
                         let mut interval = tokio::time::interval(Duration::from_secs(1));
+                        // Skip re-emission of an unchanged stream batch (main
+                        // loop hasn't collected a new one since last tick).
+                        let mut last_stream_batch: Option<Arc<crate::kv::RoundBatch>> = None;
 
                         loop {
                             interval.tick().await;
@@ -600,6 +631,69 @@ impl MeshController {
                                             log::warn!(
                                                 "Channel closed, stopping incremental update sender"
                                             );
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Stream batches: drain-portion (broadcast) +
+                            // targeted entries addressed to this peer. Each
+                            // entry is chunked if oversized. On channel
+                            // full, the round's stream traffic for this
+                            // peer is dropped — no retry (at-most-once,
+                            // spec §4.4). Application regenerates on its
+                            // own retry cycle.
+                            let stream_batch = stream_batch_handle.read().clone();
+                            let fresh_batch = last_stream_batch
+                                .as_ref()
+                                .is_none_or(|last| !Arc::ptr_eq(last, &stream_batch));
+                            if fresh_batch {
+                                last_stream_batch = Some(stream_batch.clone());
+                                let generation = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_nanos() as u64)
+                                    .unwrap_or(0);
+                                let mut entries = Vec::new();
+                                // Drain entries are broadcast: every peer emits.
+                                for (key, value) in &stream_batch.drain_entries {
+                                    entries.extend(chunk_value(
+                                        key.clone(),
+                                        generation,
+                                        Bytes::from(value.clone()),
+                                        MAX_MESSAGE_SIZE,
+                                    ));
+                                }
+                                // Targeted entries: only those addressed to this peer.
+                                for (target, key, value) in &stream_batch.targeted_entries {
+                                    if target == &peer_name_incremental {
+                                        entries.extend(chunk_value(
+                                            key.clone(),
+                                            generation,
+                                            value.clone(),
+                                            MAX_MESSAGE_SIZE,
+                                        ));
+                                    }
+                                }
+                                if !entries.is_empty() {
+                                    for batch in build_stream_batches(
+                                        entries,
+                                        DEFAULT_MAX_CHUNKS_PER_ROUND,
+                                    ) {
+                                        let msg = StreamMessage {
+                                            message_type: StreamMessageType::StreamBatch as i32,
+                                            payload: Some(StreamPayload::StreamBatch(batch)),
+                                            sequence: shared_sequence
+                                                .fetch_add(1, Ordering::Relaxed),
+                                            peer_id: self_name_incremental.clone(),
+                                        };
+                                        if let Err(e) = tx_incremental.try_send(msg) {
+                                            log::debug!(
+                                                peer = %peer_name_incremental,
+                                                error = ?e,
+                                                "stream batch dropped on backpressure"
+                                            );
+                                            // TODO(metrics): bump stream_dropped_on_backpressure
                                             break;
                                         }
                                     }

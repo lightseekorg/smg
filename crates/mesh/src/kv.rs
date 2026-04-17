@@ -424,7 +424,7 @@ impl StreamNamespace {
 // ============================================================================
 
 /// A batch of entries collected once per gossip round by the central collector.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RoundBatch {
     /// Targeted stream entries: (peer_id, key, value). Sent to one specific peer.
     pub targeted_entries: Vec<(String, String, Bytes)>,
