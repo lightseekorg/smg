@@ -39,7 +39,7 @@ use super::{
     stores::{StateStores, StoreType as LocalStoreType},
     sync::MeshSyncManager,
 };
-use crate::incremental::{PeerWatermark, RoundBatch};
+use crate::collector::{PeerWatermark, RoundBatch};
 
 #[derive(Debug)]
 pub struct GossipService {
@@ -286,8 +286,8 @@ impl GossipService {
     }
 
     /// Attach the shared RoundBatch reference from the MeshController.
-    /// Server-side sync_stream handlers will use this instead of creating
-    /// their own IncrementalUpdateCollector.
+    /// Server-side sync_stream handlers read from this single batch
+    /// produced by the CentralCollector rather than re-collecting per peer.
     pub fn with_current_batch(
         mut self,
         current_batch: Arc<parking_lot::RwLock<Arc<RoundBatch>>>,

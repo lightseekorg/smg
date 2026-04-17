@@ -1,10 +1,8 @@
 //! Incremental update collection and batching
 //!
 //! Collects local state changes and batches them for efficient transmission.
-//!
-//! v1 `IncrementalUpdateCollector` is kept only for tests in sync.rs until
-//! Step 2c migrates them. Production code uses `CentralCollector` +
-//! `PeerWatermark`.
+//! `CentralCollector` runs once per gossip round, `PeerWatermark` filters
+//! the batch per peer and tracks per-key send watermarks.
 
 use std::{
     collections::HashMap,
@@ -13,7 +11,7 @@ use std::{
 };
 
 use parking_lot::RwLock;
-use tracing::{debug, trace};
+use tracing::debug;
 
 use super::{
     service::gossip::StateUpdate,
@@ -89,8 +87,7 @@ const STRUCTURE_SNAPSHOT_INTERVAL: u64 = 30;
 /// round — ~23 MB/s of allocator churn that the OS never reclaims.
 const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 
-/// Get current timestamp in nanoseconds. Module-level so both the legacy
-/// IncrementalUpdateCollector and the new CentralCollector can use it.
+/// Get current timestamp in nanoseconds.
 #[expect(
     clippy::expect_used,
     reason = "system clock before UNIX epoch is a fatal misconfiguration that must not silently produce timestamp=0"
@@ -105,492 +102,6 @@ pub(crate) fn current_timestamp() -> u64 {
 /// Build the per-actor last-sent key for rate limit shards.
 pub(crate) fn rate_limit_last_sent_key(key: &str, actor: &str) -> String {
     format!("{key}::actor:{actor}")
-}
-
-/// Incremental update collector (v1 legacy, kept for sync.rs and incremental.rs tests).
-/// v2 production code uses `CentralCollector` + `PeerWatermark` instead.
-/// TODO(Step 2c): migrate tests to CentralCollector, then delete this struct.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        clippy::allow_attributes,
-        reason = "v1 legacy kept for tests"
-    )
-)]
-pub struct IncrementalUpdateCollector {
-    stores: Arc<StateStores>,
-    self_name: String,
-    last_sent: Arc<RwLock<LastSentVersions>>,
-    last_scanned: Arc<RwLock<LastScannedGenerations>>,
-    /// Snapshot of `tree_generation` captured during the last collection.
-    /// Used in `mark_sent` instead of re-reading the atomic to avoid
-    /// advancing `last_scanned.tree` past the batch boundary.
-    collected_tree_gen: Arc<RwLock<u64>>,
-    /// Counter for gossip rounds since last full structure snapshot per model.
-    rounds_since_snapshot: Arc<RwLock<HashMap<String, u64>>>,
-}
-
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        clippy::allow_attributes,
-        reason = "v1 legacy kept for tests"
-    )
-)]
-impl IncrementalUpdateCollector {
-    pub fn new(stores: Arc<StateStores>, self_name: String) -> Self {
-        Self {
-            stores,
-            self_name,
-            last_sent: Arc::new(RwLock::new(LastSentVersions::default())),
-            last_scanned: Arc::new(RwLock::new(LastScannedGenerations::default())),
-            collected_tree_gen: Arc::new(RwLock::new(0)),
-            rounds_since_snapshot: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    /// Helper function to collect updates for stores with serializable state
-    fn collect_serializable_updates<S>(
-        &self,
-        all_items: std::collections::BTreeMap<String, S>,
-        last_sent_map: &HashMap<String, u64>,
-        store_name: &str,
-        get_id: impl Fn(&S) -> String,
-    ) -> Vec<StateUpdate>
-    where
-        S: serde::Serialize + Versioned,
-    {
-        let mut updates = Vec::new();
-        let timestamp = current_timestamp();
-
-        for (key, state) in all_items {
-            let current_version = state.version();
-            let last_sent_version = last_sent_map.get(&key).copied().unwrap_or(0);
-
-            if current_version > last_sent_version {
-                if let Ok(serialized) = bincode::serialize(&state) {
-                    updates.push(StateUpdate {
-                        key,
-                        value: serialized,
-                        version: current_version,
-                        actor: self.self_name.clone(),
-                        timestamp,
-                    });
-                    debug!(
-                        "Collected {} update: {} (version: {})",
-                        store_name,
-                        get_id(&state),
-                        current_version
-                    );
-                }
-            }
-        }
-        updates
-    }
-
-    /// Collect incremental updates for a specific store type.
-    /// Skips the expensive `.all()` scan when the store generation hasn't changed.
-    pub fn collect_updates_for_store(&self, store_type: StoreType) -> Vec<StateUpdate> {
-        let mut updates = Vec::new();
-        let mut last_sent = self.last_sent.read();
-        let last_scanned = self.last_scanned.read();
-
-        match store_type {
-            StoreType::Worker => {
-                let gen = self.stores.worker.generation();
-                if gen == last_scanned.worker {
-                    return vec![];
-                }
-                let all_workers = self.stores.worker.all();
-                updates = self.collect_serializable_updates(
-                    all_workers,
-                    &last_sent.worker,
-                    "worker",
-                    |state: &WorkerState| state.worker_id.clone(),
-                );
-            }
-            StoreType::Policy => {
-                let policy_gen = self.stores.policy.generation();
-                let tree_gen = self.stores.tree_generation.load(Ordering::Acquire);
-                let policy_changed = policy_gen != last_scanned.policy;
-                let tree_changed = tree_gen != last_scanned.tree;
-
-                if !policy_changed && !tree_changed {
-                    return vec![];
-                }
-
-                // Snapshot tree_gen for mark_sent — avoids advancing
-                // last_scanned.tree past this batch if new ops arrive
-                // between collection and mark_sent.
-                *self.collected_tree_gen.write() = tree_gen;
-
-                let timestamp = current_timestamp();
-
-                // --- Policy store scan (only if CRDT generation changed) ---
-                // Handles non-tree policy keys only. Tree keys are stored
-                // in tree_configs (plain DashMap) and handled by the tree-
-                // specific scan below.
-                if policy_changed {
-                    let all_policies = self.stores.policy.all();
-                    for (key, state) in &all_policies {
-                        // Tree keys are no longer in the CRDT policy store;
-                        // skip any stale entries that may remain from before
-                        // the migration.
-                        if key.starts_with("tree:") {
-                            continue;
-                        }
-
-                        let current_version = state.version();
-                        let last_sent_version =
-                            last_sent.policy.get(key.as_str()).copied().unwrap_or(0);
-                        if current_version <= last_sent_version {
-                            continue;
-                        }
-
-                        if let Ok(serialized) = bincode::serialize(state) {
-                            updates.push(StateUpdate {
-                                key: key.clone(),
-                                value: serialized,
-                                version: current_version,
-                                actor: self.self_name.clone(),
-                                timestamp,
-                            });
-                            debug!(
-                                "Collected policy update: {} (version: {})",
-                                state.model_id, current_version
-                            );
-                        }
-                    }
-                }
-
-                // --- Tree keys (driven by atomic tree_versions, not CRDT) ---
-                if tree_changed {
-                    let mut emitted_tree_keys = std::collections::HashSet::new();
-
-                    // Phase 0: Tenant delta collection (v1 legacy destructive drain).
-                    // v2 production code uses `CentralCollector` which drains once
-                    // per round. This path is only reachable from sync.rs tests.
-                    {
-                        let models_with_inserts: Vec<String> = self
-                            .stores
-                            .tenant_delta_inserts
-                            .iter()
-                            .filter(|entry| !entry.value().is_empty())
-                            .map(|entry| entry.key().clone())
-                            .collect();
-                        let models_with_evictions: Vec<String> = self
-                            .stores
-                            .tenant_delta_evictions
-                            .iter()
-                            .filter(|entry| !entry.value().is_empty())
-                            .map(|entry| entry.key().clone())
-                            .collect();
-
-                        let all_models: std::collections::HashSet<String> = models_with_inserts
-                            .into_iter()
-                            .chain(models_with_evictions)
-                            .collect();
-
-                        let mut rounds = self.rounds_since_snapshot.write();
-
-                        for model_id in all_models {
-                            let key = format!("tree:{model_id}");
-
-                            let round_count = rounds.entry(model_id.clone()).or_insert(0);
-                            *round_count += 1;
-                            let _ = round_count; // tracked for future Layer 2
-
-                            let current_version = self.stores.tree_version(&key);
-
-                            let inserts = self
-                                .stores
-                                .tenant_delta_inserts
-                                .remove(&model_id)
-                                .map(|(_, v)| v)
-                                .unwrap_or_default();
-                            let evictions = self
-                                .stores
-                                .tenant_delta_evictions
-                                .remove(&model_id)
-                                .map(|(_, v)| v)
-                                .unwrap_or_default();
-
-                            if inserts.is_empty() && evictions.is_empty() {
-                                continue;
-                            }
-
-                            let delta = TenantDelta {
-                                model_id: model_id.clone(),
-                                version: current_version,
-                                inserts,
-                                evictions,
-                            };
-
-                            if let Ok(delta_bytes) = delta.to_bytes() {
-                                let delta_policy = PolicyState {
-                                    model_id: model_id.clone(),
-                                    policy_type: "tenant_delta".to_string(),
-                                    config: delta_bytes,
-                                    version: current_version,
-                                };
-                                if let Ok(serialized) = bincode::serialize(&delta_policy) {
-                                    updates.push(StateUpdate {
-                                        key: key.clone(),
-                                        value: serialized,
-                                        version: current_version,
-                                        actor: self.self_name.clone(),
-                                        timestamp,
-                                    });
-                                    debug!(
-                                        "Collected tenant delta: {} ({} inserts, {} evictions, version: {})",
-                                        model_id,
-                                        delta.inserts.len(),
-                                        delta.evictions.len(),
-                                        current_version,
-                                    );
-                                    emitted_tree_keys.insert(key);
-                                }
-                            }
-                        }
-                    }
-
-                    // Phase 1: Scan tree_configs for keys not yet emitted
-                    // (e.g., after checkpoint + buffer drain, or remote-only entries).
-                    //
-                    // tree_configs may contain either:
-                    //   - TreeState bytes (from remote full-state updates)
-                    //   - TreeSnapshot bytes (from local checkpoint_tree_states)
-                    // Both are sent LZ4-compressed as "tree_state_lz4". The
-                    // receiver detects the format and converts as needed.
-                    let phase1_start = updates.len();
-                    for entry in &self.stores.tree_configs {
-                        let key = entry.key();
-                        if emitted_tree_keys.contains(key.as_str()) {
-                            continue;
-                        }
-                        let current_version = self.stores.tree_version(key);
-                        let last_sent_version =
-                            last_sent.policy.get(key.as_str()).copied().unwrap_or(0);
-                        if current_version <= last_sent_version {
-                            continue;
-                        }
-                        let model_id = key.strip_prefix("tree:").unwrap_or(key).to_string();
-                        let config_bytes = entry.value().clone();
-                        if config_bytes.is_empty() {
-                            continue;
-                        }
-                        // Validate the bytes as either TreeState or TreeSnapshot
-                        // and extract the version for the PolicyState envelope.
-                        let tree_version = if let Ok(ts) = TreeState::from_bytes(&config_bytes) {
-                            ts.version
-                        } else if kv_index::snapshot::TreeSnapshot::from_bytes(&config_bytes)
-                            .is_ok()
-                        {
-                            // TreeSnapshot has no embedded version — use the
-                            // atomic tree_version counter instead.
-                            current_version
-                        } else {
-                            debug!(
-                                "Skipping tree_configs full-state for {} — config corrupted",
-                                key
-                            );
-                            continue;
-                        };
-                        let compressed = lz4_compress(&config_bytes);
-                        // Skip if compressed size exceeds the gRPC message limit.
-                        if compressed.len() > MAX_SNAPSHOT_BYTES {
-                            debug!(
-                                key = %key,
-                                compressed_bytes = compressed.len(),
-                                limit = MAX_SNAPSHOT_BYTES,
-                                "Skipping oversized tree snapshot — compressed size exceeds limit"
-                            );
-                            // Mark as sent via a write lock so we don't retry every round.
-                            drop(last_sent);
-                            self.last_sent
-                                .write()
-                                .policy
-                                .insert(key.to_string(), current_version);
-                            // Re-acquire read lock for remaining iterations
-                            last_sent = self.last_sent.read();
-                            continue;
-                        }
-                        let full_state = PolicyState {
-                            model_id,
-                            policy_type: "tree_state_lz4".to_string(),
-                            config: compressed,
-                            version: tree_version,
-                        };
-                        if let Ok(serialized) = bincode::serialize(&full_state) {
-                            updates.push(StateUpdate {
-                                key: key.clone(),
-                                value: serialized,
-                                version: current_version,
-                                actor: self.self_name.clone(),
-                                timestamp,
-                            });
-                            debug!(
-                                "Collected tree_configs full state: {} (version: {})",
-                                key, current_version
-                            );
-                        }
-                    }
-
-                    // Phase 1 summary
-                    let phase1_count = updates.len() - phase1_start;
-                    let phase1_bytes: usize =
-                        updates[phase1_start..].iter().map(|u| u.value.len()).sum();
-                    debug!(
-                        phase1_updates = phase1_count,
-                        phase1_total_bytes = phase1_bytes,
-                        "Phase 1: tree_configs scan {}",
-                        if phase1_count > 0 {
-                            "produced updates"
-                        } else {
-                            "no new updates"
-                        }
-                    );
-                }
-            }
-            StoreType::App => {
-                let gen = self.stores.app.generation();
-                if gen == last_scanned.app {
-                    return vec![];
-                }
-                let all_apps = self.stores.app.all();
-                updates = self.collect_serializable_updates(
-                    all_apps,
-                    &last_sent.app,
-                    "app",
-                    |state: &AppState| state.key.clone(),
-                );
-            }
-            StoreType::Membership => {
-                let gen = self.stores.membership.generation();
-                if gen == last_scanned.membership {
-                    return vec![];
-                }
-                let all_members = self.stores.membership.all();
-                updates = self.collect_serializable_updates(
-                    all_members,
-                    &last_sent.membership,
-                    "membership",
-                    |state: &MembershipState| state.name.clone(),
-                );
-            }
-            StoreType::RateLimit => {
-                let current_timestamp = current_timestamp();
-
-                for (key, actor, counter_value) in self.stores.rate_limit.all_shards() {
-                    if !self.stores.rate_limit.is_owner(&key) {
-                        continue;
-                    }
-
-                    let shard_last_sent_key = rate_limit_last_sent_key(&key, &actor);
-                    let last_sent_timestamp = last_sent
-                        .rate_limit
-                        .get(&shard_last_sent_key)
-                        .copied()
-                        .unwrap_or(0);
-
-                    // Only send if at least 1 second has passed since last send.
-                    if current_timestamp > last_sent_timestamp + 1_000_000_000 {
-                        if let Ok(serialized) = bincode::serialize(&counter_value) {
-                            updates.push(StateUpdate {
-                                key: key.clone(),
-                                value: serialized,
-                                version: current_timestamp,
-                                actor: actor.clone(),
-                                timestamp: current_timestamp,
-                            });
-                            trace!(
-                                "Collected rate limit counter shard update: {} actor={}",
-                                key,
-                                actor
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        debug!(
-            "Collected {} incremental updates for store {:?}",
-            updates.len(),
-            store_type
-        );
-        updates
-    }
-
-    /// Collect all incremental updates across all stores
-    pub fn collect_all_updates(&self) -> Vec<(StoreType, Vec<StateUpdate>)> {
-        let mut all_updates = Vec::new();
-
-        for store_type in [
-            StoreType::Worker,
-            StoreType::Policy,
-            StoreType::App,
-            StoreType::Membership,
-            StoreType::RateLimit,
-        ] {
-            let updates = self.collect_updates_for_store(store_type);
-            if !updates.is_empty() {
-                all_updates.push((store_type, updates));
-            }
-        }
-
-        all_updates
-    }
-
-    /// Mark updates as sent (called after successful transmission).
-    /// Also records the store generation to enable skipping unchanged stores.
-    pub fn mark_sent(&self, store_type: StoreType, updates: &[StateUpdate]) {
-        let mut last_sent = self.last_sent.write();
-        let mut last_scanned = self.last_scanned.write();
-
-        // Record the current generation so the next collection cycle can skip
-        // this store if nothing has changed since.
-        match store_type {
-            StoreType::Worker => last_scanned.worker = self.stores.worker.generation(),
-            StoreType::Policy => {
-                last_scanned.policy = self.stores.policy.generation();
-                // Use the snapshot captured during collection, not a
-                // live re-read — prevents skipping ops that arrived
-                // between collect and mark_sent.
-                last_scanned.tree = *self.collected_tree_gen.read();
-            }
-            StoreType::App => last_scanned.app = self.stores.app.generation(),
-            StoreType::Membership => {
-                last_scanned.membership = self.stores.membership.generation();
-            }
-            StoreType::RateLimit => {} // Rate limit uses timestamp-based tracking
-        }
-
-        for update in updates {
-            match store_type {
-                StoreType::Worker => {
-                    last_sent.worker.insert(update.key.clone(), update.version);
-                }
-                StoreType::Policy => {
-                    last_sent.policy.insert(update.key.clone(), update.version);
-                }
-                StoreType::App => {
-                    last_sent.app.insert(update.key.clone(), update.version);
-                }
-                StoreType::Membership => {
-                    last_sent
-                        .membership
-                        .insert(update.key.clone(), update.version);
-                }
-                StoreType::RateLimit => {
-                    let shard_key = rate_limit_last_sent_key(&update.key, &update.actor);
-                    last_sent.rate_limit.insert(shard_key, update.version);
-                }
-            }
-        }
-    }
 }
 
 // ============================================================================
@@ -1093,149 +604,148 @@ impl PeerWatermark {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::Duration};
-
     use super::*;
     use crate::stores::{AppState, MembershipState, PolicyState, StateStores, WorkerState};
 
-    fn create_test_collector(self_name: String) -> IncrementalUpdateCollector {
-        let stores = Arc::new(StateStores::with_self_name(self_name.clone()));
-        IncrementalUpdateCollector::new(stores, self_name)
+    /// Test-only helper: collect updates for one store type via CentralCollector.
+    fn collect_store_updates(
+        stores: &Arc<StateStores>,
+        self_name: &str,
+        store_type: StoreType,
+    ) -> Vec<StateUpdate> {
+        let central = CentralCollector::new(stores.clone(), self_name.to_string());
+        let batch = central.collect();
+        batch
+            .updates
+            .into_iter()
+            .find(|(t, _)| *t == store_type)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
+    }
+
+    fn make_worker(version: u64, health: bool, load: f64) -> WorkerState {
+        WorkerState {
+            worker_id: "worker1".to_string(),
+            model_id: "model1".to_string(),
+            url: "http://localhost:8000".to_string(),
+            health,
+            load,
+            version,
+            spec: vec![],
+        }
     }
 
     #[test]
     fn test_collect_worker_updates() {
-        let collector = create_test_collector("node1".to_string());
-        let stores = collector.stores.clone();
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+        let _ = stores
+            .worker
+            .insert("worker1".to_string(), make_worker(1, true, 0.5));
 
-        // Insert a worker state
-        let key = "worker1".to_string();
-        let worker_state = WorkerState {
-            worker_id: "worker1".to_string(),
-            model_id: "model1".to_string(),
-            url: "http://localhost:8000".to_string(),
-            health: true,
-            load: 0.5,
-            version: 1,
-            spec: vec![],
-        };
-        let _ = stores.worker.insert(key, worker_state);
-
-        // Collect updates
-        let updates = collector.collect_updates_for_store(StoreType::Worker);
+        // CentralCollector returns ALL entries — no watermark filter inside collect().
+        let central = CentralCollector::new(stores.clone(), "node1".to_string());
+        let batch = central.collect();
+        let updates: Vec<_> = batch
+            .updates
+            .iter()
+            .find(|(t, _)| *t == StoreType::Worker)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].key, "worker1");
         assert_eq!(updates[0].version, 1);
         assert_eq!(updates[0].actor, "node1");
 
-        // Collect again before mark_sent - should still include pending updates.
-        let updates2 = collector.collect_updates_for_store(StoreType::Worker);
-        assert_eq!(updates2.len(), 1);
+        // PeerWatermark applies filtering + mark_sent.
+        let mut watermark = PeerWatermark::new("peer".to_string());
+        let filtered1 = watermark.filter(&batch);
+        assert_eq!(filtered1[0].1.len(), 1);
+        // Filter again before mark_sent — still visible.
+        let filtered2 = watermark.filter(&batch);
+        assert_eq!(filtered2[0].1.len(), 1);
+        // After mark_sent — filtered out.
+        watermark.mark_sent(StoreType::Worker, &filtered2[0].1);
+        let filtered_after = watermark.filter(&batch);
+        assert!(filtered_after.is_empty());
 
-        // Mark transmission success and verify it is no longer collected.
-        collector.mark_sent(StoreType::Worker, &updates2);
-        let updates_after_mark = collector.collect_updates_for_store(StoreType::Worker);
-        assert_eq!(updates_after_mark.len(), 0);
-
-        // Update worker state
-        let key2 = "worker1".to_string();
-        let worker_state2 = WorkerState {
-            worker_id: "worker1".to_string(),
-            model_id: "model1".to_string(),
-            url: "http://localhost:8000".to_string(),
-            health: false,
-            load: 0.8,
-            version: 2,
-            spec: vec![],
-        };
-        let _ = stores.worker.insert(key2, worker_state2);
-
-        // Should collect new version
-        let updates3 = collector.collect_updates_for_store(StoreType::Worker);
+        // Advance and write a new version — next batch should carry v2.
+        central.advance_generations();
+        let _ = stores
+            .worker
+            .insert("worker1".to_string(), make_worker(2, false, 0.8));
+        let batch2 = central.collect();
+        let updates3: Vec<_> = batch2
+            .updates
+            .iter()
+            .find(|(t, _)| *t == StoreType::Worker)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
         assert_eq!(updates3.len(), 1);
         assert_eq!(updates3[0].version, 2);
     }
 
     #[test]
     fn test_collect_policy_updates() {
-        let collector = create_test_collector("node1".to_string());
-        let stores = collector.stores.clone();
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+        let _ = stores.policy.insert(
+            "policy:model1".to_string(),
+            PolicyState {
+                model_id: "model1".to_string(),
+                policy_type: "cache_aware".to_string(),
+                config: b"config_data".to_vec(),
+                version: 1,
+            },
+        );
 
-        let key = "policy:model1".to_string();
-        let policy_state = PolicyState {
-            model_id: "model1".to_string(),
-            policy_type: "cache_aware".to_string(),
-            config: b"config_data".to_vec(),
-            version: 1,
-        };
-        let _ = stores.policy.insert(key, policy_state);
-
-        let updates = collector.collect_updates_for_store(StoreType::Policy);
+        let updates = collect_store_updates(&stores, "node1", StoreType::Policy);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].key, "policy:model1");
     }
 
     #[test]
     fn test_collect_app_updates() {
-        let collector = create_test_collector("node1".to_string());
-        let stores = collector.stores.clone();
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+        let _ = stores.app.insert(
+            "app_key1".to_string(),
+            AppState {
+                key: "app_key1".to_string(),
+                value: b"app_value".to_vec(),
+                version: 1,
+            },
+        );
 
-        let key = "app_key1".to_string();
-        let app_state = AppState {
-            key: "app_key1".to_string(),
-            value: b"app_value".to_vec(),
-            version: 1,
-        };
-        let _ = stores.app.insert(key, app_state);
-
-        let updates = collector.collect_updates_for_store(StoreType::App);
+        let updates = collect_store_updates(&stores, "node1", StoreType::App);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].key, "app_key1");
     }
 
     #[test]
     fn test_collect_membership_updates() {
-        let collector = create_test_collector("node1".to_string());
-        let stores = collector.stores.clone();
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+        let _ = stores.membership.insert(
+            "node2".to_string(),
+            MembershipState {
+                name: "node2".to_string(),
+                address: "127.0.0.1:8001".to_string(),
+                status: 1, // Alive
+                version: 1,
+                metadata: std::collections::BTreeMap::new(),
+            },
+        );
 
-        let key = "node2".to_string();
-        let membership_state = MembershipState {
-            name: "node2".to_string(),
-            address: "127.0.0.1:8001".to_string(),
-            status: 1, // Alive
-            version: 1,
-            metadata: std::collections::BTreeMap::new(),
-        };
-        let _ = stores.membership.insert(key, membership_state);
-
-        let updates = collector.collect_updates_for_store(StoreType::Membership);
+        let updates = collect_store_updates(&stores, "node1", StoreType::Membership);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].key, "node2");
     }
 
     #[test]
     fn test_collect_all_updates() {
-        let collector = create_test_collector("node1".to_string());
-        let stores = collector.stores.clone();
-
-        // Insert into multiple stores
-        let worker_key = "worker1".to_string();
-        let _ = stores.worker.insert(
-            worker_key,
-            WorkerState {
-                worker_id: "worker1".to_string(),
-                model_id: "model1".to_string(),
-                url: "http://localhost:8000".to_string(),
-                health: true,
-                load: 0.5,
-                version: 1,
-                spec: vec![],
-            },
-        );
-
-        let policy_key = "policy:model1".to_string();
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+        let _ = stores
+            .worker
+            .insert("worker1".to_string(), make_worker(1, true, 0.5));
         let _ = stores.policy.insert(
-            policy_key,
+            "policy:model1".to_string(),
             PolicyState {
                 model_id: "model1".to_string(),
                 policy_type: "cache_aware".to_string(),
@@ -1244,137 +754,127 @@ mod tests {
             },
         );
 
-        let all_updates = collector.collect_all_updates();
-        assert_eq!(all_updates.len(), 2); // Worker and Policy
+        let central = CentralCollector::new(stores, "node1".to_string());
+        let batch = central.collect();
+        assert_eq!(batch.updates.len(), 2); // Worker and Policy
     }
 
     #[test]
     fn test_mark_sent() {
-        let collector = create_test_collector("node1".to_string());
-        let stores = collector.stores.clone();
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+        let _ = stores
+            .worker
+            .insert("worker1".to_string(), make_worker(1, true, 0.5));
 
-        // Insert and collect
-        let key = "worker1".to_string();
-        let _ = stores.worker.insert(
-            key,
-            WorkerState {
-                worker_id: "worker1".to_string(),
-                model_id: "model1".to_string(),
-                url: "http://localhost:8000".to_string(),
-                health: true,
-                load: 0.5,
-                version: 1,
-                spec: vec![],
-            },
-        );
+        let central = CentralCollector::new(stores, "node1".to_string());
+        let batch = central.collect();
 
-        let updates = collector.collect_updates_for_store(StoreType::Worker);
-        assert_eq!(updates.len(), 1);
+        let mut watermark = PeerWatermark::new("peer".to_string());
+        let filtered = watermark.filter(&batch);
+        assert_eq!(filtered[0].1.len(), 1);
 
-        // Mark as sent
-        collector.mark_sent(StoreType::Worker, &updates);
-
-        // Should not collect again
-        let updates2 = collector.collect_updates_for_store(StoreType::Worker);
-        assert_eq!(updates2.len(), 0);
+        // Mark as sent — subsequent filter on the same batch returns empty.
+        for (store_type, updates) in &filtered {
+            watermark.mark_sent(*store_type, updates);
+        }
+        let filtered2 = watermark.filter(&batch);
+        assert!(filtered2.is_empty());
     }
 
     #[test]
-    fn test_rate_limit_timestamp_filtering() {
-        let collector = create_test_collector("node1".to_string());
-        let stores = collector.stores.clone();
-
-        // Update membership to make node1 an owner
+    fn test_rate_limit_version_dedup() {
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         stores.rate_limit.update_membership(&["node1".to_string()]);
 
-        // Insert a counter (node1 should be owner)
         let test_key = "test_rate_limit_key".to_string();
-        if stores.rate_limit.is_owner(&test_key) {
-            stores
-                .rate_limit
-                .inc(test_key.clone(), "node1".to_string(), 1);
+        assert!(
+            stores.rate_limit.is_owner(&test_key),
+            "single-node membership should own every rate-limit shard"
+        );
+
+        stores
+            .rate_limit
+            .inc(test_key.clone(), "node1".to_string(), 1);
+
+        let central = CentralCollector::new(stores.clone(), "node1".to_string());
+        let mut watermark = PeerWatermark::new("peer".to_string());
+
+        let batch1 = central.collect();
+        let filtered1 = watermark.filter(&batch1);
+        let rl1 = filtered1
+            .iter()
+            .find(|(t, _)| *t == StoreType::RateLimit)
+            .map(|(_, v)| v)
+            .expect("rate limit updates expected on first filter");
+        assert!(!rl1.is_empty());
+        for (store_type, updates) in &filtered1 {
+            watermark.mark_sent(*store_type, updates);
         }
 
-        // Collect immediately - should be filtered by timestamp
-        let _updates = collector.collect_updates_for_store(StoreType::RateLimit);
-        // May be empty if timestamp check fails, or may have one update
-        // The exact behavior depends on timing
+        let filtered2 = watermark.filter(&batch1);
+        let rl2_count = filtered2
+            .iter()
+            .find(|(t, _)| *t == StoreType::RateLimit)
+            .map(|(_, v)| v.len())
+            .unwrap_or(0);
+        assert_eq!(rl2_count, 0, "same batch should be fully deduped");
 
-        // Wait a bit and try again
-        thread::sleep(Duration::from_secs(2));
-
-        // Now should collect (enough time has passed)
-        let updates2 = collector.collect_updates_for_store(StoreType::RateLimit);
-        // Should have at least one update if node1 is owner
-        if stores.rate_limit.is_owner(&test_key) {
-            // Updates may be 0 or 1 depending on timing
-            let _ = updates2;
-        }
+        stores
+            .rate_limit
+            .inc(test_key.clone(), "node1".to_string(), 1);
+        central.advance_generations();
+        let batch3 = central.collect();
+        let filtered3 = watermark.filter(&batch3);
+        let rl3 = filtered3
+            .iter()
+            .find(|(t, _)| *t == StoreType::RateLimit)
+            .map(|(_, v)| v)
+            .expect("bumped rate-limit shard should re-appear in filter");
+        assert!(!rl3.is_empty());
     }
 
     #[test]
     fn test_version_tracking() {
-        let collector = create_test_collector("node1".to_string());
-        let stores = collector.stores.clone();
+        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
+        let central = CentralCollector::new(stores.clone(), "node1".to_string());
 
-        let key = "worker1".to_string();
+        let _ = stores
+            .worker
+            .insert("worker1".to_string(), make_worker(1, true, 0.5));
+        let batch1 = central.collect();
+        let v1 = batch1
+            .updates
+            .iter()
+            .find(|(t, _)| *t == StoreType::Worker)
+            .map(|(_, v)| v[0].version)
+            .unwrap();
+        assert_eq!(v1, 1);
 
-        // Insert first version with explicit version number
-        let _ = stores.worker.insert(
-            key.clone(),
-            WorkerState {
-                worker_id: "worker1".to_string(),
-                model_id: "model1".to_string(),
-                url: "http://localhost:8000".to_string(),
-                health: true,
-                load: 0.5,
-                version: 1,
-                spec: vec![],
-            },
-        );
+        central.advance_generations();
+        let _ = stores
+            .worker
+            .insert("worker1".to_string(), make_worker(2, false, 0.8));
+        let batch2 = central.collect();
+        let v2 = batch2
+            .updates
+            .iter()
+            .find(|(t, _)| *t == StoreType::Worker)
+            .map(|(_, v)| v[0].version)
+            .unwrap();
+        assert_eq!(v2, 2);
 
-        let updates1 = collector.collect_updates_for_store(StoreType::Worker);
-        assert_eq!(updates1.len(), 1);
-        let version1 = updates1[0].version;
-        assert_eq!(version1, 1);
-
-        // Insert second version with incremented version number
-        let _ = stores.worker.insert(
-            key.clone(),
-            WorkerState {
-                worker_id: "worker1".to_string(),
-                model_id: "model1".to_string(),
-                url: "http://localhost:8000".to_string(),
-                health: false,
-                load: 0.8,
-                version: 2,
-                spec: vec![],
-            },
-        );
-
-        let updates2 = collector.collect_updates_for_store(StoreType::Worker);
-        assert_eq!(updates2.len(), 1);
-        let version2 = updates2[0].version;
-        assert_eq!(version2, 2);
-
-        // Insert third version with incremented version number
-        let _ = stores.worker.insert(
-            key,
-            WorkerState {
-                worker_id: "worker1".to_string(),
-                model_id: "model1".to_string(),
-                url: "http://localhost:8000".to_string(),
-                health: true,
-                load: 0.3,
-                version: 3,
-                spec: vec![],
-            },
-        );
-
-        let updates3 = collector.collect_updates_for_store(StoreType::Worker);
-        assert_eq!(updates3.len(), 1);
-        let version3 = updates3[0].version;
-        assert_eq!(version3, 3);
+        central.advance_generations();
+        let _ = stores
+            .worker
+            .insert("worker1".to_string(), make_worker(3, true, 0.3));
+        let batch3 = central.collect();
+        let v3 = batch3
+            .updates
+            .iter()
+            .find(|(t, _)| *t == StoreType::Worker)
+            .map(|(_, v)| v[0].version)
+            .unwrap();
+        assert_eq!(v3, 3);
     }
 
     // ========================================================================

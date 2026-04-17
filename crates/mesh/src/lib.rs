@@ -6,11 +6,11 @@
 //! - Consistent hashing for request routing
 //! - Partition detection and recovery
 
+mod collector;
 mod consistent_hash;
 mod controller;
 mod crdt_kv;
 mod flow_control;
-mod incremental;
 pub mod kv;
 mod metrics;
 mod mtls;
