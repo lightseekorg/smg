@@ -1242,6 +1242,14 @@ impl Gossip for GossipService {
                                     break;
                                 }
                             }
+                            StreamMessageType::StreamBatch => {
+                                // Wiring lands in Step 3.5.
+                                log::trace!(
+                                    "Received StreamBatch from {} (seq: {}) — handler not yet wired",
+                                    peer_id,
+                                    msg.sequence
+                                );
+                            }
                             _ => {
                                 log::warn!(
                                     "Unknown message type from {}: {:?}",

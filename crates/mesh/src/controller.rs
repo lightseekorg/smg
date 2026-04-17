@@ -1011,6 +1011,14 @@ impl MeshController {
                                         peer_name
                                     );
                                 }
+                                StreamMessageType::StreamBatch => {
+                                    // Wiring lands in Step 3.5.
+                                    log::trace!(
+                                        "Received StreamBatch from {} (seq: {}) — handler not yet wired",
+                                        peer_name,
+                                        msg.sequence
+                                    );
+                                }
                             }
                         }
                         Ok(Some(Err(e))) => {

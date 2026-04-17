@@ -63,6 +63,7 @@ enum StreamMessageType {
   ACK = 4;
   NACK = 5;
   HEARTBEAT = 6;
+  STREAM_BATCH = 7;
 }
 
 message StreamMessage {
