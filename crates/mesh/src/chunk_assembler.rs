@@ -181,14 +181,17 @@ impl ChunkAssembler {
     /// after each non-completing receive; the completing path removes its
     /// own entry before returning, so no enforcement is needed there.
     fn enforce_bounds(&self) {
-        // Eviction candidates: only partial assemblies. Completed ones are
-        // owned by a concurrent receive_chunk that is about to extract
-        // them via remove_if; evicting them here would silently swallow a
-        // fully-assembled payload. The remove_if predicate additionally
-        // gates on the generation observed at selection time, so a
-        // concurrent generation bump that substitutes a new incomplete
-        // state does not get evicted by mistake.
-        while self.assemblies.len() > self.max_concurrent {
+        // Cap checks and eviction target only incomplete assemblies;
+        // transiently-complete entries awaiting remove_if must not count.
+        loop {
+            let incomplete = self
+                .assemblies
+                .iter()
+                .filter(|e| !e.value().is_complete())
+                .count();
+            if incomplete <= self.max_concurrent {
+                break;
+            }
             match self.oldest_incomplete() {
                 Some((k, gen)) => {
                     self.assemblies.remove_if(&k, |_, state| {
@@ -199,7 +202,12 @@ impl ChunkAssembler {
             }
         }
         loop {
-            let total: usize = self.assemblies.iter().map(|e| e.value().bytes_held()).sum();
+            let total: usize = self
+                .assemblies
+                .iter()
+                .filter(|e| !e.value().is_complete())
+                .map(|e| e.value().bytes_held())
+                .sum();
             if total <= self.max_bytes {
                 break;
             }
@@ -481,34 +489,110 @@ mod tests {
 
     #[test]
     fn test_enforce_bounds_skips_complete_assemblies() {
-        // Simulate the race window: a just-completed assembly sits in
-        // the map (before the owning receive_chunk extracts it), and a
-        // concurrent receive_chunk on a different key triggers
-        // enforce_bounds. The complete one must survive.
+        // cap=1, one complete + two partials. Real incomplete=2 > 1,
+        // so enforce_bounds must evict one. The complete must not be
+        // picked even though it is the oldest by created_at.
         let asm = ChunkAssembler::with_limits(1, usize::MAX);
-        let old = Instant::now() - Duration::from_secs(60);
         asm.assemblies.insert(
             "complete".to_string(),
             AssemblyState {
                 generation: 1,
                 received_count: 2,
                 chunks: vec![Some(vec![0u8; 10]), Some(vec![0u8; 10])],
-                created_at: old,
+                created_at: Instant::now() - Duration::from_secs(60),
             },
         );
-        // Add a partial — this is over the cap=1, so enforce_bounds runs
-        // (via the !completed branch of receive_chunk).
-        assert!(asm
-            .receive_chunk("partial", 1, 0, 2, vec![0u8; 10])
-            .is_none());
+        asm.assemblies.insert(
+            "partial_a".to_string(),
+            AssemblyState {
+                generation: 1,
+                received_count: 0,
+                chunks: vec![None, None],
+                created_at: Instant::now() - Duration::from_secs(30),
+            },
+        );
+        asm.assemblies.insert(
+            "partial_b".to_string(),
+            AssemblyState {
+                generation: 1,
+                received_count: 0,
+                chunks: vec![None, None],
+                created_at: Instant::now(),
+            },
+        );
+
+        asm.enforce_bounds();
 
         assert!(
             asm.assemblies.contains_key("complete"),
-            "complete assembly must not be evicted"
+            "complete (even oldest) must not be evicted"
         );
         assert!(
-            !asm.assemblies.contains_key("partial"),
-            "partial (the only incomplete candidate) should be evicted"
+            !asm.assemblies.contains_key("partial_a"),
+            "oldest incomplete should be evicted"
+        );
+        assert!(
+            asm.assemblies.contains_key("partial_b"),
+            "newer incomplete survives"
+        );
+    }
+
+    #[test]
+    fn test_enforce_bounds_cap_counts_only_incomplete() {
+        // Transient complete-but-unextracted entries must not push the
+        // incomplete population over cap. Here the cap is 1, and we
+        // preload a complete entry + a partial. enforce_bounds should
+        // see 1 incomplete (<=1), not 2 total, and leave the partial
+        // alone.
+        let asm = ChunkAssembler::with_limits(1, usize::MAX);
+        asm.assemblies.insert(
+            "complete".to_string(),
+            AssemblyState {
+                generation: 1,
+                received_count: 2,
+                chunks: vec![Some(vec![0u8; 10]), Some(vec![0u8; 10])],
+                created_at: Instant::now(),
+            },
+        );
+        asm.assemblies.insert(
+            "partial".to_string(),
+            AssemblyState {
+                generation: 1,
+                received_count: 1,
+                chunks: vec![Some(vec![0u8; 10]), None],
+                created_at: Instant::now(),
+            },
+        );
+
+        // Triggering enforce_bounds from the !completed branch by
+        // receiving a new chunk on a third key would add another
+        // partial and push us over. Instead, exercise enforce_bounds
+        // directly via a receive that creates a partial but doesn't
+        // complete — against cap=1, two incompletes should evict one.
+        // But with the transient "complete" entry counted: previous
+        // logic would evict *partial* (as oldest incomplete) when it
+        // saw len=2 > 1, even though the real incomplete count was 1.
+
+        // Build the initial state manually so we can observe the
+        // filter-based count without triggering a receive.
+        let incomplete_count = asm
+            .assemblies
+            .iter()
+            .filter(|e| !e.value().is_complete())
+            .count();
+        assert_eq!(incomplete_count, 1, "only 'partial' is incomplete");
+
+        // Call enforce_bounds directly (via a no-op receive path).
+        // With the fix: incomplete=1 <= cap=1, so no eviction.
+        asm.enforce_bounds();
+
+        assert!(
+            asm.assemblies.contains_key("complete"),
+            "complete assembly still present"
+        );
+        assert!(
+            asm.assemblies.contains_key("partial"),
+            "partial must not be evicted — real incomplete count was under cap"
         );
     }
 
