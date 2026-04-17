@@ -1,6 +1,7 @@
 //! Non-streaming Harmony Responses API implementation
 
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -60,7 +61,9 @@ pub(crate) async fn serve_harmony_responses(
     let original_request = request.clone();
 
     // Load previous conversation history if previous_response_id is set
-    let current_request = load_previous_messages(ctx, request).await?;
+    let loaded_history = load_previous_messages(ctx, request).await?;
+    let current_request = loaded_history.request;
+    let existing_mcp_list_tools_labels = loaded_history.existing_mcp_list_tools_labels;
 
     // Check MCP connection and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) =
@@ -72,6 +75,7 @@ pub(crate) async fn serve_harmony_responses(
             current_request,
             tenant_request_meta.clone(),
             mcp_servers,
+            existing_mcp_list_tools_labels,
         )
         .await?
     } else {
@@ -101,6 +105,7 @@ async fn execute_with_mcp_loop(
     mut current_request: ResponsesRequest,
     tenant_request_meta: TenantRequestMeta,
     mcp_servers: Vec<McpServerBinding>,
+    existing_mcp_list_tools_labels: HashSet<String>,
 ) -> Result<ResponsesResponse, Response> {
     let mut iteration_count = 0;
 
@@ -251,6 +256,7 @@ async fn execute_with_mcp_loop(
                             &mcp_tracking,
                             &session,
                             &user_function_names,
+                            &existing_mcp_list_tools_labels,
                         );
                     }
 
@@ -304,6 +310,7 @@ async fn execute_with_mcp_loop(
                             &mcp_tracking,
                             &session,
                             &user_function_names,
+                            &existing_mcp_list_tools_labels,
                         );
                     }
 
@@ -336,7 +343,13 @@ async fn execute_with_mcp_loop(
                 );
 
                 // Inject MCP metadata into final response
-                inject_mcp_metadata(&mut response, &mcp_tracking, &session, &user_function_names);
+                inject_mcp_metadata(
+                    &mut response,
+                    &mcp_tracking,
+                    &session,
+                    &user_function_names,
+                    &existing_mcp_list_tools_labels,
+                );
 
                 // Restore original tools (hide internal MCP tools from response)
                 response.tools = original_tools.take().unwrap_or_default();
