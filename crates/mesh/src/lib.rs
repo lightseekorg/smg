@@ -6,6 +6,7 @@
 //! - Consistent hashing for request routing
 //! - Partition detection and recovery
 
+mod chunk_assembler;
 mod collector;
 mod consistent_hash;
 mod controller;
