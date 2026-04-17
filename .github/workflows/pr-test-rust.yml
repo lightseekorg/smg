@@ -465,7 +465,6 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.chat-completions == 'true')))
@@ -526,7 +525,6 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.embeddings == 'true')))
@@ -557,7 +555,6 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.chat-completions == 'true')))
@@ -611,7 +608,6 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.agentic == 'true')))
@@ -633,7 +629,6 @@ jobs:
       && !cancelled()
       && needs.e2e-1gpu-gateway.result == 'success'
       && (github.event_name != 'pull_request'
-          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.chat-completions == 'true')))
@@ -702,7 +697,6 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.agentic == 'true')))
@@ -850,7 +844,6 @@ jobs:
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          && github.event_name != 'pull_request_target'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.go-bindings == 'true')))
