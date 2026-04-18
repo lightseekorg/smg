@@ -474,13 +474,108 @@ pub struct ChatTemplateParams<'a> {
     pub special_tokens: Option<&'a crate::traits::SpecialTokens>,
 }
 
+/// Python-`json.dumps`-compatible formatter: emits `", "` after array/object
+/// items and `": "` between keys and values (matching Python's default
+/// `separators=(', ', ': ')`).
+///
+/// `serde_json`'s built-in `to_string` produces compact output with no spaces
+/// (`{"a":1}`), which does NOT match Python and therefore produces a
+/// different token stream when the rendered chat template is tokenized.
+struct PythonJsonFormatter {
+    first_in_current: Vec<bool>,
+}
+
+impl PythonJsonFormatter {
+    fn new() -> Self {
+        Self {
+            first_in_current: Vec::new(),
+        }
+    }
+}
+
+impl serde_json::ser::Formatter for PythonJsonFormatter {
+    fn begin_array<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.first_in_current.push(true);
+        w.write_all(b"[")
+    }
+    fn end_array<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.first_in_current.pop();
+        w.write_all(b"]")
+    }
+    fn begin_array_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if !first {
+            w.write_all(b", ")?;
+        }
+        Ok(())
+    }
+    fn end_array_value<W: ?Sized + std::io::Write>(&mut self, _w: &mut W) -> std::io::Result<()> {
+        if let Some(last) = self.first_in_current.last_mut() {
+            *last = false;
+        }
+        Ok(())
+    }
+    fn begin_object<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.first_in_current.push(true);
+        w.write_all(b"{")
+    }
+    fn end_object<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.first_in_current.pop();
+        w.write_all(b"}")
+    }
+    fn begin_object_key<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if !first {
+            w.write_all(b", ")?;
+        }
+        Ok(())
+    }
+    fn begin_object_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+    ) -> std::io::Result<()> {
+        w.write_all(b": ")
+    }
+    fn end_object_value<W: ?Sized + std::io::Write>(&mut self, _w: &mut W) -> std::io::Result<()> {
+        if let Some(last) = self.first_in_current.last_mut() {
+            *last = false;
+        }
+        Ok(())
+    }
+}
+
+fn serialize_python_json<T: Serialize>(value: &T) -> std::result::Result<String, MinijinjaError> {
+    let formatter = PythonJsonFormatter::new();
+    let mut buf = Vec::new();
+    let mut serializer = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    value.serialize(&mut serializer).map_err(|e| {
+        MinijinjaError::new(
+            ErrorKind::InvalidOperation,
+            format!("Failed to serialize JSON: {e}"),
+        )
+    })?;
+    String::from_utf8(buf).map_err(|e| {
+        MinijinjaError::new(
+            ErrorKind::InvalidOperation,
+            format!("Invalid UTF-8 in JSON output: {e}"),
+        )
+    })
+}
+
 /// Custom tojson filter compatible with HuggingFace transformers' implementation.
 ///
 /// HuggingFace transformers registers a custom `tojson` filter that accepts additional
 /// keyword arguments beyond what standard Jinja2 provides:
 /// - `ensure_ascii` (bool): Whether to escape non-ASCII characters (ignored in Rust, always UTF-8)
 /// - `indent` (int): Number of spaces for indentation (pretty-printing)
-/// - `separators` (ignored): Custom separators for JSON output
+/// - `separators` (tuple): Custom separators for JSON output. When omitted, Python's
+///   `json.dumps` defaults to `(', ', ': ')` (note the spaces) — we match that.
 /// - `sort_keys` (bool): Whether to sort dictionary keys
 ///
 /// This is necessary for compatibility with chat templates from HuggingFace Hub models.
@@ -543,12 +638,9 @@ fn tojson_filter(value: Value, kwargs: Kwargs) -> std::result::Result<Value, Min
             }
             serialize_with_indent(value_to_serialize, spaces as usize)
         } else {
-            serde_json::to_string(value_to_serialize).map_err(|e| {
-                MinijinjaError::new(
-                    ErrorKind::InvalidOperation,
-                    format!("Failed to serialize JSON: {e}"),
-                )
-            })
+            // Match Python's `json.dumps` default separators `(', ', ': ')`
+            // so the rendered prompt tokenizes identically to the HTTP path.
+            serialize_python_json(value_to_serialize)
         }
     };
 
@@ -861,6 +953,100 @@ mod tests {
         assert_eq!(state.content_format(), ChatTemplateContentFormat::String);
         let result = state.apply(&[], ChatTemplateParams::default());
         assert!(result.is_err());
+    }
+
+    fn run_tojson_template(template: &str, x: serde_json::Value) -> String {
+        let state = ChatTemplateState::new(Some(template.to_string())).unwrap();
+        let mut kwargs: HashMap<String, serde_json::Value> = HashMap::new();
+        kwargs.insert("x".to_string(), x);
+        state
+            .apply(
+                &[serde_json::json!({"role": "user", "content": ""})],
+                ChatTemplateParams {
+                    template_kwargs: Some(&kwargs),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn tojson_filter_matches_python_json_dumps_default() {
+        // Python's `json.dumps({"a": 1, "b": 2})` returns `{"a": 1, "b": 2}`
+        // (spaces after `,` and `:`).  HuggingFace Jinja templates rely on
+        // this default, so SMG's Rust `tojson` must match or the rendered
+        // prompt will tokenize differently vs the HTTP/Python path.
+        let result = run_tojson_template(
+            "{{ x | tojson }}",
+            serde_json::json!({"a": 1, "b": "hello", "c": [1, 2, 3]}),
+        );
+        assert_eq!(result, r#"{"a": 1, "b": "hello", "c": [1, 2, 3]}"#);
+    }
+
+    #[test]
+    fn tojson_filter_ensure_ascii_still_ignored() {
+        // `tojson(ensure_ascii=False)` must not error and must produce the
+        // same spaced output as the default.
+        let result = run_tojson_template(
+            "{{ x | tojson(ensure_ascii=False) }}",
+            serde_json::json!({"k": "v"}),
+        );
+        assert_eq!(result, r#"{"k": "v"}"#);
+    }
+
+    #[test]
+    fn tojson_filter_sort_keys_with_spaces() {
+        let result = run_tojson_template(
+            "{{ x | tojson(sort_keys=True) }}",
+            serde_json::json!({"b": 2, "a": 1}),
+        );
+        assert_eq!(result, r#"{"a": 1, "b": 2}"#);
+    }
+
+    #[test]
+    fn tojson_filter_nested_with_spaces() {
+        // Regression for gRPC vs HTTP prompt divergence: tool definitions
+        // serialized with spaces match sglang's Python path (≈21 tokens less
+        // per tool difference when spaces are missing).
+        let result = run_tojson_template(
+            "{{ x | tojson }}",
+            serde_json::json!({
+                "name": "foo",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "string"},
+                    },
+                    "required": ["a"],
+                },
+            }),
+        );
+        // Key assertions: spaces after every `,` and `:`
+        assert!(result.contains("\", \""), "expected spaces after commas");
+        assert!(result.contains("\": "), "expected spaces after colons");
+    }
+
+    #[test]
+    fn tojson_filter_preserves_insertion_order() {
+        // Regression for gRPC vs HTTP prompt divergence: Python's
+        // `json.dumps` preserves insertion order (dicts are ordered in
+        // Python 3.7+).  Without `preserve_order` on `serde_json` +
+        // `minijinja`, Rust would alphabetize the keys, producing
+        // `{"description": ..., "name": ...}` instead of
+        // `{"name": ..., "description": ...}`.  Model input differs → model
+        // output differs → fc-dash flakes.
+        let result = run_tojson_template(
+            "{{ x | tojson }}",
+            serde_json::json!({
+                "name": "foo",
+                "description": "foo desc",
+                "parameters": {"type": "object"},
+            }),
+        );
+        assert_eq!(
+            result,
+            r#"{"name": "foo", "description": "foo desc", "parameters": {"type": "object"}}"#
+        );
     }
 
     #[test]
