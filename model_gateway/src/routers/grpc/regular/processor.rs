@@ -96,12 +96,15 @@ impl ResponseProcessor {
         let mut reasoning_text: Option<String> = None;
         let mut processed_text = final_text;
 
-        if original_request.separate_reasoning
-            && reasoning_parser_available
-            && !utils::has_constrained_output(
+        let output_is_constrained = !original_request.separate_reasoning
+            && utils::has_constrained_output(
                 original_request.tool_choice.as_ref(),
                 original_request.response_format.as_ref(),
-            )
+            );
+
+        if original_request.separate_reasoning
+            && reasoning_parser_available
+            && !output_is_constrained
         {
             let pooled_parser = utils::get_reasoning_parser(
                 &self.reasoning_parser_factory,
