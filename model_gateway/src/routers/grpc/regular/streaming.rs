@@ -18,7 +18,8 @@ use llm_tokenizer::{
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatCompletionStreamResponse},
     common::{
-        FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
+        FunctionCallDelta, FunctionCallResponse, StringOrArray, Tool, ToolCall, ToolCallDelta,
+        ToolChoice, ToolChoiceValue, Usage,
     },
     completion::{CompletionRequest, CompletionStreamChoice, CompletionStreamResponse},
     generate::GenerateRequest,
@@ -605,6 +606,121 @@ impl StreamingProcessor {
                     // Don't break - continue reading all Complete messages for n>1
                 }
                 ProtoResponseVariant::None => continue,
+            }
+        }
+
+        // Phase 2.5: Fallback — if reasoning consumed everything and no tool
+        // calls were detected during streaming, re-parse the full accumulated
+        // buffer. Models sometimes embed tool call markup inside <think> blocks.
+        {
+            let any_tool_calls_found = has_tool_calls.values().any(|&v| v);
+            let tc_enabled =
+                !matches!(tool_choice, Some(ToolChoice::Value(ToolChoiceValue::None)));
+            if !any_tool_calls_found
+                && tc_enabled
+                && tools.is_some()
+                && tool_parser_available
+                && separate_reasoning
+                && reasoning_parser_available
+            {
+                let indices: Vec<u32> = stream_buffers.keys().copied().collect();
+                for index in indices {
+                    let buffer = match stream_buffers.get(&index) {
+                        Some(b) if !b.is_empty() => b.clone(),
+                        _ => continue,
+                    };
+                    // Run reasoning parser on the full buffer to get normal text
+                    let pooled_parser = utils::get_reasoning_parser(
+                        &self.reasoning_parser_factory,
+                        self.configured_reasoning_parser.as_deref(),
+                        model,
+                    );
+                    let normal_text: String = {
+                        let mut parser = pooled_parser.lock().await;
+                        parser.reset();
+                        if thinking_override {
+                            parser.mark_reasoning_started();
+                        }
+                        match parser.detect_and_parse_reasoning(&buffer) {
+                            Ok(result) => result.normal_text,
+                            Err(_) => continue,
+                        }
+                    };
+
+                    // Try normal text first; if empty, fall back to full buffer
+                    // (model may have tool calls inside <think>)
+                    let text_to_parse: &str = if normal_text.is_empty() {
+                        &buffer
+                    } else {
+                        &normal_text
+                    };
+
+                    if text_to_parse.is_empty() {
+                        continue;
+                    }
+
+                    let fallback_tc: Option<Vec<ToolCall>> = {
+                        let pooled_tp = utils::get_tool_parser(
+                            &self.tool_parser_factory,
+                            self.configured_tool_parser.as_deref(),
+                            model,
+                        );
+                        let tools_slice = tools.as_deref().unwrap_or(&[]);
+                        let result = {
+                            let tp = pooled_tp.lock().await;
+                            tp.parse_complete_with_tools(text_to_parse, tools_slice)
+                                .await
+                        };
+                        match result {
+                            Ok((_normal, parsed)) if !parsed.is_empty() => Some(
+                                parsed
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(i, tc)| {
+                                        let id = utils::generate_tool_call_id(
+                                            model,
+                                            &tc.function.name,
+                                            i,
+                                            history_tool_calls_count,
+                                        );
+                                        ToolCall {
+                                            id,
+                                            tool_type: "function".to_string(),
+                                            function: FunctionCallResponse {
+                                                name: tc.function.name,
+                                                arguments: Some(tc.function.arguments),
+                                            },
+                                        }
+                                    })
+                                    .collect(),
+                            ),
+                            _ => None,
+                        }
+                    };
+                    if let Some(tc_list) = fallback_tc {
+                        for (tc_idx, tc) in tc_list.iter().enumerate() {
+                            let delta = ToolCallDelta {
+                                index: tc_idx as u32,
+                                id: Some(tc.id.clone()),
+                                tool_type: Some("function".to_string()),
+                                function: Some(FunctionCallDelta {
+                                    name: Some(tc.function.name.clone()),
+                                    arguments: tc.function.arguments.clone(),
+                                }),
+                            };
+                            let chunk =
+                                ChatCompletionStreamResponse::builder(request_id, model)
+                                    .created(created)
+                                    .add_choice_tool_call_delta(index, delta)
+                                    .maybe_system_fingerprint(system_fingerprint)
+                                    .build();
+                            Self::format_sse_chunk_into(&mut sse_buffer, &chunk);
+                            tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                                .map_err(|_| "Failed to send fallback tool chunk".to_string())?;
+                        }
+                        has_tool_calls.insert(index, true);
+                    }
+                }
             }
         }
 

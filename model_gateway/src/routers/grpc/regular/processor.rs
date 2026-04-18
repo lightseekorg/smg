@@ -178,6 +178,26 @@ impl ResponseProcessor {
                         original_request.tools.as_deref(),
                     )
                     .await;
+
+                // Fallback: if reasoning consumed everything and tool parsing
+                // found nothing, re-attempt tool parsing on the reasoning text.
+                // Models sometimes embed tool calls inside <think> blocks.
+                if tool_calls.is_none() && processed_text.is_empty() {
+                    if let Some(ref reasoning) = reasoning_text {
+                        let (fallback_tc, remaining) = self
+                            .parse_tool_calls(
+                                reasoning,
+                                &original_request.model,
+                                history_tool_calls_count,
+                                original_request.tools.as_deref(),
+                            )
+                            .await;
+                        if fallback_tc.is_some() {
+                            tool_calls = fallback_tc;
+                            processed_text = remaining;
+                        }
+                    }
+                }
             }
         }
 
