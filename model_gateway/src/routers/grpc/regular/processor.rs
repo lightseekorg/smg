@@ -97,18 +97,22 @@ impl ResponseProcessor {
         let mut processed_text = final_text;
 
         // Skip reasoning parsing when the output is constrained (specific
-        // tool_choice or structured response_format).  Constrained decoding
-        // forces the model to emit pure JSON without <think>...</think>
-        // wrappers, so the reasoning parser would incorrectly swallow the
-        // entire output as reasoning content.
-        let output_is_constrained = matches!(
-            &original_request.tool_choice,
-            Some(ToolChoice::Function { .. })
-        ) || matches!(
-            &original_request.response_format,
-            Some(openai_protocol::common::ResponseFormat::JsonObject)
-                | Some(openai_protocol::common::ResponseFormat::JsonSchema { .. })
-        );
+        // tool_choice or structured response_format) AND reasoning is not
+        // expected.  When separate_reasoning is true the chat template
+        // injects <think> in the prompt, so the model WILL emit thinking
+        // content regardless of backend constraints (TRT-LLM does not have
+        // TGL's ReasonerGrammarObject that defers the constraint).  The
+        // reasoning parser must run to strip it before JSON/tool
+        // post-processing.
+        let output_is_constrained = !original_request.separate_reasoning
+            && (matches!(
+                &original_request.tool_choice,
+                Some(ToolChoice::Function { .. })
+            ) || matches!(
+                &original_request.response_format,
+                Some(openai_protocol::common::ResponseFormat::JsonObject)
+                    | Some(openai_protocol::common::ResponseFormat::JsonSchema { .. })
+            ));
 
         if original_request.separate_reasoning
             && reasoning_parser_available

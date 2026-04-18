@@ -260,15 +260,17 @@ impl StreamingProcessor {
         // Check if this is the specific function case (LLM generates parameters only, no name field)
         let is_specific_function = matches!(tool_choice, Some(ToolChoice::Function { .. }));
 
-        // Skip reasoning parsing when constrained decoding is active.
-        // The model emits pure JSON without <think> wrappers, so the
-        // reasoning parser would swallow the output as reasoning content.
-        let output_is_constrained = is_specific_function
-            || matches!(
-                &original_request.response_format,
-                Some(openai_protocol::common::ResponseFormat::JsonObject)
-                    | Some(openai_protocol::common::ResponseFormat::JsonSchema { .. })
-            );
+        // Skip reasoning parsing when constrained decoding is active AND
+        // reasoning is not expected.  When separate_reasoning is true the
+        // chat template injects <think>, so the model emits thinking
+        // content even with constraints.  The reasoning parser must run.
+        let output_is_constrained = !separate_reasoning
+            && (is_specific_function
+                || matches!(
+                    &original_request.response_format,
+                    Some(openai_protocol::common::ResponseFormat::JsonObject)
+                        | Some(openai_protocol::common::ResponseFormat::JsonSchema { .. })
+                ));
 
         let tool_parser_available = tools.is_some()
             && utils::check_tool_parser_availability(
@@ -407,6 +409,14 @@ impl StreamingProcessor {
                                     history_tool_calls_count,
                                 )
                             } else {
+                                // When reasoning is active the backend may
+                                // not enforce constrained decoding, so the
+                                // model can emit native tool-call tags.
+                                // Use the native parser instead of JSON.
+                                let effective_json_parser = used_json_schema
+                                    && !(separate_reasoning
+                                        && self.configured_tool_parser.is_some()
+                                        && tool_parser_available);
                                 self.process_tool_calls_stream(
                                     &delta,
                                     index,
@@ -418,7 +428,7 @@ impl StreamingProcessor {
                                     created,
                                     system_fingerprint,
                                     history_tool_calls_count,
-                                    used_json_schema,
+                                    effective_json_parser,
                                 )
                                 .await
                             };
@@ -452,6 +462,28 @@ impl StreamingProcessor {
                             delta = delta.replace(token, "");
                         }
                     }
+
+                    // Strip markdown code fences for JSON responses so
+                    // streamed content is directly parseable.
+                    let is_json_response = matches!(
+                        &original_request.response_format,
+                        Some(openai_protocol::common::ResponseFormat::JsonObject)
+                            | Some(openai_protocol::common::ResponseFormat::JsonSchema { .. })
+                    );
+                    if is_json_response {
+                        delta = delta
+                            .replace("```json", "")
+                            .replace("```JSON", "")
+                            .replace("```", "");
+                        // Fence tokens may split across chunks (e.g.
+                        // "```" in one delta, "json\n" in the next).
+                        // Drop residual language tags left over.
+                        let trimmed = delta.trim();
+                        if trimmed == "json" || trimmed == "JSON" {
+                            delta = String::new();
+                        }
+                    }
+
                     if !delta.is_empty() {
                         let content_chunk =
                             ChatCompletionStreamResponse::builder(request_id, model)
