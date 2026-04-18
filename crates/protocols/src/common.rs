@@ -275,6 +275,8 @@ pub enum ResponseFormat {
     JsonObject,
     #[serde(rename = "json_schema")]
     JsonSchema { json_schema: JsonSchemaFormat },
+    #[serde(rename = "regex")]
+    Regex { pattern: String },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]

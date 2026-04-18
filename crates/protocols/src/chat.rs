@@ -414,6 +414,7 @@ fn validate_chat_cross_parameters(
         req.regex.is_some(),
         req.ebnf.is_some(),
         matches!(req.response_format, Some(ResponseFormat::JsonSchema { .. })),
+        matches!(req.response_format, Some(ResponseFormat::Regex { .. })),
     ]
     .iter()
     .filter(|&&x| x)

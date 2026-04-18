@@ -580,6 +580,12 @@ impl TrtllmServiceClient {
                     guide: schema_str,
                 });
             }
+            Some(ResponseFormat::Regex { pattern }) => {
+                return Ok(Some(proto::GuidedDecodingParams {
+                    guide_type: proto::guided_decoding_params::GuideType::Regex as i32,
+                    guide: pattern.clone(),
+                }));
+            }
             Some(ResponseFormat::Text) | None => {}
         }
 

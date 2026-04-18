@@ -203,7 +203,9 @@ pub(crate) fn has_constrained_output(
 
     let constrained_response_format = matches!(
         response_format,
-        Some(ResponseFormat::JsonObject) | Some(ResponseFormat::JsonSchema { .. })
+        Some(ResponseFormat::JsonObject)
+            | Some(ResponseFormat::JsonSchema { .. })
+            | Some(ResponseFormat::Regex { .. })
     );
 
     constrained_tool_choice || constrained_response_format
