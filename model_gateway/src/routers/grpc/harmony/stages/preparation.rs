@@ -286,7 +286,7 @@ impl HarmonyPreparationStage {
         };
 
         let schema = match format {
-            ResponseFormat::Text => return Ok(None),
+            ResponseFormat::Text | ResponseFormat::Regex { .. } => return Ok(None),
             ResponseFormat::JsonObject => Cow::Owned(serde_json::json!({"type": "object"})),
             ResponseFormat::JsonSchema { json_schema } => Cow::Borrowed(&json_schema.schema),
         };
