@@ -61,6 +61,10 @@ def load_model(args):
                 "merges.txt",
                 "vocab.json",
                 "added_tokens.json",
+                # tiktoken-style tokenizer artifacts — must stay in sync
+                # with MlxEngineServicer._TOKENIZER_FILES / _SUFFIXES.
+                "tiktoken.model",
+                "*.tiktoken",
             ],
         )
 

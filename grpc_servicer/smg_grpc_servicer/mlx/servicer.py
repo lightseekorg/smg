@@ -267,10 +267,13 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         # tokenizer-derived IDs when config.json has none).
         eos_token_ids = list(self._eos_token_ids)
 
+        # Use the pre-resolved context limit so GetModelInfo reports the
+        # same value Generate enforces (config keys vary across model
+        # families — see __init__).
         return mlx_engine_pb2.GetModelInfoResponse(
             model_path=self.model_path,
             is_generation=True,
-            max_context_length=config.get("max_position_embeddings", 0),
+            max_context_length=self._ctx_limit,
             vocab_size=config.get("vocab_size", 0),
             served_model_name=self.model_path,
             model_type=config.get("model_type", ""),
@@ -278,7 +281,7 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
             eos_token_ids=eos_token_ids,
             pad_token_id=config.get("pad_token_id") or 0,
             bos_token_id=config.get("bos_token_id") or 0,
-            max_req_input_len=config.get("max_position_embeddings", 0),
+            max_req_input_len=self._ctx_limit,
         )
 
     async def GetServerInfo(
