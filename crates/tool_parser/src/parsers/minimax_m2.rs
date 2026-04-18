@@ -192,18 +192,19 @@ impl MinimaxM2Parser {
     /// tool schema. Mirrors sglang's `_convert_param_value_with_types` so
     /// schema-aware parsing behaves identically across HTTP and gRPC paths.
     fn convert_with_schema(value: &str, param_types: &[String]) -> Value {
-        if value.eq_ignore_ascii_case("null") {
-            return Value::Null;
-        }
-
         let normalized: Vec<String> =
             param_types.iter().map(|t| t.to_lowercase()).collect();
 
-        if normalized.iter().any(|t| t == "null")
-            && (value.eq_ignore_ascii_case("null")
-                || value.eq_ignore_ascii_case("none")
-                || value.eq_ignore_ascii_case("nil"))
-        {
+        // Only coerce "null"/"none"/"nil" to JSON null when the schema
+        // actually accepts null.  Previously this was an unconditional
+        // early return, which broke cases like fc-dash
+        // `bfcl/simple_javascript_43` where the tool description tells the
+        // model `error` can be the STRING `'null'`; the model faithfully
+        // emits `null` and the parser must not coerce it.
+        let looks_null = value.eq_ignore_ascii_case("null")
+            || value.eq_ignore_ascii_case("none")
+            || value.eq_ignore_ascii_case("nil");
+        if looks_null && normalized.iter().any(|t| t == "null") {
             return Value::Null;
         }
 
@@ -748,5 +749,54 @@ impl ToolParser for MinimaxM2Parser {
         self.in_tool_call = false;
         self.function_name_sent = false;
         self.waiting_for_tool_call_end = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn types(slice: &[&str]) -> Vec<String> {
+        slice.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn convert_with_schema_string_keeps_null_as_string() {
+        // Regression: fc-dash bfcl/simple_javascript_43.
+        // Schema declares `error: string` and the tool description tells the
+        // model the value may be the string `"null"`.  The parser must NOT
+        // coerce it to JSON null.
+        let v = MinimaxM2Parser::convert_with_schema("null", &types(&["string"]));
+        assert_eq!(v, Value::String("null".to_string()));
+
+        let v = MinimaxM2Parser::convert_with_schema("None", &types(&["string"]));
+        assert_eq!(v, Value::String("None".to_string()));
+
+        let v = MinimaxM2Parser::convert_with_schema("nil", &types(&["string"]));
+        assert_eq!(v, Value::String("nil".to_string()));
+    }
+
+    #[test]
+    fn convert_with_schema_nullable_type_becomes_null() {
+        // Schema `["string", "null"]` – literal "null" should coerce to Null.
+        let v = MinimaxM2Parser::convert_with_schema("null", &types(&["string", "null"]));
+        assert_eq!(v, Value::Null);
+
+        let v = MinimaxM2Parser::convert_with_schema("None", &types(&["integer", "null"]));
+        assert_eq!(v, Value::Null);
+    }
+
+    #[test]
+    fn convert_with_schema_integer_still_parses_numbers() {
+        let v = MinimaxM2Parser::convert_with_schema("42", &types(&["integer"]));
+        assert_eq!(v, Value::Number(42i64.into()));
+    }
+
+    #[test]
+    fn convert_with_schema_boolean_still_works() {
+        let v = MinimaxM2Parser::convert_with_schema("true", &types(&["boolean"]));
+        assert_eq!(v, Value::Bool(true));
+        let v = MinimaxM2Parser::convert_with_schema("false", &types(&["boolean"]));
+        assert_eq!(v, Value::Bool(false));
     }
 }
