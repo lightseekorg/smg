@@ -11,11 +11,11 @@
 //! * `TOKENSPEED_TEST_INPUT_IDS` — comma-separated prompt token IDs for the
 //!   Generate tests. Default: `1,2,3`.
 
-// Workspace clippy auto-allows expect/unwrap inside `#[test]` functions, but
-// `#[tokio::test]` expands too late for that detection — so we opt the whole
-// file in explicitly. This is a test file; a panic on a missing env var or a
-// dead server is the correct way to fail.
-#![expect(clippy::expect_used)]
+// Workspace clippy auto-allows expect/unwrap/panic inside `#[test]` functions,
+// but `#[tokio::test]` expands too late for that detection — so we opt the
+// whole file in explicitly. This is a test file; a panic on a missing env var
+// or a dead server is the correct way to fail.
+#![expect(clippy::expect_used, clippy::panic)]
 
 use std::{
     sync::{
@@ -41,14 +41,20 @@ fn endpoint() -> String {
 }
 
 fn input_ids() -> Vec<u32> {
-    std::env::var("TOKENSPEED_TEST_INPUT_IDS")
-        .ok()
-        .and_then(|v| {
-            v.split(',')
-                .map(|s| s.trim().parse::<u32>().ok())
-                .collect::<Option<Vec<_>>>()
-        })
-        .unwrap_or_else(|| vec![1, 2, 3])
+    // Unset → safe default. Set-but-malformed → panic loudly rather than
+    // silently running with wrong inputs (a misconfigured CI env that happens
+    // to produce passing tests is worse than a loud failure).
+    match std::env::var("TOKENSPEED_TEST_INPUT_IDS") {
+        Ok(v) => v
+            .split(',')
+            .map(|s| {
+                s.trim().parse::<u32>().unwrap_or_else(|e| {
+                    panic!("TOKENSPEED_TEST_INPUT_IDS contains {s:?}, not a u32: {e}")
+                })
+            })
+            .collect(),
+        Err(_) => vec![1, 2, 3],
+    }
 }
 
 fn sampling_params(max_new_tokens: u32) -> proto::SamplingParams {
@@ -154,19 +160,31 @@ async fn get_server_info_reports_uptime_and_type() {
     let client = connect().await;
     let resp = client.get_server_info().await.expect("get_server_info");
     assert_eq!(resp.server_type, "grpc");
-    assert!(resp.uptime_seconds >= 0.0);
+    // The server answered at least one RPC before this one, so uptime must
+    // be strictly positive — guarding against a bug that wires `uptime = 0`.
+    assert!(
+        resp.uptime_seconds > 0.0,
+        "uptime_seconds should be > 0 after the server has served at least one RPC; got {}",
+        resp.uptime_seconds
+    );
 }
 
 #[tokio::test]
 #[ignore = "requires TOKENSPEED_GRPC_ENDPOINT"]
-async fn get_loads_returns_empty_stub() {
+async fn get_loads_returns_shape() {
+    // GetLoads is a stub today but will later return per-DP-rank metrics.
+    // Only assert the RPC succeeds and entries (if any) carry non-negative
+    // queue counts. An exact-length check would break the day the stub is
+    // replaced with a real implementation.
     let client = connect().await;
     let resp = client
         .get_loads(proto::GetLoadsRequest::default())
         .await
         .expect("get_loads");
-    // The server-side is currently a stub.
-    assert_eq!(resp.loads.len(), 0);
+    for load in &resp.loads {
+        assert!(load.num_running_reqs >= 0);
+        assert!(load.num_waiting_reqs >= 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,9 +302,10 @@ async fn abort_request_out_of_band_returns_ok() {
         .await
         .expect("abort_request");
 
-    // Explicitly drop the stream rather than draining it — that triggers
-    // AbortOnDropStream's Drop impl, which is fine (idempotent with the
-    // explicit Abort above).
+    // We already sent an explicit Abort above; tell `AbortOnDropStream` so
+    // its Drop impl doesn't spawn a redundant second Abort RPC (which would
+    // race against the test returning and leak the fire-and-forget task).
+    stream.mark_completed();
     drop(stream);
 }
 
