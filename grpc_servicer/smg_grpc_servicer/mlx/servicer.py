@@ -72,6 +72,14 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         # Protects mlx-lm BatchGenerator state + self._uid_queues against
         # the background gen thread. See class docstring.
         self._gen_lock = threading.Lock()
+        # Resolve context length once — config doesn't change at runtime,
+        # and Generate was previously scanning these keys on every request.
+        self._ctx_limit = 0
+        for key in ("max_position_embeddings", "max_seq_len", "n_positions", "seq_length"):
+            val = model_config.get(key)
+            if isinstance(val, int) and val > 0:
+                self._ctx_limit = val
+                break
         logger.info("MlxEngineServicer initialized for model %s", model_path)
 
     @staticmethod
@@ -121,6 +129,12 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
             transitions={"normal": stop_sequences},
             initial="normal",
         )
+
+    @staticmethod
+    def _matched_stop_token(response):
+        """Return the matched stop token id if the response matched a single-token stop."""
+        ms = response.match_sequence
+        return ms[0] if ms and len(ms) == 1 else None
 
     @staticmethod
     def _build_output_logprobs(token_id, logprobs_array, num_logprobs):
@@ -338,27 +352,14 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
             state_machine = self._build_state_machine(sp, self._eos_token_ids)
             # When max_tokens is unset, cap at remaining context (matches
             # vLLM/SGLang semantics: unbounded within model limits, not a
-            # silent 256-token truncation). Different model configs use
-            # different keys for the context length; fall back to 256 if
-            # none are present so we don't end up with max_tokens=1.
+            # silent 256-token truncation). Fall back to 256 if the model
+            # config didn't advertise a context length.
             if sp.HasField("max_tokens"):
                 max_tokens = sp.max_tokens
+            elif self._ctx_limit > 0:
+                max_tokens = max(self._ctx_limit - len(token_ids), 1)
             else:
-                ctx_limit = 0
-                for key in (
-                    "max_position_embeddings",
-                    "max_seq_len",
-                    "n_positions",
-                    "seq_length",
-                ):
-                    val = self.model_config.get(key)
-                    if isinstance(val, int) and val > 0:
-                        ctx_limit = val
-                        break
-                if ctx_limit > 0:
-                    max_tokens = max(ctx_limit - len(token_ids), 1)
-                else:
-                    max_tokens = 256
+                max_tokens = 256
             num_logprobs = sp.logprobs if sp.HasField("logprobs") else None
 
             if sp.HasField("seed"):
@@ -391,24 +392,17 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                             # Sentinel from Abort — terminate the stream.
                             break
                         completion_tokens += 1
-                        output_logprobs = self._build_output_logprobs(
-                            r.token, r.logprobs, num_logprobs
+                        yield self._chunk_response(
+                            token_ids=[r.token],
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            cached_tokens=0,
+                            index=0,
+                            output_logprobs=self._build_output_logprobs(
+                                r.token, r.logprobs, num_logprobs
+                            ),
                         )
-
                         if r.finish_reason is not None:
-                            yield self._chunk_response(
-                                token_ids=[r.token],
-                                prompt_tokens=prompt_tokens,
-                                completion_tokens=completion_tokens,
-                                cached_tokens=0,
-                                index=0,
-                                output_logprobs=output_logprobs,
-                            )
-                            matched_token_id = None
-                            if r.match_sequence:
-                                matched_token_id = (
-                                    r.match_sequence[0] if len(r.match_sequence) == 1 else None
-                                )
                             yield self._complete_response(
                                 output_ids=[],
                                 finish_reason=r.finish_reason,
@@ -416,18 +410,9 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                                 completion_tokens=completion_tokens,
                                 cached_tokens=0,
                                 index=0,
-                                matched_token_id=matched_token_id,
+                                matched_token_id=self._matched_stop_token(r),
                             )
                             break
-                        else:
-                            yield self._chunk_response(
-                                token_ids=[r.token],
-                                prompt_tokens=prompt_tokens,
-                                completion_tokens=completion_tokens,
-                                cached_tokens=0,
-                                index=0,
-                                output_logprobs=output_logprobs,
-                            )
                 else:
                     all_output_ids = []
                     # Aggregate per-token logprobs across the whole sequence so
@@ -448,11 +433,6 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                             agg_token_logprobs.extend(step.token_logprobs)
                             agg_top.extend(step.top_logprobs)
                         if r.finish_reason is not None:
-                            matched_token_id = None
-                            if r.match_sequence:
-                                matched_token_id = (
-                                    r.match_sequence[0] if len(r.match_sequence) == 1 else None
-                                )
                             seq_logprobs = None
                             if agg_token_ids:
                                 seq_logprobs = mlx_engine_pb2.OutputLogProbs(
@@ -468,7 +448,7 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                                 cached_tokens=0,
                                 index=0,
                                 output_logprobs=seq_logprobs,
-                                matched_token_id=matched_token_id,
+                                matched_token_id=self._matched_stop_token(r),
                             )
                             break
             finally:

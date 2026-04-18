@@ -79,6 +79,22 @@ def load_model(args):
     return model, tokenizer, model_dir, model_config, eos_token_ids
 
 
+def _warmup(batch_generator):
+    """Run one end-to-end token through the batch generator so the first
+    real request doesn't pay JIT/kernel compilation cost."""
+    logger.info("Running warmup generation...")
+    try:
+        uids = batch_generator.insert(prompts=[[1]], max_tokens=[1])
+        for _ in range(10):
+            _, gen_responses = batch_generator.next()
+            if any(r.finish_reason is not None for r in gen_responses if r.uid == uids[0]):
+                break
+        batch_generator.remove(uids)
+        logger.info("Warmup complete")
+    except Exception:
+        logger.warning("Warmup failed (non-fatal)", exc_info=True)
+
+
 async def serve_grpc(args):
     """Start the MLX gRPC server."""
     start_time = time.time()
@@ -136,20 +152,8 @@ async def serve_grpc(args):
     logger.info("gRPC server listening on %s", listen_addr)
 
     # Warmup BEFORE starting the generation loop (batch_generator.next() is
-    # not thread-safe — only one caller at a time)
-    logger.info("Running warmup generation...")
-    try:
-        warmup_ids = [1]
-        uids = batch_generator.insert(prompts=[warmup_ids], max_tokens=[1])
-        for _ in range(10):
-            _, gen_responses = batch_generator.next()
-            done = any(r.finish_reason is not None for r in gen_responses if r.uid == uids[0])
-            if done:
-                break
-        batch_generator.remove(uids)
-        logger.info("Warmup complete")
-    except Exception:
-        logger.warning("Warmup failed (non-fatal)", exc_info=True)
+    # not thread-safe — only one caller at a time).
+    _warmup(batch_generator)
 
     servicer.start_generation_loop()
     health_servicer.set_serving()
