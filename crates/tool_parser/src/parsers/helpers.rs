@@ -380,6 +380,99 @@ pub(crate) fn handle_json_tool_streaming(
     Ok(result)
 }
 
+/// `serde_json::ser::Formatter` that emits `", "` after array/object items
+/// and `": "` between keys and values — matching Python's `json.dumps` with
+/// its default `separators=(', ', ': ')`.
+///
+/// The OpenAI `tool_calls[].function.arguments` field is a serialized JSON
+/// string.  sglang's HTTP path produces it via Python's `json.dumps`, which
+/// uses spaced separators.  Rust's `serde_json::to_string` produces compact
+/// output without spaces.  Without this formatter, fc-dash tests that do
+/// exact-string comparisons on tool-call arguments see different strings
+/// from HTTP vs gRPC for the same model output, breaking parity.
+struct PythonJsonFormatter {
+    first_in_current: Vec<bool>,
+}
+
+impl PythonJsonFormatter {
+    fn new() -> Self {
+        Self {
+            first_in_current: Vec::new(),
+        }
+    }
+}
+
+impl serde_json::ser::Formatter for PythonJsonFormatter {
+    fn begin_array<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.first_in_current.push(true);
+        w.write_all(b"[")
+    }
+    fn end_array<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.first_in_current.pop();
+        w.write_all(b"]")
+    }
+    fn begin_array_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if !first {
+            w.write_all(b", ")?;
+        }
+        Ok(())
+    }
+    fn end_array_value<W: ?Sized + std::io::Write>(&mut self, _w: &mut W) -> std::io::Result<()> {
+        if let Some(last) = self.first_in_current.last_mut() {
+            *last = false;
+        }
+        Ok(())
+    }
+    fn begin_object<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.first_in_current.push(true);
+        w.write_all(b"{")
+    }
+    fn end_object<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.first_in_current.pop();
+        w.write_all(b"}")
+    }
+    fn begin_object_key<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if !first {
+            w.write_all(b", ")?;
+        }
+        Ok(())
+    }
+    fn begin_object_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+    ) -> std::io::Result<()> {
+        w.write_all(b": ")
+    }
+    fn end_object_value<W: ?Sized + std::io::Write>(&mut self, _w: &mut W) -> std::io::Result<()> {
+        if let Some(last) = self.first_in_current.last_mut() {
+            *last = false;
+        }
+        Ok(())
+    }
+}
+
+/// Serialize a value to a JSON string using Python's default `json.dumps`
+/// formatting (spaces after `,` and `:`).
+///
+/// Use this for `ToolCall::arguments` so the emitted string matches what
+/// sglang's HTTP path produces.
+pub fn python_json_to_string<T: serde::Serialize>(value: &T) -> serde_json::Result<String> {
+    let formatter = PythonJsonFormatter::new();
+    let mut buf = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    value.serialize(&mut ser)?;
+    // Serializer guarantees valid UTF-8 output for `Value`.
+    Ok(String::from_utf8(buf).expect("serde_json output is valid UTF-8"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

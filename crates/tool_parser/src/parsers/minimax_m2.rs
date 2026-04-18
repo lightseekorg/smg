@@ -226,6 +226,16 @@ impl MinimaxM2Parser {
                     }
                 }
                 "number" | "float" => {
+                    // Match Python `json.dumps` int-vs-float distinction:
+                    // if the raw text parses as an integer, keep it as an
+                    // integer so the serialized argument is `85` not `85.0`.
+                    // sglang's Python parser does `int(x) or float(x)`, we
+                    // mirror it.  JSON Schema `"type": "number"` accepts both.
+                    if !value.contains(|c: char| matches!(c, '.' | 'e' | 'E')) {
+                        if let Ok(n) = value.parse::<i64>() {
+                            return Value::Number(n.into());
+                        }
+                    }
                     if let Ok(n) = value.parse::<f64>() {
                         if let Some(nn) = serde_json::Number::from_f64(n) {
                             return Value::Number(nn);
@@ -314,7 +324,10 @@ impl MinimaxM2Parser {
             let params_text = captures.get(2).map_or("", |m| m.as_str());
             let parameters = self.parse_parameters(params_text, func_name, tools);
 
-            let arguments_str = serde_json::to_string(&parameters)
+            // Use Python-`json.dumps`-compatible spacing so
+            // `tool_calls[].function.arguments` matches what sglang's HTTP
+            // path produces (`{"a": 1, "b": 2}` not `{"a":1,"b":2}`).
+            let arguments_str = helpers::python_json_to_string(&parameters)
                 .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
 
             results.push(ToolCall {
@@ -798,5 +811,60 @@ mod tests {
         assert_eq!(v, Value::Bool(true));
         let v = MinimaxM2Parser::convert_with_schema("false", &types(&["boolean"]));
         assert_eq!(v, Value::Bool(false));
+    }
+
+    #[test]
+    fn convert_with_schema_number_keeps_int_as_int() {
+        // Regression for fc-dash `bfcl/parallel_138`: schema says `number`,
+        // model emits `85` (no decimal) — must serialize as `85`, not `85.0`,
+        // to match sglang's Python path (`int(x) or float(x)`).
+        let v = MinimaxM2Parser::convert_with_schema("85", &types(&["number"]));
+        assert_eq!(v, Value::Number(85i64.into()));
+
+        let v = MinimaxM2Parser::convert_with_schema("1.8", &types(&["number"]));
+        // 1.8 should still be a float
+        assert!(v.is_f64(), "1.8 should parse as float, got {v:?}");
+        assert_eq!(
+            v.as_f64().unwrap().to_string(),
+            "1.8"
+        );
+
+        let v = MinimaxM2Parser::convert_with_schema("1267000000", &types(&["number"]));
+        assert_eq!(v, Value::Number(1267000000i64.into()));
+
+        // Scientific notation should still be float
+        let v = MinimaxM2Parser::convert_with_schema("1e5", &types(&["number"]));
+        assert!(v.is_f64());
+    }
+
+    #[tokio::test]
+    async fn parse_complete_arguments_use_spaces_like_python() {
+        // Regression for gRPC/HTTP parity: fc-dash `bfcl/parallel_138` etc
+        // compare `tool_calls[].function.arguments` as a string and expect
+        // Python's `json.dumps` default spacing (`{"a": 1, "b": 2}`).
+        let parser = MinimaxM2Parser::new();
+        let text = r#"<minimax:tool_call>
+<invoke name="calculate_BMI">
+<parameter name="weight_kg">85</parameter>
+<parameter name="height_m">1.8</parameter>
+</invoke>
+</minimax:tool_call>"#;
+
+        let (_, calls) = parser.parse_complete(text).await.unwrap();
+        assert_eq!(calls.len(), 1);
+        let args = &calls[0].function.arguments;
+        // The ordering in the argument JSON follows input order; we assert
+        // only the whitespace invariant that must match Python.
+        assert!(
+            args.contains(", "),
+            "expected `, ` between items, got: {args}"
+        );
+        assert!(
+            args.contains(": "),
+            "expected `: ` between keys and values, got: {args}"
+        );
+        // And verify no `":":` (no-space) appears
+        assert!(!args.contains("\":\""), "unexpected compact JSON: {args}");
+        assert!(!args.contains(",\""), "unexpected compact JSON: {args}");
     }
 }
