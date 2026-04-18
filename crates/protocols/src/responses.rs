@@ -82,10 +82,33 @@ pub struct CodeInterpreterTool {
 
 /// `require_approval` values.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(untagged)]
 pub enum RequireApproval {
+    Mode(RequireApprovalMode),
+    Rules(RequireApprovalRules),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RequireApprovalMode {
     Always,
     Never,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequireApprovalRules {
+    pub always: Option<RequireApprovalFilter>,
+    pub never: Option<RequireApprovalFilter>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequireApprovalFilter {
+    pub tool_names: Option<Vec<String>>,
+    pub read_only: Option<bool>,
 }
 
 // ============================================================================
@@ -1496,5 +1519,61 @@ mod tests {
         .expect("request should deserialize");
 
         assert_eq!(request.top_p, Some(0.9));
+    }
+
+    #[test]
+    fn test_require_approval_string_round_trip() {
+        let tool: McpTool = serde_json::from_value(json!({
+            "server_label": "deepwiki",
+            "require_approval": "never"
+        }))
+        .expect("mcp tool should deserialize");
+
+        assert_eq!(
+            tool.require_approval,
+            Some(RequireApproval::Mode(RequireApprovalMode::Never))
+        );
+
+        let serialized = serde_json::to_value(&tool).expect("mcp tool should serialize");
+        assert_eq!(serialized["require_approval"], json!("never"));
+    }
+
+    #[test]
+    fn test_require_approval_object_round_trip() {
+        let tool: McpTool = serde_json::from_value(json!({
+            "server_label": "deepwiki",
+            "require_approval": {
+                "always": null,
+                "never": {
+                    "tool_names": ["ask_question", "read_wiki_structure"],
+                    "read_only": null
+                }
+            }
+        }))
+        .expect("mcp tool should deserialize");
+
+        assert_eq!(
+            tool.require_approval,
+            Some(RequireApproval::Rules(RequireApprovalRules {
+                always: None,
+                never: Some(RequireApprovalFilter {
+                    tool_names: Some(vec![
+                        "ask_question".to_string(),
+                        "read_wiki_structure".to_string()
+                    ]),
+                    read_only: None,
+                }),
+            }))
+        );
+
+        let serialized = serde_json::to_value(&tool).expect("mcp tool should serialize");
+        assert_eq!(
+            serialized["require_approval"],
+            json!({
+                "never": {
+                    "tool_names": ["ask_question", "read_wiki_structure"]
+                }
+            })
+        );
     }
 }
