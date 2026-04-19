@@ -80,6 +80,15 @@ MODEL_SPECS: dict[str, dict] = {
             '{"disable_any_whitespace": true, "backend": "xgrammar"}',
         ],
     },
+    # Devstral 2 - nightly benchmarks
+    "mistralai/Devstral-2-123B-Instruct-2512": {
+        "model": _resolve_model_path("mistralai/Devstral-2-123B-Instruct-2512"),
+        "tp": 8,
+        "features": ["chat", "streaming", "function_calling"],
+        "worker_args": ["--tool-call-parser", "mistral"],
+        "vllm_args": ["--tool-call-parser", "mistral", "--enable-auto-tool-choice"],
+        "startup_timeout": 1200,
+    },
     # Embedding model
     "intfloat/e5-mistral-7b-instruct": {
         "model": _resolve_model_path("intfloat/e5-mistral-7b-instruct"),
