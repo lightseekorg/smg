@@ -114,6 +114,15 @@ pub enum ChatCompletionsSkillRef {
     },
 }
 
+/// Decoded payload carried in the `X-SMG-Skills` header for `/v1/chat/completions`.
+///
+/// On the wire the header value is a URL-safe base64 encoded JSON array of
+/// `ChatCompletionsSkillRef` entries. This wrapper models the decoded protocol
+/// payload before header encoding/after header decoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(transparent)]
+pub struct ChatCompletionsSkillsHeader(pub Vec<ChatCompletionsSkillRef>);
+
 /// Version reference accepted by skill attachment surfaces.
 ///
 /// Deserialization is intentionally manual to reject ambiguous numeric strings

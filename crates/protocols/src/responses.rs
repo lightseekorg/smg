@@ -14,7 +14,9 @@ use super::{
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
-use crate::{builders::ResponsesResponseBuilder, validated::Normalizable};
+use crate::{
+    builders::ResponsesResponseBuilder, skills::ResponsesSkillEntry, validated::Normalizable,
+};
 
 // ============================================================================
 // Response Tools (MCP and others)
@@ -78,6 +80,14 @@ pub struct WebSearchPreviewTool {
 #[serde(deny_unknown_fields)]
 pub struct CodeInterpreterTool {
     pub container: Option<Value>,
+    pub environment: Option<ResponseToolEnvironment>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseToolEnvironment {
+    pub skills: Option<Vec<ResponsesSkillEntry>>,
 }
 
 /// `require_approval` values.

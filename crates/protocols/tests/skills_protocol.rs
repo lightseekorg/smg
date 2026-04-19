@@ -1,5 +1,10 @@
-use openai_protocol::skills::{
-    OpaqueOpenAIObject, ResponsesSkillEntry, ResponsesSkillRef, SkillVersionRef,
+use openai_protocol::{
+    messages::CreateMessageRequest,
+    responses::{CodeInterpreterTool, ResponseTool},
+    skills::{
+        ChatCompletionsSkillRef, ChatCompletionsSkillsHeader, MessagesSkillRef, OpaqueOpenAIObject,
+        ResponsesSkillEntry, ResponsesSkillRef, SkillVersionRef,
+    },
 };
 use schemars::schema_for;
 use serde::Deserialize;
@@ -61,6 +66,45 @@ fn optional_skill_version_ref_accepts_null_and_absent() {
 
     let absent_value: OptionalVersionHolder = serde_json::from_value(json!({})).unwrap();
     assert_eq!(absent_value.version, None);
+}
+
+#[test]
+fn messages_container_skills_use_typed_skill_refs() {
+    let raw = json!({
+        "model": "claude-test",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 16,
+        "container": {
+            "id": "container_123",
+            "skills": [
+                {
+                    "type": "custom",
+                    "skill_id": "skill_123",
+                    "version": "latest"
+                },
+                {
+                    "type": "anthropic",
+                    "skill_id": "claude-search",
+                    "version": "20260301"
+                }
+            ]
+        }
+    });
+
+    let request: CreateMessageRequest = serde_json::from_value(raw.clone()).unwrap();
+    let container = request.container.as_ref().unwrap();
+    let expected = vec![
+        MessagesSkillRef::Custom {
+            skill_id: "skill_123".to_string(),
+            version: Some(SkillVersionRef::Latest),
+        },
+        MessagesSkillRef::Anthropic {
+            skill_id: "claude-search".to_string(),
+            version: Some("20260301".to_string()),
+        },
+    ];
+    assert_eq!(container.skills.as_ref().unwrap(), &expected);
+    assert_eq!(serde_json::to_value(&request).unwrap(), raw);
 }
 
 #[test]
@@ -160,6 +204,60 @@ fn responses_skill_entry_rejects_non_object_payloads() {
 }
 
 #[test]
+fn responses_code_interpreter_legacy_container_round_trips() {
+    let raw = json!({
+        "type": "code_interpreter",
+        "container": {
+            "type": "auto",
+            "runtime": "python"
+        }
+    });
+
+    let tool: ResponseTool = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&tool).unwrap(), raw);
+}
+
+#[test]
+fn responses_code_interpreter_environment_skills_round_trip() {
+    let raw = json!({
+        "type": "code_interpreter",
+        "container": {
+            "type": "auto"
+        },
+        "environment": {
+            "skills": [
+                {
+                    "type": "skill_reference",
+                    "skill_id": "skill_123",
+                    "version": "latest"
+                },
+                {
+                    "type": "inline_skill",
+                    "name": "map",
+                    "description": "Map the codebase",
+                    "instructions": "Read the crate map before implementing changes."
+                }
+            ]
+        }
+    });
+
+    let tool: ResponseTool = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&tool).unwrap(), raw);
+}
+
+#[test]
+fn code_interpreter_tool_schema_keeps_container_and_adds_environment() {
+    let schema = serde_json::to_value(schema_for!(CodeInterpreterTool)).unwrap();
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .unwrap();
+
+    assert!(properties.contains_key("container"));
+    assert!(properties.contains_key("environment"));
+}
+
+#[test]
 fn skill_version_ref_schema_matches_runtime_contract() {
     let schema = serde_json::to_value(schema_for!(SkillVersionRef)).unwrap();
     let one_of = schema
@@ -177,4 +275,36 @@ fn skill_version_ref_schema_matches_runtime_contract() {
         branch.get("type") == Some(&json!("string"))
             && branch.get("pattern") == Some(&json!("^[1-9][0-9]{9,}$"))
     }));
+}
+
+#[test]
+fn chat_completions_skills_header_round_trips_decoded_payload() {
+    let raw = json!([
+        {
+            "type": "custom",
+            "skill_id": "skill_123",
+            "version": "latest"
+        },
+        {
+            "type": "openai",
+            "skill_id": "openai-spreadsheets",
+            "version": "2026-03-01"
+        }
+    ]);
+
+    let header: ChatCompletionsSkillsHeader = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(
+        header,
+        ChatCompletionsSkillsHeader(vec![
+            ChatCompletionsSkillRef::Custom {
+                skill_id: "skill_123".to_string(),
+                version: Some(SkillVersionRef::Latest),
+            },
+            ChatCompletionsSkillRef::OpenAI {
+                skill_id: "openai-spreadsheets".to_string(),
+                version: Some("2026-03-01".to_string()),
+            }
+        ])
+    );
+    assert_eq!(serde_json::to_value(&header).unwrap(), raw);
 }
