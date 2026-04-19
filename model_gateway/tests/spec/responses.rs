@@ -862,29 +862,37 @@ fn test_validate_top_logprobs_requires_include() {
     );
 }
 
-/// Test background/stream conflict
+/// Background mode with streaming is now allowed (BGM-PR-01) — the OpenAI
+/// SDK issues streaming background creates, so rejecting the combo broke
+/// SDK parity. The new rule is `background=true` requires `store != false`.
 #[test]
-fn test_validate_background_stream_conflict() {
-    // Invalid: both background and stream enabled
+fn test_validate_background_with_stream_allowed() {
     let request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
         background: Some(true),
         stream: Some(true),
         ..Default::default()
     };
-    let result = request.validate();
-    assert!(
-        result.is_err(),
-        "background=true with stream=true should be invalid"
-    );
+    request
+        .validate()
+        .expect("background=true + stream=true should be accepted");
+}
 
-    if let Err(errors) = result {
-        let error_msg = errors.to_string();
-        assert!(
-            error_msg.contains("background") || error_msg.contains("stream"),
-            "Error should mention background/stream conflict"
-        );
-    }
+#[test]
+fn test_validate_background_requires_store() {
+    let request = ResponsesRequest {
+        input: ResponseInput::Text("test".to_string()),
+        background: Some(true),
+        store: Some(false),
+        ..Default::default()
+    };
+    let err = request
+        .validate()
+        .expect_err("background=true with store=false must be rejected");
+    assert!(
+        format!("{err:?}").contains("background_requires_store"),
+        "expected background_requires_store error code, got {err:?}"
+    );
 }
 
 /// Test previous_response_id format validation

@@ -326,9 +326,11 @@ pub(super) async fn execute_tool_loop(
                     )
                 })?;
 
-                // Mark as completed but with incomplete details
-                responses_response.status = ResponseStatus::Completed;
-                responses_response.incomplete_details = Some(json!({ "reason": "max_tool_calls" }));
+                // `max_tool_calls` exhaustion is not an OpenAI-valid `incomplete` reason
+                // (spec restricts to `max_output_tokens` / `content_filter`). Surface as
+                // `failed` with an explicit error code instead.
+                responses_response.status = ResponseStatus::Failed;
+                responses_response.error = Some(json!({ "code": "max_tool_calls_exceeded" }));
 
                 return Ok(responses_response);
             }

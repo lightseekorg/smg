@@ -375,6 +375,7 @@ impl StreamingResponseAccumulator {
                 content: vec![ResponseReasoningContent::ReasoningText {
                     text: self.reasoning_buffer,
                 }],
+                encrypted_content: None,
                 status: Some("completed".to_string()),
             });
         }

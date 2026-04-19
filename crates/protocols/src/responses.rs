@@ -179,6 +179,11 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         #[serde(default)]
         content: Vec<ResponseReasoningContent>,
+        /// Encrypted reasoning payload for gpt-5 / o-series round-trip via
+        /// `previous_response_id`. Opaque to SMG; must be preserved intact.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        encrypted_content: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
@@ -281,6 +286,11 @@ pub enum ResponseOutputItem {
         id: String,
         summary: Vec<String>,
         content: Vec<ResponseReasoningContent>,
+        /// Encrypted reasoning payload for gpt-5 / o-series round-trip.
+        /// Opaque to SMG; must be preserved intact.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        encrypted_content: Option<String>,
         status: Option<String>,
     },
     #[serde(rename = "function_call")]
@@ -453,8 +463,29 @@ pub enum ResponseStatus {
     Queued,
     InProgress,
     Completed,
+    Incomplete,
     Failed,
     Cancelled,
+}
+
+/// Reason why a response terminated with `status = incomplete`.
+///
+/// Matches the OpenAI Responses API `incomplete_details.reason` field, which is
+/// restricted to exactly these two values. Other termination causes
+/// (wall-clock timeout, `max_tool_calls`, provider errors) map to
+/// `ResponseStatus::Failed` with an `error.code`, not to `Incomplete`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IncompleteReason {
+    MaxOutputTokens,
+    ContentFilter,
+}
+
+/// Details accompanying a response with `status = incomplete`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+pub struct IncompleteDetails {
+    pub reason: IncompleteReason,
 }
 
 #[serde_with::skip_serializing_none]
@@ -1077,10 +1108,20 @@ fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(),
         }
     }
 
-    // 3. Validate background/stream conflict
-    if request.background == Some(true) && request.stream == Some(true) {
-        let mut e = ValidationError::new("background_conflicts_with_stream");
-        e.message = Some("Cannot use background mode with streaming".into());
+    // 3. Validate background + store interaction.
+    //
+    // OpenAI's Responses API defaults `store=true`; SMG's request type keeps
+    // `store: Option<bool>`, so `None` means "caller did not specify" and is
+    // treated as the OpenAI default (stored). Only an explicit `store=false`
+    // combined with `background=true` is rejected: a background response must
+    // be durably retrievable via `GET /v1/responses/{id}`.
+    //
+    // Note: `background=true` with `stream=true` IS allowed, matching the
+    // OpenAI SDK which issues a streaming background create.
+    if request.background == Some(true) && request.store == Some(false) {
+        let mut e = ValidationError::new("background_requires_store");
+        e.message =
+            Some("background=true requires store=true (or unset, which defaults to true)".into());
         return Err(e);
     }
 
@@ -1298,8 +1339,24 @@ pub struct ResponsesResponse {
     #[serde(default = "default_object_type")]
     pub object: String,
 
-    /// Creation timestamp
+    /// Creation timestamp (unix seconds)
     pub created_at: i64,
+
+    /// Completion timestamp (unix seconds). `None` until the response reaches
+    /// a terminal state (`completed`, `incomplete`, `failed`, `cancelled`).
+    #[serde(default)]
+    pub completed_at: Option<i64>,
+
+    /// Whether the response was created in background mode.
+    #[serde(default)]
+    pub background: Option<bool>,
+
+    /// Conversation this response is linked to, if any. Mirrors the request's
+    /// `conversation` field; cleared to `None` if conversation linkage was
+    /// skipped (e.g. the conversation was deleted between enqueue and
+    /// finalize).
+    #[serde(default)]
+    pub conversation: Option<String>,
 
     /// Response status
     pub status: ResponseStatus,
@@ -1307,8 +1364,8 @@ pub struct ResponsesResponse {
     /// Error information if status is failed
     pub error: Option<Value>,
 
-    /// Incomplete details if response was truncated
-    pub incomplete_details: Option<Value>,
+    /// Incomplete details if response truncated with `status = incomplete`
+    pub incomplete_details: Option<IncompleteDetails>,
 
     /// System instructions used
     pub instructions: Option<String>,
@@ -1399,6 +1456,11 @@ impl ResponsesResponse {
     pub fn is_failed(&self) -> bool {
         matches!(self.status, ResponseStatus::Failed)
     }
+
+    /// Check if the response terminated as incomplete (max_output_tokens / content_filter)
+    pub fn is_incomplete(&self) -> bool {
+        matches!(self.status, ResponseStatus::Incomplete)
+    }
 }
 
 impl ResponseOutputItem {
@@ -1417,7 +1479,10 @@ impl ResponseOutputItem {
         }
     }
 
-    /// Create a new reasoning output item
+    /// Create a new reasoning output item.
+    ///
+    /// `encrypted_content` defaults to `None`; use [`Self::new_reasoning_encrypted`]
+    /// when round-tripping gpt-5 / o-series encrypted reasoning.
     pub fn new_reasoning(
         id: String,
         summary: Vec<String>,
@@ -1428,6 +1493,24 @@ impl ResponseOutputItem {
             id,
             summary,
             content,
+            encrypted_content: None,
+            status,
+        }
+    }
+
+    /// Create a new reasoning output item carrying an encrypted reasoning payload.
+    pub fn new_reasoning_encrypted(
+        id: String,
+        summary: Vec<String>,
+        content: Vec<ResponseReasoningContent>,
+        encrypted_content: Option<String>,
+        status: Option<String>,
+    ) -> Self {
+        Self::Reasoning {
+            id,
+            summary,
+            content,
+            encrypted_content,
             status,
         }
     }

@@ -270,6 +270,7 @@ impl HarmonyResponseProcessor {
                 id: format!("reasoning_{}", dispatch.request_id),
                 summary: vec![],
                 content: vec![ResponseReasoningContent::ReasoningText { text: analysis }],
+                encrypted_content: None,
                 status: Some("completed".to_string()),
             };
             output.push(reasoning_item);

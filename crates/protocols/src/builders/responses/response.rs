@@ -17,9 +17,12 @@ pub struct ResponsesResponseBuilder {
     id: String,
     object: String,
     created_at: i64,
+    completed_at: Option<i64>,
+    background: Option<bool>,
+    conversation: Option<String>,
     status: ResponseStatus,
     error: Option<Value>,
-    incomplete_details: Option<Value>,
+    incomplete_details: Option<IncompleteDetails>,
     instructions: Option<String>,
     max_output_tokens: Option<u32>,
     model: String,
@@ -51,6 +54,9 @@ impl ResponsesResponseBuilder {
             id: id.into(),
             object: "response".to_string(),
             created_at: chrono::Utc::now().timestamp(),
+            completed_at: None,
+            background: None,
+            conversation: None,
             status: ResponseStatus::InProgress,
             error: None,
             incomplete_details: None,
@@ -90,6 +96,8 @@ impl ResponsesResponseBuilder {
         self.previous_response_id
             .clone_from(&request.previous_response_id);
         self.store = request.store.unwrap_or(true);
+        self.background = request.background;
+        self.conversation.clone_from(&request.conversation);
         self.temperature = request.temperature;
         self.tool_choice = if let Some(ref tc) = request.tool_choice {
             serde_json::to_string(tc).unwrap_or_else(|_| "auto".to_string())
@@ -115,6 +123,26 @@ impl ResponsesResponseBuilder {
         self
     }
 
+    /// Set the completion timestamp. Should be populated when the response
+    /// reaches a terminal status (`completed`, `incomplete`, `failed`,
+    /// `cancelled`).
+    pub fn completed_at(mut self, timestamp: i64) -> Self {
+        self.completed_at = Some(timestamp);
+        self
+    }
+
+    /// Mark the response as created in background mode.
+    pub fn background(mut self, background: bool) -> Self {
+        self.background = Some(background);
+        self
+    }
+
+    /// Set the linked conversation ID.
+    pub fn conversation(mut self, conversation: impl Into<String>) -> Self {
+        self.conversation = Some(conversation.into());
+        self
+    }
+
     /// Set the response status
     pub fn status(mut self, status: ResponseStatus) -> Self {
         self.status = status;
@@ -127,8 +155,8 @@ impl ResponsesResponseBuilder {
         self
     }
 
-    /// Set incomplete details (if response was truncated)
-    pub fn incomplete_details(mut self, details: Value) -> Self {
+    /// Set incomplete details (if response terminated with `status = incomplete`)
+    pub fn incomplete_details(mut self, details: IncompleteDetails) -> Self {
         self.incomplete_details = Some(details);
         self
     }
@@ -271,6 +299,9 @@ impl ResponsesResponseBuilder {
             id: self.id,
             object: self.object,
             created_at: self.created_at,
+            completed_at: self.completed_at,
+            background: self.background,
+            conversation: self.conversation,
             status: self.status,
             error: self.error,
             incomplete_details: self.incomplete_details,

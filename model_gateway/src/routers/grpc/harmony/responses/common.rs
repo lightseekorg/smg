@@ -93,6 +93,7 @@ pub(super) fn build_next_request_with_tools(
             content: vec![ResponseReasoningContent::ReasoningText {
                 text: analysis_text,
             }],
+            encrypted_content: None,
             status: Some("completed".to_string()),
         });
     }

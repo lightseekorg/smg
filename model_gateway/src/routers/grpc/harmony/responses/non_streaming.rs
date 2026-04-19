@@ -223,9 +223,11 @@ async fn execute_with_mcp_loop(
                         Arc::new(response_request),
                     );
 
-                    // Mark as completed with incomplete_details
-                    response.status = ResponseStatus::Completed;
-                    response.incomplete_details = Some(json!({ "reason": "max_tool_calls" }));
+                    // `max_tool_calls` exhaustion is not an OpenAI-valid `incomplete` reason
+                    // (spec restricts to `max_output_tokens` / `content_filter`). Surface as
+                    // `failed` with an explicit error code instead.
+                    response.status = ResponseStatus::Failed;
+                    response.error = Some(json!({ "code": "max_tool_calls_exceeded" }));
 
                     // Inject MCP metadata if any calls were executed
                     if mcp_tracking.total_calls() > 0 {
@@ -404,6 +406,7 @@ fn build_tool_response(
             content: vec![ResponseReasoningContent::ReasoningText {
                 text: analysis_text,
             }],
+            encrypted_content: None,
             status: Some("completed".to_string()),
         });
     }
