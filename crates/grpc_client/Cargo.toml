@@ -42,6 +42,11 @@ sha2 = "0.10"
 zip = "8.1"
 tempfile = "3.8"
 
+# Pin `constant_time_eq` ≤ 0.4.2: 0.4.3 (2026-04-19) requires rustc 1.95
+# while this workspace is still on 1.90. Re-pulled transitively through
+# `rustls`/`zip`. Remove once the workspace MSRV bumps.
+constant_time_eq = "=0.4.2"
+
 [build-dependencies]
 tonic-prost-build = "0.14.2"
 prost-build = "0.14.1"
