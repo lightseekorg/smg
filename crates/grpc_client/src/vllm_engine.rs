@@ -386,12 +386,12 @@ impl VllmEngineClient {
 
         Ok(proto::SamplingParams {
             temperature: request.temperature,
-            top_p: request.top_p.unwrap_or(1.0),
-            top_k: request.top_k.map(|v| v.max(0) as u32).unwrap_or(0), // 0 means disabled in vLLM
-            min_p: request.min_p.unwrap_or(0.0),
-            frequency_penalty: request.frequency_penalty.unwrap_or(0.0),
-            presence_penalty: request.presence_penalty.unwrap_or(0.0),
-            repetition_penalty: request.repetition_penalty.unwrap_or(1.0),
+            top_p: request.top_p,
+            top_k: request.top_k.map(|v| v.max(0) as u32),
+            min_p: request.min_p,
+            frequency_penalty: request.frequency_penalty,
+            presence_penalty: request.presence_penalty,
+            repetition_penalty: request.repetition_penalty,
             max_tokens,
             stop: stop_sequences,
             stop_token_ids: request.stop_token_ids.clone().unwrap_or_default(),
@@ -490,12 +490,12 @@ impl VllmEngineClient {
 
         Ok(proto::SamplingParams {
             temperature: request.temperature,
-            top_p: request.top_p.unwrap_or(1.0),
-            top_k: 0,   // ResponsesRequest doesn't expose top_k (0 means disabled)
-            min_p: 0.0, // ResponsesRequest doesn't expose min_p
-            frequency_penalty: 0.0, // ResponsesRequest doesn't expose frequency_penalty
-            presence_penalty: 0.0, // ResponsesRequest doesn't expose presence_penalty
-            repetition_penalty: 1.0, // ResponsesRequest doesn't expose repetition_penalty
+            top_p: request.top_p,
+            top_k: None,              // ResponsesRequest doesn't expose top_k
+            min_p: None,              // ResponsesRequest doesn't expose min_p
+            frequency_penalty: None,  // ResponsesRequest doesn't expose frequency_penalty
+            presence_penalty: None,   // ResponsesRequest doesn't expose presence_penalty
+            repetition_penalty: None, // ResponsesRequest doesn't expose repetition_penalty
             max_tokens,
             stop: vec![],               // No stop sequences in Responses API
             stop_token_ids: vec![],     // Handled by Harmony stop tokens
@@ -578,13 +578,13 @@ impl VllmEngineClient {
         let skip_special_tokens = true;
 
         Ok(proto::SamplingParams {
-            temperature: Some(request.temperature.unwrap_or(1.0) as f32),
-            top_p: request.top_p.unwrap_or(1.0) as f32,
-            top_k: request.top_k.unwrap_or(0), // 0 means disabled in vLLM
-            min_p: 0.0,
-            frequency_penalty: 0.0,
-            presence_penalty: 0.0,
-            repetition_penalty: 1.0,
+            temperature: request.temperature.map(|v| v as f32),
+            top_p: request.top_p.map(|v| v as f32),
+            top_k: request.top_k,
+            min_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repetition_penalty: None,
             max_tokens: Some(request.max_tokens),
             stop: stop_sequences,
             stop_token_ids: vec![],
@@ -680,12 +680,12 @@ impl VllmEngineClient {
 
         Ok(proto::SamplingParams {
             temperature: request.temperature,
-            top_p: request.top_p.unwrap_or(1.0),
-            top_k: request.top_k.map(|v| v.max(0) as u32).unwrap_or(0),
-            min_p: request.min_p.unwrap_or(0.0),
-            frequency_penalty: request.frequency_penalty.unwrap_or(0.0),
-            presence_penalty: request.presence_penalty.unwrap_or(0.0),
-            repetition_penalty: request.repetition_penalty.unwrap_or(1.0),
+            top_p: request.top_p,
+            top_k: request.top_k.map(|v| v.max(0) as u32),
+            min_p: request.min_p,
+            frequency_penalty: request.frequency_penalty,
+            presence_penalty: request.presence_penalty,
+            repetition_penalty: request.repetition_penalty,
             max_tokens: request.max_tokens,
             min_tokens: request.min_tokens.unwrap_or(0),
             stop: stop_sequences,
@@ -751,10 +751,6 @@ impl VllmEngineClient {
         params: Option<&GenerateSamplingParams>,
     ) -> Result<proto::SamplingParams, String> {
         let mut sampling = proto::SamplingParams {
-            temperature: Some(1.0),
-            top_p: 1.0,
-            top_k: 0, // 0 means disabled in vLLM
-            repetition_penalty: 1.0,
             n: 1,
             skip_special_tokens: true,
             spaces_between_special_tokens: true,
@@ -770,24 +766,24 @@ impl VllmEngineClient {
             sampling.temperature = Some(val);
         }
 
-        // Simple field mappings
+        // Simple field mappings — pass as Option to preserve "not set" signal
         if let Some(val) = p.top_p {
-            sampling.top_p = val;
+            sampling.top_p = Some(val);
         }
         if let Some(val) = p.top_k {
-            sampling.top_k = val.max(0) as u32; // Clamp negative values to 0 (disabled)
+            sampling.top_k = Some(val.max(0) as u32);
         }
         if let Some(val) = p.frequency_penalty {
-            sampling.frequency_penalty = val;
+            sampling.frequency_penalty = Some(val);
         }
         if let Some(val) = p.presence_penalty {
-            sampling.presence_penalty = val;
+            sampling.presence_penalty = Some(val);
         }
         if let Some(val) = p.repetition_penalty {
-            sampling.repetition_penalty = val;
+            sampling.repetition_penalty = Some(val);
         }
         if let Some(val) = p.min_p {
-            sampling.min_p = val;
+            sampling.min_p = Some(val);
         }
         if let Some(val) = p.ignore_eos {
             sampling.ignore_eos = val;
@@ -847,8 +843,8 @@ mod tests {
         let sampling_params = proto::SamplingParams {
             temperature: Some(0.7),
             max_tokens: Some(128),
-            top_p: 0.9,
-            top_k: 50,
+            top_p: Some(0.9),
+            top_k: Some(50),
             stop: vec!["</s>".to_string()],
             ..Default::default()
         };
@@ -896,26 +892,65 @@ mod tests {
     #[test]
     fn test_sampling_params_defaults() {
         let params = proto::SamplingParams::default();
-        // Optional float field defaults to None
+        // All sampling fields are optional — default to None
         assert_eq!(params.temperature, None);
-        // Non-optional numeric fields have proto defaults (0)
-        assert_eq!(params.top_p, 0.0);
-        assert_eq!(params.top_k, 0);
-        assert_eq!(params.repetition_penalty, 0.0);
+        assert_eq!(params.top_p, None);
+        assert_eq!(params.top_k, None);
+        assert_eq!(params.min_p, None);
+        assert_eq!(params.frequency_penalty, None);
+        assert_eq!(params.presence_penalty, None);
+        assert_eq!(params.repetition_penalty, None);
+        assert_eq!(params.max_tokens, None);
+        assert_eq!(params.logprobs, None);
+        // Non-optional fields
         assert_eq!(params.n, 0);
-        // Bool fields have proto defaults (false)
         assert!(!params.skip_special_tokens);
         assert!(!params.spaces_between_special_tokens);
         assert!(!params.ignore_eos);
         assert!(!params.include_stop_str_in_output);
-        // Optional fields should be None
-        assert_eq!(params.max_tokens, None);
-        assert_eq!(params.logprobs, None);
-        // Other non-optional fields
-        assert_eq!(params.min_p, 0.0);
-        assert_eq!(params.frequency_penalty, 0.0);
-        assert_eq!(params.presence_penalty, 0.0);
         assert!(params.stop.is_empty());
+    }
+
+    #[test]
+    fn test_sampling_params_optional_preserves_user_values() {
+        // When user sets values, they should be preserved as Some(value)
+        let params = proto::SamplingParams {
+            temperature: Some(0.6),
+            top_p: Some(0.95),
+            top_k: Some(20),
+            min_p: Some(0.1),
+            frequency_penalty: Some(0.5),
+            presence_penalty: Some(0.3),
+            repetition_penalty: Some(1.2),
+            max_tokens: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(params.temperature, Some(0.6));
+        assert_eq!(params.top_p, Some(0.95));
+        assert_eq!(params.top_k, Some(20));
+        assert_eq!(params.min_p, Some(0.1));
+        assert_eq!(params.frequency_penalty, Some(0.5));
+        assert_eq!(params.presence_penalty, Some(0.3));
+        assert_eq!(params.repetition_penalty, Some(1.2));
+        assert_eq!(params.max_tokens, Some(100));
+    }
+
+    #[test]
+    fn test_sampling_params_unset_fields_distinguishable_from_zero() {
+        // Unset (None) must be different from explicit zero — this is
+        // the core invariant for --generation-config support
+        let unset = proto::SamplingParams::default();
+        let zero = proto::SamplingParams {
+            temperature: Some(0.0),
+            top_p: Some(0.0),
+            top_k: Some(0),
+            min_p: Some(0.0),
+            ..Default::default()
+        };
+        assert_ne!(unset.temperature, zero.temperature);
+        assert_ne!(unset.top_p, zero.top_p);
+        assert_ne!(unset.top_k, zero.top_k);
+        assert_ne!(unset.min_p, zero.min_p);
     }
 
     // TODO: MultimodalInputs not in vLLM proto - skip test
