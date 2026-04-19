@@ -114,6 +114,19 @@ impl futures::Stream for AbortOnDropStream {
     }
 }
 
+/// Map `grpc://` → `http://` and `grpcs://` → `https://`, pass everything
+/// else through unchanged. Kept as a private helper so it can be unit-tested
+/// without spinning up a TLS server.
+fn normalize_endpoint(endpoint: &str) -> String {
+    if let Some(addr) = endpoint.strip_prefix("grpcs://") {
+        format!("https://{addr}")
+    } else if let Some(addr) = endpoint.strip_prefix("grpc://") {
+        format!("http://{addr}")
+    } else {
+        endpoint.to_string()
+    }
+}
+
 /// gRPC client for the TokenSpeed scheduler.
 #[derive(Clone)]
 pub struct TokenSpeedSchedulerClient {
@@ -134,15 +147,7 @@ impl TokenSpeedSchedulerClient {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         debug!("Connecting to TokenSpeed scheduler at {}", endpoint);
 
-        // Accept `grpc://` (→ http) and `grpcs://` (→ https) prefixes so TLS
-        // endpoints work without the caller having to rewrite the scheme.
-        let http_endpoint = if let Some(addr) = endpoint.strip_prefix("grpcs://") {
-            format!("https://{addr}")
-        } else if let Some(addr) = endpoint.strip_prefix("grpc://") {
-            format!("http://{addr}")
-        } else {
-            endpoint.to_string()
-        };
+        let http_endpoint = normalize_endpoint(endpoint);
 
         let channel = Channel::from_shared(http_endpoint)?
             .http2_keep_alive_interval(Duration::from_secs(30))
@@ -520,5 +525,62 @@ mod tests {
             }
             _ => panic!("Expected json_schema constraint"),
         }
+    }
+
+    #[test]
+    fn normalize_endpoint_rewrites_all_four_schemes() {
+        // `grpc://` is the canonical cleartext alias used across SMG.
+        assert_eq!(
+            normalize_endpoint("grpc://example.com:50051"),
+            "http://example.com:50051"
+        );
+        // `grpcs://` must be mapped to `https://` so tonic actually negotiates
+        // TLS — a regression here is silent (the client would fall back to an
+        // unknown-scheme URI error or, worse, plaintext).
+        assert_eq!(
+            normalize_endpoint("grpcs://example.com:50051"),
+            "https://example.com:50051"
+        );
+        // Already-normalized URIs pass through unchanged.
+        assert_eq!(
+            normalize_endpoint("http://example.com:50051"),
+            "http://example.com:50051"
+        );
+        assert_eq!(
+            normalize_endpoint("https://example.com:50051"),
+            "https://example.com:50051"
+        );
+        // Non-URI inputs pass through so tonic gives a clear parse error.
+        assert_eq!(normalize_endpoint("garbage"), "garbage");
+    }
+
+    #[test]
+    fn normalize_endpoint_preserves_path_and_query() {
+        assert_eq!(
+            normalize_endpoint("grpcs://host:443/prefix?tok=1"),
+            "https://host:443/prefix?tok=1"
+        );
+    }
+
+    /// Compile-time check: `subscribe_kv_events()` returns a stream of the
+    /// shared `common_proto::KvEventBatch`, not a TokenSpeed-local type. If
+    /// the proto ever stops importing `common.proto` (or the build script
+    /// loses its `extern_path` mapping), this function stops compiling.
+    async fn _subscribe_kv_events_returns_common_proto_stream(
+        client: TokenSpeedSchedulerClient,
+    ) -> Result<Streaming<crate::common_proto::KvEventBatch>, tonic::Status> {
+        client.subscribe_kv_events(0).await
+    }
+
+    /// Compile-time check: `get_tokenizer()` goes through the shared
+    /// `StreamBundle` wrapper (which internally consumes
+    /// `common_proto::GetTokenizerChunk`). A regression where the proto
+    /// reintroduces a local `GetTokenizerChunk` would refuse to compile
+    /// because `collect_bundle_from_rpc` is parameterized on the common type.
+    async fn _get_tokenizer_returns_stream_bundle(
+        client: TokenSpeedSchedulerClient,
+    ) -> Result<crate::tokenizer_bundle::StreamBundle, Box<dyn std::error::Error + Send + Sync>>
+    {
+        client.get_tokenizer().await
     }
 }
