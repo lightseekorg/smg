@@ -212,3 +212,132 @@ impl From<V1RerankReqInput> for RerankRequest {
         }
     }
 }
+
+// ============================================================================
+// Score API (vLLM /v1/score)
+// ============================================================================
+
+/// vLLM-compatible score request for cross-encoder reranker models.
+///
+/// Matches the vLLM `/v1/score` request schema which uses `text_1`/`text_2`
+/// pairs rather than the classic `query`/`documents` style.
+///
+/// # Example
+/// ```json
+/// {
+///   "model": "modernbert-reranker",
+///   "text_1": "What is the capital of France?",
+///   "text_2": ["Paris is the capital.", "London is in England."]
+/// }
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct ScoreRequest {
+    /// The model to use for scoring
+    pub model: String,
+
+    /// The query/source text (single string)
+    pub text_1: String,
+
+    /// The document(s) to score against the query.
+    /// Can be a single string or a list of strings.
+    pub text_2: StringOrVec,
+
+    /// Optional encoding format for the response
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding_format: Option<String>,
+
+    /// Whether to truncate the input
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncate_prompt_tokens: Option<u32>,
+}
+
+impl ScoreRequest {
+    /// Return text_2 as a slice of string references for routing/hashing.
+    pub fn texts(&self) -> Vec<&str> {
+        match &self.text_2 {
+            StringOrVec::Single(s) => vec![s.as_str()],
+            StringOrVec::Array(v) => v.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+impl GenerationRequest for ScoreRequest {
+    fn get_model(&self) -> Option<&str> {
+        Some(&self.model)
+    }
+
+    fn is_stream(&self) -> bool {
+        false // Score endpoint never streams
+    }
+
+    fn extract_text_for_routing(&self) -> String {
+        self.text_1.clone()
+    }
+}
+
+/// `text_2` field: either a single string or an array.
+///
+/// vLLM accepts both forms; we deserialize and normalize internally.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum StringOrVec {
+    Single(String),
+    Array(Vec<String>),
+}
+
+impl StringOrVec {
+    /// Convert into an owned `Vec<String>` regardless of variant.
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::Single(s) => vec![s],
+            Self::Array(v) => v,
+        }
+    }
+
+    /// Return the number of texts.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Single(_) => 1,
+            Self::Array(v) => v.len(),
+        }
+    }
+
+    /// Return true if empty.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Single(_) => false,
+            Self::Array(v) => v.is_empty(),
+        }
+    }
+}
+
+/// An individual score result from the vLLM score API.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ScoreData {
+    /// Always `"score"` (vLLM compat)
+    pub object: String,
+    /// The relevance score as a float
+    pub score: f64,
+    /// 0-based index of this text in `text_2`
+    pub index: usize,
+}
+
+/// Response from the vLLM `/v1/score` endpoint.
+///
+/// Mirrors the structure returned by vLLM's `ScoringResponse`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ScoreResponse {
+    /// Unique identifier for this score response
+    pub id: String,
+    /// Always `"list"`
+    pub object: String,
+    /// Unix timestamp (seconds) when the response was created
+    pub created: i64,
+    /// The scored results, one per input in `text_2`
+    pub data: Vec<ScoreData>,
+    /// The model that produced the scores
+    pub model: String,
+    /// Usage information (if provided by backend)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageInfo>,
+}

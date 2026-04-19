@@ -31,7 +31,7 @@ use openai_protocol::{
         RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
         RealtimeTranscriptionSessionCreateRequest,
     },
-    rerank::RerankRequest,
+    rerank::{RerankRequest, ScoreRequest},
     responses::ResponsesRequest,
 };
 use serde_json::Value;
@@ -688,6 +688,25 @@ impl RouterTrait for RouterManager {
             (
                 StatusCode::NOT_FOUND,
                 "No router available for rerank request",
+            )
+                .into_response()
+        }
+    }
+
+    async fn route_score(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &ScoreRequest,
+        model_id: &str,
+    ) -> Response {
+        let router = self.select_router_for_request(headers, Some(model_id));
+
+        if let Some(router) = router {
+            router.route_score(headers, body, model_id).await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Model '{model_id}' not found or no router available for score request"),
             )
                 .into_response()
         }

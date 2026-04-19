@@ -39,6 +39,7 @@ impl PipelineStage for DispatchMetadataStage {
             RequestType::Embedding(req) => req.model.clone(),
             RequestType::Classify(req) => req.model.clone(),
             RequestType::Messages(req) => req.model.clone(),
+            RequestType::Score(req) => req.model.clone(),
         };
 
         let weight_version = ctx

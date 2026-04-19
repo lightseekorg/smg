@@ -665,6 +665,40 @@ impl VllmEngineClient {
         Ok(response.into_inner())
     }
 
+    /// Build a ScoreRequest for cross-encoder reranking
+    #[expect(
+        clippy::unused_self,
+        reason = "method receiver kept for consistent public API across gRPC backends"
+    )]
+    pub fn build_score_request(
+        &self,
+        request_id: String,
+        text_1: String,
+        text_2: Vec<String>,
+    ) -> proto::ScoreRequest {
+        proto::ScoreRequest {
+            request_id,
+            text_1,
+            text_2,
+        }
+    }
+
+    /// Submit a scoring request
+    pub async fn score(
+        &self,
+        req: proto::ScoreRequest,
+    ) -> Result<proto::ScoreResponse, tonic::Status> {
+        let mut client = self.client.clone();
+        let mut request = Request::new(req);
+
+        if let Err(e) = self.trace_injector.inject(request.metadata_mut()) {
+            warn!("Failed to inject trace context: {}", e);
+        }
+
+        let response = client.score(request).await?;
+        Ok(response.into_inner())
+    }
+
     fn build_grpc_sampling_params_from_completion(
         request: &CompletionRequest,
     ) -> Result<proto::SamplingParams, String> {
