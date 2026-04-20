@@ -478,6 +478,16 @@ impl Gossip for GossipService {
         let (tx, rx) = mpsc::channel::<Result<StreamMessage, Status>>(CHANNEL_CAPACITY);
         let size_validator = MessageSizeValidator::default();
 
+        // Remote peer identity, discovered from inbound StreamMessage.peer_id.
+        // Shared between the inbound handler (writer) and the server-side
+        // sender task (reader) so the sender can emit targeted_entries whose
+        // `target` matches the learned peer. Before the first inbound message
+        // this is `None` and the sender emits only broadcast drain_entries —
+        // the targeted entries for that first round are dropped under
+        // at-most-once semantics and the application retries.
+        let learned_peer: Arc<parking_lot::RwLock<Option<String>>> =
+            Arc::new(parking_lot::RwLock::new(None));
+
         // Spawn task to periodically send incremental updates.
         // Uses PeerWatermark reading from the shared RoundBatch (central collector).
         // If current_batch is not set (e.g., temporary GossipService for snapshots),
@@ -491,6 +501,7 @@ impl Gossip for GossipService {
             // affect filtering correctness (each task has its own watermark).
             let peer_name_for_watermark = "server-inbound".to_string();
             let stream_batch_handle = self.current_stream_batch.clone();
+            let learned_peer_sender = learned_peer.clone();
             #[expect(
                 clippy::disallowed_methods,
                 reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes or handle is aborted"
@@ -570,10 +581,13 @@ impl Gossip for GossipService {
                     }
 
                     // Server-side stream emission: broadcast drain_entries
-                    // only. Targeted entries stay on the client-side
-                    // (controller.rs) where peer_name is known at task
-                    // spawn. At-most-once: on channel full, drop without
-                    // retry.
+                    // plus targeted_entries addressed to the learned remote
+                    // peer. Covers the non-initiator → initiator direction
+                    // of each peer pair; the client-side sender in
+                    // controller.rs handles the other direction. Before
+                    // learned_peer is set (first inbound message not yet
+                    // received), targeted entries in this round are dropped
+                    // under at-most-once. On channel full, drop without retry.
                     if let Some(sbh) = &stream_batch_handle {
                         let stream_batch = sbh.read().clone();
                         let fresh_batch = last_stream_batch
@@ -586,7 +600,11 @@ impl Gossip for GossipService {
                             // we keep re-checking it.
                             last_stream_batch = Some(stream_batch.clone());
                         }
-                        if fresh_batch && !stream_batch.drain_entries.is_empty() {
+                        let peer_for_targeted = learned_peer_sender.read().clone();
+                        let has_targeted = peer_for_targeted.as_ref().is_some_and(|p| {
+                            stream_batch.targeted_entries.iter().any(|(t, _, _)| t == p)
+                        });
+                        if fresh_batch && (!stream_batch.drain_entries.is_empty() || has_targeted) {
                             let mut entries = Vec::new();
                             // Generation is per-value so concurrent publishes
                             // to the same key get distinct tags.
@@ -597,6 +615,18 @@ impl Gossip for GossipService {
                                     Bytes::from(value.clone()),
                                     MAX_STREAM_CHUNK_BYTES,
                                 ));
+                            }
+                            if let Some(ref peer) = peer_for_targeted {
+                                for (target, key, value) in &stream_batch.targeted_entries {
+                                    if target == peer {
+                                        entries.extend(chunk_value(
+                                            key.clone(),
+                                            next_generation(),
+                                            value.clone(),
+                                            MAX_STREAM_CHUNK_BYTES,
+                                        ));
+                                    }
+                                }
                             }
                             if !entries.is_empty() {
                                 for batch in build_stream_batches(
@@ -653,6 +683,7 @@ impl Gossip for GossipService {
         use std::collections::HashMap;
         let mut snapshot_state: HashMap<LocalStoreType, (Vec<SnapshotChunk>, u64)> = HashMap::new();
 
+        let learned_peer_inbound = learned_peer.clone();
         #[expect(
             clippy::disallowed_methods,
             reason = "server-side stream handler that runs for the lifetime of the sync_stream gRPC connection; terminates when the stream closes"
@@ -715,6 +746,14 @@ impl Gossip for GossipService {
                     Ok(Some(Ok(msg))) => {
                         sequence += 1;
                         peer_id.clone_from(&msg.peer_id);
+                        // Publish the learned remote peer id once it's known
+                        // so the server-side sender task can start emitting
+                        // targeted_entries addressed to this peer. Only write
+                        // when unset to avoid redundant lock contention and
+                        // to ignore spurious empty peer_id fields.
+                        if !msg.peer_id.is_empty() && learned_peer_inbound.read().is_none() {
+                            *learned_peer_inbound.write() = Some(msg.peer_id.clone());
+                        }
 
                         match msg.message_type() {
                             StreamMessageType::IncrementalUpdate => {
