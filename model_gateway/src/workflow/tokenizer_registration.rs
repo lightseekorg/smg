@@ -26,10 +26,8 @@ use wfaas::{
 
 use super::data::TokenizerWorkflowData;
 use crate::{
-    app_context::AppContext,
-    config::TokenizerCacheConfig,
-    routers::grpc::multimodal::MultimodalModelConfig,
-    worker::ConnectionMode,
+    app_context::AppContext, config::TokenizerCacheConfig,
+    routers::grpc::multimodal::MultimodalModelConfig, worker::ConnectionMode,
 };
 
 /// Configuration for adding a tokenizer
@@ -242,9 +240,7 @@ fn load_tokenizer_from_bundle(
 /// missing or unparsable — text-only tokenizers legitimately ship without
 /// a `preprocessor_config.json`, and we do not want to fail tokenizer
 /// registration over multimodal artifacts.
-fn try_load_multimodal_config(
-    tokenizer_dir: &std::path::Path,
-) -> Option<MultimodalModelConfig> {
+fn try_load_multimodal_config(tokenizer_dir: &std::path::Path) -> Option<MultimodalModelConfig> {
     let config_path = tokenizer_dir.join("config.json");
     let pp_config_path = tokenizer_dir.join("preprocessor_config.json");
 
@@ -279,14 +275,13 @@ fn try_load_multimodal_config(
             return None;
         }
     };
-    let preprocessor_config =
-        match llm_multimodal::PreProcessorConfig::from_json(&pp_str) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed to parse preprocessor_config.json from bundle: {e}");
-                return None;
-            }
-        };
+    let preprocessor_config = match llm_multimodal::PreProcessorConfig::from_json(&pp_str) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to parse preprocessor_config.json from bundle: {e}");
+            return None;
+        }
+    };
 
     Some(MultimodalModelConfig {
         config,
@@ -378,10 +373,9 @@ async fn fetch_tokenizer_from_worker(
         match load_tokenizer_from_bundle(&bundle) {
             Ok((tokenizer, mm_config)) => {
                 if let Some(cfg) = mm_config {
-                    app_context.multimodal_config_registry.insert(
-                        tokenizer_id.to_string(),
-                        Arc::new(cfg),
-                    );
+                    app_context
+                        .multimodal_config_registry
+                        .insert(tokenizer_id.to_string(), Arc::new(cfg));
                     info!(
                         tokenizer_id = %tokenizer_id,
                         tokenizer_name = %model_id,

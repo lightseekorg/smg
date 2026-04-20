@@ -1022,6 +1022,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     use std::fs;
+
     use tempfile::TempDir;
 
     fn write_config_fixtures(dir: &std::path::Path) {
