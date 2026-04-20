@@ -53,7 +53,7 @@ struct AssemblyState {
     /// the same (generation, index) don't over-count. Completion is
     /// `received_count == chunks.len()`.
     received_count: u32,
-    chunks: Vec<Option<Vec<u8>>>,
+    chunks: Vec<Option<Bytes>>,
     created_at: Instant,
 }
 
@@ -78,15 +78,15 @@ impl AssemblyState {
     /// just payload bytes.
     fn bytes_held(&self) -> usize {
         let payload: usize = self.chunks.iter().flatten().map(|c| c.len()).sum();
-        let overhead = self.chunks.len() * size_of::<Option<Vec<u8>>>();
+        let overhead = self.chunks.len() * size_of::<Option<Bytes>>();
         payload + overhead
     }
 
     /// Return the assembled chunks as a fragmented buffer: each chunk
-    /// is zero-copy wrapped in a `Bytes` (no contiguous memcpy of the
+    /// stays in its own `Bytes` handle (no contiguous memcpy of the
     /// full payload).
     fn assemble(self) -> Vec<Bytes> {
-        self.chunks.into_iter().flatten().map(Bytes::from).collect()
+        self.chunks.into_iter().flatten().collect()
     }
 }
 
@@ -127,7 +127,7 @@ impl ChunkAssembler {
         generation: u64,
         index: u32,
         total: u32,
-        data: Vec<u8>,
+        data: Bytes,
     ) -> Option<Vec<Bytes>> {
         if total == 0 || total > MAX_TOTAL_CHUNKS || index >= total {
             return None;
@@ -311,7 +311,7 @@ mod tests {
     fn test_single_chunk_round_trip() {
         let asm = ChunkAssembler::new();
         let out = asm
-            .receive_chunk("peer", "k", 1, 0, 1, b"hello".to_vec())
+            .receive_chunk("peer", "k", 1, 0, 1, Bytes::from_static(b"hello"))
             .unwrap();
         assert_eq!(flatten(&out), b"hello");
         assert_eq!(asm.in_flight(), 0, "completed assembly should be removed");
@@ -321,13 +321,13 @@ mod tests {
     fn test_multi_chunk_in_order() {
         let asm = ChunkAssembler::new();
         assert!(asm
-            .receive_chunk("peer", "k", 1, 0, 3, b"aaa".to_vec())
+            .receive_chunk("peer", "k", 1, 0, 3, Bytes::from_static(b"aaa"))
             .is_none());
         assert!(asm
-            .receive_chunk("peer", "k", 1, 1, 3, b"bbb".to_vec())
+            .receive_chunk("peer", "k", 1, 1, 3, Bytes::from_static(b"bbb"))
             .is_none());
         let out = asm
-            .receive_chunk("peer", "k", 1, 2, 3, b"ccc".to_vec())
+            .receive_chunk("peer", "k", 1, 2, 3, Bytes::from_static(b"ccc"))
             .unwrap();
         assert_eq!(flatten(&out), b"aaabbbccc");
         assert_eq!(asm.in_flight(), 0);
@@ -337,13 +337,13 @@ mod tests {
     fn test_multi_chunk_out_of_order() {
         let asm = ChunkAssembler::new();
         assert!(asm
-            .receive_chunk("peer", "k", 1, 2, 3, b"ccc".to_vec())
+            .receive_chunk("peer", "k", 1, 2, 3, Bytes::from_static(b"ccc"))
             .is_none());
         assert!(asm
-            .receive_chunk("peer", "k", 1, 0, 3, b"aaa".to_vec())
+            .receive_chunk("peer", "k", 1, 0, 3, Bytes::from_static(b"aaa"))
             .is_none());
         let out = asm
-            .receive_chunk("peer", "k", 1, 1, 3, b"bbb".to_vec())
+            .receive_chunk("peer", "k", 1, 1, 3, Bytes::from_static(b"bbb"))
             .unwrap();
         assert_eq!(
             flatten(&out),
@@ -356,17 +356,17 @@ mod tests {
     fn test_generation_reset_discards_older_partials() {
         let asm = ChunkAssembler::new();
         assert!(asm
-            .receive_chunk("peer", "k", 5, 0, 3, b"old-0".to_vec())
+            .receive_chunk("peer", "k", 5, 0, 3, Bytes::from_static(b"old-0"))
             .is_none());
         assert!(asm
-            .receive_chunk("peer", "k", 5, 1, 3, b"old-1".to_vec())
+            .receive_chunk("peer", "k", 5, 1, 3, Bytes::from_static(b"old-1"))
             .is_none());
 
         assert!(asm
-            .receive_chunk("peer", "k", 6, 0, 2, b"new-0".to_vec())
+            .receive_chunk("peer", "k", 6, 0, 2, Bytes::from_static(b"new-0"))
             .is_none());
         let out = asm
-            .receive_chunk("peer", "k", 6, 1, 2, b"new-1".to_vec())
+            .receive_chunk("peer", "k", 6, 1, 2, Bytes::from_static(b"new-1"))
             .unwrap();
         assert_eq!(flatten(&out), b"new-0new-1");
     }
@@ -376,17 +376,17 @@ mod tests {
         let asm = ChunkAssembler::new();
         // gen=6 starts and records one chunk.
         assert!(asm
-            .receive_chunk("peer", "k", 6, 0, 2, b"new-0".to_vec())
+            .receive_chunk("peer", "k", 6, 0, 2, Bytes::from_static(b"new-0"))
             .is_none());
 
         // A delayed gen=5 chunk arrives — must NOT reset the gen=6 state.
         assert!(asm
-            .receive_chunk("peer", "k", 5, 0, 3, b"stale-0".to_vec())
+            .receive_chunk("peer", "k", 5, 0, 3, Bytes::from_static(b"stale-0"))
             .is_none());
 
         // Completing gen=6 must still yield the gen=6 payload.
         let out = asm
-            .receive_chunk("peer", "k", 6, 1, 2, b"new-1".to_vec())
+            .receive_chunk("peer", "k", 6, 1, 2, Bytes::from_static(b"new-1"))
             .unwrap();
         assert_eq!(
             flatten(&out),
@@ -399,7 +399,7 @@ mod tests {
     fn test_gc_removes_stale_partials() {
         let asm = ChunkAssembler::new();
         assert!(asm
-            .receive_chunk("peer", "k", 1, 0, 3, b"aaa".to_vec())
+            .receive_chunk("peer", "k", 1, 0, 3, Bytes::from_static(b"aaa"))
             .is_none());
         assert_eq!(asm.in_flight(), 1);
 
@@ -412,7 +412,7 @@ mod tests {
     fn test_gc_keeps_recent_partials() {
         let asm = ChunkAssembler::new();
         assert!(asm
-            .receive_chunk("peer", "k", 1, 0, 3, b"aaa".to_vec())
+            .receive_chunk("peer", "k", 1, 0, 3, Bytes::from_static(b"aaa"))
             .is_none());
         asm.gc(Duration::from_secs(10));
         assert_eq!(asm.in_flight(), 1, "recent partial should survive gc");
@@ -431,7 +431,10 @@ mod tests {
             AssemblyState {
                 generation: 1,
                 received_count: 2,
-                chunks: vec![Some(vec![0u8; 10]), Some(vec![0u8; 10])],
+                chunks: vec![
+                    Some(Bytes::from(vec![0u8; 10])),
+                    Some(Bytes::from(vec![0u8; 10])),
+                ],
                 created_at: old,
             },
         );
@@ -493,10 +496,10 @@ mod tests {
     fn test_malformed_chunk_is_dropped() {
         let asm = ChunkAssembler::new();
         assert!(asm
-            .receive_chunk("peer", "k", 1, 0, 0, b"x".to_vec())
+            .receive_chunk("peer", "k", 1, 0, 0, Bytes::from_static(b"x"))
             .is_none());
         assert!(asm
-            .receive_chunk("peer", "k", 1, 5, 3, b"x".to_vec())
+            .receive_chunk("peer", "k", 1, 5, 3, Bytes::from_static(b"x"))
             .is_none());
         assert_eq!(asm.in_flight(), 0);
     }
@@ -506,11 +509,18 @@ mod tests {
         let asm = ChunkAssembler::new();
         // total = u32::MAX would trigger multi-GB allocation if admitted.
         assert!(asm
-            .receive_chunk("peer", "k", 1, 0, u32::MAX, b"x".to_vec())
+            .receive_chunk("peer", "k", 1, 0, u32::MAX, Bytes::from_static(b"x"))
             .is_none());
         // Just past the cap is also rejected.
         assert!(asm
-            .receive_chunk("peer", "k", 1, 0, MAX_TOTAL_CHUNKS + 1, b"x".to_vec())
+            .receive_chunk(
+                "peer",
+                "k",
+                1,
+                0,
+                MAX_TOTAL_CHUNKS + 1,
+                Bytes::from_static(b"x")
+            )
             .is_none());
         assert_eq!(
             asm.in_flight(),
@@ -525,7 +535,14 @@ mod tests {
         // 4 partials against a cap of 3 — oldest must be evicted.
         for i in 0..4 {
             assert!(asm
-                .receive_chunk("peer", &format!("k{i}"), 1, 0, 2, vec![0u8; 10])
+                .receive_chunk(
+                    "peer",
+                    &format!("k{i}"),
+                    1,
+                    0,
+                    2,
+                    Bytes::from(vec![0u8; 10])
+                )
                 .is_none());
             thread::sleep(Duration::from_millis(1));
         }
@@ -543,13 +560,13 @@ mod tests {
         let cap = 10_000;
         let asm = ChunkAssembler::with_limits(usize::MAX, cap);
         assert!(asm
-            .receive_chunk("peer", "k_small", 1, 0, 2, vec![0u8; 2_000])
+            .receive_chunk("peer", "k_small", 1, 0, 2, Bytes::from(vec![0u8; 2_000]))
             .is_none());
         assert!(asm
-            .receive_chunk("peer", "k_med", 1, 0, 2, vec![0u8; 3_000])
+            .receive_chunk("peer", "k_med", 1, 0, 2, Bytes::from(vec![0u8; 3_000]))
             .is_none());
         assert!(asm
-            .receive_chunk("peer", "k_big", 1, 0, 2, vec![0u8; 6_000])
+            .receive_chunk("peer", "k_big", 1, 0, 2, Bytes::from(vec![0u8; 6_000]))
             .is_none());
 
         assert!(
@@ -578,7 +595,10 @@ mod tests {
             AssemblyState {
                 generation: 1,
                 received_count: 2,
-                chunks: vec![Some(vec![0u8; 10]), Some(vec![0u8; 10])],
+                chunks: vec![
+                    Some(Bytes::from(vec![0u8; 10])),
+                    Some(Bytes::from(vec![0u8; 10])),
+                ],
                 created_at: Instant::now() - Duration::from_secs(60),
             },
         );
@@ -632,7 +652,10 @@ mod tests {
             AssemblyState {
                 generation: 1,
                 received_count: 2,
-                chunks: vec![Some(vec![0u8; 10]), Some(vec![0u8; 10])],
+                chunks: vec![
+                    Some(Bytes::from(vec![0u8; 10])),
+                    Some(Bytes::from(vec![0u8; 10])),
+                ],
                 created_at: Instant::now(),
             },
         );
@@ -641,7 +664,7 @@ mod tests {
             AssemblyState {
                 generation: 1,
                 received_count: 1,
-                chunks: vec![Some(vec![0u8; 10]), None],
+                chunks: vec![Some(Bytes::from(vec![0u8; 10])), None],
                 created_at: Instant::now(),
             },
         );
@@ -728,7 +751,7 @@ mod tests {
         // still be returned regardless of size.
         let asm = ChunkAssembler::with_limits(usize::MAX, 10);
         let out = asm
-            .receive_chunk("peer", "k", 1, 0, 1, vec![0u8; 500])
+            .receive_chunk("peer", "k", 1, 0, 1, Bytes::from(vec![0u8; 500]))
             .expect("single-chunk completion returns bytes");
         assert_eq!(out.len(), 1, "single-chunk result is one Bytes fragment");
         assert_eq!(out[0].len(), 500);
@@ -739,21 +762,21 @@ mod tests {
     fn test_multiple_keys_independent() {
         let asm = ChunkAssembler::new();
         assert!(asm
-            .receive_chunk("peer", "a", 1, 0, 2, b"a0".to_vec())
+            .receive_chunk("peer", "a", 1, 0, 2, Bytes::from_static(b"a0"))
             .is_none());
         assert!(asm
-            .receive_chunk("peer", "b", 1, 0, 2, b"b0".to_vec())
+            .receive_chunk("peer", "b", 1, 0, 2, Bytes::from_static(b"b0"))
             .is_none());
         assert_eq!(asm.in_flight(), 2);
 
         let a = asm
-            .receive_chunk("peer", "a", 1, 1, 2, b"a1".to_vec())
+            .receive_chunk("peer", "a", 1, 1, 2, Bytes::from_static(b"a1"))
             .unwrap();
         assert_eq!(flatten(&a), b"a0a1");
         assert_eq!(asm.in_flight(), 1, "completing a should not touch b");
 
         let b = asm
-            .receive_chunk("peer", "b", 1, 1, 2, b"b1".to_vec())
+            .receive_chunk("peer", "b", 1, 1, 2, Bytes::from_static(b"b1"))
             .unwrap();
         assert_eq!(flatten(&b), b"b0b1");
         assert_eq!(asm.in_flight(), 0);
@@ -765,13 +788,13 @@ mod tests {
         // Start a multi-chunk assembly for (peer, "k") and an unrelated
         // one for (peer, "other") + (other_peer, "k").
         assert!(asm
-            .receive_chunk("peer", "k", 1, 0, 2, b"aa".to_vec())
+            .receive_chunk("peer", "k", 1, 0, 2, Bytes::from_static(b"aa"))
             .is_none());
         assert!(asm
-            .receive_chunk("peer", "other", 1, 0, 2, b"bb".to_vec())
+            .receive_chunk("peer", "other", 1, 0, 2, Bytes::from_static(b"bb"))
             .is_none());
         assert!(asm
-            .receive_chunk("other_peer", "k", 1, 0, 2, b"cc".to_vec())
+            .receive_chunk("other_peer", "k", 1, 0, 2, Bytes::from_static(b"cc"))
             .is_none());
         assert_eq!(asm.in_flight(), 3);
 
@@ -784,7 +807,7 @@ mod tests {
 
         // Completing the spared entries still works.
         let out = asm
-            .receive_chunk("peer", "other", 1, 1, 2, b"22".to_vec())
+            .receive_chunk("peer", "other", 1, 1, 2, Bytes::from_static(b"22"))
             .unwrap();
         assert_eq!(flatten(&out), b"bb22");
     }

@@ -88,7 +88,7 @@ pub fn chunk_value(
             generation,
             chunk_index: 0,
             total_chunks: 1,
-            data: value.to_vec(),
+            data: value,
         }];
     }
 
@@ -108,7 +108,7 @@ pub fn chunk_value(
             generation,
             chunk_index: index as u32,
             total_chunks: total_chunks as u32,
-            data: value.slice(start..end).to_vec(),
+            data: value.slice(start..end),
         });
     }
     entries
@@ -134,7 +134,7 @@ pub fn dispatch_stream_batch(
             // multi-chunk assembly for the same (peer, key); drop the
             // stale fragments so they don't wait for GC.
             mesh_kv.chunk_assembler().drop_pending(peer_id, &entry.key);
-            mesh_kv.notify_subscribers(&entry.key, Some(vec![Bytes::from(entry.data)]));
+            mesh_kv.notify_subscribers(&entry.key, Some(vec![entry.data]));
         } else {
             let key = entry.key.clone();
             if let Some(fragments) = mesh_kv.chunk_assembler().receive_chunk(
@@ -316,14 +316,14 @@ mod tests {
                 generation: 1,
                 chunk_index: 0,
                 total_chunks: 1,
-                data: vec![1],
+                data: Bytes::from_static(&[1]),
             },
             StreamEntry {
                 key: "b".into(),
                 generation: 1,
                 chunk_index: 0,
                 total_chunks: 1,
-                data: vec![2],
+                data: Bytes::from_static(&[2]),
             },
         ];
         let batches = build_stream_batches(entries, 5, 1024);
@@ -339,7 +339,7 @@ mod tests {
                 generation: 1,
                 chunk_index: 0,
                 total_chunks: 1,
-                data: vec![i as u8],
+                data: Bytes::copy_from_slice(&[i as u8]),
             })
             .collect();
         // 10 entries, cap=3 → 3 + 3 + 3 + 1 = 4 batches. No entry dropped.
@@ -364,7 +364,7 @@ mod tests {
                 generation: 1,
                 chunk_index: 0,
                 total_chunks: 1,
-                data: vec![0u8; 100],
+                data: Bytes::from(vec![0u8; 100]),
             })
             .collect();
         let batches = build_stream_batches(entries, 10, 250);
@@ -383,7 +383,7 @@ mod tests {
             generation: 1,
             chunk_index: 0,
             total_chunks: 1,
-            data: vec![0u8; 500],
+            data: Bytes::from(vec![0u8; 500]),
         }];
         let batches = build_stream_batches(entries, 10, 100);
         assert_eq!(batches.len(), 1);
@@ -401,7 +401,7 @@ mod tests {
             generation: 1,
             chunk_index: 0,
             total_chunks: 1,
-            data: vec![1],
+            data: Bytes::from_static(&[1]),
         }];
         let out = build_stream_batches(entries, 0, 1024);
         assert!(out.is_empty());
@@ -415,7 +415,7 @@ mod tests {
             generation: 1,
             chunk_index: 0,
             total_chunks: 1,
-            data: vec![1],
+            data: Bytes::from_static(&[1]),
         }];
         let out = build_stream_batches(entries, 5, 0);
         assert!(out.is_empty());
