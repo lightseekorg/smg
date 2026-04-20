@@ -11,6 +11,7 @@ use smg_data_connector::{
     StorageFactoryConfig,
 };
 use smg_mcp::McpOrchestrator;
+use smg_skills::SkillService;
 use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::debug;
 
@@ -63,6 +64,7 @@ pub struct AppContext {
     pub worker_job_queue: Arc<OnceLock<Arc<JobQueue>>>,
     pub workflow_engines: Arc<OnceLock<WorkflowEngines>>,
     pub mcp_orchestrator: Arc<OnceLock<Arc<McpOrchestrator>>>,
+    pub skill_service: Option<Arc<SkillService>>,
     pub wasm_manager: Option<Arc<WasmModuleManager>>,
     pub worker_service: Arc<WorkerService>,
     pub inflight_tracker: Arc<InFlightRequestTracker>,
@@ -99,6 +101,7 @@ pub struct AppContextBuilder {
     worker_job_queue: Option<Arc<OnceLock<Arc<JobQueue>>>>,
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
     mcp_orchestrator: Option<Arc<OnceLock<Arc<McpOrchestrator>>>>,
+    skill_service: Option<Arc<SkillService>>,
     wasm_manager: Option<Arc<WasmModuleManager>>,
     kv_event_monitor: Option<Arc<KvEventMonitor>>,
     webrtc_bind_addr: Option<std::net::IpAddr>,
@@ -151,6 +154,7 @@ impl AppContextBuilder {
             worker_job_queue: None,
             workflow_engines: None,
             mcp_orchestrator: None,
+            skill_service: None,
             wasm_manager: None,
             kv_event_monitor: None,
             webrtc_bind_addr: None,
@@ -354,6 +358,7 @@ impl AppContextBuilder {
             mcp_orchestrator: self
                 .mcp_orchestrator
                 .ok_or(AppContextBuildError::MissingField("mcp_orchestrator"))?,
+            skill_service: self.skill_service,
             wasm_manager: self.wasm_manager,
             worker_service,
             inflight_tracker: InFlightRequestTracker::new(),
@@ -387,6 +392,7 @@ impl AppContextBuilder {
             .with_workflow_engines()
             .with_mcp_orchestrator(&router_config)
             .await?
+            .with_skill_service(&router_config)
             .with_wasm_manager(&router_config)
             .with_kv_event_monitor(&router_config)
             .webrtc_bind_addr(webrtc_bind_addr)
@@ -619,6 +625,12 @@ impl AppContextBuilder {
 
         self.mcp_orchestrator = Some(mcp_orchestrator_lock);
         Ok(self)
+    }
+
+    fn with_skill_service(mut self, config: &RouterConfig) -> Self {
+        self.skill_service = (config.skills_enabled && config.skills.is_some())
+            .then(|| Arc::new(SkillService::placeholder()));
+        self
     }
 
     /// Create KV event monitor for event-driven cache-aware routing.

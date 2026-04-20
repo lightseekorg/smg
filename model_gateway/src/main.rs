@@ -464,6 +464,21 @@ struct CliArgs {
     #[arg(long, help_heading = "Parsers")]
     mcp_config_path: Option<String>,
 
+    // ==================== Skills ====================
+    /// Enable the skills subsystem scaffolding.
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::value_parser!(bool),
+        help_heading = "Skills"
+    )]
+    skills_enabled: Option<bool>,
+
+    /// Path to a YAML file with the nested skills configuration.
+    #[arg(long, help_heading = "Skills")]
+    skills_config_path: Option<String>,
+
     // ==================== Backend ====================
     /// Backend runtime to use (auto-detected if not specified)
     #[arg(long, value_enum, alias = "runtime", help_heading = "Backend")]
@@ -1157,6 +1172,10 @@ impl CliArgs {
             _ => (None, None, None),
         };
 
+        let skills_enabled = self
+            .skills_enabled
+            .unwrap_or_else(|| self.skills_config_path.is_some());
+
         let builder = RouterConfig::builder()
             .mode(mode)
             .policy(policy)
@@ -1225,6 +1244,8 @@ impl CliArgs {
             .maybe_reasoning_parser(self.reasoning_parser.as_ref())
             .maybe_tool_call_parser(self.tool_call_parser.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())
+            .skills_enabled(skills_enabled)
+            .maybe_skills_config_path(self.skills_config_path.as_ref())
             .dp_aware(self.dp_aware)
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
@@ -1418,9 +1439,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server_config = cli_args.to_server_config(router_config)?;
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async move { server::startup(server_config).await })?;
+    runtime.block_on(Box::pin(server::startup(server_config)))?;
     if is_otel_enabled() {
         shutdown_otel();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use clap::Parser;
+    use tempfile::NamedTempFile;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn skills_flags_flow_into_router_config() {
+        let mut skills_config = NamedTempFile::new().unwrap();
+        writeln!(
+            skills_config,
+            "max_skills_per_request: 4\nexecution:\n  executor_url: http://executor.internal\n"
+        )
+        .unwrap();
+
+        let cli = Cli::try_parse_from([
+            "smg",
+            "--worker-urls",
+            "http://worker1:8000",
+            "--skills-enabled",
+            "--skills-config-path",
+            skills_config.path().to_str().unwrap(),
+        ])
+        .unwrap();
+
+        let args = match cli.command {
+            Some(Commands::Launch { args }) => args,
+            None => cli.router_args,
+        };
+
+        let router_config = args.to_router_config(Vec::new()).unwrap();
+
+        assert!(router_config.skills_enabled);
+        let skills = router_config.skills.as_ref().unwrap();
+        assert_eq!(skills.max_skills_per_request, 4);
+        assert_eq!(
+            skills.execution.executor_url.as_deref(),
+            Some("http://executor.internal")
+        );
+    }
+
+    #[test]
+    fn skills_config_path_enables_skills_by_default() {
+        let mut skills_config = NamedTempFile::new().unwrap();
+        writeln!(skills_config, "max_skills_per_request: 2").unwrap();
+
+        let cli = Cli::try_parse_from([
+            "smg",
+            "--worker-urls",
+            "http://worker1:8000",
+            "--skills-config-path",
+            skills_config.path().to_str().unwrap(),
+        ])
+        .unwrap();
+
+        let args = match cli.command {
+            Some(Commands::Launch { args }) => args,
+            None => cli.router_args,
+        };
+
+        let router_config = args.to_router_config(Vec::new()).unwrap();
+
+        assert!(router_config.skills_enabled);
+        assert_eq!(
+            router_config
+                .skills
+                .as_ref()
+                .unwrap()
+                .max_skills_per_request,
+            2
+        );
+    }
 }

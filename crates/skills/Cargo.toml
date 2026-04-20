@@ -1,0 +1,26 @@
+[package]
+name = "smg-skills"
+version = "0.1.0"
+edition = "2021"
+description = "Skills domain types and service scaffolding for SMG"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+    "Keyang Ru <rukeyang@gmail.com>",
+]
+keywords = ["skills", "agents", "gateway"]
+categories = ["web-programming", "network-programming"]
+
+[lib]
+name = "smg_skills"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

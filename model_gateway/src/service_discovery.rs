@@ -1274,6 +1274,7 @@ mod tests {
             workflow_engines: Arc::new(std::sync::OnceLock::new()),
             mcp_orchestrator: Arc::new(std::sync::OnceLock::new()),
             tokenizer_registry: Arc::new(llm_tokenizer::registry::TokenizerRegistry::new()),
+            skill_service: None,
             wasm_manager: None,
             worker_service: Arc::new(WorkerService::new(
                 worker_registry,
