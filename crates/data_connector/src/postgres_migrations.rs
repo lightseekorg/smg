@@ -184,7 +184,7 @@ fn pg_v7_up(schema: &SchemaConfig) -> Vec<String> {
     vec![
         format!(
             "CREATE TABLE IF NOT EXISTS {table} (\
-             token VARCHAR(64) PRIMARY KEY, \
+             token_hash VARCHAR(64) PRIMARY KEY, \
              tenant_id VARCHAR(64) NOT NULL, \
              exec_id VARCHAR(64) NOT NULL, \
              skill_id VARCHAR(64) NOT NULL, \
@@ -202,7 +202,7 @@ fn pg_v8_up(schema: &SchemaConfig) -> Vec<String> {
     vec![
         format!(
             "CREATE TABLE IF NOT EXISTS {table} (\
-             cookie VARCHAR(64) PRIMARY KEY, \
+             cookie_hash VARCHAR(64) PRIMARY KEY, \
              tenant_id VARCHAR(64) NOT NULL, \
              exec_id VARCHAR(64) NOT NULL, \
              request_id VARCHAR(64) NOT NULL, \
@@ -398,6 +398,7 @@ mod tests {
         let stmts = pg_v7_up(&schema);
         assert_eq!(stmts.len(), 3);
         assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS bundle_tokens"));
+        assert!(stmts[0].contains("token_hash VARCHAR(64) PRIMARY KEY"));
         assert!(stmts[1].contains("idx_bundle_tokens_exec_id"));
         assert!(stmts[2].contains("idx_bundle_tokens_expires_at"));
     }
@@ -408,6 +409,7 @@ mod tests {
         let stmts = pg_v8_up(&schema);
         assert_eq!(stmts.len(), 3);
         assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS continuation_cookies"));
+        assert!(stmts[0].contains("cookie_hash VARCHAR(64) PRIMARY KEY"));
         assert!(stmts[1].contains("idx_continuation_cookies_exec_id"));
         assert!(stmts[2].contains("idx_continuation_cookies_expires_at"));
     }

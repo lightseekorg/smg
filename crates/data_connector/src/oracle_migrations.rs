@@ -203,7 +203,7 @@ fn oracle_v7_up(schema: &SchemaConfig) -> Vec<String> {
     vec![
         format!(
             "BEGIN EXECUTE IMMEDIATE 'CREATE TABLE {table} (\
-             TOKEN VARCHAR2(64) PRIMARY KEY, \
+             TOKEN_HASH VARCHAR2(64) PRIMARY KEY, \
              TENANT_ID VARCHAR2(64) NOT NULL, \
              EXEC_ID VARCHAR2(64) NOT NULL, \
              SKILL_ID VARCHAR2(64) NOT NULL, \
@@ -230,7 +230,7 @@ fn oracle_v8_up(schema: &SchemaConfig) -> Vec<String> {
     vec![
         format!(
             "BEGIN EXECUTE IMMEDIATE 'CREATE TABLE {table} (\
-             COOKIE VARCHAR2(64) PRIMARY KEY, \
+             COOKIE_HASH VARCHAR2(64) PRIMARY KEY, \
              TENANT_ID VARCHAR2(64) NOT NULL, \
              EXEC_ID VARCHAR2(64) NOT NULL, \
              REQUEST_ID VARCHAR2(64) NOT NULL, \
@@ -401,6 +401,7 @@ mod tests {
         let stmts = oracle_v7_up(&schema);
         assert_eq!(stmts.len(), 3);
         assert!(stmts[0].contains("CREATE TABLE BUNDLE_TOKENS"));
+        assert!(stmts[0].contains("TOKEN_HASH VARCHAR2(64) PRIMARY KEY"));
         assert!(stmts[0].contains("CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
         assert!(stmts[0].contains("EXPIRES_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
         assert!(stmts[1].contains("IDX_BUNDLE_TOKENS_EXEC_ID"));
@@ -413,6 +414,7 @@ mod tests {
         let stmts = oracle_v8_up(&schema);
         assert_eq!(stmts.len(), 3);
         assert!(stmts[0].contains("CREATE TABLE CONTINUATION_COOKIES"));
+        assert!(stmts[0].contains("COOKIE_HASH VARCHAR2(64) PRIMARY KEY"));
         assert!(stmts[0].contains("CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
         assert!(stmts[0].contains("EXPIRES_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
         assert!(stmts[1].contains("IDX_CONTINUATION_COOKIES_EXEC"));

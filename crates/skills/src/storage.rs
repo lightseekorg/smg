@@ -61,19 +61,28 @@ pub trait TenantAliasStore: Send + Sync + 'static {
     async fn delete_tenant_alias(&self, alias_tenant_id: &str) -> SkillsStoreResult<bool>;
 }
 
-/// Persistence contract for opaque bundle-token claims.
+/// Persistence contract for bundle-token rows keyed by a deterministic secret hash.
+///
+/// Callers are expected to hash the presented bearer secret before invoking the
+/// lookup and revoke methods on this contract.
 #[async_trait]
 pub trait BundleTokenStore: Send + Sync + 'static {
     async fn put_bundle_token(&self, claim: BundleTokenClaim) -> SkillsStoreResult<()>;
 
-    async fn get_bundle_token(&self, token: &str) -> SkillsStoreResult<Option<BundleTokenClaim>>;
+    async fn get_bundle_token(
+        &self,
+        token_hash: &str,
+    ) -> SkillsStoreResult<Option<BundleTokenClaim>>;
 
-    async fn revoke_bundle_token(&self, token: &str) -> SkillsStoreResult<bool>;
+    async fn revoke_bundle_token(&self, token_hash: &str) -> SkillsStoreResult<bool>;
 
     async fn revoke_bundle_tokens_for_exec(&self, exec_id: &str) -> SkillsStoreResult<usize>;
 }
 
-/// Persistence contract for opaque continuation-cookie claims.
+/// Persistence contract for continuation-cookie rows keyed by a deterministic secret hash.
+///
+/// Callers are expected to hash the presented continuation secret before
+/// invoking the lookup and revoke methods on this contract.
 #[async_trait]
 pub trait ContinuationCookieStore: Send + Sync + 'static {
     async fn put_continuation_cookie(
@@ -83,10 +92,10 @@ pub trait ContinuationCookieStore: Send + Sync + 'static {
 
     async fn get_continuation_cookie(
         &self,
-        cookie: &str,
+        cookie_hash: &str,
     ) -> SkillsStoreResult<Option<ContinuationCookieClaim>>;
 
-    async fn revoke_continuation_cookie(&self, cookie: &str) -> SkillsStoreResult<bool>;
+    async fn revoke_continuation_cookie(&self, cookie_hash: &str) -> SkillsStoreResult<bool>;
 
     async fn revoke_continuation_cookies_for_exec(&self, exec_id: &str)
         -> SkillsStoreResult<usize>;

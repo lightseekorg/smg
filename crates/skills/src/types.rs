@@ -56,10 +56,10 @@ pub struct TenantAliasRecord {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// Opaque bundle-token claims used for executor bundle downloads.
+/// Persisted bundle-token claims keyed by a deterministic secret hash.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BundleTokenClaim {
-    pub token: String,
+    pub token_hash: String,
     pub tenant_id: String,
     pub exec_id: String,
     pub skill_id: String,
@@ -68,10 +68,10 @@ pub struct BundleTokenClaim {
     pub expires_at: DateTime<Utc>,
 }
 
-/// Opaque continuation-cookie claims used for pause-turn resumption.
+/// Persisted continuation-cookie claims keyed by a deterministic secret hash.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContinuationCookieClaim {
-    pub cookie: String,
+    pub cookie_hash: String,
     pub tenant_id: String,
     pub exec_id: String,
     pub request_id: String,
@@ -91,7 +91,7 @@ pub struct NormalizedSkillBundle {
 impl fmt::Debug for BundleTokenClaim {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BundleTokenClaim")
-            .field("token", &"<redacted>")
+            .field("token_hash", &"<redacted>")
             .field("tenant_id", &self.tenant_id)
             .field("exec_id", &self.exec_id)
             .field("skill_id", &self.skill_id)
@@ -105,7 +105,7 @@ impl fmt::Debug for BundleTokenClaim {
 impl fmt::Debug for ContinuationCookieClaim {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ContinuationCookieClaim")
-            .field("cookie", &"<redacted>")
+            .field("cookie_hash", &"<redacted>")
             .field("tenant_id", &self.tenant_id)
             .field("exec_id", &self.exec_id)
             .field("request_id", &self.request_id)
