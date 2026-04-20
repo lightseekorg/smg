@@ -52,24 +52,24 @@ pub struct MultimodalConfigRegistry {
 }
 
 impl MultimodalConfigRegistry {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             configs: DashMap::new(),
         }
     }
 
-    pub fn get(&self, tokenizer_id: &str) -> Option<Arc<MultimodalModelConfig>> {
+    pub(crate) fn get(&self, tokenizer_id: &str) -> Option<Arc<MultimodalModelConfig>> {
         self.configs.get(tokenizer_id).map(|r| r.clone())
     }
 
-    pub fn insert(&self, tokenizer_id: String, config: Arc<MultimodalModelConfig>) {
+    pub(crate) fn insert(&self, tokenizer_id: String, config: Arc<MultimodalModelConfig>) {
         self.configs.insert(tokenizer_id, config);
     }
 
     /// Return a cached config if present; otherwise load from `tokenizer_source`
     /// (local dir or HF cache/download via `llm_multimodal::hub`), cache under
     /// `tokenizer_id`, and return it.
-    pub async fn get_or_load(
+    pub(crate) async fn get_or_load(
         &self,
         tokenizer_id: &str,
         tokenizer_source: &str,
