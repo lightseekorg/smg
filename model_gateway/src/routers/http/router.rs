@@ -516,6 +516,17 @@ impl Router {
             }
         };
 
+        // Multipart transcription can't route through `worker.prepare_request`,
+        // which is the hook that injects `data_parallel_rank` for DP-aware
+        // workers. Fail loudly instead of silently sending to an arbitrary DP
+        // shard.
+        if worker.is_dp_aware() {
+            return error::bad_request(
+                "dp_aware_not_supported",
+                "/v1/audio/transcriptions does not yet support DP-aware workers",
+            );
+        }
+
         let policy = self.policy_registry.get_policy_or_default(model_id);
         let load_guard = ["cache_aware", "manual"]
             .contains(&policy.name())
@@ -829,7 +840,11 @@ fn build_transcription_form(body: &TranscriptionRequest, audio: AudioFile) -> Re
         content_type,
     } = audio;
 
-    let mut file_part = Part::bytes(bytes.to_vec()).file_name(file_name);
+    // Wrap the already-buffered Bytes in a reqwest Body (Arc refcount, no
+    // additional copy) instead of Part::bytes, which would force a Vec copy.
+    let file_len = bytes.len() as u64;
+    let mut file_part =
+        Part::stream_with_length(reqwest::Body::from(bytes), file_len).file_name(file_name);
     if let Some(ct) = content_type.as_deref() {
         file_part = file_part
             .mime_str(ct)

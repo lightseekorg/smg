@@ -365,10 +365,17 @@ async fn v1_audio_transcriptions(
                 Err(e) => return bad_text_field("timestamp_granularities", e),
             },
             "stream" => match field.text().await {
-                Ok(t) => {
-                    let truthy = matches!(t.as_str(), "true" | "1" | "True" | "TRUE");
-                    req.stream = Some(truthy);
-                }
+                Ok(t) => match t.as_str() {
+                    "true" | "True" | "TRUE" | "1" => req.stream = Some(true),
+                    "false" | "False" | "FALSE" | "0" => req.stream = Some(false),
+                    other => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("Invalid 'stream' value: '{other}' (expected true/false/1/0)"),
+                        )
+                            .into_response();
+                    }
+                },
                 Err(e) => return bad_text_field("stream", e),
             },
             _ => {
