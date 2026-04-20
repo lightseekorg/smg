@@ -143,6 +143,7 @@ class GrpcReqState:
     # Metrics (same as TokenizerManager's ReqState)
     time_stats: APIServerReqTimeStats
     last_completion_tokens: int = 1
+    ttft_observed: bool = False
 
     # Streaming state
     stream_finished: bool = False
@@ -206,6 +207,33 @@ class GrpcRequestManager:
 
         # Metrics
         self.last_receive_tstamp = real_time()
+        self.metrics_collector = None
+        if server_args.enable_metrics:
+            try:
+                from sglang.srt.observability.metrics_collector import (
+                    TokenizerMetricsCollector,
+                )
+
+                labels = {
+                    "model_name": server_args.served_model_name,
+                }
+                self.metrics_collector = TokenizerMetricsCollector(
+                    server_args=server_args,
+                    labels=labels,
+                    bucket_time_to_first_token=server_args.bucket_time_to_first_token,
+                    bucket_e2e_request_latency=server_args.bucket_e2e_request_latency,
+                    bucket_inter_token_latency=getattr(
+                        server_args, "bucket_inter_token_latency", None
+                    ),
+                )
+                self._metrics_labels = labels
+                logger.info("TokenizerMetricsCollector initialized for gRPC request-level metrics")
+            except Exception:
+                logger.warning(
+                    "Failed to initialize TokenizerMetricsCollector, "
+                    "request-level metrics will be unavailable",
+                    exc_info=True,
+                )
 
         # Crash dump for debugging
         self.crash_dump_request_list = []
@@ -577,11 +605,33 @@ class GrpcRequestManager:
                 logger.debug(f"Skipping output for aborted request {rid}")
                 continue
 
-            # Update metrics
+            # Update timing
             if state.time_stats.first_token_time == 0.0:
                 state.time_stats.set_first_token_time()
             else:
                 state.time_stats.set_last_time()
+
+            # Observe request-level Prometheus metrics
+            if self.metrics_collector is not None:
+                completion_tokens = (
+                    batch_out.completion_tokens[i] if batch_out.completion_tokens else 0
+                )
+                labels = dict(self._metrics_labels)
+                if not state.ttft_observed:
+                    state.ttft_observed = True
+                    state.last_completion_tokens = completion_tokens
+                    self.metrics_collector.observe_time_to_first_token(
+                        labels, state.time_stats.get_first_token_latency()
+                    )
+                else:
+                    num_new_tokens = completion_tokens - state.last_completion_tokens
+                    if num_new_tokens > 0:
+                        self.metrics_collector.observe_inter_token_latency(
+                            labels,
+                            state.time_stats.get_interval(),
+                            num_new_tokens,
+                        )
+                        state.last_completion_tokens = completion_tokens
 
             # Extract output for this request
             output_data = {
@@ -671,6 +721,20 @@ class GrpcRequestManager:
                 state.time_stats.set_finished_time()
                 state.stream_finished = True
                 state.event.set()
+
+                if self.metrics_collector is not None:
+                    prompt_tokens = output_data["meta_info"].get("prompt_tokens", 0)
+                    compl_tokens = output_data["meta_info"].get("completion_tokens", 0)
+                    cached_tokens = output_data["meta_info"].get("cached_tokens", 0)
+                    self.metrics_collector.observe_one_finished_request(
+                        dict(self._metrics_labels),
+                        prompt_tokens,
+                        compl_tokens,
+                        cached_tokens,
+                        state.time_stats.get_e2e_latency(),
+                        False,
+                        0,
+                    )
 
                 # Remove from tracking after a delay
                 async def cleanup(request_id):
