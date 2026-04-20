@@ -502,7 +502,9 @@ impl ResponseStreamEventEmitter {
         let event_type = match response_format {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
-            ResponseFormat::ImageGenerationCall => return None,
+            ResponseFormat::ImageGenerationCall => {
+                unreachable!("{}", IMAGE_GENERATION_REJECTED_UPSTREAM_MSG)
+            }
             ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
             ResponseFormat::Passthrough => return None,
         };
