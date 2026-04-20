@@ -34,8 +34,16 @@ use crate::{
     routers::{
         common::{header_utils::ApiProvider, mcp_utils::DEFAULT_MAX_ITERATIONS},
         error,
+        openai::responses::approval_continuation::ApprovalContinuation,
     },
 };
+
+#[derive(Debug)]
+pub(crate) enum ToolLoopError {
+    InvalidApprovalResponse(String),
+    MaxToolCallsExceeded(String),
+    Execution(String),
+}
 
 /// State for tracking multi-turn tool calling loop
 pub(crate) struct ToolLoopState {
@@ -385,6 +393,150 @@ pub(crate) fn build_resume_payload(
     obj.insert("store".to_string(), Value::Bool(false));
 
     Ok(payload)
+}
+
+fn attach_approval_request_id(item: &mut Value, approval_request_id: &str) {
+    let Some(obj) = item.as_object_mut() else {
+        return;
+    };
+
+    if obj.get("type").and_then(|value| value.as_str()) == Some(ItemType::MCP_CALL) {
+        obj.insert(
+            "approval_request_id".to_string(),
+            Value::String(approval_request_id.to_string()),
+        );
+    }
+}
+
+struct ApprovedToolReplayContext<'a> {
+    base_payload: &'a Value,
+    tools_json: &'a Value,
+    session: &'a McpToolSession<'a>,
+    model_id: &'a str,
+    effective_limit: usize,
+}
+
+async fn maybe_resume_approved_tool_call(
+    state: &mut ToolLoopState,
+    current_payload: &mut Value,
+    continuation: Option<&ApprovalContinuation>,
+    replay_ctx: ApprovedToolReplayContext<'_>,
+) -> Result<(), ToolLoopError> {
+    let Some(continuation) = continuation else {
+        return Ok(());
+    };
+
+    if !replay_ctx.session.has_exposed_tool(&continuation.tool_name) {
+        return Err(ToolLoopError::InvalidApprovalResponse(format!(
+            "approved tool '{}' (approval_request_id={}) is not available in this request",
+            continuation.tool_name, continuation.approval_request_id
+        )));
+    }
+
+    // Binding integrity: the stored `mcp_approval_request.server_label` must
+    // still map to the same MCP backend in the current session. Without this
+    // check, a client could rebind the same tool name to a different server
+    // between the approval and the continuation, causing the approved call to
+    // dispatch to a backend the user never approved.
+    let current_server_label = replay_ctx
+        .session
+        .resolve_tool_server_label(&continuation.tool_name);
+    if current_server_label != continuation.server_label {
+        return Err(ToolLoopError::InvalidApprovalResponse(format!(
+            "approved tool '{}' (approval_request_id={}) is now bound to server '{}', but was approved against '{}'",
+            continuation.tool_name,
+            continuation.approval_request_id,
+            current_server_label,
+            continuation.server_label
+        )));
+    }
+
+    // Count approved replay against the current response's tool-call budget:
+    // a resumed, previously-approved MCP execution still consumes one
+    // `max_tool_calls` slot for this response.
+    if state.total_calls + 1 > replay_ctx.effective_limit {
+        return Err(ToolLoopError::MaxToolCallsExceeded(format!(
+            "approved MCP continuation for approval_request_id '{}' would exceed max_tool_calls limit ({})",
+            continuation.approval_request_id, replay_ctx.effective_limit
+        )));
+    }
+
+    let (output_str, transformed_item, result_label) =
+        match serde_json::from_str::<Value>(&continuation.arguments) {
+            Ok(arguments) => {
+                let tool_output = replay_ctx
+                    .session
+                    .execute_approved_tool(ToolExecutionInput {
+                        call_id: continuation.call_id.clone(),
+                        tool_name: continuation.tool_name.clone(),
+                        arguments,
+                    })
+                    .await;
+
+                Metrics::record_mcp_tool_duration(
+                    replay_ctx.model_id,
+                    &tool_output.tool_name,
+                    tool_output.duration,
+                );
+
+                let label = if tool_output.is_error {
+                    metrics_labels::RESULT_ERROR
+                } else {
+                    metrics_labels::RESULT_SUCCESS
+                };
+                let transformed = build_transformed_mcp_call_item(
+                    &tool_output.output,
+                    &tool_output.response_format,
+                    &continuation.call_id,
+                    &tool_output.server_label,
+                    &continuation.tool_name,
+                    &continuation.arguments,
+                );
+                (tool_output.output.to_string(), transformed, label)
+            }
+            Err(e) => {
+                let error_output = format!("Invalid tool arguments: {e}");
+                let transformed = build_transformed_mcp_call_item(
+                    &json!({ "error": &error_output }),
+                    &replay_ctx
+                        .session
+                        .tool_response_format(&continuation.tool_name),
+                    &continuation.call_id,
+                    &replay_ctx
+                        .session
+                        .resolve_tool_server_label(&continuation.tool_name),
+                    &continuation.tool_name,
+                    &continuation.arguments,
+                );
+                (error_output, transformed, metrics_labels::RESULT_ERROR)
+            }
+        };
+
+    let mut transformed_item = transformed_item;
+    attach_approval_request_id(&mut transformed_item, &continuation.approval_request_id);
+
+    Metrics::record_mcp_tool_call(replay_ctx.model_id, &continuation.tool_name, result_label);
+
+    state.total_calls += 1;
+    state.record_call(
+        replay_ctx.session.is_builtin_tool(&continuation.tool_name),
+        continuation.call_id.clone(),
+        continuation.tool_name.clone(),
+        continuation.arguments.clone(),
+        output_str,
+        transformed_item,
+    );
+
+    *current_payload = build_resume_payload(
+        replay_ctx.base_payload,
+        &state.conversation_history,
+        &state.original_input,
+        replay_ctx.tools_json,
+        false,
+    )
+    .map_err(ToolLoopError::Execution)?;
+
+    Ok(())
 }
 
 /// Send mcp_list_tools events to client at the start of streaming
@@ -778,7 +930,9 @@ fn approval_prefix_items(
 
 pub(crate) struct ToolLoopExecutionContext<'a> {
     pub original_body: &'a ResponsesRequest,
+    pub upstream_input: &'a ResponseInput,
     pub existing_mcp_list_tools_labels: &'a [String],
+    pub approval_continuation: Option<&'a ApprovalContinuation>,
     pub session: &'a McpToolSession<'a>,
 }
 
@@ -790,18 +944,24 @@ pub(crate) async fn execute_tool_loop(
     worker_api_key: Option<&String>,
     initial_payload: Value,
     tool_loop_ctx: ToolLoopExecutionContext<'_>,
-) -> Result<Value, String> {
+) -> Result<Value, ToolLoopError> {
     let ToolLoopExecutionContext {
         original_body,
+        upstream_input,
         existing_mcp_list_tools_labels,
+        approval_continuation,
         session,
     } = tool_loop_ctx;
 
     let mut state = ToolLoopState::new(
-        original_body.input.clone(),
+        upstream_input.clone(),
         existing_mcp_list_tools_labels.to_vec(),
     );
     let max_tool_calls = original_body.max_tool_calls.map(|n| n as usize);
+    let effective_limit = match max_tool_calls {
+        Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
+        None => DEFAULT_MAX_ITERATIONS,
+    };
     let base_payload = initial_payload.clone();
     let tools_json = base_payload.get("tools").cloned().unwrap_or(json!([]));
     let mut current_payload = initial_payload;
@@ -813,6 +973,20 @@ pub(crate) async fn execute_tool_loop(
     let provider = ApiProvider::from_url(url);
     let auth_header = provider.extract_auth_header(headers, worker_api_key);
 
+    maybe_resume_approved_tool_call(
+        &mut state,
+        &mut current_payload,
+        approval_continuation,
+        ApprovedToolReplayContext {
+            base_payload: &base_payload,
+            tools_json: &tools_json,
+            session,
+            model_id: &original_body.model,
+            effective_limit,
+        },
+    )
+    .await?;
+
     loop {
         let request_builder = client.post(url).json(&current_payload);
         let request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
@@ -820,19 +994,21 @@ pub(crate) async fn execute_tool_loop(
         let response = request_builder
             .send()
             .await
-            .map_err(|e| format!("upstream request failed: {e}"))?;
+            .map_err(|e| ToolLoopError::Execution(format!("upstream request failed: {e}")))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             let body = error::sanitize_error_body(&body);
-            return Err(format!("upstream error {status}: {body}"));
+            return Err(ToolLoopError::Execution(format!(
+                "upstream error {status}: {body}"
+            )));
         }
 
         let mut response_json = response
             .json::<Value>()
             .await
-            .map_err(|e| format!("parse response: {e}"))?;
+            .map_err(|e| ToolLoopError::Execution(format!("parse response: {e}")))?;
 
         let function_calls = extract_function_calls(&response_json);
         if function_calls.is_empty() {
@@ -855,11 +1031,6 @@ pub(crate) async fn execute_tool_loop(
             function_calls.len()
         );
 
-        let effective_limit = match max_tool_calls {
-            Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
-            None => DEFAULT_MAX_ITERATIONS,
-        };
-
         for call in function_calls {
             state.total_calls += 1;
 
@@ -874,7 +1045,8 @@ pub(crate) async fn execute_tool_loop(
                     "max_tool_calls",
                     session,
                     original_body,
-                );
+                )
+                .map_err(ToolLoopError::Execution);
             }
             let mut arguments: Value = match serde_json::from_str(&call.arguments) {
                 Ok(v) => v,
@@ -969,7 +1141,8 @@ pub(crate) async fn execute_tool_loop(
                         session,
                         original_body,
                         approval_item,
-                    );
+                    )
+                    .map_err(ToolLoopError::Execution);
                 }
             };
 
@@ -1014,7 +1187,8 @@ pub(crate) async fn execute_tool_loop(
             &state.original_input,
             &tools_json,
             false,
-        )?;
+        )
+        .map_err(ToolLoopError::Execution)?;
     }
 }
 
