@@ -61,6 +61,10 @@ pub struct MeshServerHandler {
     partition_detector: Option<Arc<PartitionDetector>>,
     state_machine: Option<Arc<NodeStateMachine>>,
     rate_limit_task_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Shared with the MeshServer so adapters can subscribe to stream
+    /// namespaces (broadcast/targeted) and publish values that reach
+    /// peers via the gossip loop.
+    mesh_kv: Arc<crate::kv::MeshKV>,
 }
 
 impl MeshServerHandler {
@@ -262,6 +266,13 @@ impl MeshServerHandler {
         // Merge operation log into our app store using CRDT merge
         self.stores.app.merge(log);
     }
+
+    /// Shared MeshKV handle — adapters subscribe to stream namespaces
+    /// and publish values through this. The handle is Arc-cloned, so
+    /// subscribers created here see the same events as the gossip loop.
+    pub fn mesh_kv(&self) -> &Arc<crate::kv::MeshKV> {
+        &self.mesh_kv
+    }
 }
 
 pub struct MeshServerBuilder {
@@ -334,7 +345,7 @@ impl MeshServerBuilder {
                 signal_rx,
                 partition_detector: Some(partition_detector.clone()),
                 mtls_manager: self.mtls_manager.clone(),
-                mesh_kv,
+                mesh_kv: mesh_kv.clone(),
             },
             MeshServerHandler {
                 state: self.state.clone(),
@@ -346,6 +357,7 @@ impl MeshServerBuilder {
                 partition_detector: Some(partition_detector),
                 state_machine: Some(state_machine),
                 rate_limit_task_handle: std::sync::Mutex::new(None),
+                mesh_kv,
             },
         )
     }
