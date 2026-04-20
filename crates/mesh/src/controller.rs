@@ -32,7 +32,7 @@ use super::{
 };
 use crate::{
     chunking::{
-        build_stream_batches, chunk_value, dispatch_stream_batch, DEFAULT_MAX_CHUNKS_PER_ROUND,
+        build_stream_batches, chunk_value, dispatch_stream_batch, DEFAULT_MAX_CHUNKS_PER_BATCH,
         MAX_STREAM_CHUNK_BYTES,
     },
     collector::{CentralCollector, PeerWatermark, RoundBatch},
@@ -693,7 +693,7 @@ impl MeshController {
                                 if !entries.is_empty() {
                                     for batch in build_stream_batches(
                                         entries,
-                                        DEFAULT_MAX_CHUNKS_PER_ROUND,
+                                        DEFAULT_MAX_CHUNKS_PER_BATCH,
                                     ) {
                                         let msg = StreamMessage {
                                             message_type: StreamMessageType::StreamBatch as i32,

@@ -19,7 +19,7 @@ use tracing::instrument;
 
 use super::{
     chunking::{
-        build_stream_batches, chunk_value, dispatch_stream_batch, DEFAULT_MAX_CHUNKS_PER_ROUND,
+        build_stream_batches, chunk_value, dispatch_stream_batch, DEFAULT_MAX_CHUNKS_PER_BATCH,
         MAX_STREAM_CHUNK_BYTES,
     },
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
@@ -596,7 +596,7 @@ impl Gossip for GossipService {
                             }
                             if !entries.is_empty() {
                                 for batch in
-                                    build_stream_batches(entries, DEFAULT_MAX_CHUNKS_PER_ROUND)
+                                    build_stream_batches(entries, DEFAULT_MAX_CHUNKS_PER_BATCH)
                                 {
                                     sequence_counter += 1;
                                     let msg = StreamMessage {

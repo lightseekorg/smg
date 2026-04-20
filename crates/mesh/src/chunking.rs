@@ -17,9 +17,15 @@ use crate::{
     service::gossip::{StreamBatch, StreamEntry},
 };
 
-/// Per-round cap on chunks emitted across all stream entries. Prevents
-/// a burst of large values from monopolising the gossip channel.
-pub const DEFAULT_MAX_CHUNKS_PER_ROUND: usize = 5;
+/// Maximum chunks packed into a single `StreamBatch` message. This is
+/// a message-shape cap, not a bandwidth throttle: `build_stream_batches`
+/// emits multiple batches as needed to carry every entry in the round.
+/// The 128-slot sync channel's backpressure provides rate limiting;
+/// there is no explicit per-round chunk budget in this iteration (spec
+/// §10 contemplates one as `max_chunks_per_round`, but a hard round
+/// cap combined with §4.4's drained-per-round buffer would make any
+/// value with more chunks than the cap permanently undeliverable).
+pub const DEFAULT_MAX_CHUNKS_PER_BATCH: usize = 5;
 
 /// Headroom reserved below `MAX_MESSAGE_SIZE` for protobuf envelope
 /// overhead (StreamMessage wrapper, StreamEntry metadata, per-field
@@ -125,7 +131,7 @@ pub fn build_stream_batches(
     debug_assert!(
         max_chunks_per_batch > 0,
         "max_chunks_per_batch must be non-zero; callers should pass \
-         DEFAULT_MAX_CHUNKS_PER_ROUND or another positive cap"
+         DEFAULT_MAX_CHUNKS_PER_BATCH or another positive cap"
     );
     if max_chunks_per_batch == 0 || entries.is_empty() {
         return Vec::new();
