@@ -573,7 +573,7 @@ impl Gossip for GossipService {
                     // only. Targeted entries stay on the client-side
                     // (controller.rs) where peer_name is known at task
                     // spawn. At-most-once: on channel full, drop without
-                    // retry (spec §4.4).
+                    // retry.
                     if let Some(sbh) = &stream_batch_handle {
                         let stream_batch = sbh.read().clone();
                         let fresh_batch = last_stream_batch

@@ -48,11 +48,10 @@ pub fn next_generation() -> u64 {
 /// Maximum chunks packed into a single `StreamBatch` message. This is
 /// a message-shape cap, not a bandwidth throttle: `build_stream_batches`
 /// emits multiple batches as needed to carry every entry in the round.
-/// The 128-slot sync channel's backpressure provides rate limiting;
-/// there is no explicit per-round chunk budget in this iteration (spec
-/// §10 contemplates one as `max_chunks_per_round`, but a hard round
-/// cap combined with §4.4's drained-per-round buffer would make any
-/// value with more chunks than the cap permanently undeliverable).
+/// The 128-slot sync channel's backpressure provides rate limiting.
+/// A hard per-round chunk cap would combine with the drained-per-round
+/// buffer to make any value with more chunks than the cap permanently
+/// undeliverable, so none is enforced here.
 pub const DEFAULT_MAX_CHUNKS_PER_BATCH: usize = 5;
 
 /// Headroom reserved below `MAX_MESSAGE_SIZE` for protobuf envelope

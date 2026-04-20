@@ -180,10 +180,10 @@ impl MeshController {
             }
 
             // Chunk assembler GC: every 5 rounds (~5s), drop partial
-            // assemblies older than 30s per spec §4.4. Partial chunks
-            // the receiver has been holding for a full assembly timeout
-            // are assumed lost; the sender will re-publish on its own
-            // retry cycle with a fresh generation.
+            // assemblies older than 30s. Partial chunks the receiver has
+            // been holding for a full assembly timeout are assumed lost;
+            // the sender will re-publish on its own retry cycle with a
+            // fresh generation.
             if cnt.is_multiple_of(5) {
                 if let Some(mesh_kv) = &self.mesh_kv {
                     mesh_kv.chunk_assembler().gc(Duration::from_secs(30));
@@ -656,9 +656,8 @@ impl MeshController {
                             // targeted entries addressed to this peer. Each
                             // entry is chunked if oversized. On channel
                             // full, the round's stream traffic for this
-                            // peer is dropped — no retry (at-most-once,
-                            // spec §4.4). Application regenerates on its
-                            // own retry cycle.
+                            // peer is dropped — no retry (at-most-once).
+                            // Application regenerates on its own retry cycle.
                             let stream_batch = stream_batch_handle.read().clone();
                             let fresh_batch = last_stream_batch
                                 .as_ref()
