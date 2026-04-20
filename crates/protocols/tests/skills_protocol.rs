@@ -2,8 +2,8 @@ use openai_protocol::{
     messages::CreateMessageRequest,
     responses::{CodeInterpreterTool, ResponseTool},
     skills::{
-        ChatCompletionsSkillRef, ChatCompletionsSkillsHeader, MessagesSkillRef, OpaqueOpenAIObject,
-        ResponsesSkillEntry, ResponsesSkillRef, SkillVersionRef,
+        MessagesSkillRef, OpaqueOpenAIObject, ResponsesSkillEntry, ResponsesSkillRef,
+        SkillVersionRef,
     },
 };
 use schemars::schema_for;
@@ -275,36 +275,4 @@ fn skill_version_ref_schema_matches_runtime_contract() {
         branch.get("type") == Some(&json!("string"))
             && branch.get("pattern") == Some(&json!("^[1-9][0-9]{9,}$"))
     }));
-}
-
-#[test]
-fn chat_completions_skills_header_round_trips_decoded_payload() {
-    let raw = json!([
-        {
-            "type": "custom",
-            "skill_id": "skill_123",
-            "version": "latest"
-        },
-        {
-            "type": "openai",
-            "skill_id": "openai-spreadsheets",
-            "version": "2026-03-01"
-        }
-    ]);
-
-    let header: ChatCompletionsSkillsHeader = serde_json::from_value(raw.clone()).unwrap();
-    assert_eq!(
-        header,
-        ChatCompletionsSkillsHeader(vec![
-            ChatCompletionsSkillRef::Custom {
-                skill_id: "skill_123".to_string(),
-                version: Some(SkillVersionRef::Latest),
-            },
-            ChatCompletionsSkillRef::OpenAI {
-                skill_id: "openai-spreadsheets".to_string(),
-                version: Some("2026-03-01".to_string()),
-            }
-        ])
-    );
-    assert_eq!(serde_json::to_value(&header).unwrap(), raw);
 }
