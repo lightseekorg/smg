@@ -4,17 +4,9 @@ use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
 };
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillsBlobStoreBackend {
-    #[default]
-    Filesystem,
-    S3,
-    Gcs,
-    Azure,
-    Oci,
-}
+pub use smg_blob_storage::{
+    BlobStoreBackend as SkillsBlobStoreBackend, BlobStoreConfig as SkillsBlobStoreConfig,
+};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -230,34 +222,6 @@ impl Default for SkillsAdminConfig {
                 SkillsAdminOperation::CreateAlias,
                 SkillsAdminOperation::ExecuteMigration,
             ],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct SkillsBlobStoreConfig {
-    pub backend: SkillsBlobStoreBackend,
-    pub path: String,
-    pub bucket: Option<String>,
-    pub prefix: Option<String>,
-    pub region: Option<String>,
-    pub endpoint: Option<String>,
-    pub read_retry_window_ms: u64,
-    pub read_retry_max_attempts: u32,
-}
-
-impl Default for SkillsBlobStoreConfig {
-    fn default() -> Self {
-        Self {
-            backend: SkillsBlobStoreBackend::Filesystem,
-            path: "/var/smg/skills".to_string(),
-            bucket: None,
-            prefix: None,
-            region: None,
-            endpoint: None,
-            read_retry_window_ms: 2000,
-            read_retry_max_attempts: 3,
         }
     }
 }

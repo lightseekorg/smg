@@ -1,8 +1,8 @@
 [package]
-name = "smg-skills"
+name = "smg-blob-storage"
 version = "0.1.0"
 edition = "2021"
-description = "Skills domain types and service scaffolding for SMG"
+description = "Generic blob/object storage contracts for SMG"
 license = "Apache-2.0"
 repository = "https://github.com/lightseekorg/smg"
 authors = [
@@ -10,24 +10,18 @@ authors = [
     "Chang Su <mckvtl@gmail.com>",
     "Keyang Ru <rukeyang@gmail.com>",
 ]
-keywords = ["skills", "agents", "gateway"]
-categories = ["web-programming", "network-programming"]
+keywords = ["blob", "storage", "s3", "gcs", "azure"]
+categories = ["filesystem", "web-programming"]
 
 [lib]
-name = "smg_skills"
+name = "smg_blob_storage"
 
 [dependencies]
 async-trait.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
-serde_yml = "0.0.12"
-smg-blob-storage.workspace = true
 thiserror.workspace = true
-zip = "8.1"
-
-[dev-dependencies]
-anyhow.workspace = true
-serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 
 [lints]
 workspace = true

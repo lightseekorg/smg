@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Top-level skill metadata stored in the control-plane database.
@@ -5,8 +8,15 @@ use serde::{Deserialize, Serialize};
 pub struct SkillRecord {
     pub tenant_id: String,
     pub skill_id: String,
-    pub display_name: String,
+    pub name: String,
+    pub short_description: Option<String>,
+    pub description: Option<String>,
+    pub source: String,
+    pub has_code_files: bool,
+    pub latest_version: Option<String>,
     pub default_version: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Metadata for a single immutable skill version.
@@ -15,7 +25,16 @@ pub struct SkillVersionRecord {
     pub skill_id: String,
     pub version: String,
     pub version_number: u32,
-    pub has_code_files: bool,
+    pub name: String,
+    pub short_description: Option<String>,
+    pub description: String,
+    pub interface: Option<SkillInterfaceMetadata>,
+    pub dependencies: Option<SkillSidecarDependencies>,
+    pub policy: Option<SkillPolicyMetadata>,
+    pub deprecated: bool,
+    pub file_manifest: Vec<SkillFileRecord>,
+    pub instruction_token_counts: BTreeMap<String, u32>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// File-level manifest entry stored alongside a normalized skill bundle.
@@ -24,6 +43,39 @@ pub struct SkillFileRecord {
     pub relative_path: String,
     pub media_type: Option<String>,
     pub size_bytes: u64,
+    pub blob_key: Option<String>,
+}
+
+/// Tenant-alias mapping for request-time tenant resolution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TenantAliasRecord {
+    pub alias_tenant_id: String,
+    pub canonical_tenant_id: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Opaque bundle-token claims used for executor bundle downloads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleTokenClaim {
+    pub token: String,
+    pub tenant_id: String,
+    pub exec_id: String,
+    pub skill_id: String,
+    pub skill_version: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Opaque continuation-cookie claims used for pause-turn resumption.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContinuationCookieClaim {
+    pub cookie: String,
+    pub tenant_id: String,
+    pub exec_id: String,
+    pub request_id: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
 }
 
 /// Canonical in-memory representation of a validated skill bundle.
@@ -45,6 +97,7 @@ impl NormalizedSkillBundle {
                 relative_path: file.relative_path.clone(),
                 media_type: None,
                 size_bytes: file.size_bytes(),
+                blob_key: None,
             })
             .collect()
     }

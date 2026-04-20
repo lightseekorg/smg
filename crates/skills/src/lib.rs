@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod config;
+pub mod storage;
 pub mod types;
 pub mod validation;
 
@@ -18,10 +19,15 @@ pub use config::{
     SkillsResolutionMode, SkillsRetentionConfig, SkillsRetentionMode, SkillsTenancyConfig,
     SkillsToolLoopConfig, SkillsZdrConfig,
 };
+pub use storage::{
+    BundleTokenStore, ContinuationCookieStore, SkillMetadataStore, SkillsStoreError,
+    SkillsStoreResult, TenantAliasStore,
+};
 pub use types::{
-    NormalizedSkillBundle, NormalizedSkillFile, ParsedSkillBundle, SkillDependencyTool,
-    SkillFileRecord, SkillInterfaceMetadata, SkillParseWarning, SkillParseWarningKind,
-    SkillPolicyMetadata, SkillRecord, SkillSidecarDependencies, SkillVersionRecord,
+    BundleTokenClaim, ContinuationCookieClaim, NormalizedSkillBundle, NormalizedSkillFile,
+    ParsedSkillBundle, SkillDependencyTool, SkillFileRecord, SkillInterfaceMetadata,
+    SkillParseWarning, SkillParseWarningKind, SkillPolicyMetadata, SkillRecord,
+    SkillSidecarDependencies, SkillVersionRecord, TenantAliasRecord,
 };
 pub use validation::{
     is_code_file_path, normalize_skill_bundle_zip, parse_skill_bundle, SkillBundleArchiveError,
