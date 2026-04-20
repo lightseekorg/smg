@@ -12,6 +12,7 @@ use smg_mcp::McpToolSession;
 use tracing::warn;
 
 use super::common::parse_sse_block;
+use crate::routers::common::mcp_utils::collect_user_function_names;
 
 /// Check if a JSON value is missing, null, or an empty string
 fn is_missing_or_empty(value: Option<&Value>) -> bool {
@@ -238,24 +239,6 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
     }
 }
 
-fn collect_user_function_names(original_body: &ResponsesRequest) -> HashSet<&str> {
-    original_body
-        .tools
-        .as_ref()
-        .map(|tools| {
-            tools
-                .iter()
-                .filter_map(|tool| match tool {
-                    ResponseTool::Function(function_tool) => {
-                        Some(function_tool.function.name.as_str())
-                    }
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// Restore original tools (MCP and builtin) in response for client.
 ///
 /// The model receives function tools, but the response should mirror the original
@@ -276,7 +259,7 @@ fn restore_client_tool_view(
     resp: &mut Value,
     original_body: &ResponsesRequest,
     session: Option<&McpToolSession<'_>>,
-    user_function_names: &HashSet<&str>,
+    user_function_names: &HashSet<String>,
 ) {
     let Some(original_tools) = original_body.tools.as_ref() else {
         return;
@@ -300,7 +283,9 @@ fn restore_client_tool_view(
             }
             _ => {
                 if let Some(value) = response_tool_to_value(original_tool) {
-                    if !is_internal_mcp_tool_value(&value, session, user_function_names) {
+                    let should_hide = session
+                        .is_some_and(|s| s.should_hide_tool_json(&value, user_function_names));
+                    if !should_hide {
                         restored_tools.push(value);
                     }
                 }
@@ -351,7 +336,7 @@ fn restore_client_tool_view(
 fn strip_internal_mcp_tools(
     resp: &mut Value,
     session: Option<&McpToolSession<'_>>,
-    user_function_names: &HashSet<&str>,
+    user_function_names: &HashSet<String>,
 ) {
     let Some(obj) = resp.as_object_mut() else {
         return;
@@ -361,13 +346,15 @@ fn strip_internal_mcp_tools(
         return;
     };
 
-    tools.retain(|tool| !is_internal_mcp_tool_value(tool, session, user_function_names));
+    tools.retain(|tool| {
+        !session.is_some_and(|s| s.should_hide_tool_json(tool, user_function_names))
+    });
 }
 
 fn strip_internal_mcp_output_items(
     resp: &mut Value,
     session: Option<&McpToolSession<'_>>,
-    user_function_names: &HashSet<&str>,
+    user_function_names: &HashSet<String>,
 ) {
     let Some(obj) = resp.as_object_mut() else {
         return;
@@ -377,30 +364,9 @@ fn strip_internal_mcp_output_items(
         return;
     };
 
-    output.retain(|item| !is_internal_mcp_output_item(item, session, user_function_names));
-}
-
-fn is_internal_mcp_tool_value(
-    tool: &Value,
-    session: Option<&McpToolSession<'_>>,
-    user_function_names: &HashSet<&str>,
-) -> bool {
-    let Some(session) = session else {
-        return false;
-    };
-
-    match tool.get("type").and_then(|value| value.as_str()) {
-        Some("function") => function_tool_name(tool).is_some_and(|name| {
-            session.is_internal_tool(name) && !user_function_names.contains(name)
-        }),
-        // MCP tool entries are keyed by server metadata, so function-name collision
-        // handling does not apply to this arm.
-        Some("mcp") => tool
-            .get("server_label")
-            .and_then(|value| value.as_str())
-            .is_some_and(|server_label| session.is_internal_server_label(server_label)),
-        _ => false,
-    }
+    output.retain(|item| {
+        !session.is_some_and(|s| s.should_hide_output_item_json(item, user_function_names))
+    });
 }
 
 fn function_tool_name(tool: &Value) -> Option<&str> {
@@ -415,53 +381,6 @@ fn function_tool_name(tool: &Value) -> Option<&str> {
                 .and_then(|function| function.get("name"))
                 .and_then(|value| value.as_str())
         })
-}
-
-fn is_internal_mcp_output_item(
-    item: &Value,
-    session: Option<&McpToolSession<'_>>,
-    user_function_names: &HashSet<&str>,
-) -> bool {
-    let Some(session) = session else {
-        return false;
-    };
-
-    match item.get("type").and_then(|value| value.as_str()) {
-        // mcp_list_tools is gateway-synthesized metadata and should always be hidden
-        // for internal servers, even when builtin call outputs remain visible.
-        Some("mcp_list_tools") => item
-            .get("server_label")
-            .and_then(|value| value.as_str())
-            .is_some_and(|server_label| session.is_internal_server_label(server_label)),
-        Some("mcp_call") | Some("mcp_approval_request") => {
-            let matches_internal_server = item
-                .get("server_label")
-                .and_then(|value| value.as_str())
-                .is_some_and(|server_label| {
-                    session.is_internal_non_builtin_server_label(server_label)
-                });
-
-            match item.get("name").and_then(|value| value.as_str()) {
-                Some(name) if session.has_exposed_tool(name) => {
-                    session.is_internal_non_builtin_tool(name)
-                }
-                _ => matches_internal_server,
-            }
-        }
-        Some("function_call") => item
-            .get("name")
-            .and_then(|value| value.as_str())
-            .is_some_and(|name| {
-                session.is_internal_tool(name) && !user_function_names.contains(name)
-            }),
-        Some("function_tool_call") => item
-            .get("name")
-            .and_then(|value| value.as_str())
-            .is_some_and(|name| {
-                session.is_internal_tool(name) && !user_function_names.contains(name)
-            }),
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -1230,7 +1149,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_original_tools_hides_internal_list_tools_but_keeps_builtin_passthrough_call() {
+    async fn restore_original_tools_hides_builtin_list_tools_keeps_passthrough_call() {
         let original_body = ResponsesRequest {
             model: "gpt-5.4".to_string(),
             input: ResponseInput::Text("hello".to_string()),
@@ -1292,6 +1211,9 @@ mod tests {
 
         restore_original_tools(&mut response, &original_body, Some(&session));
 
+        // Builtin mcp_list_tools is hidden — clients don't see the underlying
+        // MCP server for builtin-routed tools like web_search_preview.
+        // Builtin passthrough mcp_call remains visible.
         assert_eq!(
             response["output"],
             serde_json::json!([

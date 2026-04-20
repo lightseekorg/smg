@@ -435,7 +435,7 @@ impl ResponseStorage for MemoryResponseStorage {
                 .collect();
 
             // Sort by creation time (newest first)
-            responses_with_time.sort_by(|a, b| b.0.cmp(&a.0));
+            responses_with_time.sort_by_key(|(created_at, _)| std::cmp::Reverse(*created_at));
 
             // Apply limit and collect the actual responses
             let limit = limit.unwrap_or(responses_with_time.len());

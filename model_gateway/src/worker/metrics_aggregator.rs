@@ -32,7 +32,7 @@ pub fn aggregate_metrics(metric_packs: Vec<MetricPack>) -> anyhow::Result<String
         expositions.push(exposition);
     }
 
-    let text = try_reduce(expositions.into_iter(), merge_exposition)?
+    let text = try_reduce(expositions, merge_exposition)?
         .map(|x| format!("{x}"))
         .unwrap_or_default();
     Ok(text)

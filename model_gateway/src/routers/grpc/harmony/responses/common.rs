@@ -1,5 +1,7 @@
 //! Shared helpers and state tracking for Harmony Responses
 
+use std::collections::HashSet;
+
 use axum::response::Response;
 use openai_protocol::{
     common::{ToolCall, ToolChoice, ToolChoiceValue},
@@ -164,6 +166,7 @@ pub(super) fn inject_mcp_metadata(
     response: &mut ResponsesResponse,
     tracking: &McpCallTracking,
     session: &McpToolSession<'_>,
+    user_function_names: &HashSet<String>,
 ) {
     let tool_output_items: Vec<ResponseOutputItem> = tracking
         .tool_calls
@@ -171,7 +174,11 @@ pub(super) fn inject_mcp_metadata(
         .map(|record| record.output_item.clone())
         .collect();
 
-    session.inject_mcp_output_items(&mut response.output, tool_output_items);
+    session.inject_client_visible_mcp_output_items(
+        &mut response.output,
+        tool_output_items,
+        user_function_names,
+    );
 }
 
 /// Load previous conversation messages from storage

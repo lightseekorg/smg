@@ -1,16 +1,16 @@
-//! Qwen Coder Parser Integration Tests
+//! Qwen XML Parser Integration Tests
 //!
-//! Tests for the Qwen Coder parser which handles XML format:
+//! Tests for the Qwen XML parser which handles XML format:
 //! <tool_call>\n<function=name>\n<parameter=key>value</parameter>\n</function>\n</tool_call>
 mod common;
 
 use common::{create_test_tools, streaming_helpers};
 use serde_json::json;
-use tool_parser::{parsers::QwenCoderParser, traits::ToolParser};
+use tool_parser::{parsers::QwenXmlParser, traits::ToolParser};
 
 #[tokio::test]
-async fn test_qwen_coder_single_tool() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_single_tool() {
+    let parser = QwenXmlParser::new();
     let input = r"<tool_call>
 <function=get_weather>
 <parameter=city>Beijing</parameter>
@@ -28,8 +28,8 @@ async fn test_qwen_coder_single_tool() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_multiple_sequential_tools() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_multiple_sequential_tools() {
+    let parser = QwenXmlParser::new();
     let input = r"Let me help you with that.
 <tool_call>
 <function=search>
@@ -51,8 +51,8 @@ async fn test_qwen_coder_multiple_sequential_tools() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_nested_json_in_parameters() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_nested_json_in_parameters() {
+    let parser = QwenXmlParser::new();
     let input = r#"<tool_call>
 <function=process_data>
 <parameter=config>{"nested": {"value": [1, 2, 3]}}</parameter>
@@ -71,8 +71,8 @@ async fn test_qwen_coder_nested_json_in_parameters() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_string_parameters() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_string_parameters() {
+    let parser = QwenXmlParser::new();
     let input = r"<tool_call>
 <function=process>
 <parameter=text>Hello World</parameter>
@@ -90,8 +90,8 @@ async fn test_qwen_coder_string_parameters() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_empty_arguments() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_empty_arguments() {
+    let parser = QwenXmlParser::new();
     let input = r"<tool_call>
 <function=get_time>
 </function>
@@ -106,8 +106,8 @@ async fn test_qwen_coder_empty_arguments() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_multiline_parameter_values() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_multiline_parameter_values() {
+    let parser = QwenXmlParser::new();
     let input = r"<tool_call>
 <function=write_file>
 <parameter=content>Line 1
@@ -126,8 +126,8 @@ Line 3</parameter>
 }
 
 #[tokio::test]
-async fn test_qwen_coder_format_detection() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_format_detection() {
+    let parser = QwenXmlParser::new();
 
     assert!(parser.has_tool_markers("<tool_call>"));
     assert!(parser.has_tool_markers("Some text <tool_call>"));
@@ -136,8 +136,8 @@ async fn test_qwen_coder_format_detection() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_incomplete_tags() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_incomplete_tags() {
+    let parser = QwenXmlParser::new();
 
     // Missing closing tag
     let input = r"<tool_call>
@@ -155,8 +155,8 @@ async fn test_qwen_coder_incomplete_tags() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_streaming_basic() {
-    let mut parser = QwenCoderParser::new();
+async fn test_qwen_xml_streaming_basic() {
+    let mut parser = QwenXmlParser::new();
     let tools = create_test_tools();
 
     // Simulate streaming chunks
@@ -191,8 +191,8 @@ async fn test_qwen_coder_streaming_basic() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_streaming_incremental_json() {
-    let mut parser = QwenCoderParser::new();
+async fn test_qwen_xml_streaming_incremental_json() {
+    let mut parser = QwenXmlParser::new();
     let tools = create_test_tools();
 
     let chunks = vec![
@@ -234,8 +234,8 @@ async fn test_qwen_coder_streaming_incremental_json() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_streaming_partial_tags() {
-    let mut parser = QwenCoderParser::new();
+async fn test_qwen_xml_streaming_partial_tags() {
+    let mut parser = QwenXmlParser::new();
     let tools = create_test_tools();
 
     // Chunks split mid-tag
@@ -271,8 +271,8 @@ async fn test_qwen_coder_streaming_partial_tags() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_multiple_tools_boundary() {
-    let mut parser = QwenCoderParser::new();
+async fn test_qwen_xml_multiple_tools_boundary() {
+    let mut parser = QwenXmlParser::new();
     let tools = create_test_tools();
 
     // Tool boundary at chunk boundary
@@ -299,8 +299,8 @@ async fn test_qwen_coder_multiple_tools_boundary() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_invalid_function_name() {
-    let mut parser = QwenCoderParser::new();
+async fn test_qwen_xml_invalid_function_name() {
+    let mut parser = QwenXmlParser::new();
     let tools = create_test_tools();
 
     let chunks = vec![
@@ -329,8 +329,8 @@ async fn test_qwen_coder_invalid_function_name() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_type_conversion() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_type_conversion() {
+    let parser = QwenXmlParser::new();
 
     let input = r"<tool_call>
 <function=process>
@@ -355,8 +355,8 @@ async fn test_qwen_coder_type_conversion() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_special_characters_in_values() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_special_characters_in_values() {
+    let parser = QwenXmlParser::new();
 
     let input = r#"<tool_call>
 <function=process>
@@ -376,8 +376,8 @@ async fn test_qwen_coder_special_characters_in_values() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_whitespace_handling() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_whitespace_handling() {
+    let parser = QwenXmlParser::new();
 
     // Test with various whitespace scenarios
     let input = r"<tool_call>
@@ -401,9 +401,9 @@ async fn test_qwen_coder_whitespace_handling() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_no_tools() {
+async fn test_qwen_xml_no_tools() {
     // Test input with no tool calls at all
-    let parser = QwenCoderParser::new();
+    let parser = QwenXmlParser::new();
 
     let input = r"This is just a normal response without any tool calls.
 I can provide information directly without using any tools.
@@ -427,8 +427,8 @@ they are not actual tool calls unless properly formatted.";
 }
 
 #[tokio::test]
-async fn test_qwen_coder_streaming_state_reset() {
-    let mut parser = QwenCoderParser::new();
+async fn test_qwen_xml_streaming_state_reset() {
+    let mut parser = QwenXmlParser::new();
     let tools = create_test_tools();
 
     // First tool
@@ -463,9 +463,9 @@ async fn test_qwen_coder_streaming_state_reset() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_realistic_chunks() {
+async fn test_qwen_xml_realistic_chunks() {
     let tools = create_test_tools();
-    let mut parser = QwenCoderParser::new();
+    let mut parser = QwenXmlParser::new();
 
     let input = r"<tool_call>
 <function=get_weather>
@@ -493,9 +493,9 @@ async fn test_qwen_coder_realistic_chunks() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_xml_tag_arrives_in_parts() {
+async fn test_qwen_xml_xml_tag_arrives_in_parts() {
     let tools = create_test_tools();
-    let mut parser = QwenCoderParser::new();
+    let mut parser = QwenXmlParser::new();
 
     let chunks = vec![
         "<to", "ol_", "cal", "l>", "<fun", "cti", "on=", "get", "_we", "ath", "er>", "<par", "ame",
@@ -519,8 +519,8 @@ async fn test_qwen_coder_xml_tag_arrives_in_parts() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_content_before_and_after_tool_calls() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_content_before_and_after_tool_calls() {
+    let parser = QwenXmlParser::new();
 
     let input = r"I'll analyze the weather for you now.
 <tool_call>
@@ -548,8 +548,8 @@ Based on the analysis, here's what I found.";
 }
 
 #[tokio::test]
-async fn test_qwen_coder_incomplete_tool_call() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_incomplete_tool_call() {
+    let parser = QwenXmlParser::new();
 
     // Incomplete tool call - missing closing tag
     let input = r"<tool_call>
@@ -564,8 +564,8 @@ async fn test_qwen_coder_incomplete_tool_call() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_malformed_function_tag() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_malformed_function_tag() {
+    let parser = QwenXmlParser::new();
 
     // Malformed function tag - missing name attribute
     let input = r"<tool_call>
@@ -582,8 +582,8 @@ async fn test_qwen_coder_malformed_function_tag() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_many_parameters() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_many_parameters() {
+    let parser = QwenXmlParser::new();
 
     let mut params_xml = String::new();
     for i in 1..=20 {
@@ -620,8 +620,8 @@ async fn test_qwen_coder_many_parameters() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_qwen_coder_malformed_xml_missing_parameter_close() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_malformed_xml_missing_parameter_close() {
+    let parser = QwenXmlParser::new();
 
     // Missing </parameter> closing tag - parser regex won't match incomplete parameter
     let input = r"<tool_call>
@@ -645,8 +645,8 @@ async fn test_qwen_coder_malformed_xml_missing_parameter_close() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_malformed_xml_unclosed_function() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_malformed_xml_unclosed_function() {
+    let parser = QwenXmlParser::new();
 
     // Missing </function> closing tag
     let input = r"<tool_call>
@@ -663,8 +663,8 @@ async fn test_qwen_coder_malformed_xml_unclosed_function() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_malformed_xml_nested_tool_calls() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_malformed_xml_nested_tool_calls() {
+    let parser = QwenXmlParser::new();
 
     // Nested tool_call tags (invalid)
     let input = r"<tool_call>
@@ -684,8 +684,8 @@ async fn test_qwen_coder_malformed_xml_nested_tool_calls() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_unicode_parameter_names() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_unicode_parameter_names() {
+    let parser = QwenXmlParser::new();
 
     // Unicode characters in parameter names (Chinese, Japanese, emoji)
     let input = r"<tool_call>
@@ -707,8 +707,8 @@ async fn test_qwen_coder_unicode_parameter_names() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_unicode_function_name() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_unicode_function_name() {
+    let parser = QwenXmlParser::new();
 
     // Unicode function name
     let input = r"<tool_call>
@@ -726,8 +726,8 @@ async fn test_qwen_coder_unicode_function_name() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_very_large_parameter_value() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_very_large_parameter_value() {
+    let parser = QwenXmlParser::new();
 
     // Generate a large parameter value (100KB)
     let large_value: String = "x".repeat(100_000);
@@ -749,8 +749,8 @@ async fn test_qwen_coder_very_large_parameter_value() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_very_large_nested_json_parameter() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_very_large_nested_json_parameter() {
+    let parser = QwenXmlParser::new();
 
     // Generate moderately nested JSON structure (10 levels to avoid stack overflow)
     let mut nested_json = String::from(r#"{"level": 0}"#);
@@ -777,8 +777,8 @@ async fn test_qwen_coder_very_large_nested_json_parameter() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_streaming_malformed_recovery() {
-    let mut parser = QwenCoderParser::new();
+async fn test_qwen_xml_streaming_malformed_recovery() {
+    let mut parser = QwenXmlParser::new();
     let tools = create_test_tools();
 
     // First: malformed tool call (invalid function name)
@@ -808,8 +808,8 @@ async fn test_qwen_coder_streaming_malformed_recovery() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_parameter_with_xml_like_content() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_parameter_with_xml_like_content() {
+    let parser = QwenXmlParser::new();
 
     // Parameter value contains XML-like content that shouldn't be parsed as tags
     let input = r#"<tool_call>
@@ -834,8 +834,8 @@ async fn test_qwen_coder_parameter_with_xml_like_content() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_empty_parameter_value() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_empty_parameter_value() {
+    let parser = QwenXmlParser::new();
 
     let input = r"<tool_call>
 <function=process>
@@ -859,8 +859,8 @@ async fn test_qwen_coder_empty_parameter_value() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_qwen_coder_html_entity_decoding() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_html_entity_decoding() {
+    let parser = QwenXmlParser::new();
 
     // Test HTML entities in parameter values
     let input = r"<tool_call>
@@ -881,8 +881,8 @@ async fn test_qwen_coder_html_entity_decoding() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_html_numeric_entities() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_html_numeric_entities() {
+    let parser = QwenXmlParser::new();
 
     // Test numeric HTML entities
     let input = r"<tool_call>
@@ -901,8 +901,8 @@ async fn test_qwen_coder_html_numeric_entities() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_python_literals() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_python_literals() {
+    let parser = QwenXmlParser::new();
 
     // Test Python-style literals (True, False, None)
     let input = r"<tool_call>
@@ -931,8 +931,8 @@ async fn test_qwen_coder_python_literals() {
 }
 
 #[tokio::test]
-async fn test_qwen_coder_mixed_html_and_json() {
-    let parser = QwenCoderParser::new();
+async fn test_qwen_xml_mixed_html_and_json() {
+    let parser = QwenXmlParser::new();
 
     // Test HTML entities within JSON structures
     let input = r#"<tool_call>

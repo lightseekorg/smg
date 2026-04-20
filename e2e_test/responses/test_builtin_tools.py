@@ -376,6 +376,17 @@ class TestBuiltinToolRouting:
             f"Built-in tool should NOT produce mcp_list_tools, got: {output_types}"
         )
 
+        web_search_calls = [item for item in resp.output if item.type == "web_search_call"]
+        assert web_search_calls, "Expected at least one web_search_call item in response output"
+
+        ws_call = web_search_calls[0]
+        assert ws_call.status == "completed"
+        assert ws_call.action is not None, "Expected web_search_call.action to be populated"
+        assert ws_call.action.query, "Expected web_search_call.action.query to be populated"
+        assert "rust" in ws_call.action.query.lower(), (
+            f"Expected action.query to reference the Rust prompt, got: {ws_call.action.query}"
+        )
+
     def test_response_tools_shows_original_type(self, gateway_with_mcp_config):
         """Test that response tools field shows web_search_preview, not mcp."""
         gateway, client = gateway_with_mcp_config

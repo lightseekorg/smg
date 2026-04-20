@@ -226,17 +226,11 @@ impl AppTestContext {
             match &mut config.mode {
                 RoutingMode::Regular {
                     worker_urls: ref mut urls,
-                } => {
-                    if urls.is_empty() {
-                        urls.clone_from(&worker_urls);
-                    }
                 }
-                RoutingMode::OpenAI {
+                | RoutingMode::OpenAI {
                     worker_urls: ref mut urls,
-                } => {
-                    if urls.is_empty() {
-                        urls.clone_from(&worker_urls);
-                    }
+                } if urls.is_empty() => {
+                    urls.clone_from(&worker_urls);
                 }
                 _ => {}
             }

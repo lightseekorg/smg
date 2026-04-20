@@ -30,10 +30,10 @@ pub use core::{config, pool as connection_pool};
 pub use core::{
     ArgMappingConfig, BuiltinToolType, ConfigValidationError, HandlerRequestContext,
     LatencySnapshot, McpConfig, McpMetrics, McpOrchestrator, McpRequestContext, McpServerBinding,
-    McpServerConfig, McpToolSession, McpTransport, MetricsSnapshot, PolicyConfig,
-    PolicyDecisionConfig, PoolKey, RefreshRequest, ResponseFormatConfig, ServerPolicyConfig,
-    SmgClientHandler, Tool, ToolCallResult, ToolConfig, ToolExecutionInput, ToolExecutionOutput,
-    TrustLevelConfig, DEFAULT_SERVER_LABEL,
+    McpServerConfig, McpToolSession, McpTransport, MetricsSnapshot, PendingToolExecution,
+    PolicyConfig, PolicyDecisionConfig, PoolKey, RefreshRequest, ResponseFormatConfig,
+    ServerPolicyConfig, SmgClientHandler, Tool, ToolCallResult, ToolConfig, ToolExecutionInput,
+    ToolExecutionOutput, ToolExecutionResult, TrustLevelConfig, DEFAULT_SERVER_LABEL,
 };
 
 // Re-export shared types
@@ -57,6 +57,5 @@ pub use responses_bridge::{
 pub use tenant::{SessionId, TenantContext, TenantId};
 // Re-export from transform
 pub use transform::{
-    extract_image_generation_fallback_text, mcp_response_item_id, ResponseFormat,
-    ResponseTransformer,
+    extract_embedded_openai_responses, extract_image_generation_fallback_text, mcp_response_item_id, ResponseFormat, ResponseTransformer,
 };

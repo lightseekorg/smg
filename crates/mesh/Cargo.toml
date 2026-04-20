@@ -33,6 +33,7 @@ tracing.workspace = true
 
 # Mesh-specific dependencies
 bincode = "1.3"
+bytes = "1"
 crdts = "7.3"
 futures = "0.3"
 metrics = "0.24.2"

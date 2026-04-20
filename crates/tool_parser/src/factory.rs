@@ -10,8 +10,8 @@ use tokio::sync::Mutex;
 use crate::{
     parsers::{
         CohereParser, DeepSeek31Parser, DeepSeekParser, Glm4MoeParser, JsonParser, KimiK2Parser,
-        LlamaParser, MinimaxM2Parser, MistralParser, PassthroughParser, PythonicParser,
-        QwenCoderParser, QwenParser, Step3Parser,
+        LlamaParser, MinimaxM2Parser, MistralParser, PassthroughParser, PythonicParser, QwenParser,
+        QwenXmlParser, Step3Parser,
     },
     traits::ToolParser,
 };
@@ -310,7 +310,8 @@ impl ParserFactory {
             MistralParser::build_structural_tag,
         );
         registry.register_parser("qwen", || Box::new(QwenParser::new()));
-        registry.register_parser("qwen_coder", || Box::new(QwenCoderParser::new()));
+        registry.register_parser("qwen_xml", || Box::new(QwenXmlParser::new()));
+        registry.register_parser("qwen_coder", || Box::new(QwenXmlParser::new()));
         registry.register_parser("pythonic", || Box::new(PythonicParser::new()));
         registry.register_parser("llama", || Box::new(LlamaParser::new()));
         registry.register_parser("deepseek", || Box::new(DeepSeekParser::new()));
@@ -346,14 +347,16 @@ impl ParserFactory {
         registry.map_model("mixtral-*", "mistral");
 
         // Qwen models (more specific patterns first - longer patterns take precedence)
-        // Qwen Coder models use XML format: <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
-        registry.map_model("Qwen/Qwen3-Coder*", "qwen_coder");
-        registry.map_model("Qwen3-Coder*", "qwen_coder");
-        registry.map_model("qwen3-coder*", "qwen_coder");
-        registry.map_model("Qwen/Qwen2.5-Coder*", "qwen_coder");
-        registry.map_model("Qwen2.5-Coder*", "qwen_coder");
-        registry.map_model("qwen2.5-coder*", "qwen_coder");
-        // Generic Qwen models use JSON format
+        // Qwen3.5+ and Qwen3-Coder use XML format: <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
+        registry.map_model("Qwen/Qwen3.5*", "qwen_xml");
+        registry.map_model("Qwen3.5*", "qwen_xml");
+        registry.map_model("qwen3.5*", "qwen_xml");
+        registry.map_model("qwen/qwen3.5*", "qwen_xml");
+        registry.map_model("Qwen/Qwen3-Coder*", "qwen_xml");
+        registry.map_model("Qwen3-Coder*", "qwen_xml");
+        registry.map_model("qwen3-coder*", "qwen_xml");
+        registry.map_model("qwen/qwen3-coder*", "qwen_xml");
+        // Qwen3 and earlier (including Qwen2.5-Coder) use JSON format
         registry.map_model("qwen*", "qwen");
         registry.map_model("Qwen*", "qwen");
 

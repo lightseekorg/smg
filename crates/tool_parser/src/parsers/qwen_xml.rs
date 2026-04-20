@@ -10,9 +10,9 @@ use crate::{
     types::{FunctionCall, StreamingParseResult, ToolCall, ToolCallItem},
 };
 
-/// Qwen Coder format parser for tool calls
+/// Qwen XML format parser for tool calls
 ///
-/// Handles the Qwen Coder specific XML format:
+/// Handles the Qwen XML specific XML format:
 /// `<tool_call>\n<function=name>\n<parameter=key>value</parameter>\n</function>\n</tool_call>`
 ///
 /// Features:
@@ -21,7 +21,7 @@ use crate::{
 /// - XML-style parameters: `<parameter=key>value</parameter>`
 ///
 /// Reference: https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8?chat_template=default
-pub struct QwenCoderParser {
+pub struct QwenXmlParser {
     /// Regex for extracting tool calls in parse_complete
     extractor: Regex,
 
@@ -153,8 +153,8 @@ fn safe_val(raw: &str) -> Value {
     Value::String(unescaped)
 }
 
-impl QwenCoderParser {
-    /// Create a new Qwen Coder parser
+impl QwenXmlParser {
+    /// Create a new Qwen XML parser
     #[expect(
         clippy::expect_used,
         reason = "regex patterns are compile-time string literals"
@@ -314,16 +314,16 @@ impl QwenCoderParser {
     }
 }
 
-impl Default for QwenCoderParser {
+impl Default for QwenXmlParser {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl ToolParser for QwenCoderParser {
+impl ToolParser for QwenXmlParser {
     async fn parse_complete(&self, text: &str) -> ParserResult<(String, Vec<ToolCall>)> {
-        // Check if text contains Qwen Coder format
+        // Check if text contains Qwen XML format
         if !self.has_tool_markers(text) {
             return Ok((text.to_string(), vec![]));
         }

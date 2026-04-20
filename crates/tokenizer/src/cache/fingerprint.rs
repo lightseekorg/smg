@@ -42,11 +42,7 @@ impl TokenizerFingerprint {
 
         // Sample up to 1000 tokens for speed
         let sample_size = vocab_size.min(1000);
-        let step = if sample_size > 0 {
-            vocab_size / sample_size
-        } else {
-            1
-        };
+        let step = vocab_size.checked_div(sample_size).unwrap_or(1);
 
         for i in (0..vocab_size).step_by(step.max(1)) {
             if let Some(token) = tokenizer.id_to_token(i as u32) {

@@ -9,3 +9,5 @@ pub(crate) mod utils;
 pub(crate) use context::ResponsesContext;
 pub(crate) use streaming::build_sse_response;
 pub(crate) use utils::{ensure_mcp_connection, persist_response_if_needed};
+
+pub(crate) use crate::routers::common::mcp_utils::collect_user_function_names;

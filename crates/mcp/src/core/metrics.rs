@@ -206,7 +206,7 @@ impl LatencyStats {
 
         LatencySnapshot {
             count,
-            avg_ms: if count > 0 { total / count } else { 0 },
+            avg_ms: total.checked_div(count).unwrap_or(0),
             min_ms: if min == u64::MAX { 0 } else { min },
             max_ms: max,
         }

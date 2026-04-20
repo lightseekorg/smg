@@ -363,24 +363,24 @@ impl Bucket {
         }
 
         let worker_cnt = bucket_cnt;
-        let boundary = if worker_cnt == 0 {
-            Vec::new()
-        } else {
-            let gap = self.l_max / worker_cnt;
-            self.l_max = usize::MAX;
-            prefill_worker_urls
-                .iter()
-                .enumerate()
-                .map(|(i, url)| {
-                    let min = i * gap;
-                    let max = if i == worker_cnt - 1 {
-                        self.l_max
-                    } else {
-                        (i + 1) * gap - 1
-                    };
-                    Boundary::new(url.clone(), [min, max])
-                })
-                .collect()
+        let boundary = match self.l_max.checked_div(worker_cnt) {
+            None => Vec::new(),
+            Some(gap) => {
+                self.l_max = usize::MAX;
+                prefill_worker_urls
+                    .iter()
+                    .enumerate()
+                    .map(|(i, url)| {
+                        let min = i * gap;
+                        let max = if i == worker_cnt - 1 {
+                            self.l_max
+                        } else {
+                            (i + 1) * gap - 1
+                        };
+                        Boundary::new(url.clone(), [min, max])
+                    })
+                    .collect()
+            }
         };
 
         self.boundary = boundary;
