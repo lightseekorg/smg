@@ -1274,6 +1274,9 @@ mod tests {
             workflow_engines: Arc::new(std::sync::OnceLock::new()),
             mcp_orchestrator: Arc::new(std::sync::OnceLock::new()),
             tokenizer_registry: Arc::new(llm_tokenizer::registry::TokenizerRegistry::new()),
+            multimodal_config_registry: Arc::new(
+                crate::routers::grpc::multimodal::MultimodalConfigRegistry::new(),
+            ),
             wasm_manager: None,
             worker_service: Arc::new(WorkerService::new(
                 worker_registry,
