@@ -593,9 +593,11 @@ impl Gossip for GossipService {
                                 ));
                             }
                             if !entries.is_empty() {
-                                for batch in
-                                    build_stream_batches(entries, DEFAULT_MAX_CHUNKS_PER_BATCH)
-                                {
+                                for batch in build_stream_batches(
+                                    entries,
+                                    DEFAULT_MAX_CHUNKS_PER_BATCH,
+                                    MAX_STREAM_CHUNK_BYTES,
+                                ) {
                                     sequence_counter += 1;
                                     let msg = StreamMessage {
                                         message_type: StreamMessageType::StreamBatch as i32,

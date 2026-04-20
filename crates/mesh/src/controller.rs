@@ -692,6 +692,7 @@ impl MeshController {
                                     for batch in build_stream_batches(
                                         entries,
                                         DEFAULT_MAX_CHUNKS_PER_BATCH,
+                                        MAX_STREAM_CHUNK_BYTES,
                                     ) {
                                         let msg = StreamMessage {
                                             message_type: StreamMessageType::StreamBatch as i32,
