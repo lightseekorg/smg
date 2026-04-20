@@ -808,17 +808,70 @@ impl WorkerManager {
             return EngineMetricsResult::Err("No available workers".to_string());
         }
 
-        let responses = fan_out(&workers, client, "metrics", reqwest::Method::GET).await;
-
         let mut metric_packs = Vec::new();
-        for resp in responses {
-            if let Ok(r) = resp.result {
-                if r.status().is_success() {
-                    if let Ok(text) = r.text().await {
-                        metric_packs.push(MetricPack {
-                            labels: vec![("worker_addr".into(), resp.url)],
-                            metrics_text: text,
-                        });
+
+        let http_workers: Vec<_> = workers
+            .iter()
+            .filter(|w| matches!(w.connection_mode(), ConnectionMode::Http))
+            .cloned()
+            .collect();
+
+        let grpc_workers: Vec<_> = workers
+            .iter()
+            .filter(|w| matches!(w.connection_mode(), ConnectionMode::Grpc))
+            .cloned()
+            .collect();
+
+        if !http_workers.is_empty() {
+            let responses =
+                fan_out(&http_workers, client, "metrics", reqwest::Method::GET).await;
+            for resp in responses {
+                if let Ok(r) = resp.result {
+                    if r.status().is_success() {
+                        if let Ok(text) = r.text().await {
+                            metric_packs.push(MetricPack {
+                                labels: vec![("worker_addr".into(), resp.url)],
+                                metrics_text: text,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // gRPC workers expose Prometheus metrics on a separate HTTP port
+        // (gRPC port + 1) when --enable-metrics is passed to sglang.
+        for worker in &grpc_workers {
+            if let Some(metrics_url) = grpc_worker_metrics_url(worker.url()) {
+                match client
+                    .get(&metrics_url)
+                    .timeout(REQUEST_TIMEOUT)
+                    .send()
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => {
+                        if let Ok(text) = r.text().await {
+                            metric_packs.push(MetricPack {
+                                labels: vec![(
+                                    "worker_addr".into(),
+                                    worker.url().to_string(),
+                                )],
+                                metrics_text: text,
+                            });
+                        }
+                    }
+                    Ok(r) => {
+                        warn!(
+                            "gRPC worker metrics endpoint {} returned {}",
+                            metrics_url,
+                            r.status()
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to scrape gRPC worker metrics from {}: {e}",
+                            metrics_url
+                        );
                     }
                 }
             }
@@ -833,6 +886,20 @@ impl WorkerManager {
             Err(e) => EngineMetricsResult::Err(format!("Failed to aggregate metrics: {e}")),
         }
     }
+}
+
+/// Derive the HTTP metrics URL for a gRPC worker.
+///
+/// gRPC worker URLs use `grpc://host:port` (with optional `@dp_rank` suffix).
+/// The sglang metrics HTTP endpoint runs on port + 1.
+fn grpc_worker_metrics_url(worker_url: &str) -> Option<String> {
+    let stripped = worker_url
+        .strip_prefix("grpc://")
+        .or_else(|| worker_url.strip_prefix("grpcs://"))?;
+    let (host, port_and_suffix) = stripped.rsplit_once(':')?;
+    let port_str = port_and_suffix.split(['/', '@']).next()?;
+    let port: u16 = port_str.parse().ok()?;
+    Some(format!("http://{host}:{}/metrics", port + 1))
 }
 
 #[cfg(test)]
@@ -1128,5 +1195,24 @@ mod tests {
             registry.get(&worker_id).unwrap().status(),
             WorkerStatus::Ready
         );
+    }
+
+    #[test]
+    fn test_grpc_worker_metrics_url() {
+        assert_eq!(
+            grpc_worker_metrics_url("grpc://localhost:9001"),
+            Some("http://localhost:9002/metrics".to_string()),
+        );
+
+        assert_eq!(
+            grpc_worker_metrics_url("grpc://host:9001@2"),
+            Some("http://host:9002/metrics".to_string()),
+        );
+        assert_eq!(
+            grpc_worker_metrics_url("grpcs://host:443"),
+            Some("http://host:444/metrics".to_string()),
+        );
+        assert_eq!(grpc_worker_metrics_url("http://host:8080"), None);
+        assert_eq!(grpc_worker_metrics_url("invalid"), None);
     }
 }
