@@ -81,14 +81,21 @@ pub fn chunk_value(
 /// assembler and fire subscribers only on full reassembly.
 ///
 /// Takes ownership of the entries so chunk payloads move into `Bytes`
-/// without cloning.
-pub fn dispatch_stream_batch(mesh_kv: &MeshKV, entries: impl IntoIterator<Item = StreamEntry>) {
+/// without cloning. The chunk assembler scopes in-flight state by
+/// `peer_id` so concurrent chunked values from different senders under
+/// the same key don't collide.
+pub fn dispatch_stream_batch(
+    mesh_kv: &MeshKV,
+    peer_id: &str,
+    entries: impl IntoIterator<Item = StreamEntry>,
+) {
     for entry in entries {
         if entry.total_chunks == 1 {
             mesh_kv.notify_subscribers(&entry.key, Some(vec![Bytes::from(entry.data)]));
         } else {
             let key = entry.key.clone();
             if let Some(fragments) = mesh_kv.chunk_assembler().receive_chunk(
+                peer_id,
                 &key,
                 entry.generation,
                 entry.chunk_index,

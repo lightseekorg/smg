@@ -1138,7 +1138,11 @@ impl MeshController {
                                         if let Some(StreamPayload::StreamBatch(batch)) =
                                             msg.payload
                                         {
-                                            dispatch_stream_batch(mesh_kv, batch.entries);
+                                            dispatch_stream_batch(
+                                                mesh_kv,
+                                                &msg.peer_id,
+                                                batch.entries,
+                                            );
                                         }
                                     }
                                 }
