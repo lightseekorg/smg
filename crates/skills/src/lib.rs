@@ -18,4 +18,9 @@ pub use config::{
     SkillsResolutionMode, SkillsRetentionConfig, SkillsRetentionMode, SkillsTenancyConfig,
     SkillsToolLoopConfig, SkillsZdrConfig,
 };
-pub use types::{SkillFileRecord, SkillRecord, SkillVersionRecord};
+pub use types::{
+    ParsedSkillBundle, SkillDependencyTool, SkillFileRecord, SkillInterfaceMetadata,
+    SkillParseWarning, SkillParseWarningKind, SkillPolicyMetadata, SkillRecord,
+    SkillSidecarDependencies, SkillVersionRecord,
+};
+pub use validation::{parse_skill_bundle, SkillParseError};

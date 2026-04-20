@@ -18,8 +18,11 @@ name = "smg_skills"
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+serde_yml = "0.0.12"
+thiserror.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
 serde_json.workspace = true
 
 [lints]
