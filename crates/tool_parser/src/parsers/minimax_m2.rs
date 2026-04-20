@@ -341,7 +341,11 @@ impl MinimaxM2Parser {
         Ok(results)
     }
 
-    /// Parse all tool calls from text and return first valid position
+    /// Parse all tool calls from text and return first valid position.
+    ///
+    /// Also handles truncated output where `<minimax:tool_call>` is present
+    /// but the closing tag never arrived: falls back to scanning `<invoke>`
+    /// blocks directly from the start marker.
     fn parse_tool_calls_from_text(
         &self,
         text: &str,
@@ -350,7 +354,9 @@ impl MinimaxM2Parser {
         let mut results = Vec::new();
         let mut first_valid_pos = None;
 
+        let mut wrapper_matched = false;
         for mat in self.tool_call_extractor.find_iter(text) {
+            wrapper_matched = true;
             match self.parse_tool_call_block(mat.as_str(), tools) {
                 Ok(block_tools) => {
                     if !block_tools.is_empty() && first_valid_pos.is_none() {
@@ -361,6 +367,18 @@ impl MinimaxM2Parser {
                 Err(e) => {
                     tracing::debug!("Failed to parse tool call block: {}", e);
                     continue;
+                }
+            }
+        }
+
+        if !wrapper_matched {
+            if let Some(wrapper_start) = text.find(self.tool_call_start_token) {
+                let tail = &text[wrapper_start..];
+                if let Ok(block_tools) = self.parse_tool_call_block(tail, tools) {
+                    if !block_tools.is_empty() {
+                        first_valid_pos = Some(wrapper_start);
+                        results.extend(block_tools);
+                    }
                 }
             }
         }
@@ -407,9 +425,14 @@ impl MinimaxM2Parser {
             })
             .collect();
 
-        // Build new parameters map
-        let mut new_params = HashMap::new();
+        // Track insertion order so streamed args match the model's emit
+        // order (matches sglang HTTP / non-streaming path).
+        let mut new_params: HashMap<String, Value> = HashMap::new();
+        let mut new_params_order: Vec<String> = Vec::new();
         for (name, value) in param_matches {
+            if !new_params.contains_key(&name) {
+                new_params_order.push(name.clone());
+            }
             new_params.insert(name, value);
         }
 
@@ -424,18 +447,18 @@ impl MinimaxM2Parser {
 
             // Build incremental JSON with single allocation
             if self.current_parameters.is_empty() {
-                // First parameters - start JSON object but don't close it
                 let mut json_fragment = String::with_capacity(256);
                 json_fragment.push('{');
 
                 let mut first = true;
-                for (key, value) in &new_params {
+                for key in &new_params_order {
+                    let value = &new_params[key];
                     if !first {
                         json_fragment.push_str(", ");
                     }
-                    // serde_json::to_string for String/Value is infallible; write! to String is infallible
                     let key_json = serde_json::to_string(key).unwrap_or_default();
-                    let value_json = serde_json::to_string(value).unwrap_or_default();
+                    let value_json =
+                        helpers::python_json_to_string(value).unwrap_or_default();
                     let _ = write!(&mut json_fragment, "{key_json}: {value_json}");
                     first = false;
                 }
@@ -448,10 +471,9 @@ impl MinimaxM2Parser {
 
                 self.streamed_args_for_tool[tool_id] = json_fragment;
             } else {
-                // Additional parameters - add them incrementally
-                let new_keys: Vec<_> = new_params
-                    .keys()
-                    .filter(|k| !self.current_parameters.contains_key(*k))
+                let new_keys: Vec<&String> = new_params_order
+                    .iter()
+                    .filter(|k| !self.current_parameters.contains_key(k.as_str()))
                     .collect();
 
                 if !new_keys.is_empty() {
@@ -459,9 +481,9 @@ impl MinimaxM2Parser {
 
                     for key in new_keys {
                         let value = &new_params[key];
-                        // serde_json::to_string for String/Value is infallible; write! to String is infallible
                         let key_json = serde_json::to_string(key).unwrap_or_default();
-                        let value_json = serde_json::to_string(value).unwrap_or_default();
+                        let value_json =
+                            helpers::python_json_to_string(value).unwrap_or_default();
                         let _ = write!(&mut json_fragment, ", {key_json}: {value_json}");
                     }
 
@@ -665,14 +687,15 @@ impl ToolParser for MinimaxM2Parser {
                 break;
             }
 
-            // Parse parameters incrementally
+            // Scope the parameter scan to the current <invoke>. A flushed
+            // chunk containing multiple <invoke>..</invoke> blocks would
+            // otherwise collapse params from all blocks into one HashMap.
             if self.function_name_sent {
-                // Process parameters and get any calls to emit
-                // Note: We need to be careful here - parse_and_stream_parameters needs
-                // to work with the buffer but we can't pass &self.buffer directly
-                // due to borrow checker. Instead, we'll refactor slightly.
-                // For now, keep the clone but mark it as a TODO for future optimization
-                let buffer_copy = self.buffer.clone(); // TODO: Optimize this
+                let params_end = self
+                    .buffer
+                    .find(self.invoke_end_token)
+                    .unwrap_or(self.buffer.len());
+                let buffer_copy = self.buffer[..params_end].to_string();
                 let parameter_calls = self.parse_and_stream_parameters(&buffer_copy, tools);
                 calls.extend(parameter_calls);
 
@@ -750,6 +773,14 @@ impl ToolParser for MinimaxM2Parser {
 
     fn get_unstreamed_tool_args(&self) -> Option<Vec<ToolCallItem>> {
         helpers::get_unstreamed_args(&self.prev_tool_call_arr, &self.streamed_args_for_tool)
+    }
+
+    fn current_tool_index(&self) -> usize {
+        if self.current_tool_id < 0 {
+            0
+        } else {
+            self.current_tool_id as usize
+        }
     }
 
     fn reset(&mut self) {

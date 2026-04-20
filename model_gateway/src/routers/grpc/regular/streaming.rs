@@ -609,19 +609,16 @@ impl StreamingProcessor {
             }
         }
 
-        // Phase 2.5: Fallback — if reasoning consumed everything and no tool
-        // calls were detected during streaming, re-parse the full accumulated
-        // buffer. Models sometimes embed tool call markup inside <think> blocks.
+        // Phase 2.5: Reconciliation — re-parse the full accumulated buffer
+        // and emit any tool calls that were missed during streaming (handles
+        // both "all swallowed inside <think>" and "N expected, N-1 streamed"
+        // cases).
         {
-            let any_tool_calls_found = has_tool_calls.values().any(|&v| v);
             let tc_enabled =
                 !matches!(tool_choice, Some(ToolChoice::Value(ToolChoiceValue::None)));
-            if !any_tool_calls_found
-                && tc_enabled
+            if tc_enabled
                 && tools.is_some()
-                && tool_parser_available
-                && separate_reasoning
-                && reasoning_parser_available
+                && (tool_parser_available || used_json_schema)
             {
                 let indices: Vec<u32> = stream_buffers.keys().copied().collect();
                 for index in indices {
@@ -698,27 +695,38 @@ impl StreamingProcessor {
                         }
                     };
                     if let Some(tc_list) = fallback_tc {
-                        for (tc_idx, tc) in tc_list.iter().enumerate() {
-                            let delta = ToolCallDelta {
-                                index: tc_idx as u32,
-                                id: Some(tc.id.clone()),
-                                tool_type: Some("function".to_string()),
-                                function: Some(FunctionCallDelta {
-                                    name: Some(tc.function.name.clone()),
-                                    arguments: tc.function.arguments.clone(),
-                                }),
-                            };
-                            let chunk =
-                                ChatCompletionStreamResponse::builder(request_id, model)
-                                    .created(created)
-                                    .add_choice_tool_call_delta(index, delta)
-                                    .maybe_system_fingerprint(system_fingerprint)
-                                    .build();
-                            Self::format_sse_chunk_into(&mut sse_buffer, &chunk);
-                            tx.send(Ok(Bytes::from(sse_buffer.clone())))
-                                .map_err(|_| "Failed to send fallback tool chunk".to_string())?;
+                        let already_streamed: usize = match tool_parsers.get(&index) {
+                            Some(parser_arc) => {
+                                let guard = parser_arc.lock().await;
+                                guard.current_tool_index()
+                            }
+                            None => 0,
+                        };
+
+                        if tc_list.len() > already_streamed {
+                            for (tc_idx, tc) in tc_list.iter().enumerate().skip(already_streamed) {
+                                let delta = ToolCallDelta {
+                                    index: tc_idx as u32,
+                                    id: Some(tc.id.clone()),
+                                    tool_type: Some("function".to_string()),
+                                    function: Some(FunctionCallDelta {
+                                        name: Some(tc.function.name.clone()),
+                                        arguments: tc.function.arguments.clone(),
+                                    }),
+                                };
+                                let chunk =
+                                    ChatCompletionStreamResponse::builder(request_id, model)
+                                        .created(created)
+                                        .add_choice_tool_call_delta(index, delta)
+                                        .maybe_system_fingerprint(system_fingerprint)
+                                        .build();
+                                Self::format_sse_chunk_into(&mut sse_buffer, &chunk);
+                                tx.send(Ok(Bytes::from(sse_buffer.clone()))).map_err(
+                                    |_| "Failed to send fallback tool chunk".to_string(),
+                                )?;
+                            }
+                            has_tool_calls.insert(index, true);
                         }
-                        has_tool_calls.insert(index, true);
                     }
                 }
             }
@@ -2197,31 +2205,135 @@ impl StreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Complete(complete) => {
-                    // Flush stop decoder
-                    if let SequenceDecoderOutput::Text(text) = stop_decoder.flush() {
-                        if !text.is_empty() {
-                            if !text_block_open {
+                    // Route flushed stop-decoder text through the tool parser
+                    // when active, otherwise emit as text.
+                    if let SequenceDecoderOutput::Text(flushed_text) = stop_decoder.flush() {
+                        if !flushed_text.is_empty() {
+                            if let Some(ref mut parser) = streaming_tool_parser {
+                                match parser.parse_incremental(&flushed_text, &chat_tools).await {
+                                    Ok(StreamingParseResult {
+                                        normal_text: nt,
+                                        calls,
+                                    }) => {
+                                        if !nt.is_empty() && !nt.trim().is_empty() {
+                                            if !text_block_open {
+                                                Self::send_messages_event(
+                                                    tx,
+                                                    &mut sse_buffer,
+                                                    &MessageStreamEvent::ContentBlockStart {
+                                                        index: current_block_index,
+                                                        content_block: ContentBlock::Text {
+                                                            text: String::new(),
+                                                            citations: None,
+                                                        },
+                                                    },
+                                                )?;
+                                                text_block_open = true;
+                                            }
+                                            Self::send_messages_event(
+                                                tx,
+                                                &mut sse_buffer,
+                                                &MessageStreamEvent::ContentBlockDelta {
+                                                    index: current_block_index,
+                                                    delta: ContentBlockDelta::TextDelta {
+                                                        text: nt,
+                                                    },
+                                                },
+                                            )?;
+                                        }
+                                        for tool_call_item in calls {
+                                            has_tool_calls = true;
+                                            if let Some(ref name) = tool_call_item.name {
+                                                if text_block_open {
+                                                    Self::send_messages_event(
+                                                        tx,
+                                                        &mut sse_buffer,
+                                                        &MessageStreamEvent::ContentBlockStop {
+                                                            index: current_block_index,
+                                                        },
+                                                    )?;
+                                                    text_block_open = false;
+                                                    current_block_index += 1;
+                                                }
+                                                if tool_block_open {
+                                                    Self::send_messages_event(
+                                                        tx,
+                                                        &mut sse_buffer,
+                                                        &MessageStreamEvent::ContentBlockStop {
+                                                            index: current_block_index,
+                                                        },
+                                                    )?;
+                                                    current_block_index += 1;
+                                                }
+                                                let tool_id = utils::generate_tool_call_id(
+                                                    model,
+                                                    name,
+                                                    tool_call_item.tool_index,
+                                                    history_tool_calls_count,
+                                                );
+                                                Self::send_messages_event(
+                                                    tx,
+                                                    &mut sse_buffer,
+                                                    &MessageStreamEvent::ContentBlockStart {
+                                                        index: current_block_index,
+                                                        content_block: ContentBlock::ToolUse {
+                                                            id: tool_id,
+                                                            name: name.clone(),
+                                                            input: serde_json::json!({}),
+                                                        },
+                                                    },
+                                                )?;
+                                                tool_block_open = true;
+                                            }
+                                            if !tool_call_item.parameters.is_empty() {
+                                                Self::send_messages_event(
+                                                    tx,
+                                                    &mut sse_buffer,
+                                                    &MessageStreamEvent::ContentBlockDelta {
+                                                        index: current_block_index,
+                                                        delta:
+                                                            ContentBlockDelta::InputJsonDelta {
+                                                                partial_json: tool_call_item
+                                                                    .parameters,
+                                                            },
+                                                    },
+                                                )?;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Tool parse error on flush: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                            } else {
+                                if !text_block_open {
+                                    Self::send_messages_event(
+                                        tx,
+                                        &mut sse_buffer,
+                                        &MessageStreamEvent::ContentBlockStart {
+                                            index: current_block_index,
+                                            content_block: ContentBlock::Text {
+                                                text: String::new(),
+                                                citations: None,
+                                            },
+                                        },
+                                    )?;
+                                    text_block_open = true;
+                                }
                                 Self::send_messages_event(
                                     tx,
                                     &mut sse_buffer,
-                                    &MessageStreamEvent::ContentBlockStart {
+                                    &MessageStreamEvent::ContentBlockDelta {
                                         index: current_block_index,
-                                        content_block: ContentBlock::Text {
-                                            text: String::new(),
-                                            citations: None,
+                                        delta: ContentBlockDelta::TextDelta {
+                                            text: flushed_text,
                                         },
                                     },
                                 )?;
-                                text_block_open = true;
                             }
-                            Self::send_messages_event(
-                                tx,
-                                &mut sse_buffer,
-                                &MessageStreamEvent::ContentBlockDelta {
-                                    index: current_block_index,
-                                    delta: ContentBlockDelta::TextDelta { text },
-                                },
-                            )?;
                         }
                     }
 

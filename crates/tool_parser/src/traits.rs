@@ -54,6 +54,13 @@ pub trait ToolParser: Send + Sync {
         None
     }
 
+    /// Number of complete tool calls already emitted for the current choice.
+    /// Used by the streaming orchestrator to reconcile against a full-buffer
+    /// parse. Default 0 disables reconciliation.
+    fn current_tool_index(&self) -> usize {
+        0
+    }
+
     /// Reset the parser state for reuse across requests.
     /// This should clear all buffers and reset state to initial values.
     fn reset(&mut self) {
