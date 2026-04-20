@@ -8,8 +8,7 @@ use openai_protocol::{
     common::{Usage, UsageInfo},
     event_types::{
         CodeInterpreterCallEvent, ContentPartEvent, FileSearchCallEvent, FunctionCallEvent,
-        ImageGenerationCallEvent, McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent,
-        WebSearchCallEvent,
+        McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent, WebSearchCallEvent,
     },
     responses::{
         ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
@@ -24,6 +23,9 @@ use uuid::Uuid;
 
 use crate::routers::grpc::harmony::responses::ToolResult;
 
+const IMAGE_GENERATION_REJECTED_UPSTREAM_MSG: &str =
+    "image_generation rejected upstream by ensure_mcp_connection";
+
 pub(crate) enum OutputItemType {
     Message,
     McpListTools,
@@ -32,7 +34,6 @@ pub(crate) enum OutputItemType {
     Reasoning,
     WebSearchCall,
     CodeInterpreterCall,
-    ImageGenerationCall,
     FileSearchCall,
 }
 
@@ -475,10 +476,16 @@ impl ResponseStreamEventEmitter {
         item_id: &str,
         response_format: &ResponseFormat,
     ) -> serde_json::Value {
+        #[expect(
+            clippy::unreachable,
+            reason = "image generation is rejected upstream by ensure_mcp_connection"
+        )]
         let event_type = match response_format {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::IN_PROGRESS,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::IN_PROGRESS,
-            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::IN_PROGRESS,
+            ResponseFormat::ImageGenerationCall => {
+                unreachable!("{}", IMAGE_GENERATION_REJECTED_UPSTREAM_MSG)
+            }
             ResponseFormat::FileSearchCall => FileSearchCallEvent::IN_PROGRESS,
             ResponseFormat::Passthrough => McpEvent::CALL_IN_PROGRESS,
         };
@@ -495,7 +502,7 @@ impl ResponseStreamEventEmitter {
         let event_type = match response_format {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
-            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
+            ResponseFormat::ImageGenerationCall => return None,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
             ResponseFormat::Passthrough => return None,
         };
@@ -509,10 +516,16 @@ impl ResponseStreamEventEmitter {
         item_id: &str,
         response_format: &ResponseFormat,
     ) -> serde_json::Value {
+        #[expect(
+            clippy::unreachable,
+            reason = "image generation is rejected upstream by ensure_mcp_connection"
+        )]
         let event_type = match response_format {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::COMPLETED,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::COMPLETED,
-            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::COMPLETED,
+            ResponseFormat::ImageGenerationCall => {
+                unreachable!("{}", IMAGE_GENERATION_REJECTED_UPSTREAM_MSG)
+            }
             ResponseFormat::FileSearchCall => FileSearchCallEvent::COMPLETED,
             ResponseFormat::Passthrough => McpEvent::CALL_COMPLETED,
         };
@@ -525,10 +538,16 @@ impl ResponseStreamEventEmitter {
 
     /// Get the type string for JSON based on response format.
     pub fn type_str_for_format(response_format: Option<&ResponseFormat>) -> &'static str {
+        #[expect(
+            clippy::unreachable,
+            reason = "image generation is rejected upstream by ensure_mcp_connection"
+        )]
         match response_format {
             Some(ResponseFormat::WebSearchCall) => "web_search_call",
             Some(ResponseFormat::CodeInterpreterCall) => "code_interpreter_call",
-            Some(ResponseFormat::ImageGenerationCall) => "image_generation_call",
+            Some(ResponseFormat::ImageGenerationCall) => {
+                unreachable!("{}", IMAGE_GENERATION_REJECTED_UPSTREAM_MSG)
+            }
             Some(ResponseFormat::FileSearchCall) => "file_search_call",
             Some(ResponseFormat::Passthrough) => "mcp_call",
             None => "function_call",
@@ -537,10 +556,16 @@ impl ResponseStreamEventEmitter {
 
     /// Get the OutputItemType based on response format.
     pub fn output_item_type_for_format(response_format: Option<&ResponseFormat>) -> OutputItemType {
+        #[expect(
+            clippy::unreachable,
+            reason = "image generation is rejected upstream by ensure_mcp_connection"
+        )]
         match response_format {
             Some(ResponseFormat::WebSearchCall) => OutputItemType::WebSearchCall,
             Some(ResponseFormat::CodeInterpreterCall) => OutputItemType::CodeInterpreterCall,
-            Some(ResponseFormat::ImageGenerationCall) => OutputItemType::ImageGenerationCall,
+            Some(ResponseFormat::ImageGenerationCall) => {
+                unreachable!("{}", IMAGE_GENERATION_REJECTED_UPSTREAM_MSG)
+            }
             Some(ResponseFormat::FileSearchCall) => OutputItemType::FileSearchCall,
             Some(ResponseFormat::Passthrough) => OutputItemType::McpCall,
             None => OutputItemType::FunctionCall,
@@ -634,7 +659,6 @@ impl ResponseStreamEventEmitter {
             OutputItemType::Reasoning => "rs",
             OutputItemType::WebSearchCall => "ws",
             OutputItemType::CodeInterpreterCall => "ci",
-            OutputItemType::ImageGenerationCall => "ig",
             OutputItemType::FileSearchCall => "fs",
         };
 

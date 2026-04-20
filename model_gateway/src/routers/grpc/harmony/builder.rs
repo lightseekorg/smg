@@ -66,6 +66,8 @@ const BUILTIN_TOOLS: &[&str] = &[
     "container",
     "image_generation",
 ];
+const IMAGE_GENERATION_REJECTED_UPSTREAM_MSG: &str =
+    "image_generation rejected upstream by ensure_mcp_connection";
 
 /// Trait for tool-like objects that can be converted to Harmony ToolDescription
 trait ToolLike {
@@ -402,22 +404,27 @@ impl HarmonyBuilder {
         if request.previous_response_id.is_none() {
             // New conversation
 
-            let tool_types: Vec<&str> = request
-                .tools
-                .as_ref()
-                .map(|tools| {
-                    tools
-                        .iter()
-                        .filter_map(|tool| match tool {
-                            ResponseTool::Function(_) => Some("function"),
-                            ResponseTool::WebSearchPreview(_) => Some("web_search_preview"),
-                            ResponseTool::CodeInterpreter(_) => Some("code_interpreter"),
-                            ResponseTool::ImageGeneration(_) => None,
-                            ResponseTool::Mcp(_) => Some("mcp"),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let tool_types: Vec<&str> = if let Some(tools) = request.tools.as_ref() {
+                let mut types = Vec::with_capacity(tools.len());
+                for tool in tools {
+                    #[expect(
+                        clippy::unreachable,
+                        reason = "image generation is rejected upstream by ensure_mcp_connection"
+                    )]
+                    match tool {
+                        ResponseTool::Function(_) => types.push("function"),
+                        ResponseTool::WebSearchPreview(_) => types.push("web_search_preview"),
+                        ResponseTool::CodeInterpreter(_) => types.push("code_interpreter"),
+                        ResponseTool::ImageGeneration(_) => {
+                            unreachable!("{}", IMAGE_GENERATION_REJECTED_UPSTREAM_MSG);
+                        }
+                        ResponseTool::Mcp(_) => types.push("mcp"),
+                    }
+                }
+                types
+            } else {
+                Vec::new()
+            };
 
             let with_custom_tools = has_custom_tools(&tool_types);
 
