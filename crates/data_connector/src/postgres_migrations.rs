@@ -120,7 +120,7 @@ fn pg_v4_up(schema: &SchemaConfig) -> Vec<String> {
     vec![
         format!(
             "CREATE TABLE IF NOT EXISTS {table} (\
-             id VARCHAR(64) PRIMARY KEY, \
+             skill_id VARCHAR(64) PRIMARY KEY, \
              tenant_id VARCHAR(64) NOT NULL, \
              name VARCHAR(64) NOT NULL, \
              short_description TEXT, \
@@ -142,7 +142,7 @@ fn pg_v5_up(schema: &SchemaConfig) -> Vec<String> {
     vec![
         format!(
             "CREATE TABLE IF NOT EXISTS {table} (\
-             skill_id VARCHAR(64) NOT NULL REFERENCES {skills_table}(id) ON DELETE CASCADE, \
+             skill_id VARCHAR(64) NOT NULL REFERENCES {skills_table}(skill_id) ON DELETE CASCADE, \
              version VARCHAR(64) NOT NULL, \
              version_number INTEGER NOT NULL, \
              name VARCHAR(64) NOT NULL, \
@@ -367,6 +367,7 @@ mod tests {
         let stmts = pg_v4_up(&schema);
         assert_eq!(stmts.len(), 2);
         assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS skills"));
+        assert!(stmts[0].contains("skill_id VARCHAR(64) PRIMARY KEY"));
         assert!(stmts[0].contains("source VARCHAR(64) NOT NULL DEFAULT 'custom'"));
         assert!(stmts[1].contains("idx_skills_tenant_name"));
     }
@@ -377,7 +378,7 @@ mod tests {
         let stmts = pg_v5_up(&schema);
         assert_eq!(stmts.len(), 2);
         assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS skill_versions"));
-        assert!(stmts[0].contains("REFERENCES skills(id) ON DELETE CASCADE"));
+        assert!(stmts[0].contains("REFERENCES skills(skill_id) ON DELETE CASCADE"));
         assert!(stmts[0].contains("file_manifest JSONB NOT NULL"));
         assert!(stmts[0].contains("instruction_token_counts JSONB NOT NULL"));
         assert!(stmts[1].contains("idx_skill_version_number"));

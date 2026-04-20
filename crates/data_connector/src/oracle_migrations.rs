@@ -120,29 +120,35 @@ fn oracle_v3_up(schema: &SchemaConfig) -> Vec<String> {
         .collect()
 }
 
+fn oracle_idempotent_ddl(ddl: &str) -> String {
+    let escaped = ddl.replace('\'', "''");
+    format!(
+        "BEGIN EXECUTE IMMEDIATE '{escaped}'; \
+         EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
+    )
+}
+
 fn oracle_v4_up(schema: &SchemaConfig) -> Vec<String> {
     let table = oracle_qualified_name(schema, "SKILLS");
     let index = oracle_qualified_name(schema, "IDX_SKILLS_TENANT_NAME");
     vec![
-        format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE TABLE {table} (\
-             ID VARCHAR2(64) PRIMARY KEY, \
-             TENANT_ID VARCHAR2(64) NOT NULL, \
-             NAME VARCHAR2(64) NOT NULL, \
-             SHORT_DESCRIPTION CLOB, \
-             DESCRIPTION CLOB, \
-             SOURCE VARCHAR2(64) DEFAULT ''custom'' NOT NULL, \
-             HAS_CODE_FILES NUMBER(1) DEFAULT 0 NOT NULL, \
-             LATEST_VERSION VARCHAR2(64), \
-             DEFAULT_VERSION VARCHAR2(64), \
-             CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL, \
-             UPDATED_AT TIMESTAMP WITH TIME ZONE NOT NULL)'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ),
-        format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {index} ON {table} (TENANT_ID, NAME)'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ),
+        oracle_idempotent_ddl(&format!(
+            "CREATE TABLE {table} (\
+             SKILL_ID VARCHAR2(64) PRIMARY KEY, \
+            TENANT_ID VARCHAR2(64) NOT NULL, \
+            NAME VARCHAR2(64) NOT NULL, \
+            SHORT_DESCRIPTION CLOB, \
+            DESCRIPTION CLOB, \
+            SOURCE VARCHAR2(64) DEFAULT 'custom' NOT NULL, \
+            HAS_CODE_FILES NUMBER(1) DEFAULT 0 NOT NULL, \
+            LATEST_VERSION VARCHAR2(64), \
+            DEFAULT_VERSION VARCHAR2(64), \
+            CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL, \
+             UPDATED_AT TIMESTAMP WITH TIME ZONE NOT NULL)"
+        )),
+        oracle_idempotent_ddl(&format!(
+            "CREATE INDEX {index} ON {table} (TENANT_ID, NAME)"
+        )),
     ]
 }
 
@@ -151,8 +157,8 @@ fn oracle_v5_up(schema: &SchemaConfig) -> Vec<String> {
     let table = oracle_qualified_name(schema, "SKILL_VERSIONS");
     let index = oracle_qualified_name(schema, "IDX_SKILL_VERSION_NUMBER");
     vec![
-        format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE TABLE {table} (\
+        oracle_idempotent_ddl(&format!(
+            "CREATE TABLE {table} (\
              SKILL_ID VARCHAR2(64) NOT NULL, \
              VERSION VARCHAR2(64) NOT NULL, \
              VERSION_NUMBER NUMBER(10) NOT NULL, \
@@ -167,13 +173,11 @@ fn oracle_v5_up(schema: &SchemaConfig) -> Vec<String> {
              INSTRUCTION_TOKEN_COUNTS CLOB NOT NULL CHECK (INSTRUCTION_TOKEN_COUNTS IS JSON), \
              CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL, \
              CONSTRAINT PK_SKILL_VERSIONS PRIMARY KEY (SKILL_ID, VERSION), \
-             CONSTRAINT FK_SKILL_VERSIONS_SKILL FOREIGN KEY (SKILL_ID) REFERENCES {skills_table}(ID) ON DELETE CASCADE)'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ),
-        format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE UNIQUE INDEX {index} ON {table} (SKILL_ID, VERSION_NUMBER)'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ),
+             CONSTRAINT FK_SKILL_VERSIONS_SKILL FOREIGN KEY (SKILL_ID) REFERENCES {skills_table}(SKILL_ID) ON DELETE CASCADE)"
+        )),
+        oracle_idempotent_ddl(&format!(
+            "CREATE UNIQUE INDEX {index} ON {table} (SKILL_ID, VERSION_NUMBER)"
+        )),
     ]
 }
 
@@ -181,18 +185,16 @@ fn oracle_v6_up(schema: &SchemaConfig) -> Vec<String> {
     let table = oracle_qualified_name(schema, "TENANT_ALIASES");
     let index = oracle_qualified_name(schema, "IDX_TENANT_ALIASES_CANONICAL");
     vec![
-        format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE TABLE {table} (\
+        oracle_idempotent_ddl(&format!(
+            "CREATE TABLE {table} (\
              ALIAS_TENANT_ID VARCHAR2(64) PRIMARY KEY, \
              CANONICAL_TENANT_ID VARCHAR2(64) NOT NULL, \
              CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL, \
-             EXPIRES_AT TIMESTAMP WITH TIME ZONE)'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ),
-        format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {index} ON {table} (CANONICAL_TENANT_ID)'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ),
+             EXPIRES_AT TIMESTAMP WITH TIME ZONE)"
+        )),
+        oracle_idempotent_ddl(&format!(
+            "CREATE INDEX {index} ON {table} (CANONICAL_TENANT_ID)"
+        )),
     ]
 }
 
@@ -201,25 +203,20 @@ fn oracle_v7_up(schema: &SchemaConfig) -> Vec<String> {
     let exec_index = oracle_qualified_name(schema, "IDX_BUNDLE_TOKENS_EXEC_ID");
     let expires_index = oracle_qualified_name(schema, "IDX_BUNDLE_TOKENS_EXPIRES_AT");
     vec![
-        format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE TABLE {table} (\
+        oracle_idempotent_ddl(&format!(
+            "CREATE TABLE {table} (\
              TOKEN_HASH VARCHAR2(64) PRIMARY KEY, \
              TENANT_ID VARCHAR2(64) NOT NULL, \
              EXEC_ID VARCHAR2(64) NOT NULL, \
              SKILL_ID VARCHAR2(64) NOT NULL, \
              SKILL_VERSION VARCHAR2(64) NOT NULL, \
              CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL, \
-             EXPIRES_AT TIMESTAMP WITH TIME ZONE NOT NULL)'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ),
-        format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {exec_index} ON {table} (EXEC_ID)'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ),
-        format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {expires_index} ON {table} (EXPIRES_AT)'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ),
+             EXPIRES_AT TIMESTAMP WITH TIME ZONE NOT NULL)"
+        )),
+        oracle_idempotent_ddl(&format!("CREATE INDEX {exec_index} ON {table} (EXEC_ID)")),
+        oracle_idempotent_ddl(&format!(
+            "CREATE INDEX {expires_index} ON {table} (EXPIRES_AT)"
+        )),
     ]
 }
 
@@ -228,24 +225,19 @@ fn oracle_v8_up(schema: &SchemaConfig) -> Vec<String> {
     let exec_index = oracle_qualified_name(schema, "IDX_CONTINUATION_COOKIES_EXEC");
     let expires_index = oracle_qualified_name(schema, "IDX_CONTINUATION_COOKIES_EXP");
     vec![
-        format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE TABLE {table} (\
+        oracle_idempotent_ddl(&format!(
+            "CREATE TABLE {table} (\
              COOKIE_HASH VARCHAR2(64) PRIMARY KEY, \
              TENANT_ID VARCHAR2(64) NOT NULL, \
              EXEC_ID VARCHAR2(64) NOT NULL, \
              REQUEST_ID VARCHAR2(64) NOT NULL, \
              CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL, \
-             EXPIRES_AT TIMESTAMP WITH TIME ZONE NOT NULL)'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ),
-        format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {exec_index} ON {table} (EXEC_ID)'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ),
-        format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {expires_index} ON {table} (EXPIRES_AT)'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ),
+             EXPIRES_AT TIMESTAMP WITH TIME ZONE NOT NULL)"
+        )),
+        oracle_idempotent_ddl(&format!("CREATE INDEX {exec_index} ON {table} (EXEC_ID)")),
+        oracle_idempotent_ddl(&format!(
+            "CREATE INDEX {expires_index} ON {table} (EXPIRES_AT)"
+        )),
     ]
 }
 
@@ -366,6 +358,7 @@ mod tests {
         let stmts = oracle_v4_up(&schema);
         assert_eq!(stmts.len(), 2);
         assert!(stmts[0].contains("CREATE TABLE SKILLS"));
+        assert!(stmts[0].contains("SKILL_ID VARCHAR2(64) PRIMARY KEY"));
         assert!(stmts[0].contains("SOURCE VARCHAR2(64) DEFAULT ''custom'' NOT NULL"));
         assert!(stmts[0].contains("CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
         assert!(stmts[0].contains("UPDATED_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
@@ -379,7 +372,7 @@ mod tests {
         assert_eq!(stmts.len(), 2);
         assert!(stmts[0].contains("CREATE TABLE SKILL_VERSIONS"));
         assert!(stmts[0].contains("CHECK (FILE_MANIFEST IS JSON)"));
-        assert!(stmts[0].contains("REFERENCES SKILLS(ID) ON DELETE CASCADE"));
+        assert!(stmts[0].contains("REFERENCES SKILLS(SKILL_ID) ON DELETE CASCADE"));
         assert!(stmts[0].contains("CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
         assert!(stmts[1].contains("IDX_SKILL_VERSION_NUMBER"));
     }
@@ -419,5 +412,53 @@ mod tests {
         assert!(stmts[0].contains("EXPIRES_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
         assert!(stmts[1].contains("IDX_CONTINUATION_COOKIES_EXEC"));
         assert!(stmts[2].contains("IDX_CONTINUATION_COOKIES_EXP"));
+    }
+
+    #[test]
+    fn oracle_idempotent_ddl_escapes_single_quotes() {
+        let stmt = oracle_idempotent_ddl("CREATE TABLE T (SOURCE VARCHAR2(64) DEFAULT 'custom')");
+        assert!(stmt.contains("DEFAULT ''custom''"));
+        assert!(stmt.contains("SQLCODE != -955"));
+    }
+
+    #[test]
+    fn oracle_v4_to_v8_qualify_objects_with_owner() {
+        let schema = SchemaConfig {
+            owner: Some("OWNER".to_string()),
+            ..Default::default()
+        };
+
+        let v4 = oracle_v4_up(&schema);
+        assert!(v4[0].contains("CREATE TABLE OWNER.SKILLS"));
+        assert!(v4[1].contains("CREATE INDEX OWNER.IDX_SKILLS_TENANT_NAME ON OWNER.SKILLS"));
+
+        let v5 = oracle_v5_up(&schema);
+        assert!(v5[0].contains("CREATE TABLE OWNER.SKILL_VERSIONS"));
+        assert!(v5[0].contains("REFERENCES OWNER.SKILLS(SKILL_ID) ON DELETE CASCADE"));
+        assert!(v5[1].contains(
+            "CREATE UNIQUE INDEX OWNER.IDX_SKILL_VERSION_NUMBER ON OWNER.SKILL_VERSIONS"
+        ));
+
+        let v6 = oracle_v6_up(&schema);
+        assert!(v6[0].contains("CREATE TABLE OWNER.TENANT_ALIASES"));
+        assert!(v6[1]
+            .contains("CREATE INDEX OWNER.IDX_TENANT_ALIASES_CANONICAL ON OWNER.TENANT_ALIASES"));
+
+        let v7 = oracle_v7_up(&schema);
+        assert!(v7[0].contains("CREATE TABLE OWNER.BUNDLE_TOKENS"));
+        assert!(
+            v7[1].contains("CREATE INDEX OWNER.IDX_BUNDLE_TOKENS_EXEC_ID ON OWNER.BUNDLE_TOKENS")
+        );
+        assert!(v7[2]
+            .contains("CREATE INDEX OWNER.IDX_BUNDLE_TOKENS_EXPIRES_AT ON OWNER.BUNDLE_TOKENS"));
+
+        let v8 = oracle_v8_up(&schema);
+        assert!(v8[0].contains("CREATE TABLE OWNER.CONTINUATION_COOKIES"));
+        assert!(v8[1].contains(
+            "CREATE INDEX OWNER.IDX_CONTINUATION_COOKIES_EXEC ON OWNER.CONTINUATION_COOKIES"
+        ));
+        assert!(v8[2].contains(
+            "CREATE INDEX OWNER.IDX_CONTINUATION_COOKIES_EXP ON OWNER.CONTINUATION_COOKIES"
+        ));
     }
 }
