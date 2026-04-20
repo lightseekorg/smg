@@ -20,6 +20,7 @@ use tracing::instrument;
 use super::{
     chunking::{
         build_stream_batches, chunk_value, dispatch_stream_batch, DEFAULT_MAX_CHUNKS_PER_ROUND,
+        MAX_STREAM_CHUNK_BYTES,
     },
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
     metrics::{
@@ -590,7 +591,7 @@ impl Gossip for GossipService {
                                     key.clone(),
                                     generation,
                                     Bytes::from(value.clone()),
-                                    MAX_MESSAGE_SIZE,
+                                    MAX_STREAM_CHUNK_BYTES,
                                 ));
                             }
                             if !entries.is_empty() {

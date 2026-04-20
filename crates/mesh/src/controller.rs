@@ -33,6 +33,7 @@ use super::{
 use crate::{
     chunking::{
         build_stream_batches, chunk_value, dispatch_stream_batch, DEFAULT_MAX_CHUNKS_PER_ROUND,
+        MAX_STREAM_CHUNK_BYTES,
     },
     collector::{CentralCollector, PeerWatermark, RoundBatch},
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
@@ -675,7 +676,7 @@ impl MeshController {
                                         key.clone(),
                                         generation,
                                         Bytes::from(value.clone()),
-                                        MAX_MESSAGE_SIZE,
+                                        MAX_STREAM_CHUNK_BYTES,
                                     ));
                                 }
                                 // Targeted entries: only those addressed to this peer.
@@ -685,7 +686,7 @@ impl MeshController {
                                             key.clone(),
                                             generation,
                                             value.clone(),
-                                            MAX_MESSAGE_SIZE,
+                                            MAX_STREAM_CHUNK_BYTES,
                                         ));
                                     }
                                 }

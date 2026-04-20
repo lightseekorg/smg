@@ -12,6 +12,7 @@
 use bytes::Bytes;
 
 use crate::{
+    flow_control::MAX_MESSAGE_SIZE,
     kv::MeshKV,
     service::gossip::{StreamBatch, StreamEntry},
 };
@@ -19,6 +20,18 @@ use crate::{
 /// Per-round cap on chunks emitted across all stream entries. Prevents
 /// a burst of large values from monopolising the gossip channel.
 pub const DEFAULT_MAX_CHUNKS_PER_ROUND: usize = 5;
+
+/// Headroom reserved below `MAX_MESSAGE_SIZE` for protobuf envelope
+/// overhead (StreamMessage wrapper, StreamEntry metadata, per-field
+/// tags and length prefixes). Without this margin a chunk sized
+/// exactly at `MAX_MESSAGE_SIZE` pushes the serialised message past
+/// the receiver's `max_decoding_message_size` and tonic rejects it.
+pub const STREAM_CHUNK_OVERHEAD_MARGIN: usize = 64 * 1024;
+
+/// Maximum payload bytes per `StreamEntry`. Callers pass this to
+/// [`chunk_value`] so every emitted entry leaves room for the
+/// protobuf envelope within the gRPC message budget.
+pub const MAX_STREAM_CHUNK_BYTES: usize = MAX_MESSAGE_SIZE - STREAM_CHUNK_OVERHEAD_MARGIN;
 
 /// Split a stream value into one or more `StreamEntry`s.
 ///
