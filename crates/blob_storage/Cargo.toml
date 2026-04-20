@@ -18,10 +18,19 @@ name = "smg_blob_storage"
 
 [dependencies]
 async-trait.workspace = true
+blake3.workspace = true
 chrono = { workspace = true, features = ["serde"] }
+lru.workspace = true
+parking_lot.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["fs", "io-util"] }
+uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+anyhow.workspace = true
+tempfile = "3.15"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

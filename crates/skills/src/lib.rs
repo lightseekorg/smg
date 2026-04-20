@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod config;
+pub mod memory;
 pub mod storage;
 pub mod types;
 pub mod validation;
@@ -19,6 +20,7 @@ pub use config::{
     SkillsResolutionMode, SkillsRetentionConfig, SkillsRetentionMode, SkillsTenancyConfig,
     SkillsToolLoopConfig, SkillsZdrConfig,
 };
+pub use memory::InMemorySkillStore;
 pub use storage::{
     BundleTokenStore, ContinuationCookieStore, SkillMetadataStore, SkillsStoreError,
     SkillsStoreResult, TenantAliasStore,

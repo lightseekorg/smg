@@ -5,7 +5,8 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
 };
 pub use smg_blob_storage::{
-    BlobStoreBackend as SkillsBlobStoreBackend, BlobStoreConfig as SkillsBlobStoreConfig,
+    BlobCacheConfig as SkillsCacheConfig, BlobStoreBackend as SkillsBlobStoreBackend,
+    BlobStoreConfig as SkillsBlobStoreConfig,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -222,22 +223,6 @@ impl Default for SkillsAdminConfig {
                 SkillsAdminOperation::CreateAlias,
                 SkillsAdminOperation::ExecuteMigration,
             ],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct SkillsCacheConfig {
-    pub path: String,
-    pub max_size_mb: usize,
-}
-
-impl Default for SkillsCacheConfig {
-    fn default() -> Self {
-        Self {
-            path: "/var/smg/cache/skills".to_string(),
-            max_size_mb: 1024,
         }
     }
 }

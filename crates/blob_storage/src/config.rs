@@ -44,3 +44,32 @@ impl Default for BlobStoreConfig {
         }
     }
 }
+
+/// Local read-cache configuration layered in front of blob reads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BlobCacheConfig {
+    pub path: String,
+    pub max_size_mb: usize,
+}
+
+impl BlobCacheConfig {
+    #[must_use]
+    pub fn max_size_bytes(&self) -> u64 {
+        self.max_size_mb as u64 * 1024 * 1024
+    }
+
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.max_size_mb > 0
+    }
+}
+
+impl Default for BlobCacheConfig {
+    fn default() -> Self {
+        Self {
+            path: "/var/smg/cache/skills".to_string(),
+            max_size_mb: 1024,
+        }
+    }
+}

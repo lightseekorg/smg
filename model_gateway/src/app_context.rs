@@ -6,6 +6,7 @@ use std::{
 use llm_tokenizer::registry::TokenizerRegistry;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use reqwest::Client;
+use smg_blob_storage::create_blob_store;
 use smg_data_connector::{
     create_storage, ConversationItemStorage, ConversationStorage, ResponseStorage,
     StorageFactoryConfig,
@@ -392,7 +393,7 @@ impl AppContextBuilder {
             .with_workflow_engines()
             .with_mcp_orchestrator(&router_config)
             .await?
-            .with_skill_service(&router_config)
+            .with_skill_service(&router_config)?
             .with_wasm_manager(&router_config)
             .with_kv_event_monitor(&router_config)
             .webrtc_bind_addr(webrtc_bind_addr)
@@ -627,10 +628,22 @@ impl AppContextBuilder {
         Ok(self)
     }
 
-    fn with_skill_service(mut self, config: &RouterConfig) -> Self {
-        self.skill_service = (config.skills_enabled && config.skills.is_some())
-            .then(|| Arc::new(SkillService::placeholder()));
-        self
+    fn with_skill_service(mut self, config: &RouterConfig) -> Result<Self, String> {
+        if !config.skills_enabled {
+            self.skill_service = None;
+            return Ok(self);
+        }
+
+        let Some(skills_config) = config.skills.as_ref() else {
+            self.skill_service = None;
+            return Ok(self);
+        };
+
+        let blob_store =
+            create_blob_store(&skills_config.blob_store, Some(&skills_config.cache))
+                .map_err(|error| format!("Failed to initialize skills blob store: {error}"))?;
+        self.skill_service = Some(Arc::new(SkillService::in_memory(blob_store)));
+        Ok(self)
     }
 
     /// Create KV event monitor for event-driven cache-aware routing.
@@ -676,5 +689,37 @@ impl AppContextBuilder {
 impl Default for AppContextBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::{anyhow, Result};
+    use smg_skills::{SkillServiceMode, SkillsConfig};
+    use tempfile::TempDir;
+
+    use super::AppContextBuilder;
+    use crate::config::RouterConfig;
+
+    #[test]
+    fn with_skill_service_builds_single_process_service_when_enabled() -> Result<()> {
+        let blob_root = TempDir::new()?;
+        let cache_root = TempDir::new()?;
+        let mut config = RouterConfig::default();
+        config.skills_enabled = true;
+        let mut skills = SkillsConfig::default();
+        skills.blob_store.path = blob_root.path().display().to_string();
+        skills.cache.path = cache_root.path().display().to_string();
+        config.skills = Some(skills);
+
+        let builder = AppContextBuilder::new()
+            .with_skill_service(&config)
+            .map_err(anyhow::Error::msg)?;
+        let service = builder
+            .skill_service
+            .ok_or_else(|| anyhow!("skill service should be built"))?;
+
+        assert_eq!(service.mode(), SkillServiceMode::SingleProcess);
+        Ok(())
     }
 }
