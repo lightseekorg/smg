@@ -20,6 +20,7 @@ name = "smg_skills"
 serde = { workspace = true, features = ["derive"] }
 serde_yml = "0.0.12"
 thiserror.workspace = true
+zip = "8.1"
 
 [dev-dependencies]
 anyhow.workspace = true

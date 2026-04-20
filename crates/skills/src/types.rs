@@ -23,6 +23,35 @@ pub struct SkillFileRecord {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedSkillBundle {
+    pub files: Vec<NormalizedSkillFile>,
+    pub skill_md_path: String,
+    pub openai_sidecar_path: Option<String>,
+    pub has_code_files: bool,
+}
+
+impl NormalizedSkillBundle {
+    #[must_use]
+    pub fn file_manifest(&self) -> Vec<SkillFileRecord> {
+        self.files
+            .iter()
+            .map(|file| SkillFileRecord {
+                relative_path: file.relative_path.clone(),
+                media_type: None,
+                size_bytes: file.size_bytes,
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedSkillFile {
+    pub relative_path: String,
+    pub contents: Vec<u8>,
+    pub size_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ParsedSkillBundle {
     pub name: String,

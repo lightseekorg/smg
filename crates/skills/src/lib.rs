@@ -19,8 +19,11 @@ pub use config::{
     SkillsToolLoopConfig, SkillsZdrConfig,
 };
 pub use types::{
-    ParsedSkillBundle, SkillDependencyTool, SkillFileRecord, SkillInterfaceMetadata,
-    SkillParseWarning, SkillParseWarningKind, SkillPolicyMetadata, SkillRecord,
-    SkillSidecarDependencies, SkillVersionRecord,
+    NormalizedSkillBundle, NormalizedSkillFile, ParsedSkillBundle, SkillDependencyTool,
+    SkillFileRecord, SkillInterfaceMetadata, SkillParseWarning, SkillParseWarningKind,
+    SkillPolicyMetadata, SkillRecord, SkillSidecarDependencies, SkillVersionRecord,
 };
-pub use validation::{parse_skill_bundle, SkillParseError};
+pub use validation::{
+    is_code_file_path, normalize_skill_bundle_zip, parse_skill_bundle, SkillBundleArchiveError,
+    SkillParseError,
+};
