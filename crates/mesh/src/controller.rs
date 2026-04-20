@@ -32,8 +32,8 @@ use super::{
 };
 use crate::{
     chunking::{
-        build_stream_batches, chunk_value, dispatch_stream_batch, DEFAULT_MAX_CHUNKS_PER_BATCH,
-        MAX_STREAM_CHUNK_BYTES,
+        build_stream_batches, chunk_value, dispatch_stream_batch, next_generation,
+        DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_STREAM_CHUNK_BYTES,
     },
     collector::{CentralCollector, PeerWatermark, RoundBatch},
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
@@ -665,16 +665,14 @@ impl MeshController {
                                 .is_none_or(|last| !Arc::ptr_eq(last, &stream_batch));
                             if fresh_batch {
                                 last_stream_batch = Some(stream_batch.clone());
-                                let generation = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_nanos() as u64)
-                                    .unwrap_or(0);
                                 let mut entries = Vec::new();
                                 // Drain entries are broadcast: every peer emits.
+                                // Generation is per-value so concurrent publishes
+                                // to the same key get distinct tags.
                                 for (key, value) in &stream_batch.drain_entries {
                                     entries.extend(chunk_value(
                                         key.clone(),
-                                        generation,
+                                        next_generation(),
                                         Bytes::from(value.clone()),
                                         MAX_STREAM_CHUNK_BYTES,
                                     ));
@@ -684,7 +682,7 @@ impl MeshController {
                                     if target == &peer_name_incremental {
                                         entries.extend(chunk_value(
                                             key.clone(),
-                                            generation,
+                                            next_generation(),
                                             value.clone(),
                                             MAX_STREAM_CHUNK_BYTES,
                                         ));

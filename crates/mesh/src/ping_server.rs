@@ -19,8 +19,8 @@ use tracing::instrument;
 
 use super::{
     chunking::{
-        build_stream_batches, chunk_value, dispatch_stream_batch, DEFAULT_MAX_CHUNKS_PER_BATCH,
-        MAX_STREAM_CHUNK_BYTES,
+        build_stream_batches, chunk_value, dispatch_stream_batch, next_generation,
+        DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_STREAM_CHUNK_BYTES,
     },
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
     metrics::{
@@ -581,15 +581,13 @@ impl Gossip for GossipService {
                             .is_none_or(|last| !Arc::ptr_eq(last, &stream_batch));
                         if fresh_batch && !stream_batch.drain_entries.is_empty() {
                             last_stream_batch = Some(stream_batch.clone());
-                            let generation = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_nanos() as u64)
-                                .unwrap_or(0);
                             let mut entries = Vec::new();
+                            // Generation is per-value so concurrent publishes
+                            // to the same key get distinct tags.
                             for (key, value) in &stream_batch.drain_entries {
                                 entries.extend(chunk_value(
                                     key.clone(),
-                                    generation,
+                                    next_generation(),
                                     Bytes::from(value.clone()),
                                     MAX_STREAM_CHUNK_BYTES,
                                 ));

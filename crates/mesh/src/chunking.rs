@@ -9,6 +9,11 @@
 //! go through the [`ChunkAssembler`](crate::chunk_assembler::ChunkAssembler)
 //! and fire subscribers only on full reassembly.
 
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    LazyLock,
+};
+
 use bytes::Bytes;
 
 use crate::{
@@ -16,6 +21,29 @@ use crate::{
     kv::MeshKV,
     service::gossip::{StreamBatch, StreamEntry},
 };
+
+/// Monotonic generation counter for stream-batch values. Seeded from
+/// wall-clock nanos on first use so a process restart starts at a
+/// value that almost certainly exceeds any generation emitted before
+/// the restart (receivers holding stale assembler state won't accept
+/// a smaller tag). Subsequent calls are pure atomic increments, so
+/// NTP steps or clock drift mid-process can't rewind the counter.
+static STREAM_GENERATION: LazyLock<AtomicU64> = LazyLock::new(|| {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    AtomicU64::new(seed)
+});
+
+/// Returns the next monotonic generation tag for a stream-batch value.
+/// Call this once per published value — every chunk of that value
+/// shares the tag so the receiver's assembler can group them, and
+/// concurrent publishes to the same key get distinct tags so stale
+/// fragments don't mix into a fresh value.
+pub fn next_generation() -> u64 {
+    STREAM_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Maximum chunks packed into a single `StreamBatch` message. This is
 /// a message-shape cap, not a bandwidth throttle: `build_stream_batches`
@@ -150,6 +178,14 @@ pub fn build_stream_batches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_generation_is_strictly_monotonic() {
+        let a = next_generation();
+        let b = next_generation();
+        let c = next_generation();
+        assert!(a < b && b < c, "{a} < {b} < {c}");
+    }
 
     #[test]
     fn test_single_chunk_fast_path() {
