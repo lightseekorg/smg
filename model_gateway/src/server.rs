@@ -348,8 +348,19 @@ async fn v1_audio_transcriptions(
                 Err(e) => return bad_text_field("response_format", e),
             },
             "temperature" => match field.text().await {
-                Ok(t) => match t.parse::<f32>() {
-                    Ok(v) => req.temperature = Some(v),
+                Ok(t) => match t.trim().parse::<f32>() {
+                    Ok(v) if v.is_finite() && (0.0..=1.0).contains(&v) => {
+                        req.temperature = Some(v);
+                    }
+                    Ok(v) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "Invalid 'temperature' value: {v} (must be a finite number in [0.0, 1.0])"
+                            ),
+                        )
+                            .into_response();
+                    }
                     Err(e) => {
                         return (
                             StatusCode::BAD_REQUEST,
@@ -832,7 +843,6 @@ pub fn build_app(
         .route("/v1/messages", post(v1_messages))
         .route("/v1/interactions", post(v1_interactions))
         .route("/v1/classify", post(v1_classify))
-        .route("/v1/audio/transcriptions", post(v1_audio_transcriptions))
         // Tokenize / Detokenize endpoints
         .route("/v1/tokenize", post(v1_tokenize))
         .route("/v1/detokenize", post(v1_detokenize))
@@ -865,6 +875,22 @@ pub fn build_app(
     let realtime_routes = Router::new()
         .route("/v1/realtime", get(v1_realtime_ws))
         .route("/v1/realtime/calls", post(v1_realtime_webrtc))
+        .route_layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::concurrency_limit_middleware,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            auth_config.clone(),
+            middleware::auth_middleware,
+        ));
+
+    // Multipart upload routes: auth + concurrency but NO WASM middleware.
+    // The WASM OnRequest phase buffers the full body into a `Vec<u8>` subject
+    // to the WASM manager's `max_body_size` (10MB default). Audio uploads
+    // routinely exceed that, so WASM middleware would reject them with 400
+    // before reaching the handler.
+    let multipart_upload_routes = Router::new()
+        .route("/v1/audio/transcriptions", post(v1_audio_transcriptions))
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::concurrency_limit_middleware,
@@ -957,6 +983,7 @@ pub fn build_app(
     Router::new()
         .merge(protected_routes)
         .merge(realtime_routes)
+        .merge(multipart_upload_routes)
         .merge(public_routes)
         .merge(admin_routes)
         .merge(worker_routes)

@@ -24,7 +24,7 @@ use reqwest::{
     Client,
 };
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 use tracing::error;
 
 use crate::{
@@ -620,7 +620,11 @@ impl Router {
             let mut response_headers = header_utils::preserve_response_headers(res.headers());
             response_headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
             let stream = res.bytes_stream();
-            let (tx, rx) = mpsc::unbounded_channel();
+            // Bounded channel applies backpressure: if the downstream client
+            // is slow, the upstream relay awaits on `send` rather than piling
+            // chunks in memory.
+            const STREAM_RELAY_BUFFER: usize = 32;
+            let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, String>>(STREAM_RELAY_BUFFER);
             #[expect(
                 clippy::disallowed_methods,
                 reason = "fire-and-forget stream relay; gateway shutdown need not wait for individual stream forwarding"
@@ -630,18 +634,18 @@ impl Router {
                 while let Some(chunk) = stream.next().await {
                     match chunk {
                         Ok(bytes) => {
-                            if tx.send(Ok(bytes)).is_err() {
+                            if tx.send(Ok(bytes)).await.is_err() {
                                 break;
                             }
                         }
                         Err(e) => {
-                            let _ = tx.send(Err(format!("Stream error: {e}")));
+                            let _ = tx.send(Err(format!("Stream error: {e}"))).await;
                             break;
                         }
                     }
                 }
             });
-            let stream = UnboundedReceiverStream::new(rx);
+            let stream = ReceiverStream::new(rx);
             let body = Body::from_stream(stream);
             let mut response = Response::new(body);
             *response.status_mut() = status;
@@ -666,7 +670,11 @@ impl Router {
             }
         };
 
-        if status.is_success() {
+        // The non-streaming path can rewrite a 2xx upstream into a 5xx local
+        // response if reading the body fails. Classify metrics off the final
+        // response the client will actually see, not the upstream status.
+        let final_status = response.status();
+        if final_status.is_success() {
             Metrics::record_router_duration(
                 metrics_labels::ROUTER_HTTP,
                 metrics_labels::BACKEND_REGULAR,
@@ -682,7 +690,7 @@ impl Router {
                 metrics_labels::CONNECTION_HTTP,
                 model_id,
                 endpoint,
-                error_type_from_status(status),
+                error_type_from_status(final_status),
             );
         }
 
