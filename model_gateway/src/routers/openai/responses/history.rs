@@ -42,6 +42,9 @@ pub(crate) async fn load_input_history(
         .take()
         .filter(|id| !id.is_empty());
     let mut existing_mcp_list_tools_labels = HashSet::new();
+    let approval_only_continuation = previous_response_id.is_some()
+        && matches!(request_body.input, ResponseInput::Items(ref items) if !items.is_empty()
+            && items.iter().all(|item| matches!(item, ResponseInputOutputItem::McpApprovalResponse { .. })));
 
     // Load items from previous response chain if specified
     let mut chain_items: Option<Vec<ResponseInputOutputItem>> = None;
@@ -63,13 +66,14 @@ pub(crate) async fn load_input_history(
                     .responses
                     .iter()
                     .flat_map(|stored| {
-                        deserialize_items_from_array(&stored.input)
+                        deserialize_input_items_from_array(&stored.input)
                             .into_iter()
-                            .chain(deserialize_items_from_array(
+                            .chain(deserialize_output_items_from_array(
                                 stored
                                     .raw_response
                                     .get("output")
                                     .unwrap_or(&Value::Array(vec![])),
+                                approval_only_continuation,
                             ))
                     })
                     .collect();
@@ -226,12 +230,37 @@ pub(crate) async fn load_input_history(
     })
 }
 
-/// Deserialize ResponseInputOutputItems from a JSON array value
-fn deserialize_items_from_array(array: &Value) -> Vec<ResponseInputOutputItem> {
+fn deserialize_input_items_from_array(array: &Value) -> Vec<ResponseInputOutputItem> {
     array
         .as_array()
         .map(|arr| {
             arr.iter()
+                .filter(|item| {
+                    item.get("type").and_then(|v| v.as_str()) != Some("mcp_approval_response")
+                })
+                .filter_map(|item| {
+                    serde_json::from_value::<ResponseInputOutputItem>(item.clone())
+                        .map_err(|e| warn!("Failed to deserialize item: {}. Item: {}", e, item))
+                        .ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn deserialize_output_items_from_array(
+    array: &Value,
+    keep_approval_requests: bool,
+) -> Vec<ResponseInputOutputItem> {
+    array
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|item| match item.get("type").and_then(|v| v.as_str()) {
+                    Some(ItemType::MCP_LIST_TOOLS) | Some(ItemType::MCP_CALL) => false,
+                    Some("mcp_approval_request") => keep_approval_requests,
+                    _ => true,
+                })
                 .filter_map(|item| {
                     serde_json::from_value::<ResponseInputOutputItem>(item.clone())
                         .map_err(|e| warn!("Failed to deserialize item: {}. Item: {}", e, item))

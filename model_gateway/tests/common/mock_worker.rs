@@ -1048,7 +1048,7 @@ async fn responses_handler(
                 "usage": null
             }))
             .into_response()
-        } else if has_tools && has_prior_tool_context {
+        } else if has_prior_tool_context {
             Json(json!({
                 "id": format!("resp-{}", Uuid::now_v7()),
                 "object": "response",

@@ -1102,7 +1102,16 @@ fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(),
             )
         });
 
-        if !has_valid_input {
+        let is_approval_only_continuation = !request.stream.unwrap_or(false)
+            && request
+                .previous_response_id
+                .as_ref()
+                .is_some_and(|id| !id.is_empty())
+            && items
+                .iter()
+                .all(|item| matches!(item, ResponseInputOutputItem::McpApprovalResponse { .. }));
+
+        if !has_valid_input && !is_approval_only_continuation {
             let mut e = ValidationError::new("input_missing_user_message");
             e.message = Some("Input items must contain at least one message".into());
             return Err(e);
