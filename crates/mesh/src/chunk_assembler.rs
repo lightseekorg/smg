@@ -36,8 +36,12 @@ pub const DEFAULT_MAX_ASSEMBLER_BYTES: usize = 512 * 1024 * 1024;
 /// per-assembly vector overhead stays under ~25 KB.
 pub const MAX_TOTAL_CHUNKS: u32 = 1024;
 
+/// Composite key scoping an assembly by sender peer + application key.
+/// Two peers chunking the same key in flight don't collide.
+type AssemblyKey = (String, String);
+
 pub struct ChunkAssembler {
-    assemblies: DashMap<String, AssemblyState>,
+    assemblies: DashMap<AssemblyKey, AssemblyState>,
     max_concurrent: usize,
     max_bytes: usize,
 }
@@ -129,10 +133,7 @@ impl ChunkAssembler {
             return None;
         }
 
-        // Scope the assembly by sender. '\0' isn't a legal character in
-        // proto string fields (peer_id / subscriber keys), so there's no
-        // collision between scoped keys and any unscoped application key.
-        let scoped_key = format!("{peer_id}\0{key}");
+        let asm_key: AssemblyKey = (peer_id.to_string(), key.to_string());
 
         // Record the chunk under the shard lock. Assembly happens outside
         // the guard so the lock is not held during the allocation+copy of
@@ -140,7 +141,7 @@ impl ChunkAssembler {
         let completed = {
             let mut entry = self
                 .assemblies
-                .entry(scoped_key.clone())
+                .entry(asm_key.clone())
                 .or_insert_with(|| AssemblyState::new(generation, total));
 
             match generation.cmp(&entry.generation) {
@@ -175,7 +176,7 @@ impl ChunkAssembler {
         // (newer generation reset the state after our chunk landed), we
         // return None — the newer generation is what matters now.
         self.assemblies
-            .remove_if(&scoped_key, |_, state| {
+            .remove_if(&asm_key, |_, state| {
                 state.generation == generation && state.is_complete()
             })
             .map(|(_, state)| state.assemble())
@@ -218,12 +219,12 @@ impl ChunkAssembler {
             .sum()
     }
 
-    fn try_evict_stale(&self, key: &str, gen: u64) {
+    fn try_evict_stale(&self, key: &AssemblyKey, gen: u64) {
         self.assemblies
             .remove_if(key, |_, s| s.generation == gen && !s.is_complete());
     }
 
-    fn oldest_incomplete(&self) -> Option<(String, u64)> {
+    fn oldest_incomplete(&self) -> Option<(AssemblyKey, u64)> {
         self.assemblies
             .iter()
             .filter(|e| !e.value().is_complete())
@@ -231,7 +232,7 @@ impl ChunkAssembler {
             .map(|e| (e.key().clone(), e.value().generation))
     }
 
-    fn largest_incomplete(&self) -> Option<(String, u64)> {
+    fn largest_incomplete(&self) -> Option<(AssemblyKey, u64)> {
         self.assemblies
             .iter()
             .filter(|e| !e.value().is_complete())
@@ -250,7 +251,7 @@ impl ChunkAssembler {
         self.remove_stale(&expired, timeout);
     }
 
-    fn collect_expired(&self, timeout: Duration) -> Vec<String> {
+    fn collect_expired(&self, timeout: Duration) -> Vec<AssemblyKey> {
         self.assemblies
             .iter()
             .filter(|e| e.value().created_at.elapsed() >= timeout && !e.value().is_complete())
@@ -258,7 +259,7 @@ impl ChunkAssembler {
             .collect()
     }
 
-    fn remove_stale(&self, keys: &[String], timeout: Duration) {
+    fn remove_stale(&self, keys: &[AssemblyKey], timeout: Duration) {
         for key in keys {
             self.assemblies.remove_if(key, |_, state| {
                 state.created_at.elapsed() >= timeout && !state.is_complete()
@@ -414,8 +415,9 @@ mod tests {
         // the timeout would otherwise apply.
         let asm = ChunkAssembler::new();
         let old = Instant::now() - Duration::from_secs(60);
+        let k: AssemblyKey = ("peer".into(), "complete".into());
         asm.assemblies.insert(
-            "complete".to_string(),
+            k.clone(),
             AssemblyState {
                 generation: 1,
                 received_count: 2,
@@ -425,7 +427,7 @@ mod tests {
         );
         asm.gc(Duration::from_secs(1));
         assert!(
-            asm.assemblies.contains_key("complete"),
+            asm.assemblies.contains_key(&k),
             "gc must not remove a complete assembly"
         );
     }
@@ -437,9 +439,10 @@ mod tests {
         // remove_if timeout re-check must spare the fresh state.
         let asm = ChunkAssembler::new();
         let timeout = Duration::from_secs(1);
+        let k: AssemblyKey = ("peer".into(), "k".into());
 
         asm.assemblies.insert(
-            "k".to_string(),
+            k.clone(),
             AssemblyState {
                 generation: 1,
                 received_count: 0,
@@ -450,12 +453,12 @@ mod tests {
 
         // Phase 1: collect sees the expired entry.
         let expired = asm.collect_expired(timeout);
-        assert_eq!(expired, vec!["k".to_string()]);
+        assert_eq!(expired, vec![k.clone()]);
 
-        // Race: a concurrent receive_chunk resets "k" to a fresh
+        // Race: a concurrent receive_chunk resets the entry to a fresh
         // generation before gc's remove phase fires.
         asm.assemblies.insert(
-            "k".to_string(),
+            k.clone(),
             AssemblyState {
                 generation: 2,
                 received_count: 0,
@@ -469,7 +472,7 @@ mod tests {
         // and the fresh state is spared.
         asm.remove_stale(&expired, timeout);
 
-        let survived = asm.assemblies.get("k").expect("fresh entry must survive");
+        let survived = asm.assemblies.get(&k).expect("fresh entry must survive");
         assert_eq!(
             survived.generation, 2,
             "gc evicted the fresh replacement instead of sparing it"
@@ -518,7 +521,7 @@ mod tests {
         }
         assert_eq!(asm.in_flight(), 3, "concurrent cap enforced");
         assert!(
-            !asm.assemblies.contains_key("k0"),
+            !asm.assemblies.contains_key(&("peer".into(), "k0".into())),
             "oldest partial (k0) should be evicted"
         );
     }
@@ -545,7 +548,8 @@ mod tests {
             asm.total_bytes()
         );
         assert!(
-            !asm.assemblies.contains_key("k_big"),
+            !asm.assemblies
+                .contains_key(&("peer".into(), "k_big".into())),
             "largest partial (k_big) should be evicted"
         );
     }
@@ -556,8 +560,11 @@ mod tests {
         // so enforce_bounds must evict one. The complete must not be
         // picked even though it is the oldest by created_at.
         let asm = ChunkAssembler::with_limits(1, usize::MAX);
+        let k_complete: AssemblyKey = ("peer".into(), "complete".into());
+        let k_partial_a: AssemblyKey = ("peer".into(), "partial_a".into());
+        let k_partial_b: AssemblyKey = ("peer".into(), "partial_b".into());
         asm.assemblies.insert(
-            "complete".to_string(),
+            k_complete.clone(),
             AssemblyState {
                 generation: 1,
                 received_count: 2,
@@ -566,7 +573,7 @@ mod tests {
             },
         );
         asm.assemblies.insert(
-            "partial_a".to_string(),
+            k_partial_a.clone(),
             AssemblyState {
                 generation: 1,
                 received_count: 0,
@@ -575,7 +582,7 @@ mod tests {
             },
         );
         asm.assemblies.insert(
-            "partial_b".to_string(),
+            k_partial_b.clone(),
             AssemblyState {
                 generation: 1,
                 received_count: 0,
@@ -587,15 +594,15 @@ mod tests {
         asm.enforce_bounds();
 
         assert!(
-            asm.assemblies.contains_key("complete"),
+            asm.assemblies.contains_key(&k_complete),
             "complete (even oldest) must not be evicted"
         );
         assert!(
-            !asm.assemblies.contains_key("partial_a"),
+            !asm.assemblies.contains_key(&k_partial_a),
             "oldest incomplete should be evicted"
         );
         assert!(
-            asm.assemblies.contains_key("partial_b"),
+            asm.assemblies.contains_key(&k_partial_b),
             "newer incomplete survives"
         );
     }
@@ -608,8 +615,10 @@ mod tests {
         // see 1 incomplete (<=1), not 2 total, and leave the partial
         // alone.
         let asm = ChunkAssembler::with_limits(1, usize::MAX);
+        let k_complete: AssemblyKey = ("peer".into(), "complete".into());
+        let k_partial: AssemblyKey = ("peer".into(), "partial".into());
         asm.assemblies.insert(
-            "complete".to_string(),
+            k_complete.clone(),
             AssemblyState {
                 generation: 1,
                 received_count: 2,
@@ -618,7 +627,7 @@ mod tests {
             },
         );
         asm.assemblies.insert(
-            "partial".to_string(),
+            k_partial.clone(),
             AssemblyState {
                 generation: 1,
                 received_count: 1,
@@ -626,15 +635,6 @@ mod tests {
                 created_at: Instant::now(),
             },
         );
-
-        // Triggering enforce_bounds from the !completed branch by
-        // receiving a new chunk on a third key would add another
-        // partial and push us over. Instead, exercise enforce_bounds
-        // directly via a receive that creates a partial but doesn't
-        // complete — against cap=1, two incompletes should evict one.
-        // But with the transient "complete" entry counted: previous
-        // logic would evict *partial* (as oldest incomplete) when it
-        // saw len=2 > 1, even though the real incomplete count was 1.
 
         // Build the initial state manually so we can observe the
         // filter-based count without triggering a receive.
@@ -650,11 +650,11 @@ mod tests {
         asm.enforce_bounds();
 
         assert!(
-            asm.assemblies.contains_key("complete"),
+            asm.assemblies.contains_key(&k_complete),
             "complete assembly still present"
         );
         assert!(
-            asm.assemblies.contains_key("partial"),
+            asm.assemblies.contains_key(&k_partial),
             "partial must not be evicted — real incomplete count was under cap"
         );
     }
@@ -667,10 +667,11 @@ mod tests {
         // must spare the replacement. We emulate the race in-process
         // by splitting selection from removal via the private helper.
         let asm = ChunkAssembler::with_limits(1, usize::MAX);
+        let k: AssemblyKey = ("peer".into(), "k".into());
 
         // Insert a stale generation-5 partial as the eviction target.
         asm.assemblies.insert(
-            "k".to_string(),
+            k.clone(),
             AssemblyState {
                 generation: 5,
                 received_count: 0,
@@ -680,13 +681,13 @@ mod tests {
         );
 
         // Enforcement picks this key + generation.
-        let (k, gen) = asm.oldest_incomplete().expect("have an incomplete");
-        assert_eq!(k, "k");
+        let (picked_key, gen) = asm.oldest_incomplete().expect("have an incomplete");
+        assert_eq!(picked_key, k);
         assert_eq!(gen, 5);
 
         // Racing thread replaces the state with a fresh generation-6.
         asm.assemblies.insert(
-            "k".to_string(),
+            k.clone(),
             AssemblyState {
                 generation: 6,
                 received_count: 0,
@@ -696,13 +697,13 @@ mod tests {
         );
 
         // The delayed remove_if must NOT evict the generation-6 state.
-        asm.assemblies.remove_if(&k, |_, state| {
+        asm.assemblies.remove_if(&picked_key, |_, state| {
             state.generation == gen && !state.is_complete()
         });
 
         let survived = asm
             .assemblies
-            .get("k")
+            .get(&k)
             .expect("newer-generation replacement must survive");
         assert_eq!(
             survived.generation, 6,
