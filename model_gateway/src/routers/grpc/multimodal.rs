@@ -1099,4 +1099,38 @@ mod tests {
             .expect("preloaded entry must be returned without touching source");
         assert!(Arc::ptr_eq(&got, &cfg));
     }
+
+    #[tokio::test]
+    async fn multimodal_components_serves_preloaded_config_without_touching_source() {
+        // Simulates the IGW/K8s data path: GetTokenizer bundle is extracted,
+        // multimodal config is read, the bundle tempdir is cleaned up, and
+        // the parsed config is inserted into the shared registry under the
+        // tokenizer UUID. A later multimodal request must return the
+        // preloaded entry without attempting to re-read from `tokenizer_source`
+        // (which in IGW mode is an unreachable worker-only path).
+        let registry = Arc::new(MultimodalConfigRegistry::new());
+        let components = MultimodalComponents::new(registry.clone())
+            .expect("MultimodalComponents::new should succeed");
+
+        let cfg = Arc::new(MultimodalModelConfig {
+            config: serde_json::json!({"model_type":"phi3_v"}),
+            preprocessor_config: PreProcessorConfig::from_json(
+                r#"{"image_processor_type":"Phi3VImageProcessor"}"#,
+            )
+            .unwrap(),
+        });
+        registry.insert("tok-uuid-igw".to_string(), cfg.clone());
+
+        let bad_source = "/nonexistent/worker-only/path-that-would-fail";
+        let got = components
+            .config_registry
+            .get_or_load("tok-uuid-igw", bad_source)
+            .await
+            .expect("preloaded entry must be returned without touching source");
+
+        assert!(
+            Arc::ptr_eq(&got, &cfg),
+            "registry must return the exact Arc preloaded during registration"
+        );
+    }
 }
