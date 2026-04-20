@@ -586,6 +586,16 @@ impl Router {
                     err_resp.status().as_u16(),
                     extract_error_code_from_response(&err_resp),
                 );
+                // Mirror route_typed_request: a send failure must still bump
+                // the terminal router_error counter, not just upstream_response.
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_HTTP,
+                    metrics_labels::BACKEND_REGULAR,
+                    metrics_labels::CONNECTION_HTTP,
+                    model_id,
+                    endpoint,
+                    error_type_from_status(err_resp.status()),
+                );
                 return err_resp;
             }
         };
