@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 use super::super::context::ResponsesComponents;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::{error, openai::responses::header_utils::ConversationMemoryConfig},
+    routers::{common::header_utils::ConversationMemoryConfig, error},
 };
 
 const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
@@ -311,7 +311,7 @@ mod tests {
     use openai_protocol::responses::{ResponseInput, ResponsesRequest};
 
     use super::inject_memory_context;
-    use crate::routers::openai::responses::header_utils::{
+    use crate::routers::common::header_utils::{
         ConversationMemoryConfig, LongTermMemoryConfig, ShortTermMemoryConfig,
     };
 
