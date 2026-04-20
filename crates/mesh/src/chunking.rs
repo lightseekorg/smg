@@ -109,6 +109,11 @@ pub fn build_stream_batches(
     entries: Vec<StreamEntry>,
     max_chunks_per_batch: usize,
 ) -> Vec<StreamBatch> {
+    debug_assert!(
+        max_chunks_per_batch > 0,
+        "max_chunks_per_batch must be non-zero; callers should pass \
+         DEFAULT_MAX_CHUNKS_PER_ROUND or another positive cap"
+    );
     if max_chunks_per_batch == 0 || entries.is_empty() {
         return Vec::new();
     }
@@ -270,7 +275,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_stream_batches_zero_cap_returns_empty() {
+    #[cfg_attr(debug_assertions, should_panic(expected = "max_chunks_per_batch"))]
+    fn test_build_stream_batches_zero_cap() {
+        // Debug build: assert fires (contract violation).
+        // Release build: runtime zero-check still returns empty as a safety net.
         let entries = vec![StreamEntry {
             key: "k".into(),
             generation: 1,
@@ -278,6 +286,7 @@ mod tests {
             total_chunks: 1,
             data: vec![1],
         }];
-        assert!(build_stream_batches(entries, 0).is_empty());
+        let out = build_stream_batches(entries, 0);
+        assert!(out.is_empty());
     }
 }
