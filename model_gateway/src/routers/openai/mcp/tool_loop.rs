@@ -253,8 +253,8 @@ pub(crate) async fn execute_streaming_tool_calls(
             },
         );
 
-        let model_context_output = response_format
-            .compact_tool_output_for_model_context(&tool_output.output);
+        let model_context_output =
+            response_format.compact_tool_output_for_model_context(&tool_output.output);
         let mut mcp_call_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
             warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
             json!({})
@@ -940,8 +940,8 @@ pub(crate) async fn execute_tool_loop(
             );
 
             let response_format = session.tool_response_format(&call.name);
-            let model_context_output = response_format
-                .compact_tool_output_for_model_context(&tool_output.output);
+            let model_context_output =
+                response_format.compact_tool_output_for_model_context(&tool_output.output);
             let server_label = session.resolve_tool_server_label(&call.name);
             let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, &response_format);
             let transformed_item = build_transformed_mcp_call_item(

@@ -253,7 +253,7 @@ impl ResponseTransformer {
 
     /// Transform MCP web search results to OpenAI web_search_call format.
     fn to_web_search_call(
-        result:  &Value,
+        result: &Value,
         tool_call_id: &str,
         arguments: &str,
     ) -> ResponseOutputItem {

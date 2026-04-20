@@ -15,9 +15,7 @@ use tracing::debug;
 use super::{
     common::responses::{
         handlers::cancel_response_impl,
-        utils::{
-            reject_unsupported_tool_for_grpc_route_entry, validate_worker_availability,
-        },
+        utils::{reject_unsupported_tool_for_grpc_route_entry, validate_worker_availability},
         ResponsesContext,
     },
     context::SharedComponents,
