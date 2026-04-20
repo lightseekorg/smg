@@ -557,6 +557,7 @@ impl<'a> McpToolSession<'a> {
             }
             ResponseOutputItem::WebSearchCall { .. }
             | ResponseOutputItem::CodeInterpreterCall { .. }
+            | ResponseOutputItem::ImageGenerationCall { .. }
             | ResponseOutputItem::FileSearchCall { .. }
             | ResponseOutputItem::Message { .. }
             | ResponseOutputItem::Reasoning { .. } => true,

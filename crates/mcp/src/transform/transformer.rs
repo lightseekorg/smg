@@ -45,7 +45,7 @@ pub fn extract_image_generation_fallback_text(value: &Value) -> Option<String> {
     })
 }
 /// Extract non-null `openai_response` objects from embedded MCP text-block payloads.
-pub fn extract_embedded_openai_responses(result: &serde_json::Value) -> Vec<serde_json::Value> {
+pub fn extract_embedded_openai_responses(result: &Value) -> Vec<Value> {
     let text_blocks = result
         .as_array()
         .map(|items| items.as_slice())
@@ -446,7 +446,7 @@ impl ResponseTransformer {
     }
 
     fn extract_query_from_arguments(arguments: &str) -> Option<String> {
-        let args_json = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+        let args_json = serde_json::from_str::<Value>(arguments).ok()?;
         args_json
             .as_object()
             .and_then(|obj| obj.get("query"))
@@ -530,7 +530,7 @@ impl ResponseTransformer {
     }
 }
 
-fn parse_text_block_payload(item: &serde_json::Value) -> Option<serde_json::Value> {
+fn parse_text_block_payload(item: &Value) -> Option<Value> {
     let Some(obj) = item.as_object() else {
         warn!("Expected MCP result item to be an object");
         return None;
@@ -545,7 +545,7 @@ fn parse_text_block_payload(item: &serde_json::Value) -> Option<serde_json::Valu
         return None;
     };
 
-    match serde_json::from_str::<serde_json::Value>(text) {
+    match serde_json::from_str::<Value>(text) {
         Ok(payload) => Some(payload),
         Err(error) => {
             warn!("Failed to parse embedded MCP text block payload: {error}");
