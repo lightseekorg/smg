@@ -25,7 +25,12 @@ use wfaas::{
 };
 
 use super::data::TokenizerWorkflowData;
-use crate::{app_context::AppContext, config::TokenizerCacheConfig, worker::ConnectionMode};
+use crate::{
+    app_context::AppContext,
+    config::TokenizerCacheConfig,
+    routers::grpc::multimodal::MultimodalModelConfig,
+    worker::ConnectionMode,
+};
 
 /// Configuration for adding a tokenizer
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +116,7 @@ impl StepExecutor<TokenizerWorkflowData> for LoadTokenizerStep {
                 let cache_cfg = cache_config.clone();
                 let app_context = app_context.clone();
                 let name = name.clone();
+                let id = id.clone();
                 async move {
                     let base_tokenizer = match factory::create_tokenizer_async_with_chat_template(
                         &source,
@@ -125,7 +131,7 @@ impl StepExecutor<TokenizerWorkflowData> for LoadTokenizerStep {
                                 source, local_err
                             );
 
-                            fetch_tokenizer_from_worker(&app_context, &name).await.map_err(
+                            fetch_tokenizer_from_worker(&app_context, &id, &name).await.map_err(
                                 |worker_err| {
                                     format!(
                                         "Failed to load tokenizer locally ({local_err}) and remotely from worker ({worker_err})"
@@ -211,22 +217,87 @@ fn with_optional_cache(
     }
 }
 
-fn load_tokenizer_from_bundle(bundle: &StreamBundle) -> Result<Arc<dyn Tokenizer>, String> {
+fn load_tokenizer_from_bundle(
+    bundle: &StreamBundle,
+) -> Result<(Arc<dyn Tokenizer>, Option<MultimodalModelConfig>), String> {
     tokenizer_bundle::with_extracted_bundle(bundle, |tokenizer_dir| {
         let tokenizer_path = tokenizer_dir.to_string_lossy().into_owned();
         info!(
             "Tokenizer extracted from temporary path: {}",
             tokenizer_path
         );
-        factory::create_tokenizer_with_chat_template(&tokenizer_path, None)
-            .map_err(|e| format!("tokenizer load failed: {e}"))
+
+        let tokenizer = factory::create_tokenizer_with_chat_template(&tokenizer_path, None)
+            .map_err(|e| format!("tokenizer load failed: {e}"))?;
+
+        let mm_config = try_load_multimodal_config(tokenizer_dir);
+
+        Ok((tokenizer, mm_config))
     })
     .map_err(|e| format!("bundle extraction/load failed: {e}"))
+}
+
+/// Best-effort read of `config.json` + `preprocessor_config.json` from an
+/// extracted tokenizer bundle directory. Returns `None` if either file is
+/// missing or unparsable — text-only tokenizers legitimately ship without
+/// a `preprocessor_config.json`, and we do not want to fail tokenizer
+/// registration over multimodal artifacts.
+fn try_load_multimodal_config(
+    tokenizer_dir: &std::path::Path,
+) -> Option<MultimodalModelConfig> {
+    let config_path = tokenizer_dir.join("config.json");
+    let pp_config_path = tokenizer_dir.join("preprocessor_config.json");
+
+    if !config_path.exists() || !pp_config_path.exists() {
+        debug!(
+            "Bundle has no multimodal config (config.json present: {}, preprocessor_config.json present: {})",
+            config_path.exists(),
+            pp_config_path.exists()
+        );
+        return None;
+    }
+
+    let config_str = match std::fs::read_to_string(&config_path) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Failed to read config.json from bundle: {e}");
+            return None;
+        }
+    };
+    let config: serde_json::Value = match serde_json::from_str(&config_str) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Failed to parse config.json from bundle: {e}");
+            return None;
+        }
+    };
+
+    let pp_str = match std::fs::read_to_string(&pp_config_path) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Failed to read preprocessor_config.json from bundle: {e}");
+            return None;
+        }
+    };
+    let preprocessor_config =
+        match llm_multimodal::PreProcessorConfig::from_json(&pp_str) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to parse preprocessor_config.json from bundle: {e}");
+                return None;
+            }
+        };
+
+    Some(MultimodalModelConfig {
+        config,
+        preprocessor_config,
+    })
 }
 
 /// Fetch a tokenizer from a healthy gRPC worker when local loading fails.
 async fn fetch_tokenizer_from_worker(
     app_context: &AppContext,
+    tokenizer_id: &str,
     model_id: &str,
 ) -> Result<Arc<dyn Tokenizer>, String> {
     let workers = app_context.worker_registry.get_workers_filtered(
@@ -305,7 +376,20 @@ async fn fetch_tokenizer_from_worker(
         );
 
         match load_tokenizer_from_bundle(&bundle) {
-            Ok(tokenizer) => return Ok(tokenizer),
+            Ok((tokenizer, mm_config)) => {
+                if let Some(cfg) = mm_config {
+                    app_context.multimodal_config_registry.insert(
+                        tokenizer_id.to_string(),
+                        Arc::new(cfg),
+                    );
+                    info!(
+                        tokenizer_id = %tokenizer_id,
+                        tokenizer_name = %model_id,
+                        "Preloaded multimodal config from GetTokenizer bundle"
+                    );
+                }
+                return Ok(tokenizer);
+            }
             Err(e) => failures.push(e),
         };
     }
