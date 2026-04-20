@@ -651,15 +651,6 @@ impl Router {
         Metrics::record_router_upstream_response(metrics_labels::ROUTER_HTTP, status.as_u16(), "");
 
         events::RequestReceivedEvent {}.emit();
-        worker.record_outcome(status.as_u16());
-
-        if status.is_server_error() {
-            Metrics::record_worker_error(
-                metrics_labels::WORKER_REGULAR,
-                metrics_labels::CONNECTION_HTTP,
-                error_type_from_status(status),
-            );
-        }
 
         let response = if is_stream {
             // Preserve the upstream content-type verbatim. A `stream=true`
@@ -724,6 +715,17 @@ impl Router {
         // response if reading the body fails. Classify metrics off the final
         // response the client will actually see, not the upstream status.
         let final_status = response.status();
+        // Feed the final status into the circuit breaker / worker-error
+        // metric here — not at header time — so a body-read failure after a
+        // 2xx header is still attributed to the worker that produced it.
+        worker.record_outcome(final_status.as_u16());
+        if final_status.is_server_error() {
+            Metrics::record_worker_error(
+                metrics_labels::WORKER_REGULAR,
+                metrics_labels::CONNECTION_HTTP,
+                error_type_from_status(final_status),
+            );
+        }
         if final_status.is_success() {
             Metrics::record_router_duration(
                 metrics_labels::ROUTER_HTTP,
