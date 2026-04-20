@@ -129,6 +129,28 @@ fn normalizes_zip_paths_to_skill_root_manifest() -> Result<()> {
 }
 
 #[test]
+fn recognizes_openai_sidecar_case_insensitively() -> Result<()> {
+    let normalized = normalize(&[
+        TestZipEntry::File {
+            path: "gh-fix-ci/SKILL.md",
+            contents: b"skill body",
+            unix_mode: Some(0o100644),
+        },
+        TestZipEntry::File {
+            path: "gh-fix-ci/agents/OpenAI.YAML",
+            contents: b"interface: {}",
+            unix_mode: Some(0o100644),
+        },
+    ])?;
+
+    assert_eq!(
+        normalized.openai_sidecar_path.as_deref(),
+        Some("agents/OpenAI.YAML")
+    );
+    Ok(())
+}
+
+#[test]
 fn rejects_archives_without_a_single_top_level_directory() {
     let error = normalize(&[
         TestZipEntry::File {
@@ -311,16 +333,18 @@ fn rejects_archives_without_root_level_skill_md() {
 
 #[test]
 fn rejects_more_than_max_regular_files() {
+    let dynamic_paths = (0..500)
+        .map(|index| format!("gh-fix-ci/assets/file-{index}.txt"))
+        .collect::<Vec<_>>();
     let mut entries = Vec::with_capacity(501);
     entries.push(TestZipEntry::File {
         path: "gh-fix-ci/SKILL.md",
         contents: b"skill body",
         unix_mode: Some(0o100644),
     });
-    for index in 0..500 {
-        let path = format!("gh-fix-ci/assets/file-{index}.txt");
+    for path in &dynamic_paths {
         entries.push(TestZipEntry::File {
-            path: Box::leak(path.into_boxed_str()),
+            path,
             contents: b"payload",
             unix_mode: Some(0o100644),
         });
@@ -330,6 +354,82 @@ fn rejects_more_than_max_regular_files() {
     assert_eq!(
         error,
         SkillBundleArchiveError::TooManyFiles { max_files: 500 }
+    );
+}
+
+#[test]
+fn rejects_too_many_archive_entries() -> Result<()> {
+    let cursor = Cursor::new(Vec::new());
+    let mut writer = ZipWriter::new(cursor);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    for index in 0..1024 {
+        writer.add_directory(format!("gh-fix-ci/dir-{index}/"), options)?;
+    }
+    writer.start_file("gh-fix-ci/SKILL.md", options)?;
+    writer.write_all(b"skill body")?;
+
+    let zip_bytes = writer.finish()?.into_inner();
+    let error = normalize_skill_bundle_zip(&zip_bytes).expect_err("entry count limit must fail");
+    assert_eq!(
+        error,
+        SkillBundleArchiveError::TooManyEntries { max_entries: 1024 }
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_entry_larger_than_max_uncompressed_size() {
+    let oversized = vec![b'x'; 25 * 1024 * 1024 + 1];
+    let error = normalize(&[
+        TestZipEntry::File {
+            path: "gh-fix-ci/SKILL.md",
+            contents: b"skill body",
+            unix_mode: Some(0o100644),
+        },
+        TestZipEntry::File {
+            path: "gh-fix-ci/assets/huge.bin",
+            contents: &oversized,
+            unix_mode: Some(0o100644),
+        },
+    ])
+    .expect_err("oversized entry must fail");
+
+    assert_eq!(
+        error,
+        SkillBundleArchiveError::EntryTooLarge {
+            path: "assets/huge.bin".to_owned(),
+            max_bytes: 25 * 1024 * 1024,
+        }
+    );
+}
+
+#[test]
+fn rejects_total_uncompressed_bundle_size_larger_than_limit() {
+    let large_payload = vec![b'x'; 15 * 1024 * 1024];
+    let error = normalize(&[
+        TestZipEntry::File {
+            path: "gh-fix-ci/SKILL.md",
+            contents: b"skill body",
+            unix_mode: Some(0o100644),
+        },
+        TestZipEntry::File {
+            path: "gh-fix-ci/assets/part-1.bin",
+            contents: &large_payload,
+            unix_mode: Some(0o100644),
+        },
+        TestZipEntry::File {
+            path: "gh-fix-ci/assets/part-2.bin",
+            contents: &large_payload,
+            unix_mode: Some(0o100644),
+        },
+    ])
+    .expect_err("oversized bundle must fail");
+
+    assert_eq!(
+        error,
+        SkillBundleArchiveError::BundleTooLarge {
+            max_bytes: 30 * 1024 * 1024,
+        }
     );
 }
 

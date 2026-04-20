@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+/// Top-level skill metadata stored in the control-plane database.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillRecord {
     pub tenant_id: String,
@@ -8,6 +9,7 @@ pub struct SkillRecord {
     pub default_version: Option<String>,
 }
 
+/// Metadata for a single immutable skill version.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillVersionRecord {
     pub skill_id: String,
@@ -16,6 +18,7 @@ pub struct SkillVersionRecord {
     pub has_code_files: bool,
 }
 
+/// File-level manifest entry stored alongside a normalized skill bundle.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillFileRecord {
     pub relative_path: String,
@@ -23,6 +26,7 @@ pub struct SkillFileRecord {
     pub size_bytes: u64,
 }
 
+/// Canonical in-memory representation of a validated skill bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedSkillBundle {
     pub files: Vec<NormalizedSkillFile>,
@@ -32,6 +36,7 @@ pub struct NormalizedSkillBundle {
 }
 
 impl NormalizedSkillBundle {
+    /// Project the in-memory bundle into a stable file manifest.
     #[must_use]
     pub fn file_manifest(&self) -> Vec<SkillFileRecord> {
         self.files
@@ -39,19 +44,28 @@ impl NormalizedSkillBundle {
             .map(|file| SkillFileRecord {
                 relative_path: file.relative_path.clone(),
                 media_type: None,
-                size_bytes: file.size_bytes,
+                size_bytes: file.size_bytes(),
             })
             .collect()
     }
 }
 
+/// Canonical skill-bundle file with a skill-root-relative path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedSkillFile {
     pub relative_path: String,
     pub contents: Vec<u8>,
-    pub size_bytes: u64,
 }
 
+impl NormalizedSkillFile {
+    /// Return the canonical uncompressed size of this file in bytes.
+    #[must_use]
+    pub fn size_bytes(&self) -> u64 {
+        self.contents.len() as u64
+    }
+}
+
+/// Parsed `SKILL.md` plus any successfully recovered OpenAI sidecar metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ParsedSkillBundle {
     pub name: String,
@@ -64,6 +78,7 @@ pub struct ParsedSkillBundle {
     pub warnings: Vec<SkillParseWarning>,
 }
 
+/// Optional interface metadata sourced from `agents/openai.yaml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SkillInterfaceMetadata {
     pub display_name: Option<String>,
@@ -75,6 +90,7 @@ pub struct SkillInterfaceMetadata {
 }
 
 impl SkillInterfaceMetadata {
+    /// Return whether this interface block contains any usable fields.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.display_name.is_none()
@@ -86,18 +102,21 @@ impl SkillInterfaceMetadata {
     }
 }
 
+/// Optional dependency metadata sourced from `agents/openai.yaml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SkillSidecarDependencies {
     pub tools: Vec<SkillDependencyTool>,
 }
 
 impl SkillSidecarDependencies {
+    /// Return whether the dependencies block contains any tool declarations.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
 }
 
+/// A single dependency tool declaration from `agents/openai.yaml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillDependencyTool {
     pub tool_type: String,
@@ -108,6 +127,7 @@ pub struct SkillDependencyTool {
     pub url: Option<String>,
 }
 
+/// Optional invocation-policy metadata sourced from `agents/openai.yaml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SkillPolicyMetadata {
     pub allow_implicit_invocation: Option<bool>,
@@ -115,12 +135,14 @@ pub struct SkillPolicyMetadata {
 }
 
 impl SkillPolicyMetadata {
+    /// Return whether the policy block contains any usable settings.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.allow_implicit_invocation.is_none() && self.products.is_empty()
     }
 }
 
+/// Warning produced while salvaging optional sidecar metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillParseWarning {
     pub kind: SkillParseWarningKind,
@@ -128,6 +150,7 @@ pub struct SkillParseWarning {
     pub message: String,
 }
 
+/// Kinds of non-fatal sidecar parsing warnings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SkillParseWarningKind {
     SidecarFileIgnored,

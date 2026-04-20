@@ -19,7 +19,10 @@ const MAX_NAME_LEN: usize = 64;
 const MAX_DISPLAY_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1024;
 const MAX_SIDECAR_STRING_LEN: usize = 1024;
+const MAX_BUNDLE_ARCHIVE_ENTRY_COUNT: usize = 1024;
 const MAX_BUNDLE_FILE_COUNT: usize = 500;
+const MAX_BUNDLE_FILE_SIZE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_BUNDLE_TOTAL_SIZE_BYTES: u64 = 30 * 1024 * 1024;
 const RESERVED_SKILL_NAMES: [&str; 3] = ["anthropic", "claude", "openai"];
 const SKILL_MD_PATH: &str = "SKILL.md";
 const OPENAI_SIDECAR_PATH: &str = "agents/openai.yaml";
@@ -37,6 +40,7 @@ const NON_CODE_FILE_EXTENSIONS: &[&str] = &[
 const CODE_FILE_BASENAMES: &[&str] = &["Dockerfile", "Makefile"];
 const CODE_FILE_PREFIXES: &[&str] = &["run.", "main.", "exec."];
 
+/// Errors returned while parsing `SKILL.md` and its optional OpenAI sidecar.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SkillParseError {
     #[error("SKILL.md must begin with a YAML frontmatter block delimited by --- lines")]
@@ -54,6 +58,8 @@ pub enum SkillParseError {
     },
 }
 
+/// Errors returned while validating and normalizing uploaded skill-bundle zip
+/// archives.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SkillBundleArchiveError {
     #[error("skill bundle zip archive is invalid: {message}")]
@@ -66,8 +72,16 @@ pub enum SkillBundleArchiveError {
     DuplicateNormalizedPath { path: String },
     #[error("skill bundle contains unsupported entry type `{entry_type}` at `{path}`")]
     UnsupportedEntryType { path: String, entry_type: String },
+    #[error("skill bundle contains more than {max_entries} archive entries")]
+    TooManyEntries { max_entries: usize },
     #[error("skill bundle contains more than {max_files} regular files")]
     TooManyFiles { max_files: usize },
+    #[error(
+        "skill bundle entry `{path}` exceeds the maximum uncompressed size of {max_bytes} bytes"
+    )]
+    EntryTooLarge { path: String, max_bytes: u64 },
+    #[error("skill bundle exceeds the maximum total uncompressed size of {max_bytes} bytes")]
+    BundleTooLarge { max_bytes: u64 },
     #[error("skill bundle must contain exactly one root-level SKILL.md file")]
     MissingSkillMd,
     #[error("skill bundle contains multiple root-level SKILL.md files: `{first}` and `{second}`")]
@@ -90,6 +104,10 @@ struct SkillFrontmatterMetadata {
     short_description: Option<String>,
 }
 
+/// Parse a root-level `SKILL.md` plus optional `agents/openai.yaml` sidecar.
+///
+/// The sidecar is fail-open: invalid sidecar content is ignored and surfaced as
+/// warnings instead of making the entire bundle invalid.
 pub fn parse_skill_bundle(
     skill_md: &str,
     openai_yaml: Option<&str>,
@@ -128,6 +146,11 @@ pub fn parse_skill_bundle(
     })
 }
 
+/// Normalize an uploaded skill-bundle zip archive into skill-root-relative files.
+///
+/// This strips the single required top-level directory, rejects unsafe entries,
+/// and produces the canonical manifest shape used by later storage and upload
+/// steps.
 pub fn normalize_skill_bundle_zip(
     zip_bytes: &[u8],
 ) -> Result<NormalizedSkillBundle, SkillBundleArchiveError> {
@@ -136,15 +159,21 @@ pub fn normalize_skill_bundle_zip(
             message: error.to_string(),
         }
     })?;
+    if archive.len() > MAX_BUNDLE_ARCHIVE_ENTRY_COUNT {
+        return Err(SkillBundleArchiveError::TooManyEntries {
+            max_entries: MAX_BUNDLE_ARCHIVE_ENTRY_COUNT,
+        });
+    }
 
     let mut top_level_dir: Option<String> = None;
     let mut seen_relative_paths = HashSet::new();
     let mut files = Vec::new();
     let mut skill_md_path: Option<String> = None;
     let mut openai_sidecar_path = None;
+    let mut total_uncompressed_size_bytes: u64 = 0;
 
     for index in 0..archive.len() {
-        let mut entry =
+        let entry =
             archive
                 .by_index(index)
                 .map_err(|error| SkillBundleArchiveError::InvalidZip {
@@ -199,14 +228,56 @@ pub fn normalize_skill_bundle_zip(
                     });
                 }
 
-                let size_bytes = entry.size();
+                let advertised_size_bytes = entry.size();
+                if advertised_size_bytes > MAX_BUNDLE_FILE_SIZE_BYTES {
+                    return Err(SkillBundleArchiveError::EntryTooLarge {
+                        path: relative_path,
+                        max_bytes: MAX_BUNDLE_FILE_SIZE_BYTES,
+                    });
+                }
+
+                let remaining_bundle_bytes = MAX_BUNDLE_TOTAL_SIZE_BYTES
+                    .checked_sub(total_uncompressed_size_bytes)
+                    .ok_or(SkillBundleArchiveError::BundleTooLarge {
+                        max_bytes: MAX_BUNDLE_TOTAL_SIZE_BYTES,
+                    })?;
+                if advertised_size_bytes > remaining_bundle_bytes {
+                    return Err(SkillBundleArchiveError::BundleTooLarge {
+                        max_bytes: MAX_BUNDLE_TOTAL_SIZE_BYTES,
+                    });
+                }
+
+                let max_read_bytes = remaining_bundle_bytes.min(MAX_BUNDLE_FILE_SIZE_BYTES);
                 let mut contents = Vec::new();
-                entry.read_to_end(&mut contents).map_err(|error| {
+                let mut limited_entry = entry.take(max_read_bytes + 1);
+                limited_entry.read_to_end(&mut contents).map_err(|error| {
                     SkillBundleArchiveError::ReadEntry {
                         path: relative_path.clone(),
                         message: error.to_string(),
                     }
                 })?;
+                let actual_size_bytes = u64::try_from(contents.len()).map_err(|_| {
+                    SkillBundleArchiveError::ReadEntry {
+                        path: relative_path.clone(),
+                        message: "decompressed entry size overflowed u64".to_owned(),
+                    }
+                })?;
+                if actual_size_bytes > MAX_BUNDLE_FILE_SIZE_BYTES {
+                    return Err(SkillBundleArchiveError::EntryTooLarge {
+                        path: relative_path,
+                        max_bytes: MAX_BUNDLE_FILE_SIZE_BYTES,
+                    });
+                }
+                total_uncompressed_size_bytes = total_uncompressed_size_bytes
+                    .checked_add(actual_size_bytes)
+                    .ok_or(SkillBundleArchiveError::BundleTooLarge {
+                        max_bytes: MAX_BUNDLE_TOTAL_SIZE_BYTES,
+                    })?;
+                if total_uncompressed_size_bytes > MAX_BUNDLE_TOTAL_SIZE_BYTES {
+                    return Err(SkillBundleArchiveError::BundleTooLarge {
+                        max_bytes: MAX_BUNDLE_TOTAL_SIZE_BYTES,
+                    });
+                }
 
                 if relative_path.eq_ignore_ascii_case(SKILL_MD_PATH) {
                     if let Some(existing) = &skill_md_path {
@@ -218,14 +289,13 @@ pub fn normalize_skill_bundle_zip(
                     skill_md_path = Some(relative_path.clone());
                 }
 
-                if relative_path == OPENAI_SIDECAR_PATH {
+                if relative_path.eq_ignore_ascii_case(OPENAI_SIDECAR_PATH) {
                     openai_sidecar_path = Some(relative_path.clone());
                 }
 
                 files.push(NormalizedSkillFile {
                     relative_path,
                     contents,
-                    size_bytes,
                 });
             }
         }
@@ -245,6 +315,12 @@ pub fn normalize_skill_bundle_zip(
     })
 }
 
+/// Deterministically classify whether a bundle file should count as code for
+/// `has_code_files`.
+///
+/// This intentionally errs on the side of false positives: basename matches for
+/// `run.*`, `main.*`, and `exec.*` win even if the extension would otherwise be
+/// considered non-code.
 pub fn is_code_file_path(path: &str) -> bool {
     let basename = path.rsplit('/').next().unwrap_or(path);
     if CODE_FILE_BASENAMES
