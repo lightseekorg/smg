@@ -189,6 +189,11 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         #[serde(default)]
         content: Vec<ResponseReasoningContent>,
+        /// Encrypted reasoning payload for gpt-5 / o-series round-trip via
+        /// `previous_response_id`. Opaque to SMG; preserved verbatim.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        encrypted_content: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
@@ -291,6 +296,11 @@ pub enum ResponseOutputItem {
         id: String,
         summary: Vec<String>,
         content: Vec<ResponseReasoningContent>,
+        /// Encrypted reasoning payload for gpt-5 / o-series round-trip.
+        /// Opaque to SMG; preserved verbatim.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        encrypted_content: Option<String>,
         status: Option<String>,
     },
     #[serde(rename = "function_call")]
@@ -463,6 +473,7 @@ pub enum ResponseStatus {
     Queued,
     InProgress,
     Completed,
+    Incomplete,
     Failed,
     Cancelled,
 }
@@ -1308,8 +1319,21 @@ pub struct ResponsesResponse {
     #[serde(default = "default_object_type")]
     pub object: String,
 
-    /// Creation timestamp
+    /// Creation timestamp (unix seconds)
     pub created_at: i64,
+
+    /// Completion timestamp (unix seconds). `None` until the response reaches
+    /// a terminal state (`completed`, `incomplete`, `failed`, `cancelled`).
+    #[serde(default)]
+    pub completed_at: Option<i64>,
+
+    /// Whether the response was created in background mode.
+    #[serde(default)]
+    pub background: Option<bool>,
+
+    /// Conversation this response is linked to, if any.
+    #[serde(default)]
+    pub conversation: Option<String>,
 
     /// Response status
     pub status: ResponseStatus,
@@ -1409,6 +1433,11 @@ impl ResponsesResponse {
     pub fn is_failed(&self) -> bool {
         matches!(self.status, ResponseStatus::Failed)
     }
+
+    /// Check if the response terminated as incomplete (max_output_tokens / content_filter)
+    pub fn is_incomplete(&self) -> bool {
+        matches!(self.status, ResponseStatus::Incomplete)
+    }
 }
 
 impl ResponseOutputItem {
@@ -1427,7 +1456,11 @@ impl ResponseOutputItem {
         }
     }
 
-    /// Create a new reasoning output item
+    /// Create a new reasoning output item.
+    ///
+    /// `encrypted_content` defaults to `None`; use
+    /// [`Self::new_reasoning_encrypted`] when carrying gpt-5 / o-series
+    /// encrypted reasoning.
     pub fn new_reasoning(
         id: String,
         summary: Vec<String>,
@@ -1438,6 +1471,24 @@ impl ResponseOutputItem {
             id,
             summary,
             content,
+            encrypted_content: None,
+            status,
+        }
+    }
+
+    /// Create a new reasoning output item carrying an encrypted reasoning payload.
+    pub fn new_reasoning_encrypted(
+        id: String,
+        summary: Vec<String>,
+        content: Vec<ResponseReasoningContent>,
+        encrypted_content: Option<String>,
+        status: Option<String>,
+    ) -> Self {
+        Self::Reasoning {
+            id,
+            summary,
+            content,
+            encrypted_content,
             status,
         }
     }

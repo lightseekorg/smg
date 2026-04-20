@@ -404,6 +404,7 @@ fn build_tool_response(
             content: vec![ResponseReasoningContent::ReasoningText {
                 text: analysis_text,
             }],
+            encrypted_content: None,
             status: Some("completed".to_string()),
         });
     }

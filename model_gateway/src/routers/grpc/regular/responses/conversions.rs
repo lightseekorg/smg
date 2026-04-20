@@ -315,6 +315,7 @@ pub(crate) fn chat_to_responses(
                 content: vec![ReasoningText {
                     text: reasoning.clone(),
                 }],
+                encrypted_content: None,
                 status: Some("completed".to_string()),
             });
         }
