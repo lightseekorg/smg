@@ -312,7 +312,7 @@ impl GrpcRouter {
     ) -> Response {
         // Reject unsupported tool types at route entry.
         // In particular, gRPC Responses does not support image_generation tools.
-        if let Err(response) = reject_unsupported_tool_for_grpc_route_entry(body) {
+        if let Some(response) = reject_unsupported_tool_for_grpc_route_entry(body) {
             return response;
         }
 

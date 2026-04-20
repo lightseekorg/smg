@@ -902,9 +902,7 @@ pub(crate) async fn execute_tool_loop(
                 })
                 .await;
 
-            let response_format = session.tool_response_format(&call.name);
             let server_label = session.resolve_tool_server_label(&call.name);
-            let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, &response_format);
             let approval_request_id = approval_request_item_id_source(&call.item_id);
 
             let tool_output = match tool_result {

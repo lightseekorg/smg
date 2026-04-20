@@ -115,7 +115,7 @@ pub(crate) async fn ensure_mcp_connection(
 /// This validation must run before any MCP setup/connection logic.
 pub(crate) fn reject_unsupported_tool_for_grpc_route_entry(
     request: &ResponsesRequest,
-) -> Result<(), Response> {
+) -> Option<Response> {
     let unsupported_kind = request.tools.as_ref().and_then(|tools| {
         tools
             .iter()
@@ -129,7 +129,7 @@ pub(crate) fn reject_unsupported_tool_for_grpc_route_entry(
             .map(|k| k.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        return Err(error::bad_request(
+        return Some(error::bad_request(
             ERROR_CODE_UNSUPPORTED_TOOL,
             format!(
                 "Tool '{}' is not supported for gRPC Responses routes. Supported tools: {}.",
@@ -139,7 +139,7 @@ pub(crate) fn reject_unsupported_tool_for_grpc_route_entry(
         ));
     }
 
-    Ok(())
+    None
 }
 
 /// Validate that workers are available for the requested model
