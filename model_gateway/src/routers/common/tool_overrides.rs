@@ -7,6 +7,11 @@ use smg_mcp::ResponseFormat;
 /// Input source:
 /// - `original_body.tools` from the incoming Responses request.
 ///
+/// Extensibility note:
+/// - This function intentionally uses exhaustive matching on `ResponseFormat`.
+///   When a new `ResponseFormat` variant is added, Rust will require this
+///   function to handle it explicitly (or intentionally return `None`).
+///
 /// Current behavior:
 /// - `ResponseFormat::ImageGenerationCall`: reads the first
 ///   `ResponseTool::ImageGeneration` entry, serializes it to a JSON object,

@@ -889,9 +889,10 @@ pub(crate) async fn execute_tool_loop(
                 }
             };
             apply_request_tool_overrides(&response_format, original_body, &mut arguments);
+            let effective_arguments_str = arguments.to_string();
             debug!(
                 "Calling MCP tool '{}' with args: {}",
-                call.name, call.arguments
+                call.name, effective_arguments_str
             );
             let tool_result = session
                 .execute_tool_result(ToolExecutionInput {
@@ -912,7 +913,7 @@ pub(crate) async fn execute_tool_loop(
                     let approval_item = build_mcp_approval_request_item(
                         &approval_request_id,
                         &pending.tool_name,
-                        &call.arguments,
+                        &effective_arguments_str,
                         &server_label,
                     );
                     return build_approval_response(

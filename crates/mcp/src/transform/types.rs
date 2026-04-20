@@ -24,39 +24,54 @@ pub enum ResponseFormat {
 }
 
 impl ResponseFormat {
+    fn output_compactor(&self) -> fn(&Value) -> String {
+        match self {
+            ResponseFormat::Passthrough => Self::compact_noop,
+            ResponseFormat::WebSearchCall => Self::compact_noop,
+            ResponseFormat::CodeInterpreterCall => Self::compact_noop,
+            ResponseFormat::ImageGenerationCall => Self::compact_image_generation,
+            ResponseFormat::FileSearchCall => Self::compact_noop,
+        }
+    }
+
+    fn compact_noop(output: &Value) -> String {
+        output.to_string()
+    }
+
+    fn compact_image_generation(output: &Value) -> String {
+        // image tool outputs are wrapped as content blocks
+        // [{"type":"text","text":"{\"result\":\"<base64>\",\"status\":\"completed\"}"}]
+        // Parse each `text` JSON payload and remove `result` to avoid large base64 in model context.
+        let Some(items) = output.as_array() else {
+            return output.to_string();
+        };
+
+        let mut sanitized = items.clone();
+        for item in &mut sanitized {
+            let Some(item_obj) = item.as_object_mut() else {
+                continue;
+            };
+            if item_obj.remove("result").is_some() {
+                continue;
+            }
+            let Some(text) = item_obj.get("text").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Ok(Value::Object(mut obj)) = serde_json::from_str::<Value>(text) {
+                obj.remove("result");
+                item_obj.insert(
+                    "text".to_string(),
+                    Value::String(Value::Object(obj).to_string()),
+                );
+            }
+        }
+        Value::Array(sanitized).to_string()
+    }
+
     /// Compact tool output before feeding it back into model context.
     pub fn compact_tool_output_for_model_context(&self, output: &Value) -> String {
         let input = output.to_string();
-        let result = if matches!(self, ResponseFormat::ImageGenerationCall) {
-            // image tool outputs are wrapped as content blocks
-            // [{"type":"text","text":"{\"result\":\"<base64>\",\"status\":\"completed\"}"}]
-            // Parse each `text` JSON payload and remove `result` to avoid large base64 in model context.
-            let items = output
-                .as_array()
-                .expect("ImageGenerationCall output must be a wrapped content array");
-            let mut sanitized = items.clone();
-            for item in &mut sanitized {
-                let Some(item_obj) = item.as_object_mut() else {
-                    continue;
-                };
-                if item_obj.remove("result").is_some() {
-                    continue;
-                }
-                let Some(text) = item_obj.get("text").and_then(Value::as_str) else {
-                    continue;
-                };
-                if let Ok(Value::Object(mut obj)) = serde_json::from_str::<Value>(text) {
-                    obj.remove("result");
-                    item_obj.insert(
-                        "text".to_string(),
-                        Value::String(Value::Object(obj).to_string()),
-                    );
-                }
-            }
-            Value::Array(sanitized).to_string()
-        } else {
-            output.to_string()
-        };
+        let result = self.output_compactor()(output);
 
         debug!(
             response_format = ?self,
