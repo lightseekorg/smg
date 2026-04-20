@@ -141,13 +141,14 @@ pub(crate) struct MultimodalComponents {
     pub media_connector: Arc<MediaConnector>,
     pub image_processor_registry: Arc<ImageProcessorRegistry>,
     pub model_registry: Arc<ModelRegistry>,
-    /// Lazily-loaded model configs, keyed by model_id.
-    pub model_configs: DashMap<String, Arc<MultimodalModelConfig>>,
+    /// Shared reference to the app-level multimodal config cache.
+    pub config_registry: Arc<MultimodalConfigRegistry>,
 }
 
 impl MultimodalComponents {
-    /// Create multimodal components with default registries.
-    pub fn new() -> Result<Self> {
+    /// Create multimodal components with default registries and a reference
+    /// to the shared `MultimodalConfigRegistry` owned by `AppContext`.
+    pub fn new(config_registry: Arc<MultimodalConfigRegistry>) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -159,62 +160,8 @@ impl MultimodalComponents {
             media_connector: Arc::new(media_connector),
             image_processor_registry: Arc::new(ImageProcessorRegistry::with_defaults()),
             model_registry: Arc::new(ModelRegistry::default()),
-            model_configs: DashMap::new(),
+            config_registry,
         })
-    }
-
-    /// Load or retrieve cached model config for a given model and tokenizer source path.
-    pub async fn get_or_load_config(
-        &self,
-        model_id: &str,
-        tokenizer_source: &str,
-    ) -> Result<Arc<MultimodalModelConfig>> {
-        if let Some(cached) = self.model_configs.get(model_id) {
-            return Ok(cached.clone());
-        }
-
-        let base_dir = llm_multimodal::hub::resolve_model_config_dir(tokenizer_source)
-            .await
-            .with_context(|| {
-                format!("Failed to resolve model config directory for '{tokenizer_source}'")
-            })?;
-
-        // Load config.json
-        let config_path = base_dir.join("config.json");
-        let config: serde_json::Value = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read config.json at {}", config_path.display()))
-            .and_then(|s| {
-                serde_json::from_str(&s).with_context(|| {
-                    format!("Failed to parse config.json at {}", config_path.display())
-                })
-            })?;
-
-        // Load preprocessor_config.json
-        let pp_config_path = base_dir.join("preprocessor_config.json");
-        let preprocessor_config = std::fs::read_to_string(&pp_config_path)
-            .with_context(|| {
-                format!(
-                    "Failed to read preprocessor_config.json at {}",
-                    pp_config_path.display()
-                )
-            })
-            .and_then(|s| {
-                PreProcessorConfig::from_json(&s).with_context(|| {
-                    format!(
-                        "Failed to parse preprocessor_config.json at {}",
-                        pp_config_path.display()
-                    )
-                })
-            })?;
-
-        let model_config = Arc::new(MultimodalModelConfig {
-            config,
-            preprocessor_config,
-        });
-
-        self.model_configs
-            .insert(model_id.to_string(), model_config.clone());
-        Ok(model_config)
     }
 }
 
@@ -252,17 +199,20 @@ pub(crate) struct MultimodalIntermediate {
 
 /// Resolve the placeholder token string for a multimodal model.
 ///
-/// Loads the model config and looks up the model spec to get the placeholder
-/// token (e.g. `"<|image|>"` for Phi-3-vision). Returns `None` if the model
-/// is not recognized as multimodal.
+/// Loads the model config (via the shared registry, keyed by `tokenizer_id`)
+/// and looks up the model spec to get the placeholder token (e.g.
+/// `"<|image|>"` for Phi-3-vision). Returns `None` if the model is not
+/// recognized as multimodal.
 pub(crate) async fn resolve_placeholder_token(
     model_id: &str,
     tokenizer: &dyn TokenizerTrait,
     components: &MultimodalComponents,
+    tokenizer_id: &str,
     tokenizer_source: &str,
 ) -> Result<Option<String>> {
     let model_config = components
-        .get_or_load_config(model_id, tokenizer_source)
+        .config_registry
+        .get_or_load(tokenizer_id, tokenizer_source)
         .await?;
     let metadata = ModelMetadata {
         model_id,
@@ -409,15 +359,13 @@ fn extract_content_parts_messages(messages: &[InputMessage]) -> Vec<MediaContent
 }
 
 /// Process multimodal content from Messages API input messages.
-///
-/// Entry point for the messages preparation stage. Extracts image content parts
-/// from `InputMessage`, then delegates to the shared processing core.
 pub(crate) async fn process_multimodal_messages(
     messages: &[InputMessage],
     model_id: &str,
     tokenizer: &dyn TokenizerTrait,
     token_ids: Vec<u32>,
     components: &MultimodalComponents,
+    tokenizer_id: &str,
     tokenizer_source: &str,
 ) -> Result<MultimodalOutput> {
     let content_parts = extract_content_parts_messages(messages);
@@ -427,21 +375,20 @@ pub(crate) async fn process_multimodal_messages(
         tokenizer,
         token_ids,
         components,
+        tokenizer_id,
         tokenizer_source,
     )
     .await
 }
 
 /// Process multimodal content: fetch images, preprocess pixels, expand tokens, collect hashes.
-///
-/// Single entry point called from preparation.rs. Handles the full pipeline:
-/// extract content parts → fetch images → preprocess → expand tokens → collect hashes.
 pub(crate) async fn process_multimodal(
     messages: &[ChatMessage],
     model_id: &str,
     tokenizer: &dyn TokenizerTrait,
     token_ids: Vec<u32>,
     components: &MultimodalComponents,
+    tokenizer_id: &str,
     tokenizer_source: &str,
 ) -> Result<MultimodalOutput> {
     let content_parts = extract_content_parts(messages);
@@ -451,6 +398,7 @@ pub(crate) async fn process_multimodal(
         tokenizer,
         token_ids,
         components,
+        tokenizer_id,
         tokenizer_source,
     )
     .await
@@ -466,6 +414,7 @@ async fn process_multimodal_parts(
     tokenizer: &dyn TokenizerTrait,
     token_ids: Vec<u32>,
     components: &MultimodalComponents,
+    tokenizer_id: &str,
     tokenizer_source: &str,
 ) -> Result<MultimodalOutput> {
     let mut tracker = AsyncMultiModalTracker::new(components.media_connector.clone());
@@ -509,7 +458,8 @@ async fn process_multimodal_parts(
 
     // Step 2: Resolve model spec and preprocess images
     let model_config = components
-        .get_or_load_config(model_id, tokenizer_source)
+        .config_registry
+        .get_or_load(tokenizer_id, tokenizer_source)
         .await?;
     let model_type = model_config
         .config
