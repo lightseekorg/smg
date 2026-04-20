@@ -579,8 +579,14 @@ impl Gossip for GossipService {
                         let fresh_batch = last_stream_batch
                             .as_ref()
                             .is_none_or(|last| !Arc::ptr_eq(last, &stream_batch));
-                        if fresh_batch && !stream_batch.drain_entries.is_empty() {
+                        if fresh_batch {
+                            // Advance the tracker for every fresh Arc, not just
+                            // ones that produced work — otherwise a batch with
+                            // empty drain_entries stays "fresh" across ticks and
+                            // we keep re-checking it.
                             last_stream_batch = Some(stream_batch.clone());
+                        }
+                        if fresh_batch && !stream_batch.drain_entries.is_empty() {
                             let mut entries = Vec::new();
                             // Generation is per-value so concurrent publishes
                             // to the same key get distinct tags.
