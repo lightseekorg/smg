@@ -1134,12 +1134,12 @@ impl MeshController {
                                     );
                                 }
                                 StreamMessageType::StreamBatch => {
-                                    if let (
-                                        Some(StreamPayload::StreamBatch(batch)),
-                                        Some(mesh_kv),
-                                    ) = (&msg.payload, &mesh_kv)
-                                    {
-                                        dispatch_stream_batch(mesh_kv, batch.entries.iter());
+                                    if let Some(mesh_kv) = &mesh_kv {
+                                        if let Some(StreamPayload::StreamBatch(batch)) =
+                                            msg.payload
+                                        {
+                                            dispatch_stream_batch(mesh_kv, batch.entries);
+                                        }
                                     }
                                 }
                             }

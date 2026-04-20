@@ -78,24 +78,25 @@ pub fn chunk_value(
 /// Receiver-side dispatch for `StreamBatch` entries. Single-chunk
 /// entries (`total_chunks == 1`) fire subscribers directly — no state
 /// in the chunk assembler. Multi-chunk entries route through the
-/// assembler and fire subscribers only on full reassembly. Fires go
-/// through `MeshKV::notify_subscribers` with a fragmented `Vec<Bytes>`
-/// payload so fan-out is zero-copy.
-pub fn dispatch_stream_batch<'a>(
-    mesh_kv: &MeshKV,
-    entries: impl IntoIterator<Item = &'a StreamEntry>,
-) {
+/// assembler and fire subscribers only on full reassembly.
+///
+/// Takes ownership of the entries so chunk payloads move into `Bytes`
+/// without cloning.
+pub fn dispatch_stream_batch(mesh_kv: &MeshKV, entries: impl IntoIterator<Item = StreamEntry>) {
     for entry in entries {
         if entry.total_chunks == 1 {
-            mesh_kv.notify_subscribers(&entry.key, Some(vec![Bytes::from(entry.data.clone())]));
-        } else if let Some(fragments) = mesh_kv.chunk_assembler().receive_chunk(
-            &entry.key,
-            entry.generation,
-            entry.chunk_index,
-            entry.total_chunks,
-            entry.data.clone(),
-        ) {
-            mesh_kv.notify_subscribers(&entry.key, Some(fragments));
+            mesh_kv.notify_subscribers(&entry.key, Some(vec![Bytes::from(entry.data)]));
+        } else {
+            let key = entry.key.clone();
+            if let Some(fragments) = mesh_kv.chunk_assembler().receive_chunk(
+                &key,
+                entry.generation,
+                entry.chunk_index,
+                entry.total_chunks,
+                entry.data,
+            ) {
+                mesh_kv.notify_subscribers(&key, Some(fragments));
+            }
         }
     }
 }

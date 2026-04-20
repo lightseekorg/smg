@@ -1337,12 +1337,13 @@ impl Gossip for GossipService {
                                 }
                             }
                             StreamMessageType::StreamBatch => {
-                                if let (
-                                    Some(gossip::stream_message::Payload::StreamBatch(batch)),
-                                    Some(mesh_kv),
-                                ) = (&msg.payload, &mesh_kv)
-                                {
-                                    dispatch_stream_batch(mesh_kv, batch.entries.iter());
+                                if let Some(mesh_kv) = &mesh_kv {
+                                    if let Some(gossip::stream_message::Payload::StreamBatch(
+                                        batch,
+                                    )) = msg.payload
+                                    {
+                                        dispatch_stream_batch(mesh_kv, batch.entries);
+                                    }
                                 }
                             }
                             _ => {
