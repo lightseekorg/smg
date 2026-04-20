@@ -309,15 +309,14 @@ pub(crate) fn chat_to_responses(
     // Convert reasoning content if present (O1-style models)
     if let Some(reasoning) = &choice.message.reasoning_content {
         if !reasoning.is_empty() {
-            output.push(ResponseOutputItem::Reasoning {
-                id: format!("reasoning_{}", chat_resp.id),
-                summary: vec![],
-                content: vec![ReasoningText {
+            output.push(ResponseOutputItem::new_reasoning(
+                format!("reasoning_{}", chat_resp.id),
+                vec![],
+                vec![ReasoningText {
                     text: reasoning.clone(),
                 }],
-                encrypted_content: None,
-                status: Some("completed".to_string()),
-            });
+                Some("completed".to_string()),
+            ));
         }
     }
 

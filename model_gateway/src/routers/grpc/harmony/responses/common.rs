@@ -87,15 +87,14 @@ pub(super) fn build_next_request_with_tools(
 
     // Add reasoning if present (from analysis channel)
     if let Some(analysis_text) = analysis {
-        items.push(ResponseInputOutputItem::Reasoning {
-            id: format!("reasoning_{assistant_id}"),
-            summary: vec![],
-            content: vec![ResponseReasoningContent::ReasoningText {
+        items.push(ResponseInputOutputItem::new_reasoning(
+            format!("reasoning_{assistant_id}"),
+            vec![],
+            vec![ResponseReasoningContent::ReasoningText {
                 text: analysis_text,
             }],
-            encrypted_content: None,
-            status: Some("completed".to_string()),
-        });
+            Some("completed".to_string()),
+        ));
     }
 
     // Add message content if present (from final channel)

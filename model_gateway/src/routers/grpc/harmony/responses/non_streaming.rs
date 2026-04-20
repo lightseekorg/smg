@@ -398,15 +398,14 @@ fn build_tool_response(
 
     // Add reasoning output item if analysis exists
     if let Some(analysis_text) = analysis {
-        output.push(ResponseOutputItem::Reasoning {
-            id: format!("reasoning_{request_id}"),
-            summary: vec![],
-            content: vec![ResponseReasoningContent::ReasoningText {
+        output.push(ResponseOutputItem::new_reasoning(
+            format!("reasoning_{request_id}"),
+            vec![],
+            vec![ResponseReasoningContent::ReasoningText {
                 text: analysis_text,
             }],
-            encrypted_content: None,
-            status: Some("completed".to_string()),
-        });
+            Some("completed".to_string()),
+        ));
     }
 
     // Add message output item if partial text exists

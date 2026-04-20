@@ -369,15 +369,14 @@ impl StreamingResponseAccumulator {
 
         // Add reasoning if present
         if !self.reasoning_buffer.is_empty() {
-            output.push(ResponseOutputItem::Reasoning {
-                id: format!("reasoning_{}", self.response_id),
-                summary: vec![],
-                content: vec![ResponseReasoningContent::ReasoningText {
+            output.push(ResponseOutputItem::new_reasoning(
+                format!("reasoning_{}", self.response_id),
+                vec![],
+                vec![ResponseReasoningContent::ReasoningText {
                     text: self.reasoning_buffer,
                 }],
-                encrypted_content: None,
-                status: Some("completed".to_string()),
-            });
+                Some("completed".to_string()),
+            ));
         }
 
         // Add tool calls

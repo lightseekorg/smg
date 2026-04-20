@@ -46,7 +46,7 @@ fn reasoning_output_item_round_trips_encrypted_content() {
         vec![ResponseReasoningContent::ReasoningText {
             text: "inner thought".to_string(),
         }],
-        Some("opaque-ciphertext-xyz".to_string()),
+        "opaque-ciphertext-xyz".to_string(),
         Some("completed".to_string()),
     );
 

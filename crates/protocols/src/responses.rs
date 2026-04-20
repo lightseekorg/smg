@@ -183,6 +183,7 @@ pub enum ResponseInputOutputItem {
         status: Option<String>,
     },
     #[serde(rename = "reasoning")]
+    #[non_exhaustive]
     Reasoning {
         id: String,
         summary: Vec<String>,
@@ -292,6 +293,7 @@ pub enum ResponseOutputItem {
         status: String,
     },
     #[serde(rename = "reasoning")]
+    #[non_exhaustive]
     Reasoning {
         id: String,
         summary: Vec<String>,
@@ -469,6 +471,7 @@ pub enum Truncation {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ResponseStatus {
     Queued,
     InProgress,
@@ -1311,6 +1314,7 @@ pub fn generate_id(prefix: &str) -> String {
 
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[non_exhaustive]
 pub struct ResponsesResponse {
     /// Response ID
     pub id: String,
@@ -1440,6 +1444,47 @@ impl ResponsesResponse {
     }
 }
 
+impl ResponseInputOutputItem {
+    /// Create a new reasoning input/output item.
+    ///
+    /// `encrypted_content` defaults to `None`; use
+    /// [`Self::new_reasoning_encrypted`] when round-tripping gpt-5 /
+    /// o-series encrypted reasoning.
+    pub fn new_reasoning(
+        id: String,
+        summary: Vec<String>,
+        content: Vec<ResponseReasoningContent>,
+        status: Option<String>,
+    ) -> Self {
+        Self::Reasoning {
+            id,
+            summary,
+            content,
+            encrypted_content: None,
+            status,
+        }
+    }
+
+    /// Create a new reasoning input/output item carrying an encrypted
+    /// reasoning payload. The `encrypted_content` must be the opaque
+    /// ciphertext.
+    pub fn new_reasoning_encrypted(
+        id: String,
+        summary: Vec<String>,
+        content: Vec<ResponseReasoningContent>,
+        encrypted_content: String,
+        status: Option<String>,
+    ) -> Self {
+        Self::Reasoning {
+            id,
+            summary,
+            content,
+            encrypted_content: Some(encrypted_content),
+            status,
+        }
+    }
+}
+
 impl ResponseOutputItem {
     /// Create a new message output item
     pub fn new_message(
@@ -1477,18 +1522,22 @@ impl ResponseOutputItem {
     }
 
     /// Create a new reasoning output item carrying an encrypted reasoning payload.
+    ///
+    /// The `encrypted_content` must be the opaque ciphertext; a `None` value
+    /// would defeat the purpose of the `_encrypted` constructor — callers
+    /// without ciphertext should use [`Self::new_reasoning`] instead.
     pub fn new_reasoning_encrypted(
         id: String,
         summary: Vec<String>,
         content: Vec<ResponseReasoningContent>,
-        encrypted_content: Option<String>,
+        encrypted_content: String,
         status: Option<String>,
     ) -> Self {
         Self::Reasoning {
             id,
             summary,
             content,
-            encrypted_content,
+            encrypted_content: Some(encrypted_content),
             status,
         }
     }
