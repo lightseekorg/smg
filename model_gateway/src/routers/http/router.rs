@@ -699,12 +699,17 @@ impl Router {
             // chunks in memory.
             const STREAM_RELAY_BUFFER: usize = 32;
             let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, String>>(STREAM_RELAY_BUFFER);
-            // Attribute stream outcome to the worker from inside the relay
-            // task: a mid-stream error after a 2xx header must mark the
-            // worker failed (502-synthetic) so the circuit breaker and
-            // worker-error metric track the transport failure.
+            // Attribute worker-level and router-level outcomes to the actual
+            // stream completion from inside the relay task: a mid-stream error
+            // after a 2xx header, or a non-streaming 5xx header returned under
+            // `stream=true`, must be visible to circuit-breaker + worker-error
+            // + router-error metrics. Recording only at header time would mis-
+            // classify those.
             let worker_for_stream = worker.clone();
-            let stream_header_status = status.as_u16();
+            let stream_header_status = status;
+            let stream_model_id = model_id.to_string();
+            let stream_endpoint = endpoint;
+            let stream_start = start;
             #[expect(
                 clippy::disallowed_methods,
                 reason = "fire-and-forget stream relay; gateway shutdown need not wait for individual stream forwarding"
@@ -726,17 +731,39 @@ impl Router {
                         }
                     }
                 }
-                let outcome_status = if stream_failed {
-                    StatusCode::BAD_GATEWAY.as_u16()
+                // Effective status = BAD_GATEWAY if the relay failed, else the
+                // worker's header status. Covers both "5xx header returned
+                // while stream=true" and "200 header then mid-stream break".
+                let effective_status = if stream_failed {
+                    StatusCode::BAD_GATEWAY
                 } else {
                     stream_header_status
                 };
-                worker_for_stream.record_outcome(outcome_status);
-                if stream_failed {
+                worker_for_stream.record_outcome(effective_status.as_u16());
+                if effective_status.is_server_error() {
                     Metrics::record_worker_error(
                         metrics_labels::WORKER_REGULAR,
                         metrics_labels::CONNECTION_HTTP,
-                        error_type_from_status(StatusCode::BAD_GATEWAY),
+                        error_type_from_status(effective_status),
+                    );
+                }
+                if effective_status.is_success() {
+                    Metrics::record_router_duration(
+                        metrics_labels::ROUTER_HTTP,
+                        metrics_labels::BACKEND_REGULAR,
+                        metrics_labels::CONNECTION_HTTP,
+                        &stream_model_id,
+                        stream_endpoint,
+                        stream_start.elapsed(),
+                    );
+                } else {
+                    Metrics::record_router_error(
+                        metrics_labels::ROUTER_HTTP,
+                        metrics_labels::BACKEND_REGULAR,
+                        metrics_labels::CONNECTION_HTTP,
+                        &stream_model_id,
+                        stream_endpoint,
+                        error_type_from_status(effective_status),
                     );
                 }
             });
@@ -765,15 +792,12 @@ impl Router {
             }
         };
 
-        // The non-streaming path can rewrite a 2xx upstream into a 5xx local
-        // response if reading the body fails. Classify metrics off the final
-        // response the client will actually see, not the upstream status.
-        let final_status = response.status();
+        // Non-streaming: classify metrics off the final response the client
+        // will actually see. A body-read failure can rewrite a 2xx upstream
+        // into a local 5xx, and we want the circuit breaker + metrics to see
+        // that. Streaming outcomes are owned by the relay task above.
         if !is_stream {
-            // Feed the final status into the circuit breaker / worker-error
-            // metric here — not at header time — so a body-read failure after
-            // a 2xx header is still attributed to the worker that produced
-            // it. Streaming outcomes are recorded inside the relay task.
+            let final_status = response.status();
             worker.record_outcome(final_status.as_u16());
             if final_status.is_server_error() {
                 Metrics::record_worker_error(
@@ -782,25 +806,25 @@ impl Router {
                     error_type_from_status(final_status),
                 );
             }
-        }
-        if final_status.is_success() {
-            Metrics::record_router_duration(
-                metrics_labels::ROUTER_HTTP,
-                metrics_labels::BACKEND_REGULAR,
-                metrics_labels::CONNECTION_HTTP,
-                model_id,
-                endpoint,
-                start.elapsed(),
-            );
-        } else {
-            Metrics::record_router_error(
-                metrics_labels::ROUTER_HTTP,
-                metrics_labels::BACKEND_REGULAR,
-                metrics_labels::CONNECTION_HTTP,
-                model_id,
-                endpoint,
-                error_type_from_status(final_status),
-            );
+            if final_status.is_success() {
+                Metrics::record_router_duration(
+                    metrics_labels::ROUTER_HTTP,
+                    metrics_labels::BACKEND_REGULAR,
+                    metrics_labels::CONNECTION_HTTP,
+                    model_id,
+                    endpoint,
+                    start.elapsed(),
+                );
+            } else {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_HTTP,
+                    metrics_labels::BACKEND_REGULAR,
+                    metrics_labels::CONNECTION_HTTP,
+                    model_id,
+                    endpoint,
+                    error_type_from_status(final_status),
+                );
+            }
         }
 
         response
