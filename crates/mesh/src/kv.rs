@@ -492,7 +492,7 @@ impl MeshKV {
     /// Handle to the node-wide chunk reassembly buffer. Used by the
     /// gossip receive path to route `StreamBatch` chunks through
     /// reassembly before firing subscribers.
-    pub fn chunk_assembler(&self) -> Arc<ChunkAssembler> {
+    pub(crate) fn chunk_assembler(&self) -> Arc<ChunkAssembler> {
         self.chunk_assembler.clone()
     }
 
@@ -500,7 +500,7 @@ impl MeshKV {
     /// receive path when a chunked value completes (or a single-chunk
     /// entry arrives), so handlers can deliver into adapter-owned
     /// mpsc channels without reaching into internal registries.
-    pub fn notify_subscribers(&self, key: &str, value: Option<Vec<Bytes>>) {
+    pub(crate) fn notify_subscribers(&self, key: &str, value: Option<Vec<Bytes>>) {
         self.subscriber_registry.notify(key, value);
     }
 
