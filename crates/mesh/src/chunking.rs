@@ -1,14 +1,13 @@
-//! Sender-side stream chunking helpers.
+//! Sender-side stream chunking helpers and receiver-side dispatch.
 //!
-//! Splits oversized stream values into bounded `StreamEntry` messages
-//! that fit the gRPC per-message budget. Single-message values pass
-//! through as `(total_chunks=1, chunk_index=0)`; values exceeding
-//! `max_chunk_bytes` are split into N chunks.
+//! Sender: [`chunk_value`] splits an oversized value into a sequence
+//! of `StreamEntry`s; [`build_stream_batches`] packs them into
+//! `StreamBatch` messages respecting a per-batch cap.
 //!
-//! Tree repair pages (`tree:page:*`) are bounded at 2 MB by the
-//! TreeSyncAdapter contract (spec §4.1) and therefore always take the
-//! single-chunk fast path. A debug assertion in [`chunk_value`] catches
-//! any regression that would route a tree page through the split path.
+//! Receiver: [`dispatch_stream_batch`] routes inbound entries —
+//! single-chunk entries fire subscribers directly, multi-chunk entries
+//! go through the [`ChunkAssembler`](crate::chunk_assembler::ChunkAssembler)
+//! and fire subscribers only on full reassembly.
 
 use bytes::Bytes;
 
@@ -26,11 +25,8 @@ pub const DEFAULT_MAX_CHUNKS_PER_ROUND: usize = 5;
 /// Values with `value.len() <= max_chunk_bytes` produce a single entry
 /// with `total_chunks = 1`. Larger values split into
 /// `ceil(len / max_chunk_bytes)` chunks of at most `max_chunk_bytes`
-/// bytes each. Chunks are emitted in index order 0..N.
-///
-/// `generation` is a per-publish monotonic tag chosen by the caller.
-/// The spec uses nanosecond wall-clock timestamps so that generations
-/// remain monotonic across sender restarts.
+/// bytes each. Chunks are emitted in index order 0..N. `generation` is
+/// a per-publish monotonic tag chosen by the caller.
 pub fn chunk_value(
     key: String,
     generation: u64,
@@ -40,10 +36,6 @@ pub fn chunk_value(
     assert!(max_chunk_bytes > 0, "max_chunk_bytes must be non-zero");
 
     if value.len() <= max_chunk_bytes {
-        debug_assert!(
-            !key.starts_with("tree:page:") || value.len() <= max_chunk_bytes,
-            "tree:page:* entries must fit in a single gRPC message"
-        );
         return vec![StreamEntry {
             key,
             generation,
