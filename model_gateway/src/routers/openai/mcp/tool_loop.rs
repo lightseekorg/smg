@@ -838,7 +838,6 @@ pub(crate) async fn execute_tool_loop(
 
         for call in function_calls {
             state.total_calls += 1;
-            let response_format = session.tool_response_format(&call.name);
 
             if state.total_calls > effective_limit {
                 warn!(
@@ -853,14 +852,15 @@ pub(crate) async fn execute_tool_loop(
                     original_body,
                 );
             }
+            let response_format = session.tool_response_format(&call.name);
+            let server_label = session.resolve_tool_server_label(&call.name);
+            let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, &response_format);
+            let approval_request_id = approval_request_item_id_source(&call.item_id);
             let mut arguments: Value = match serde_json::from_str(&call.arguments) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(tool = %call.name, error = %e, "Failed to parse tool arguments as JSON");
                     let error_output = format!("Invalid tool arguments: {e}");
-                    let server_label = session.resolve_tool_server_label(&call.name);
-                    let tool_item_id =
-                        non_streaming_tool_item_id_source(&call.item_id, &response_format);
                     let error_json = json!({ "error": &error_output });
                     let transformed_item = build_transformed_mcp_call_item(
                         &error_json,
@@ -901,11 +901,6 @@ pub(crate) async fn execute_tool_loop(
                     arguments,
                 })
                 .await;
-
-            let response_format = session.tool_response_format(&call.name);
-            let server_label = session.resolve_tool_server_label(&call.name);
-            let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, &response_format);
-            let approval_request_id = approval_request_item_id_source(&call.item_id);
 
             let tool_output = match tool_result {
                 ToolExecutionResult::Executed(tool_output) => tool_output,
