@@ -80,10 +80,7 @@ impl AssemblyState {
 
     /// Return the assembled chunks as a fragmented buffer: each chunk
     /// is zero-copy wrapped in a `Bytes` (no contiguous memcpy of the
-    /// full payload). Avoids the ~2× peak that a `Vec<u8>` concat path
-    /// imposed — the byte cap now bounds real memory, not payload-plus-
-    /// contiguous-copy. Subscribers that need contiguous bytes can
-    /// concat at their own discretion.
+    /// full payload).
     fn assemble(self) -> Vec<Bytes> {
         self.chunks.into_iter().flatten().map(Bytes::from).collect()
     }

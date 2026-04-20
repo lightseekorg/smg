@@ -100,23 +100,27 @@ pub fn dispatch_stream_batch<'a>(
     }
 }
 
-/// Pack `StreamEntry`s into `StreamBatch`es respecting a per-round
-/// chunk cap. If the flat entries exceed the cap, the trailing entries
-/// are dropped — this is at-most-once (§4.4); the sender's buffer is
-/// already drained and the application will re-publish on its next
-/// retry cycle.
+/// Pack `StreamEntry`s into one or more `StreamBatch`es of at most
+/// `max_chunks_per_batch` entries each. Every entry is emitted —
+/// truncating mid-sequence would strand trailing chunks of a value
+/// undeliverable (receiver never completes reassembly; buffer was
+/// already drained so the sender has nothing to retry with).
 pub fn build_stream_batches(
     entries: Vec<StreamEntry>,
-    max_chunks_per_round: usize,
+    max_chunks_per_batch: usize,
 ) -> Vec<StreamBatch> {
-    if entries.is_empty() {
+    if max_chunks_per_batch == 0 || entries.is_empty() {
         return Vec::new();
     }
-    let taken: Vec<StreamEntry> = entries.into_iter().take(max_chunks_per_round).collect();
-    if taken.is_empty() {
-        return Vec::new();
+    let mut out = Vec::new();
+    let mut iter = entries.into_iter().peekable();
+    while iter.peek().is_some() {
+        let batch: Vec<StreamEntry> = iter.by_ref().take(max_chunks_per_batch).collect();
+        if !batch.is_empty() {
+            out.push(StreamBatch { entries: batch });
+        }
     }
-    vec![StreamBatch { entries: taken }]
+    out
 }
 
 #[cfg(test)]
@@ -244,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_stream_batches_truncates_over_cap() {
+    fn test_build_stream_batches_packs_over_cap() {
         let entries: Vec<StreamEntry> = (0..10)
             .map(|i| StreamEntry {
                 key: format!("k{i}"),
@@ -254,8 +258,26 @@ mod tests {
                 data: vec![i as u8],
             })
             .collect();
+        // 10 entries, cap=3 → 3 + 3 + 3 + 1 = 4 batches. No entry dropped.
         let batches = build_stream_batches(entries, 3);
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].entries.len(), 3, "cap enforced at 3");
+        assert_eq!(batches.len(), 4);
+        assert_eq!(batches[0].entries.len(), 3);
+        assert_eq!(batches[1].entries.len(), 3);
+        assert_eq!(batches[2].entries.len(), 3);
+        assert_eq!(batches[3].entries.len(), 1);
+        let total: usize = batches.iter().map(|b| b.entries.len()).sum();
+        assert_eq!(total, 10, "every entry must be emitted (no truncation)");
+    }
+
+    #[test]
+    fn test_build_stream_batches_zero_cap_returns_empty() {
+        let entries = vec![StreamEntry {
+            key: "k".into(),
+            generation: 1,
+            chunk_index: 0,
+            total_chunks: 1,
+            data: vec![1],
+        }];
+        assert!(build_stream_batches(entries, 0).is_empty());
     }
 }
