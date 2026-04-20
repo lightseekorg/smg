@@ -44,18 +44,19 @@ service SglangScheduler {
 
 // Sampling parameters matching SGLang's SamplingParams
 //
-// IMPORTANT: Do not use SamplingParams::default() directly!
-// The proto3 defaults (0 for numeric fields) do NOT match the semantic defaults
-// (temperature=1.0, top_p=1.0, top_k=-1, etc.). Always construct with explicit values
-// or use the conversion functions in sglang_scheduler.rs / grpc_server.py.
+// The 7 core sampling fields (temperature, top_p, top_k, min_p,
+// frequency_penalty, presence_penalty, repetition_penalty) are proto3
+// `optional` so the servicer can distinguish "user set this to 0" from
+// "user did not set this". Unset fields fall back to:
+//   preferred_sampling_params > model generation_config > OpenAI defaults.
 message SamplingParams {
-  float temperature = 1;
-  float top_p = 2;
-  int32 top_k = 3;
-  float min_p = 4;
-  float frequency_penalty = 5;
-  float presence_penalty = 6;
-  float repetition_penalty = 7;
+  optional float temperature = 1;
+  optional float top_p = 2;
+  optional int32 top_k = 3;
+  optional float min_p = 4;
+  optional float frequency_penalty = 5;
+  optional float presence_penalty = 6;
+  optional float repetition_penalty = 7;
 
   optional uint32 max_new_tokens = 8;
   repeated string stop = 9;

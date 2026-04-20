@@ -162,6 +162,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         model_info: dict,
         scheduler_info: dict,
         health_servicer: SGLangHealthServicer | None = None,
+        model_config=None,
     ):
         """Initialize the standalone gRPC service."""
         self.request_manager = request_manager
@@ -170,6 +171,32 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         self.scheduler_info = scheduler_info
         self.start_time = time.time()
         self.health_servicer = health_servicer
+
+        # Build merged sampling defaults for generation-config support.
+        # Priority: user-set (HasField) > preferred > generation_config > OpenAI defaults.
+        # Computed once here since these are immutable after init.
+        openai_defaults = {
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": -1,
+            "min_p": 0.0,
+            "frequency_penalty": 0.0,
+            "presence_penalty": 0.0,
+            "repetition_penalty": 1.0,
+        }
+        default_sampling_params = (
+            dict(model_config.get_default_sampling_params()) if model_config else {}
+        )
+        preferred_sampling_params = (
+            dict(server_args.preferred_sampling_params)
+            if server_args.preferred_sampling_params
+            else {}
+        )
+        self._sampling_base = {
+            **openai_defaults,
+            **default_sampling_params,
+            **preferred_sampling_params,
+        }
         self.mm_receiver = None
         if (
             self.server_args.language_only
@@ -887,7 +914,35 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
     def _convert_sampling_params(
         self, grpc_params: sglang_scheduler_pb2.SamplingParams
     ) -> SGLSamplingParams:
-        """Convert gRPC SamplingParams to internal format."""
+        """Convert gRPC SamplingParams to internal format.
+
+        For the 7 optional sampling fields, applies a 3-tier default cascade:
+          user-set (HasField) > preferred_sampling_params > generation_config > OpenAI defaults
+        """
+        base = self._sampling_base
+
+        # Resolve each optional field: user-set value wins, else fall back to base
+        temperature = (
+            grpc_params.temperature if grpc_params.HasField("temperature") else base["temperature"]
+        )
+        top_p = grpc_params.top_p if grpc_params.HasField("top_p") else base["top_p"]
+        top_k = grpc_params.top_k if grpc_params.HasField("top_k") else base["top_k"]
+        min_p = grpc_params.min_p if grpc_params.HasField("min_p") else base["min_p"]
+        frequency_penalty = (
+            grpc_params.frequency_penalty
+            if grpc_params.HasField("frequency_penalty")
+            else base["frequency_penalty"]
+        )
+        presence_penalty = (
+            grpc_params.presence_penalty
+            if grpc_params.HasField("presence_penalty")
+            else base["presence_penalty"]
+        )
+        repetition_penalty = (
+            grpc_params.repetition_penalty
+            if grpc_params.HasField("repetition_penalty")
+            else base["repetition_penalty"]
+        )
 
         # Handle constraint types
         regex = None
@@ -921,13 +976,13 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         stop_token_ids = list(grpc_params.stop_token_ids) if grpc_params.stop_token_ids else None
 
         return SGLSamplingParams(
-            temperature=grpc_params.temperature,
-            top_p=grpc_params.top_p,
-            top_k=grpc_params.top_k,
-            min_p=grpc_params.min_p,
-            frequency_penalty=grpc_params.frequency_penalty,
-            presence_penalty=grpc_params.presence_penalty,
-            repetition_penalty=grpc_params.repetition_penalty,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
+            repetition_penalty=repetition_penalty,
             max_new_tokens=max_new_tokens,
             min_new_tokens=grpc_params.min_new_tokens,
             stop=stop,
