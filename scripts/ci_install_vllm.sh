@@ -19,15 +19,25 @@ fi
 
 echo "Using uv version: $(uv --version)"
 
-# Pin vLLM below 0.19.1. vLLM 0.19.1 bundled a transformers v5 upgrade
-# (transformers 4.57 → 5.5) which broke e5-mistral-7b-instruct embedding
-# quality (self-similarity ~0.33 instead of ~1.0). Last-known-good combo
-# is vllm==0.19.0 / transformers==4.57.6 per run 24591985132 (commit
-# 82a3fb1a); regression first seen in run 24608587304 (commit dcede344)
-# once vllm 0.19.1 started resolving. See run 24644816475 / job
-# 72068881582 for the failure signature.
+# Pin vLLM below 0.19.1 AND transformers below 5.0 (belt and suspenders).
+#
+# What broke: e2e-1gpu-embeddings (vllm) started failing on main after
+# vllm 0.19.1 was published. The failing combo was
+#   vllm==0.19.1 + transformers==5.5.4
+# which reports self-similarity ~0.33 (expected ~1.0) on
+# intfloat/e5-mistral-7b-instruct. Last-known-good combo was
+#   vllm==0.19.0 + transformers==4.57.6   (run 24591985132, 82a3fb1a)
+# regression first appeared in run 24608587304 (dcede344). Job showing
+# the failure: https://github.com/lightseekorg/smg/actions/runs/24644816475/job/72068881582
+#
+# Why both pins: we have not isolated whether vllm 0.19.1 regressed on
+# its own or transformers 5.x is the culprit — vllm 0.19.1's wheel
+# permits transformers 5.5.1+ (metadata: transformers!=5.0.*,...,!=5.5.0,>=4.56.0),
+# while vllm 0.19.0's wheel hard-caps transformers<5 (metadata: transformers<5,>=4.56.0).
+# Pinning both guarantees we restore the last-known-good regardless of
+# which side actually broke it. See PR description for follow-up work.
 echo "Installing vLLM..."
-uv pip install "vllm<0.19.1"
+uv pip install "vllm<0.19.1" "transformers<5"
 
 # Install nixl for vLLM PD disaggregation (NIXL KV transfer)
 echo "Installing nixl..."
