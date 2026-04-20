@@ -305,6 +305,50 @@ impl<'a> McpToolSession<'a> {
         }
     }
 
+    /// Continue a previously approved tool call without re-entering approval.
+    pub async fn continue_tool_execution(&self, input: ToolExecutionInput) -> ToolExecutionOutput {
+        let invoked_name = input.tool_name.clone();
+        let arguments_str = input.arguments.to_string();
+
+        if let Some(binding) = self.exposed_name_map.get(&invoked_name) {
+            let resolved_tool_name = binding.resolved_tool_name.clone();
+            let mut output = self
+                .orchestrator
+                .continue_tool_resolved_execution(
+                    ToolExecutionInput {
+                        call_id: input.call_id,
+                        tool_name: resolved_tool_name,
+                        arguments: input.arguments,
+                    },
+                    &binding.server_key,
+                    &binding.server_label,
+                )
+                .await;
+            output.tool_name = invoked_name;
+            output
+        } else {
+            let fallback_label = self
+                .all_mcp_servers
+                .first()
+                .map(|b| b.label.as_str())
+                .unwrap_or(DEFAULT_SERVER_LABEL)
+                .to_string();
+            let err = format!("Tool '{invoked_name}' is not in this session's exposed tool map");
+            ToolExecutionOutput {
+                call_id: input.call_id,
+                tool_name: invoked_name,
+                server_key: UNKNOWN_SERVER_KEY.to_string(),
+                server_label: fallback_label,
+                arguments_str,
+                output: serde_json::json!({ "error": &err }),
+                is_error: true,
+                error_message: Some(err),
+                response_format: ResponseFormat::Passthrough,
+                duration: std::time::Duration::default(),
+            }
+        }
+    }
+
     /// Resolve the user-facing server label for a tool.
     ///
     /// Uses the orchestrator inventory to find the tool's server key, then maps

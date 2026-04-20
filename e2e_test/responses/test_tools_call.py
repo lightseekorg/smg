@@ -559,7 +559,7 @@ class TestToolCallingCloud:
         assert len(final_text) > 0, "Final text should not be empty"
 
     def test_mcp_approval_required_interrupts_and_resumes(self, model, api_client):
-        """Test MCP approval-required workflow eventually supports interruption and resume."""
+        """Test MCP approval-required workflow interrupts and resumes."""
 
         time.sleep(2)  # Avoid rate limiting
 
@@ -579,8 +579,31 @@ class TestToolCallingCloud:
 
         assert_mcp_approval_interruption_non_streaming(resp)
 
-        # TODO: extend this same test in a follow-up PR with the approval continuation
-        # request and assert the resumed turn emits mcp_call plus the final assistant output.
+        approval_request = next(item for item in resp.output if item.type == "mcp_approval_request")
+        resumed = api_client.responses.create(
+            model=model,
+            previous_response_id=resp.id,
+            input=[
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": approval_request.id,
+                    "approve": True,
+                }
+            ],
+            tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL_REQUIRE_APPROVAL_ALWAYS],
+            stream=False,
+            reasoning={"effort": "low"},
+        )
+
+        assert resumed.error is None
+        assert resumed.status == "completed"
+        resumed_mcp_calls = [item for item in resumed.output if item.type == "mcp_call"]
+        assert len(resumed_mcp_calls) > 0
+        brave_calls = [item for item in resumed_mcp_calls if item.server_label == "brave"]
+        assert len(brave_calls) > 0, "Expected resumed brave mcp_call output"
+        assert all(call.approval_request_id == approval_request.id for call in brave_calls)
+        assert all(item.type != "mcp_approval_request" for item in resumed.output)
+        assert len(resumed.output_text) > 0
 
     def test_mcp_multi_server_tool_call(self, model, api_client):
         """Test MCP tool call with multiple MCP servers (non-streaming)."""

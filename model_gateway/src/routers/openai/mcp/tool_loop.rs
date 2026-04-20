@@ -17,7 +17,9 @@ use openai_protocol::{
         is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType, McpEvent,
         OutputItemEvent, WebSearchCallEvent,
     },
-    responses::{generate_id, ResponseInput, ResponseTool, ResponsesRequest},
+    responses::{
+        generate_id, ResponseInput, ResponseInputOutputItem, ResponseTool, ResponsesRequest,
+    },
 };
 use serde_json::{json, to_value, Value};
 use smg_mcp::{
@@ -50,6 +52,13 @@ pub(crate) struct ToolLoopState {
     pub existing_mcp_list_tools_labels: HashSet<String>,
     /// Transformed output items (mcp_call, web_search_call, etc.) - stored to avoid reconstruction
     pub mcp_call_items: Vec<Value>,
+}
+
+struct ApprovedToolContinuation {
+    approval_request_id: String,
+    tool_name: String,
+    arguments: Value,
+    arguments_str: String,
 }
 
 impl ToolLoopState {
@@ -329,6 +338,9 @@ pub(crate) fn build_resume_payload(
         .as_object_mut()
         .ok_or_else(|| "payload not an object".to_string())?;
 
+    obj.remove("tools");
+    obj.remove("tool_choice");
+
     let mut input_array = Vec::with_capacity(1 + conversation_history.len());
 
     match original_input {
@@ -341,8 +353,14 @@ pub(crate) fn build_resume_payload(
             input_array.push(user_item);
         }
         ResponseInput::Items(items) => {
-            let items_value =
-                to_value(items).map_err(|e| format!("Failed to serialize input items: {e}"))?;
+            let replay_items = items
+                .iter()
+                .filter(|item| !matches!(item, ResponseInputOutputItem::McpApprovalRequest { .. }))
+                .filter(|item| !matches!(item, ResponseInputOutputItem::McpApprovalResponse { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
+            let items_value = to_value(replay_items)
+                .map_err(|e| format!("Failed to serialize input items: {e}"))?;
             if let Some(items_arr) = items_value.as_array() {
                 input_array.extend_from_slice(items_arr);
             }
@@ -585,6 +603,81 @@ fn approval_request_item_id_source(item_id: &str) -> String {
     normalize_tool_item_id_with_prefix(item_id, "mcpr_")
 }
 
+fn approval_continuation_call_id(approval_request_id: &str) -> String {
+    let suffix = approval_request_id
+        .strip_prefix("mcpr_")
+        .unwrap_or(approval_request_id);
+    format!("call_{suffix}")
+}
+
+fn approval_continuation_item_id(approval_request_id: &str) -> String {
+    let suffix = approval_request_id
+        .strip_prefix("mcpr_")
+        .unwrap_or(approval_request_id);
+    format!("fc_{suffix}")
+}
+
+fn payload_input(payload: &Value) -> Option<ResponseInput> {
+    payload
+        .get("input")
+        .cloned()
+        .and_then(|input| serde_json::from_value(input).ok())
+}
+
+fn extract_approved_tool_continuation(
+    current_input: &ResponseInput,
+    payload: &Value,
+) -> Option<ApprovedToolContinuation> {
+    let ResponseInput::Items(current_items) = current_input else {
+        return None;
+    };
+
+    let approval_response_id = current_items.iter().rev().find_map(|item| match item {
+        ResponseInputOutputItem::McpApprovalResponse {
+            approval_request_id,
+            approve,
+            ..
+        } if *approve => Some(approval_request_id.clone()),
+        _ => None,
+    })?;
+
+    let input = payload_input(payload)?;
+    let ResponseInput::Items(items) = input else {
+        return None;
+    };
+
+    items.iter().rev().find_map(|item| match item {
+        ResponseInputOutputItem::McpApprovalRequest {
+            id,
+            name,
+            arguments,
+            ..
+        } if id == &approval_response_id => {
+            serde_json::from_str(arguments)
+                .ok()
+                .map(|arguments_json| ApprovedToolContinuation {
+                    approval_request_id: approval_response_id.clone(),
+                    tool_name: name.clone(),
+                    arguments: arguments_json,
+                    arguments_str: arguments.clone(),
+                })
+        }
+        _ => None,
+    })
+}
+
+fn set_mcp_call_approval_request_id(item: &mut Value, approval_request_id: &str) {
+    let Some(obj) = item.as_object_mut() else {
+        return;
+    };
+    if obj.get("type").and_then(|value| value.as_str()) == Some(ItemType::MCP_CALL) {
+        obj.insert(
+            "approval_request_id".to_string(),
+            Value::String(approval_request_id.to_string()),
+        );
+    }
+}
+
 pub(crate) fn mcp_list_tools_bindings_to_emit(
     existing_labels: &HashSet<String>,
     bindings: &[McpServerBinding],
@@ -769,6 +862,78 @@ pub(crate) async fn execute_tool_loop(
     let base_payload = initial_payload.clone();
     let tools_json = base_payload.get("tools").cloned().unwrap_or(json!([]));
     let mut current_payload = initial_payload;
+
+    if let Some(continuation) =
+        extract_approved_tool_continuation(&original_body.input, &current_payload)
+    {
+        state.original_input =
+            payload_input(&current_payload).unwrap_or_else(|| original_body.input.clone());
+        state.iteration += 1;
+        state.total_calls += 1;
+
+        let effective_limit = match max_tool_calls {
+            Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
+            None => DEFAULT_MAX_ITERATIONS,
+        };
+        if state.total_calls > effective_limit {
+            return Err("approved tool continuation exceeded max_tool_calls".to_string());
+        }
+
+        let call_id = approval_continuation_call_id(&continuation.approval_request_id);
+        let item_id = approval_continuation_item_id(&continuation.approval_request_id);
+        let tool_output = session
+            .continue_tool_execution(ToolExecutionInput {
+                call_id: call_id.clone(),
+                tool_name: continuation.tool_name.clone(),
+                arguments: continuation.arguments,
+            })
+            .await;
+
+        Metrics::record_mcp_tool_iteration(&original_body.model);
+        Metrics::record_mcp_tool_duration(
+            &original_body.model,
+            &tool_output.tool_name,
+            tool_output.duration,
+        );
+        Metrics::record_mcp_tool_call(
+            &original_body.model,
+            &tool_output.tool_name,
+            if tool_output.is_error {
+                metrics_labels::RESULT_ERROR
+            } else {
+                metrics_labels::RESULT_SUCCESS
+            },
+        );
+
+        let response_format = session.tool_response_format(&continuation.tool_name);
+        let tool_item_id = non_streaming_tool_item_id_source(&item_id, &response_format);
+        let mut transformed_item = build_transformed_mcp_call_item(
+            &tool_output.output,
+            &response_format,
+            &tool_item_id,
+            &tool_output.server_label,
+            &continuation.tool_name,
+            &continuation.arguments_str,
+        );
+        set_mcp_call_approval_request_id(&mut transformed_item, &continuation.approval_request_id);
+
+        state.record_call(
+            session.is_builtin_tool(&continuation.tool_name),
+            call_id,
+            continuation.tool_name,
+            continuation.arguments_str,
+            tool_output.output.to_string(),
+            transformed_item,
+        );
+
+        current_payload = build_resume_payload(
+            &base_payload,
+            &state.conversation_history,
+            &state.original_input,
+            &json!([]),
+            false,
+        )?;
+    }
 
     info!(
         "Starting tool loop: max_tool_calls={:?}, max_iterations={}",
@@ -1201,6 +1366,7 @@ fn extract_function_calls(resp: &Value) -> Vec<ExtractedFunctionCall> {
 mod tests {
     use std::collections::HashSet;
 
+    use openai_protocol::event_types::ItemType;
     use serde_json::json;
     use smg_mcp::{
         BuiltinToolType, McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig,
@@ -1208,9 +1374,9 @@ mod tests {
     };
 
     use super::{
-        build_transformed_mcp_call_item, extract_openai_response_output_items,
-        is_internal_mcp_response_item, mcp_list_tools_bindings_to_emit, ResponseInput,
-        ToolLoopState,
+        build_resume_payload, build_transformed_mcp_call_item,
+        extract_openai_response_output_items, is_internal_mcp_response_item,
+        mcp_list_tools_bindings_to_emit, ResponseInput, ResponseInputOutputItem, ToolLoopState,
     };
 
     fn test_tool(name: &str) -> Tool {
@@ -1514,5 +1680,59 @@ mod tests {
         let output = r#"[{"type":"text","text":"{\"openai_response\":null}"}]"#;
         let extracted = extract_openai_response_output_items(output);
         assert!(extracted.is_empty());
+    }
+
+    #[test]
+    fn build_resume_payload_strips_approval_items_from_replayed_input() {
+        let base_payload = json!({
+            "model": "gpt-5.4",
+            "input": []
+        });
+        let original_input = ResponseInput::Items(vec![
+            ResponseInputOutputItem::Message {
+                id: "msg_1".to_string(),
+                role: "user".to_string(),
+                content: vec![openai_protocol::responses::ResponseContentPart::InputText {
+                    text: "hello".to_string(),
+                }],
+                status: Some("completed".to_string()),
+            },
+            ResponseInputOutputItem::McpApprovalRequest {
+                id: "mcpr_1".to_string(),
+                arguments: "{}".to_string(),
+                name: "ask_question".to_string(),
+                server_label: "deepwiki".to_string(),
+            },
+            ResponseInputOutputItem::McpApprovalResponse {
+                id: None,
+                approval_request_id: "mcpr_1".to_string(),
+                approve: true,
+                reason: None,
+            },
+        ]);
+
+        let payload = build_resume_payload(
+            &base_payload,
+            &[json!({
+                "type": ItemType::FUNCTION_CALL_OUTPUT,
+                "call_id": "call_1",
+                "output": "ok"
+            })],
+            &original_input,
+            &json!([]),
+            false,
+        )
+        .expect("resume payload");
+
+        let input = payload["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[1]["type"], ItemType::FUNCTION_CALL_OUTPUT);
+        assert!(input
+            .iter()
+            .all(|item| item["type"] != "mcp_approval_request"));
+        assert!(input
+            .iter()
+            .all(|item| item["type"] != "mcp_approval_response"));
     }
 }

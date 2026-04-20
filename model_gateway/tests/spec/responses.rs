@@ -1008,6 +1008,47 @@ fn test_validate_input_items_structure() {
         result.is_err(),
         "Input items without messages should be invalid"
     );
+
+    // Valid: approval-only continuation with previous_response_id
+    let request = ResponsesRequest {
+        input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+            id: None,
+            approval_request_id: "mcpr_123".to_string(),
+            approve: true,
+            reason: None,
+        }]),
+        previous_response_id: Some("resp_123".to_string()),
+        ..Default::default()
+    };
+    assert!(
+        request.validate().is_ok(),
+        "Approval-only continuation should be valid when previous_response_id is set"
+    );
+
+    let request = ResponsesRequest {
+        input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+            id: None,
+            approval_request_id: "mcpr_123".to_string(),
+            approve: true,
+            reason: None,
+        }]),
+        previous_response_id: Some(String::new()),
+        ..Default::default()
+    };
+    assert!(request.validate().is_err());
+
+    let request = ResponsesRequest {
+        input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+            id: None,
+            approval_request_id: "mcpr_123".to_string(),
+            approve: true,
+            reason: None,
+        }]),
+        previous_response_id: Some("resp_123".to_string()),
+        stream: Some(true),
+        ..Default::default()
+    };
+    assert!(request.validate().is_err());
 }
 
 // ============================================================================

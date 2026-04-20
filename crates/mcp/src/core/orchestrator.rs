@@ -1061,6 +1061,88 @@ impl McpOrchestrator {
         }
     }
 
+    /// Continue a previously approved resolved tool call without re-entering approval.
+    pub async fn continue_tool_resolved_execution(
+        &self,
+        input: ToolExecutionInput,
+        server_key: &str,
+        server_label: &str,
+    ) -> ToolExecutionOutput {
+        let start = Instant::now();
+        let arguments_str = input.arguments.to_string();
+
+        let qualified = QualifiedToolName::new(server_key, &input.tool_name);
+        let entry = self.tool_inventory.get_entry(server_key, &input.tool_name);
+
+        match entry {
+            Some(entry) => {
+                self.active_executions.fetch_add(1, Ordering::SeqCst);
+                let _guard = scopeguard::guard(Arc::clone(&self.active_executions), |count| {
+                    count.fetch_sub(1, Ordering::SeqCst);
+                });
+                self.metrics.record_call_start(&qualified);
+                let call_start_time = Instant::now();
+                let response_format = entry.response_format.clone();
+
+                let output = match self
+                    .execute_tool_with_reconnect(&entry, input.arguments)
+                    .await
+                {
+                    Ok(raw_result) => ToolExecutionOutput {
+                        call_id: input.call_id,
+                        tool_name: input.tool_name,
+                        server_key: server_key.to_string(),
+                        server_label: server_label.to_string(),
+                        arguments_str,
+                        output: Self::call_result_to_json(&raw_result),
+                        is_error: raw_result.is_error.unwrap_or(false),
+                        error_message: None,
+                        response_format: response_format.clone(),
+                        duration: call_start_time.elapsed(),
+                    },
+                    Err(e) => {
+                        let err = format!("Tool call failed: {e}");
+                        ToolExecutionOutput {
+                            call_id: input.call_id,
+                            tool_name: input.tool_name,
+                            server_key: server_key.to_string(),
+                            server_label: server_label.to_string(),
+                            arguments_str,
+                            output: serde_json::json!({ "error": &err }),
+                            is_error: true,
+                            error_message: Some(err),
+                            response_format,
+                            duration: call_start_time.elapsed(),
+                        }
+                    }
+                };
+
+                let duration_ms = output.duration.as_millis() as u64;
+                self.metrics
+                    .record_call_end(&qualified, !output.is_error, duration_ms);
+                output
+            }
+            None => {
+                let err = format!(
+                    "Tool '{}' not found on server '{}'",
+                    input.tool_name, server_key
+                );
+                ToolExecutionOutput {
+                    call_id: input.call_id,
+                    tool_name: input.tool_name,
+                    server_key: server_key.to_string(),
+                    server_label: server_label.to_string(),
+                    arguments_str,
+                    output: serde_json::json!({ "error": &err }),
+                    is_error: true,
+                    error_message: Some(err),
+                    response_format: ResponseFormat::Passthrough,
+                    duration: start.elapsed(),
+                }
+            }
+        }
+    }
+
     async fn execute_tool_entry_result(
         &self,
         entry: &ToolEntry,
