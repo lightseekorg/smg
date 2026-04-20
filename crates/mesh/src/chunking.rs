@@ -130,6 +130,10 @@ pub fn dispatch_stream_batch(
 ) {
     for entry in entries {
         if entry.total_chunks == 1 {
+            // A fresh single-chunk value supersedes any in-flight
+            // multi-chunk assembly for the same (peer, key); drop the
+            // stale fragments so they don't wait for GC.
+            mesh_kv.chunk_assembler().drop_pending(peer_id, &entry.key);
             mesh_kv.notify_subscribers(&entry.key, Some(vec![Bytes::from(entry.data)]));
         } else {
             let key = entry.key.clone();

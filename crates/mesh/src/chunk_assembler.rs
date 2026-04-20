@@ -259,6 +259,16 @@ impl ChunkAssembler {
             .collect()
     }
 
+    /// Invalidate any pending partial assembly for `(peer_id, key)`.
+    /// The single-chunk fast path calls this so a fresh value replaces
+    /// leftover fragments from an older multi-chunk publish under the
+    /// same key, instead of waiting for the 30 s GC to clean them up.
+    /// No-op if no entry exists.
+    pub fn drop_pending(&self, peer_id: &str, key: &str) {
+        let asm_key: AssemblyKey = (peer_id.to_string(), key.to_string());
+        self.assemblies.remove(&asm_key);
+    }
+
     fn remove_stale(&self, keys: &[AssemblyKey], timeout: Duration) {
         for key in keys {
             self.assemblies.remove_if(key, |_, state| {
@@ -746,6 +756,43 @@ mod tests {
             .receive_chunk("peer", "b", 1, 1, 2, b"b1".to_vec())
             .unwrap();
         assert_eq!(flatten(&b), b"b0b1");
+        assert_eq!(asm.in_flight(), 0);
+    }
+
+    #[test]
+    fn test_drop_pending_removes_only_matching_entry() {
+        let asm = ChunkAssembler::new();
+        // Start a multi-chunk assembly for (peer, "k") and an unrelated
+        // one for (peer, "other") + (other_peer, "k").
+        assert!(asm
+            .receive_chunk("peer", "k", 1, 0, 2, b"aa".to_vec())
+            .is_none());
+        assert!(asm
+            .receive_chunk("peer", "other", 1, 0, 2, b"bb".to_vec())
+            .is_none());
+        assert!(asm
+            .receive_chunk("other_peer", "k", 1, 0, 2, b"cc".to_vec())
+            .is_none());
+        assert_eq!(asm.in_flight(), 3);
+
+        asm.drop_pending("peer", "k");
+        assert_eq!(
+            asm.in_flight(),
+            2,
+            "only (peer, k) should be gone; other entries spared"
+        );
+
+        // Completing the spared entries still works.
+        let out = asm
+            .receive_chunk("peer", "other", 1, 1, 2, b"22".to_vec())
+            .unwrap();
+        assert_eq!(flatten(&out), b"bb22");
+    }
+
+    #[test]
+    fn test_drop_pending_on_missing_key_is_noop() {
+        let asm = ChunkAssembler::new();
+        asm.drop_pending("peer", "nonexistent");
         assert_eq!(asm.in_flight(), 0);
     }
 }
