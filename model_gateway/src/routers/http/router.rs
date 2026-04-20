@@ -699,12 +699,19 @@ impl Router {
             // chunks in memory.
             const STREAM_RELAY_BUFFER: usize = 32;
             let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, String>>(STREAM_RELAY_BUFFER);
+            // Attribute stream outcome to the worker from inside the relay
+            // task: a mid-stream error after a 2xx header must mark the
+            // worker failed (502-synthetic) so the circuit breaker and
+            // worker-error metric track the transport failure.
+            let worker_for_stream = worker.clone();
+            let stream_header_status = status.as_u16();
             #[expect(
                 clippy::disallowed_methods,
                 reason = "fire-and-forget stream relay; gateway shutdown need not wait for individual stream forwarding"
             )]
             tokio::spawn(async move {
                 let mut stream = stream;
+                let mut stream_failed = false;
                 while let Some(chunk) = stream.next().await {
                     match chunk {
                         Ok(bytes) => {
@@ -713,10 +720,24 @@ impl Router {
                             }
                         }
                         Err(e) => {
+                            stream_failed = true;
                             let _ = tx.send(Err(format!("Stream error: {e}"))).await;
                             break;
                         }
                     }
+                }
+                let outcome_status = if stream_failed {
+                    StatusCode::BAD_GATEWAY.as_u16()
+                } else {
+                    stream_header_status
+                };
+                worker_for_stream.record_outcome(outcome_status);
+                if stream_failed {
+                    Metrics::record_worker_error(
+                        metrics_labels::WORKER_REGULAR,
+                        metrics_labels::CONNECTION_HTTP,
+                        error_type_from_status(StatusCode::BAD_GATEWAY),
+                    );
                 }
             });
             let stream = ReceiverStream::new(rx);
@@ -748,16 +769,19 @@ impl Router {
         // response if reading the body fails. Classify metrics off the final
         // response the client will actually see, not the upstream status.
         let final_status = response.status();
-        // Feed the final status into the circuit breaker / worker-error
-        // metric here — not at header time — so a body-read failure after a
-        // 2xx header is still attributed to the worker that produced it.
-        worker.record_outcome(final_status.as_u16());
-        if final_status.is_server_error() {
-            Metrics::record_worker_error(
-                metrics_labels::WORKER_REGULAR,
-                metrics_labels::CONNECTION_HTTP,
-                error_type_from_status(final_status),
-            );
+        if !is_stream {
+            // Feed the final status into the circuit breaker / worker-error
+            // metric here — not at header time — so a body-read failure after
+            // a 2xx header is still attributed to the worker that produced
+            // it. Streaming outcomes are recorded inside the relay task.
+            worker.record_outcome(final_status.as_u16());
+            if final_status.is_server_error() {
+                Metrics::record_worker_error(
+                    metrics_labels::WORKER_REGULAR,
+                    metrics_labels::CONNECTION_HTTP,
+                    error_type_from_status(final_status),
+                );
+            }
         }
         if final_status.is_success() {
             Metrics::record_router_duration(
