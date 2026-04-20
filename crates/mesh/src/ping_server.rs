@@ -607,13 +607,22 @@ impl Gossip for GossipService {
                                         sequence: sequence_counter,
                                         peer_id: self_name_incremental.clone(),
                                     };
-                                    if let Err(e) = tx_incremental.try_send(Ok(msg)) {
-                                        log::debug!(
-                                            error = ?e,
-                                            "server-side stream batch dropped on backpressure"
-                                        );
-                                        // TODO(metrics): bump stream_dropped_on_backpressure
-                                        break;
+                                    match tx_incremental.try_send(Ok(msg)) {
+                                        Ok(()) => {}
+                                        Err(mpsc::error::TrySendError::Full(_)) => {
+                                            log::debug!(
+                                                "server-side stream batch dropped on backpressure"
+                                            );
+                                            // TODO(metrics): bump
+                                            // stream_dropped_on_backpressure
+                                            break;
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                                            log::warn!(
+                                                "server-side stream sender: channel closed, stopping"
+                                            );
+                                            return;
+                                        }
                                     }
                                 }
                             }
