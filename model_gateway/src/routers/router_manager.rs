@@ -33,6 +33,7 @@ use openai_protocol::{
     },
     rerank::RerankRequest,
     responses::ResponsesRequest,
+    transcription::TranscriptionRequest,
 };
 use serde_json::Value;
 use tracing::{debug, info, warn};
@@ -43,7 +44,7 @@ use crate::{
     routers::{
         common::header_utils::apply_provider_headers,
         factory::{router_ids, RouterId},
-        RouterFactory, RouterTrait,
+        AudioFile, RouterFactory, RouterTrait,
     },
     server::ServerConfig,
     worker::{ConnectionMode, ProviderType, RuntimeType, WorkerRegistry, WorkerType},
@@ -665,6 +666,28 @@ impl RouterTrait for RouterManager {
 
         if let Some(router) = router {
             router.route_classify(headers, body, model_id).await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Model '{}' not found or no router available", body.model),
+            )
+                .into_response()
+        }
+    }
+
+    async fn route_audio_transcriptions(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &TranscriptionRequest,
+        audio: AudioFile,
+        model_id: &str,
+    ) -> Response {
+        let router = self.select_router_for_request(headers, Some(model_id));
+
+        if let Some(router) = router {
+            router
+                .route_audio_transcriptions(headers, body, audio, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,

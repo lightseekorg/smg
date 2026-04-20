@@ -7,7 +7,7 @@ use std::{
 };
 
 use axum::{
-    extract::{Path, Query, Request, State},
+    extract::{multipart::MultipartError, Multipart, Path, Query, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -30,6 +30,7 @@ use openai_protocol::{
     rerank::{RerankRequest, V1RerankReqInput},
     responses::ResponsesRequest,
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
+    transcription::TranscriptionRequest,
     validated::ValidatedJson,
     worker::{WorkerSpec, WorkerUpdateRequest},
 };
@@ -62,7 +63,7 @@ use crate::{
         openai::realtime::ws::RealtimeQueryParams,
         parse, responses as response_handlers,
         router_manager::RouterManager,
-        tokenize, RouterTrait,
+        tokenize, AudioFile, RouterTrait,
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
@@ -288,6 +289,127 @@ async fn v1_classify(
         .router
         .route_classify(Some(&headers), &body, &body.model)
         .await
+}
+
+async fn v1_audio_transcriptions(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
+    let mut file_bytes: Option<bytes::Bytes> = None;
+    let mut file_name: Option<String> = None;
+    let mut file_content_type: Option<String> = None;
+    let mut req = TranscriptionRequest::default();
+    let mut timestamp_granularities: Vec<String> = Vec::new();
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to read multipart field: {e}"),
+                )
+                    .into_response();
+            }
+        };
+
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "file" => {
+                file_name = field.file_name().map(str::to_string);
+                file_content_type = field.content_type().map(str::to_string);
+                match field.bytes().await {
+                    Ok(b) => file_bytes = Some(b),
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("Failed to read audio file bytes: {e}"),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            "model" => match field.text().await {
+                Ok(t) => req.model = t,
+                Err(e) => return bad_text_field("model", e),
+            },
+            "language" => match field.text().await {
+                Ok(t) => req.language = Some(t),
+                Err(e) => return bad_text_field("language", e),
+            },
+            "prompt" => match field.text().await {
+                Ok(t) => req.prompt = Some(t),
+                Err(e) => return bad_text_field("prompt", e),
+            },
+            "response_format" => match field.text().await {
+                Ok(t) => req.response_format = Some(t),
+                Err(e) => return bad_text_field("response_format", e),
+            },
+            "temperature" => match field.text().await {
+                Ok(t) => match t.parse::<f32>() {
+                    Ok(v) => req.temperature = Some(v),
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("Invalid 'temperature' value: {e}"),
+                        )
+                            .into_response();
+                    }
+                },
+                Err(e) => return bad_text_field("temperature", e),
+            },
+            "timestamp_granularities" | "timestamp_granularities[]" => match field.text().await {
+                Ok(t) => timestamp_granularities.push(t),
+                Err(e) => return bad_text_field("timestamp_granularities", e),
+            },
+            "stream" => match field.text().await {
+                Ok(t) => {
+                    let truthy = matches!(t.as_str(), "true" | "1" | "True" | "TRUE");
+                    req.stream = Some(truthy);
+                }
+                Err(e) => return bad_text_field("stream", e),
+            },
+            _ => {
+                // Unknown field; drain to free resources but otherwise ignore.
+                let _ = field.bytes().await;
+            }
+        }
+    }
+
+    if req.model.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Missing required 'model' field").into_response();
+    }
+    let bytes = match file_bytes {
+        Some(b) => b,
+        None => {
+            return (StatusCode::BAD_REQUEST, "Missing required 'file' part").into_response();
+        }
+    };
+
+    if !timestamp_granularities.is_empty() {
+        req.timestamp_granularities = Some(timestamp_granularities);
+    }
+
+    let audio = AudioFile {
+        bytes,
+        file_name: file_name.unwrap_or_else(|| "audio".to_string()),
+        content_type: file_content_type,
+    };
+
+    state
+        .router
+        .route_audio_transcriptions(Some(&headers), &req, audio, &req.model)
+        .await
+}
+
+fn bad_text_field(field: &str, e: MultipartError) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        format!("Failed to read '{field}' field: {e}"),
+    )
+        .into_response()
 }
 
 async fn v1_responses_get(
@@ -703,6 +825,7 @@ pub fn build_app(
         .route("/v1/messages", post(v1_messages))
         .route("/v1/interactions", post(v1_interactions))
         .route("/v1/classify", post(v1_classify))
+        .route("/v1/audio/transcriptions", post(v1_audio_transcriptions))
         // Tokenize / Detokenize endpoints
         .route("/v1/tokenize", post(v1_tokenize))
         .route("/v1/detokenize", post(v1_detokenize))

@@ -17,8 +17,12 @@ use openai_protocol::{
     generate::GenerateRequest,
     rerank::{RerankRequest, RerankResponse, RerankResult},
     responses::ResponsesRequest,
+    transcription::TranscriptionRequest,
 };
-use reqwest::Client;
+use reqwest::{
+    multipart::{Form, Part},
+    Client,
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::error;
@@ -39,7 +43,7 @@ use crate::{
         },
         error::{self, extract_error_code_from_response},
         grpc::utils::{error_type_from_status, route_to_endpoint},
-        RouterTrait,
+        AudioFile, RouterTrait,
     },
     worker::{AttachedBody, ConnectionMode, Worker, WorkerLoadGuard, WorkerRegistry, WorkerType},
 };
@@ -461,6 +465,209 @@ impl Router {
             .await
     }
 
+    /// Forward an audio transcription request to an audio-capable worker as
+    /// `multipart/form-data`. Separate from `route_typed_request` because the
+    /// endpoint is not JSON-bodied.
+    async fn route_multipart_transcription(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &TranscriptionRequest,
+        audio: AudioFile,
+        route: &'static str,
+        model_id: &str,
+    ) -> Response {
+        let start = Instant::now();
+        let is_stream = body.is_stream();
+        let text = body.extract_text_for_routing();
+        let endpoint = route_to_endpoint(route);
+
+        Metrics::record_router_request(
+            metrics_labels::ROUTER_HTTP,
+            metrics_labels::BACKEND_REGULAR,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            endpoint,
+            bool_to_static_str(is_stream),
+        );
+
+        let worker = match self.select_worker_for_model(model_id, Some(&text), headers) {
+            Some(w) => w,
+            None => {
+                let model_filter = if model_id == crate::worker::UNKNOWN_MODEL_ID {
+                    None
+                } else {
+                    Some(model_id)
+                };
+                let total = self.worker_registry.get_workers_filtered(
+                    model_filter,
+                    Some(WorkerType::Regular),
+                    Some(ConnectionMode::Http),
+                    None,
+                    false,
+                );
+                return if total.is_empty() {
+                    error::model_not_found(model_id)
+                } else {
+                    error::service_unavailable(
+                        "no_available_workers",
+                        "All workers are unavailable (circuit breaker open or unhealthy)",
+                    )
+                };
+            }
+        };
+
+        let policy = self.policy_registry.get_policy_or_default(model_id);
+        let load_guard = ["cache_aware", "manual"]
+            .contains(&policy.name())
+            .then(|| WorkerLoadGuard::new(worker.clone(), headers));
+
+        let mut headers_with_trace = headers.cloned().unwrap_or_default();
+        inject_trace_context_http(&mut headers_with_trace);
+        let headers = Some(&headers_with_trace);
+
+        events::RequestSentEvent { url: worker.url() }.emit();
+
+        let form = match build_transcription_form(body, audio) {
+            Ok(f) => f,
+            Err(e) => {
+                return error::bad_request("multipart_build_failed", e);
+            }
+        };
+
+        let endpoint_url = worker.endpoint_url(route);
+        let mut request_builder = self.client.post(&endpoint_url).multipart(form);
+
+        if let Some(key) = worker.api_key().cloned() {
+            let mut auth_header = String::with_capacity(7 + key.len());
+            auth_header.push_str("Bearer ");
+            auth_header.push_str(&key);
+            request_builder = request_builder.header("Authorization", auth_header);
+        }
+
+        if let Some(headers) = headers {
+            for (name, value) in headers {
+                // Skip Content-Type and Content-Length — reqwest sets the
+                // correct multipart boundary itself.
+                let name_str = name.as_str();
+                if name_str.eq_ignore_ascii_case("content-type")
+                    || name_str.eq_ignore_ascii_case("content-length")
+                {
+                    continue;
+                }
+                if header_utils::should_forward_request_header(name_str) {
+                    request_builder = request_builder.header(name, value);
+                }
+            }
+        }
+
+        let res = match request_builder.send().await {
+            Ok(res) => res,
+            Err(e) => {
+                error!(
+                    "Failed to send multipart transcription request worker_url={} route={} error={}",
+                    worker.url(),
+                    route,
+                    e
+                );
+                let err_resp = convert_reqwest_error(e);
+                Metrics::record_router_upstream_response(
+                    metrics_labels::ROUTER_HTTP,
+                    err_resp.status().as_u16(),
+                    extract_error_code_from_response(&err_resp),
+                );
+                return err_resp;
+            }
+        };
+
+        let status = StatusCode::from_u16(res.status().as_u16())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+        Metrics::record_router_upstream_response(metrics_labels::ROUTER_HTTP, status.as_u16(), "");
+
+        events::RequestReceivedEvent {}.emit();
+        worker.record_outcome(status.as_u16());
+
+        if status.is_server_error() {
+            Metrics::record_worker_error(
+                metrics_labels::WORKER_REGULAR,
+                metrics_labels::CONNECTION_HTTP,
+                error_type_from_status(status),
+            );
+        }
+
+        let response = if is_stream {
+            let mut response_headers = header_utils::preserve_response_headers(res.headers());
+            response_headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+            let stream = res.bytes_stream();
+            let (tx, rx) = mpsc::unbounded_channel();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "fire-and-forget stream relay; gateway shutdown need not wait for individual stream forwarding"
+            )]
+            tokio::spawn(async move {
+                let mut stream = stream;
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(bytes) => {
+                            if tx.send(Ok(bytes)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(format!("Stream error: {e}")));
+                            break;
+                        }
+                    }
+                }
+            });
+            let stream = UnboundedReceiverStream::new(rx);
+            let body = Body::from_stream(stream);
+            let mut response = Response::new(body);
+            *response.status_mut() = status;
+            *response.headers_mut() = response_headers;
+            if let Some(guard) = load_guard {
+                response = AttachedBody::wrap_response(response, guard);
+            }
+            response
+        } else {
+            let response_headers = header_utils::preserve_response_headers(res.headers());
+            match res.bytes().await {
+                Ok(body) => {
+                    let mut response = Response::new(Body::from(body));
+                    *response.status_mut() = status;
+                    *response.headers_mut() = response_headers;
+                    response
+                }
+                Err(e) => error::internal_error(
+                    "read_response_body_failed",
+                    format!("Failed to read response body: {e}"),
+                ),
+            }
+        };
+
+        if status.is_success() {
+            Metrics::record_router_duration(
+                metrics_labels::ROUTER_HTTP,
+                metrics_labels::BACKEND_REGULAR,
+                metrics_labels::CONNECTION_HTTP,
+                model_id,
+                endpoint,
+                start.elapsed(),
+            );
+        } else {
+            Metrics::record_router_error(
+                metrics_labels::ROUTER_HTTP,
+                metrics_labels::BACKEND_REGULAR,
+                metrics_labels::CONNECTION_HTTP,
+                model_id,
+                endpoint,
+                error_type_from_status(status),
+            );
+        }
+
+        response
+    }
+
     // Send typed request directly without conversion
     async fn send_typed_request<T: serde::Serialize>(
         &self,
@@ -615,6 +822,48 @@ impl Router {
     }
 }
 
+fn build_transcription_form(body: &TranscriptionRequest, audio: AudioFile) -> Result<Form, String> {
+    let AudioFile {
+        bytes,
+        file_name,
+        content_type,
+    } = audio;
+
+    let mut file_part = Part::bytes(bytes.to_vec()).file_name(file_name);
+    if let Some(ct) = content_type.as_deref() {
+        file_part = file_part
+            .mime_str(ct)
+            .map_err(|e| format!("Invalid audio content-type '{ct}': {e}"))?;
+    }
+
+    let mut form = Form::new()
+        .part("file", file_part)
+        .text("model", body.model.clone());
+
+    if let Some(ref language) = body.language {
+        form = form.text("language", language.clone());
+    }
+    if let Some(ref prompt) = body.prompt {
+        form = form.text("prompt", prompt.clone());
+    }
+    if let Some(ref fmt) = body.response_format {
+        form = form.text("response_format", fmt.clone());
+    }
+    if let Some(temp) = body.temperature {
+        form = form.text("temperature", temp.to_string());
+    }
+    if let Some(ref grans) = body.timestamp_granularities {
+        for g in grans {
+            form = form.text("timestamp_granularities[]", g.clone());
+        }
+    }
+    if let Some(stream) = body.stream {
+        form = form.text("stream", stream.to_string());
+    }
+
+    Ok(form)
+}
+
 fn convert_reqwest_error(e: reqwest::Error) -> Response {
     let url = e
         .url()
@@ -750,6 +999,23 @@ impl RouterTrait for Router {
     ) -> Response {
         self.route_typed_request(headers, body, "/v1/classify", model_id)
             .await
+    }
+
+    async fn route_audio_transcriptions(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &TranscriptionRequest,
+        audio: AudioFile,
+        model_id: &str,
+    ) -> Response {
+        self.route_multipart_transcription(
+            headers,
+            body,
+            audio,
+            "/v1/audio/transcriptions",
+            model_id,
+        )
+        .await
     }
 
     async fn route_rerank(

@@ -389,6 +389,7 @@ pub mod metrics_labels {
     pub const ENDPOINT_REALTIME_SESSIONS: &str = "realtime_sessions";
     pub const ENDPOINT_REALTIME_CLIENT_SECRETS: &str = "realtime_client_secrets";
     pub const ENDPOINT_REALTIME_TRANSCRIPTION: &str = "realtime_transcription";
+    pub const ENDPOINT_AUDIO_TRANSCRIPTIONS: &str = "audio_transcriptions";
 
     // Connection modes
     pub const CONNECTION_WEBSOCKET: &str = "websocket";
