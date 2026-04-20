@@ -11,7 +11,9 @@ import atexit
 import logging
 import os
 import random
+import shutil
 import signal
+import tempfile
 import socket
 import subprocess
 import sys
@@ -578,6 +580,7 @@ class ServeOrchestrator:
         self.launcher: WorkerLauncher = BACKEND_LAUNCHERS[backend]()
         self.workers: list[tuple[subprocess.Popen, int]] = []
         self._shutting_down = False
+        self._prometheus_dir: str | None = None
 
     # -- public API ---------------------------------------------------------
 
@@ -599,6 +602,15 @@ class ServeOrchestrator:
     def _launch_workers(self) -> None:
         ports = _find_available_ports(self.args.worker_base_port, self.args.data_parallel_size)
         host = self.args.worker_host
+
+        if getattr(self.args, "connection_mode", "grpc") == "grpc":
+            self._prometheus_dir = tempfile.mkdtemp(prefix="smg_prometheus_")
+            os.environ["PROMETHEUS_MULTIPROC_DIR"] = self._prometheus_dir
+            logger.info(
+                "Set PROMETHEUS_MULTIPROC_DIR=%s for gRPC metrics collection",
+                self._prometheus_dir,
+            )
+
         for dp_rank, port in enumerate(ports):
             env = self.launcher.gpu_env(self.args, dp_rank)
             proc = self.launcher.launch(self.args, self.backend_args, host, port, env)
@@ -684,6 +696,23 @@ class ServeOrchestrator:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except (ProcessLookupError, OSError):
                     pass
+
+        self._cleanup_prometheus_dir()
+
+    def _cleanup_prometheus_dir(self) -> None:
+        """Remove the temporary prometheus multiprocess directory and its .db files."""
+        if self._prometheus_dir is None:
+            return
+        try:
+            shutil.rmtree(self._prometheus_dir)
+            logger.info("Cleaned up PROMETHEUS_MULTIPROC_DIR=%s", self._prometheus_dir)
+        except OSError as e:
+            logger.warning(
+                "Failed to clean up PROMETHEUS_MULTIPROC_DIR=%s: %s",
+                self._prometheus_dir,
+                e,
+            )
+        self._prometheus_dir = None
 
 
 # ---------------------------------------------------------------------------
