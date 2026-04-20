@@ -1,19 +1,13 @@
 //! MCP tool execution logic for Harmony Responses
 
 use axum::response::Response;
-use openai_protocol::{
-    common::ToolCall,
-    responses::{ResponseTool, ResponsesRequest},
-};
+use openai_protocol::{common::ToolCall, responses::ResponseTool};
 use serde_json::{from_str, json, Value};
-use smg_mcp::{McpToolSession, ResponseFormat, ToolExecutionInput};
+use smg_mcp::{McpToolSession, ToolExecutionInput};
 use tracing::{debug, error};
 
 use super::common::McpCallTracking;
-use crate::{
-    observability::metrics::{metrics_labels, Metrics},
-    routers::common::tool_overrides::apply_request_tool_overrides,
-};
+use crate::observability::metrics::{metrics_labels, Metrics};
 
 /// Tool execution result
 ///
@@ -28,9 +22,6 @@ pub(crate) struct ToolResult {
 
     /// Whether this is an error result
     pub is_error: bool,
-
-    /// Response format used to transform this tool call.
-    pub response_format: ResponseFormat,
 }
 
 /// Execute MCP tools and collect results
@@ -44,14 +35,14 @@ pub(super) async fn execute_mcp_tools(
     session: &McpToolSession<'_>,
     tool_calls: &[ToolCall],
     tracking: &mut McpCallTracking,
-    original_request: &ResponsesRequest,
+    model_id: &str,
 ) -> Result<Vec<ToolResult>, Response> {
     // Convert tool calls to execution inputs
     let inputs: Vec<ToolExecutionInput> = tool_calls
         .iter()
         .map(|tc| {
             let args_str = tc.function.arguments.as_deref().unwrap_or("{}");
-            let mut args: Value = from_str(args_str).unwrap_or_else(|e| {
+            let args: Value = from_str(args_str).unwrap_or_else(|e| {
                 error!(
                     function = "execute_mcp_tools",
                     tool_name = %tc.function.name,
@@ -61,8 +52,6 @@ pub(super) async fn execute_mcp_tools(
                 );
                 json!({})
             });
-            let response_format = session.tool_response_format(&tc.function.name);
-            apply_request_tool_overrides(&response_format, original_request, &mut args);
             ToolExecutionInput {
                 call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),
@@ -90,13 +79,9 @@ pub(super) async fn execute_mcp_tools(
             tracking.record_call(output_item.clone());
 
             // Record MCP tool metrics
-            Metrics::record_mcp_tool_duration(
-                &original_request.model,
-                &output.tool_name,
-                output.duration,
-            );
+            Metrics::record_mcp_tool_duration(model_id, &output.tool_name, output.duration);
             Metrics::record_mcp_tool_call(
-                &original_request.model,
+                model_id,
                 &output.tool_name,
                 if output.is_error {
                     metrics_labels::RESULT_ERROR
@@ -109,7 +94,6 @@ pub(super) async fn execute_mcp_tools(
                 call_id: output.call_id,
                 output: output.output,
                 is_error: output.is_error,
-                response_format: output.response_format,
             }
         })
         .collect();

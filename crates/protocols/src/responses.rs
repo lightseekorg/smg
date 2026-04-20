@@ -45,6 +45,42 @@ pub enum ResponseTool {
     Mcp(McpTool),
 }
 
+/// Discriminant for `ResponseTool` variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseToolKind {
+    Function,
+    WebSearchPreview,
+    CodeInterpreter,
+    ImageGeneration,
+    Mcp,
+}
+
+impl ResponseTool {
+    /// Returns the tool kind with an exhaustive match over all variants.
+    pub fn kind(&self) -> ResponseToolKind {
+        match self {
+            Self::Function(_) => ResponseToolKind::Function,
+            Self::WebSearchPreview(_) => ResponseToolKind::WebSearchPreview,
+            Self::CodeInterpreter(_) => ResponseToolKind::CodeInterpreter,
+            Self::ImageGeneration(_) => ResponseToolKind::ImageGeneration,
+            Self::Mcp(_) => ResponseToolKind::Mcp,
+        }
+    }
+}
+
+impl ResponseToolKind {
+    /// Stable tool-type string used in request/response payloads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Function => "function",
+            Self::WebSearchPreview => "web_search_preview",
+            Self::CodeInterpreter => "code_interpreter",
+            Self::ImageGeneration => "image_generation",
+            Self::Mcp => "mcp",
+        }
+    }
+}
+
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]

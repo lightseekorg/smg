@@ -32,8 +32,8 @@ pub(crate) enum OutputItemType {
     Reasoning,
     WebSearchCall,
     CodeInterpreterCall,
-    FileSearchCall,
     ImageGenerationCall,
+    FileSearchCall,
 }
 
 /// Status of an output item
@@ -122,7 +122,8 @@ impl ResponseStreamEventEmitter {
     ///
     /// After MCP tools are executed, this updates the stored output items
     /// to include the output field from the tool results.
-    /// Supports mcp_call, web_search_call, code_interpreter_call, and file_search_call item types.
+    /// Supports mcp_call, web_search_call, code_interpreter_call, image_generation_call, and
+    /// file_search_call item types.
     pub(crate) fn update_mcp_call_outputs(&mut self, tool_results: &[ToolResult]) {
         for tool_result in tool_results {
             // Find the output item with matching call_id
@@ -135,6 +136,7 @@ impl ResponseStreamEventEmitter {
                         Some("mcp_call")
                             | Some("web_search_call")
                             | Some("code_interpreter_call")
+                            | Some("image_generation_call")
                             | Some("file_search_call")
                     );
                     if is_tool_call
@@ -632,8 +634,8 @@ impl ResponseStreamEventEmitter {
             OutputItemType::Reasoning => "rs",
             OutputItemType::WebSearchCall => "ws",
             OutputItemType::CodeInterpreterCall => "ci",
-            OutputItemType::FileSearchCall => "fs",
             OutputItemType::ImageGenerationCall => "ig",
+            OutputItemType::FileSearchCall => "fs",
         };
 
         let id = Self::generate_item_id(id_prefix);

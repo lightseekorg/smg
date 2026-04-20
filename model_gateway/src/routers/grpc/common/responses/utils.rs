@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::response::Response;
 use openai_protocol::{
     common::Tool,
-    responses::{ResponseTool, ResponsesRequest, ResponsesResponse},
+    responses::{ResponseTool, ResponseToolKind, ResponsesRequest, ResponsesResponse},
 };
 use serde_json::to_value;
 use smg_data_connector::{
@@ -25,6 +25,25 @@ use crate::{
     worker::WorkerRegistry,
 };
 
+const ERROR_CODE_UNSUPPORTED_TOOL: &str = "unsupported_tool";
+
+const GRPC_RESPONSES_SUPPORTED_TOOL_KINDS: &[ResponseToolKind] = &[
+    ResponseToolKind::Function,
+    ResponseToolKind::WebSearchPreview,
+    ResponseToolKind::CodeInterpreter,
+    ResponseToolKind::Mcp,
+];
+
+fn is_supported_for_grpc_responses_route_entry(kind: ResponseToolKind) -> bool {
+    match kind {
+        ResponseToolKind::Function => true,
+        ResponseToolKind::WebSearchPreview => true,
+        ResponseToolKind::CodeInterpreter => true,
+        ResponseToolKind::ImageGeneration => false,
+        ResponseToolKind::Mcp => true,
+    }
+}
+
 /// Ensure MCP connection succeeds if MCP tools or builtin tools are declared
 ///
 /// Checks if request declares MCP tools or builtin tool types (web_search_preview,
@@ -38,7 +57,7 @@ pub(crate) async fn ensure_mcp_connection(
 ) -> Result<(bool, Vec<McpServerBinding>), Response> {
     // Check for explicit MCP tools (must error if connection fails)
     let has_explicit_mcp_tools = tools
-        .map(|t| t.iter().any(|tool| matches!(tool, ResponseTool::Mcp(_))))
+        .map(|t| t.iter().any(|tool| tool.kind() == ResponseToolKind::Mcp))
         .unwrap_or(false);
 
     // Check for builtin tools that MAY have MCP routing configured
@@ -46,10 +65,10 @@ pub(crate) async fn ensure_mcp_connection(
         .map(|t| {
             t.iter().any(|tool| {
                 matches!(
-                    tool,
-                    ResponseTool::WebSearchPreview(_)
-                        | ResponseTool::CodeInterpreter(_)
-                        | ResponseTool::ImageGeneration(_)
+                    tool.kind(),
+                    ResponseToolKind::WebSearchPreview
+                        | ResponseToolKind::CodeInterpreter
+                        | ResponseToolKind::ImageGeneration
                 )
             })
         })
@@ -89,6 +108,38 @@ pub(crate) async fn ensure_mcp_connection(
     }
 
     Ok((false, Vec::new()))
+}
+
+/// Reject tools unsupported by the gRPC Responses router at route entry.
+///
+/// This validation must run before any MCP setup/connection logic.
+pub(crate) fn reject_unsupported_tool_for_grpc_route_entry(
+    request: &ResponsesRequest,
+) -> Result<(), Response> {
+    let unsupported_kind = request.tools.as_ref().and_then(|tools| {
+        tools
+            .iter()
+            .map(ResponseTool::kind)
+            .find(|kind| !is_supported_for_grpc_responses_route_entry(*kind))
+    });
+
+    if let Some(kind) = unsupported_kind {
+        let supported = GRPC_RESPONSES_SUPPORTED_TOOL_KINDS
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(error::bad_request(
+            ERROR_CODE_UNSUPPORTED_TOOL,
+            format!(
+                "Tool '{}' is not supported for gRPC Responses routes. Supported tools: {}.",
+                kind.as_str(),
+                supported
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Validate that workers are available for the requested model

@@ -63,8 +63,8 @@ pub(crate) fn convert_harmony_logprobs(proto_logprobs: &ProtoOutputLogProbs) -> 
 const BUILTIN_TOOLS: &[&str] = &[
     "web_search_preview",
     "code_interpreter",
-    "image_generation",
     "container",
+    "image_generation",
 ];
 
 /// Trait for tool-like objects that can be converted to Harmony ToolDescription
@@ -412,7 +412,9 @@ impl HarmonyBuilder {
                             ResponseTool::Function(_) => "function",
                             ResponseTool::WebSearchPreview(_) => "web_search_preview",
                             ResponseTool::CodeInterpreter(_) => "code_interpreter",
-                            ResponseTool::ImageGeneration(_) => "image_generation",
+                            ResponseTool::ImageGeneration(_) => unreachable!(
+                                "image_generation rejected upstream by ensure_mcp_connection"
+                            ),
                             ResponseTool::Mcp(_) => "mcp",
                         })
                         .collect()

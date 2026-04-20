@@ -291,7 +291,7 @@ async fn execute_mcp_tool_loop_streaming(
                         &session,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
-                        &current_request,
+                        &current_request.model,
                     )
                     .await
                     {

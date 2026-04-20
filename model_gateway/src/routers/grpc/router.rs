@@ -14,7 +14,11 @@ use tracing::debug;
 
 use super::{
     common::responses::{
-        handlers::cancel_response_impl, utils::validate_worker_availability, ResponsesContext,
+        handlers::cancel_response_impl,
+        utils::{
+            reject_unsupported_tool_for_grpc_route_entry, validate_worker_availability,
+        },
+        ResponsesContext,
     },
     context::SharedComponents,
     harmony::{serve_harmony_responses, serve_harmony_responses_stream, HarmonyDetector},
@@ -306,6 +310,12 @@ impl GrpcRouter {
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
+        // Reject unsupported tool types at route entry.
+        // In particular, gRPC Responses does not support image_generation tools.
+        if let Err(response) = reject_unsupported_tool_for_grpc_route_entry(body) {
+            return response;
+        }
+
         // 0. Fast worker validation (fail-fast before expensive operations)
         if let Some(error_response) = validate_worker_availability(&self.worker_registry, model_id)
         {
