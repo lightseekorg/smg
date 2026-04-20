@@ -19,8 +19,15 @@ fi
 
 echo "Using uv version: $(uv --version)"
 
+# Pin vLLM below 0.19.1. vLLM 0.19.1 bundled a transformers v5 upgrade
+# (transformers 4.57 → 5.5) which broke e5-mistral-7b-instruct embedding
+# quality (self-similarity ~0.33 instead of ~1.0). Last-known-good combo
+# is vllm==0.19.0 / transformers==4.57.6 per run 24591985132 (commit
+# 82a3fb1a); regression first seen in run 24608587304 (commit dcede344)
+# once vllm 0.19.1 started resolving. See run 24644816475 / job
+# 72068881582 for the failure signature.
 echo "Installing vLLM..."
-uv pip install vllm
+uv pip install "vllm<0.19.1"
 
 # Install nixl for vLLM PD disaggregation (NIXL KV transfer)
 echo "Installing nixl..."
