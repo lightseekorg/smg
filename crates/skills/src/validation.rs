@@ -167,6 +167,7 @@ pub fn normalize_skill_bundle_zip(
 
     let mut top_level_dir: Option<String> = None;
     let mut seen_relative_paths = HashSet::new();
+    let mut seen_folded_relative_paths = HashSet::new();
     let mut files = Vec::new();
     let mut skill_md_path: Option<String> = None;
     let mut openai_sidecar_path = None;
@@ -212,8 +213,22 @@ pub fn normalize_skill_bundle_zip(
 
         let relative_path = relative_segments.join("/");
         validate_special_bundle_paths(&relative_path)?;
+        let is_skill_md = relative_path.eq_ignore_ascii_case(SKILL_MD_PATH);
 
         if !seen_relative_paths.insert(relative_path.clone()) {
+            return Err(SkillBundleArchiveError::DuplicateNormalizedPath {
+                path: relative_path,
+            });
+        }
+        if !seen_folded_relative_paths.insert(relative_path.to_ascii_lowercase()) {
+            if is_skill_md {
+                if let Some(existing) = &skill_md_path {
+                    return Err(SkillBundleArchiveError::MultipleSkillMd {
+                        first: existing.clone(),
+                        second: relative_path,
+                    });
+                }
+            }
             return Err(SkillBundleArchiveError::DuplicateNormalizedPath {
                 path: relative_path,
             });
@@ -279,7 +294,7 @@ pub fn normalize_skill_bundle_zip(
                     });
                 }
 
-                if relative_path.eq_ignore_ascii_case(SKILL_MD_PATH) {
+                if is_skill_md {
                     if let Some(existing) = &skill_md_path {
                         return Err(SkillBundleArchiveError::MultipleSkillMd {
                             first: existing.clone(),

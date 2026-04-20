@@ -254,6 +254,35 @@ fn rejects_duplicate_normalized_paths() {
 }
 
 #[test]
+fn rejects_case_only_duplicate_normalized_paths() {
+    let error = normalize(&[
+        TestZipEntry::File {
+            path: "gh-fix-ci/SKILL.md",
+            contents: b"skill body",
+            unix_mode: Some(0o100644),
+        },
+        TestZipEntry::File {
+            path: "gh-fix-ci/scripts/Run.py",
+            contents: b"print('one')",
+            unix_mode: Some(0o100755),
+        },
+        TestZipEntry::File {
+            path: "gh-fix-ci/scripts/run.py",
+            contents: b"print('two')",
+            unix_mode: Some(0o100755),
+        },
+    ])
+    .expect_err("case-only duplicate normalized path must fail");
+
+    assert_eq!(
+        error,
+        SkillBundleArchiveError::DuplicateNormalizedPath {
+            path: "scripts/run.py".to_owned(),
+        }
+    );
+}
+
+#[test]
 fn rejects_symlinks() {
     let symlink = normalize(&[
         TestZipEntry::File {
