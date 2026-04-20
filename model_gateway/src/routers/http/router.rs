@@ -662,8 +662,13 @@ impl Router {
         }
 
         let response = if is_stream {
-            let mut response_headers = header_utils::preserve_response_headers(res.headers());
-            response_headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+            // Preserve the upstream content-type verbatim. A `stream=true`
+            // hint from the client doesn't guarantee the worker actually
+            // streams — whisper backends may ignore it and return a normal
+            // JSON body (success or 4xx error). Don't relabel non-SSE
+            // responses as SSE; leave that judgment to whatever the worker
+            // set.
+            let response_headers = header_utils::preserve_response_headers(res.headers());
             let stream = res.bytes_stream();
             // Bounded channel applies backpressure: if the downstream client
             // is slow, the upstream relay awaits on `send` rather than piling
