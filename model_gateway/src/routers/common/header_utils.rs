@@ -77,6 +77,7 @@ fn should_forward_header_no_alloc(name: &str) -> bool {
         || name.eq_ignore_ascii_case("transfer-encoding")
         || name.eq_ignore_ascii_case("upgrade")
         || name.eq_ignore_ascii_case("content-encoding")
+        || name.eq_ignore_ascii_case("content-length")
         || name.eq_ignore_ascii_case("host"))
 }
 
