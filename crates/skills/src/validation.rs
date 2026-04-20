@@ -10,6 +10,7 @@ use crate::types::{
 };
 
 const MAX_NAME_LEN: usize = 64;
+const MAX_DISPLAY_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1024;
 const MAX_SIDECAR_STRING_LEN: usize = 1024;
 const RESERVED_SKILL_NAMES: [&str; 3] = ["anthropic", "claude", "openai"];
@@ -163,17 +164,16 @@ fn validate_name(name: &str) -> Result<(), SkillParseError> {
             message: format!("must be at most {MAX_NAME_LEN} characters"),
         });
     }
-    if RESERVED_SKILL_NAMES
-        .iter()
-        .any(|reserved| reserved.eq_ignore_ascii_case(name))
-    {
-        return Err(SkillParseError::InvalidField {
-            field: "name",
-            message: "is reserved".to_owned(),
-        });
-    }
-
     for segment in name.split(':') {
+        if RESERVED_SKILL_NAMES
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(segment))
+        {
+            return Err(SkillParseError::InvalidField {
+                field: "name",
+                message: "is reserved".to_owned(),
+            });
+        }
         if segment.is_empty() {
             return Err(SkillParseError::InvalidField {
                 field: "name",
@@ -182,12 +182,7 @@ fn validate_name(name: &str) -> Result<(), SkillParseError> {
         }
 
         let mut chars = segment.chars();
-        let Some(first) = chars.next() else {
-            return Err(SkillParseError::InvalidField {
-                field: "name",
-                message: "must not contain empty namespace segments".to_owned(),
-            });
-        };
+        let first = chars.next().unwrap_or('\0');
 
         if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
             return Err(SkillParseError::InvalidField {
@@ -232,7 +227,7 @@ fn validate_length(
     value: &str,
     max_len: usize,
 ) -> Result<(), SkillParseError> {
-    if value.len() > max_len {
+    if value.chars().count() > max_len {
         return Err(SkillParseError::InvalidField {
             field,
             message: format!("must be at most {max_len} characters"),
@@ -245,16 +240,37 @@ fn contains_xml_like_tag(value: &str) -> bool {
     let bytes = value.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'<' {
-            let next_index = index + 1;
-            if next_index < bytes.len()
-                && (bytes[next_index].is_ascii_alphabetic() || bytes[next_index] == b'/')
-                && bytes[next_index..].contains(&b'>')
-            {
-                return true;
+        if bytes[index] != b'<' {
+            index += 1;
+            continue;
+        }
+
+        let mut tag_index = index + 1;
+        if tag_index < bytes.len() && bytes[tag_index] == b'/' {
+            tag_index += 1;
+        }
+
+        if tag_index >= bytes.len() || !bytes[tag_index].is_ascii_alphabetic() {
+            index += 1;
+            continue;
+        }
+
+        tag_index += 1;
+        while tag_index < bytes.len() {
+            match bytes[tag_index] {
+                b'>' => return true,
+                b'<' => break,
+                _ => {
+                    tag_index += 1;
+                }
             }
         }
-        index += 1;
+
+        if tag_index >= bytes.len() {
+            return false;
+        }
+
+        index = tag_index;
     }
     false
 }
@@ -326,7 +342,9 @@ fn parse_interface(
             "display_name",
             "agents/openai.yaml.interface.display_name",
             warnings,
-            |value| validate_sidecar_string_len("interface.display_name", value, 64),
+            |value| {
+                validate_sidecar_string_len("interface.display_name", value, MAX_DISPLAY_NAME_LEN)
+            },
         ),
         short_description: parse_string_field(
             mapping,
@@ -632,7 +650,7 @@ fn push_field_warning(warnings: &mut Vec<SkillParseWarning>, path: &str, message
 }
 
 fn validate_sidecar_string_len(field: &str, value: &str, max_len: usize) -> Result<(), String> {
-    if value.len() > max_len {
+    if value.chars().count() > max_len {
         return Err(format!("{field} must be at most {max_len} characters"));
     }
     Ok(())
@@ -664,13 +682,23 @@ fn validate_sidecar_path(value: &str) -> Result<(), String> {
         return Err("path must use forward slashes".to_owned());
     }
 
-    for segment in value.split('/') {
+    let mut segments = value.split('/').peekable();
+    let mut index = 0;
+    while let Some(segment) = segments.next() {
         if segment.is_empty() {
             return Err("path must not contain empty segments".to_owned());
         }
-        if segment == "." || segment == ".." {
+        if segment == "." {
+            if index == 0 && segments.peek().is_some() {
+                index += 1;
+                continue;
+            }
+            return Err("path must not contain standalone current-directory segments".to_owned());
+        }
+        if segment == ".." {
             return Err("path must not contain traversal segments".to_owned());
         }
+        index += 1;
     }
 
     Ok(())
