@@ -490,6 +490,29 @@ impl Router {
             bool_to_static_str(is_stream),
         );
 
+        // Finalize router metrics for an early error that never reached an
+        // upstream worker (model_not_found, dp_aware_not_supported, no
+        // available workers, build failure). Without this, pre-send failures
+        // silently disappear from router_upstream_responses / router_error.
+        let record_pre_send_error = |response: &Response| {
+            let rstatus = response.status();
+            Metrics::record_router_upstream_response(
+                metrics_labels::ROUTER_HTTP,
+                rstatus.as_u16(),
+                extract_error_code_from_response(response),
+            );
+            if !is_retryable_status(rstatus) {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_HTTP,
+                    metrics_labels::BACKEND_REGULAR,
+                    metrics_labels::CONNECTION_HTTP,
+                    model_id,
+                    endpoint,
+                    error_type_from_status(rstatus),
+                );
+            }
+        };
+
         // Multipart transcription can't route through `worker.prepare_request`,
         // which is the hook that injects `data_parallel_rank` for DP-aware
         // workers. Pre-filter DP-aware workers out of the candidate pool so
@@ -508,7 +531,9 @@ impl Router {
             false,
         );
         if all_workers.is_empty() {
-            return error::model_not_found(model_id);
+            let resp = error::model_not_found(model_id);
+            record_pre_send_error(&resp);
+            return resp;
         }
         let non_dp_workers: Vec<Arc<dyn Worker>> = all_workers
             .iter()
@@ -516,10 +541,12 @@ impl Router {
             .cloned()
             .collect();
         if non_dp_workers.is_empty() {
-            return error::bad_request(
+            let resp = error::bad_request(
                 "dp_aware_not_supported",
                 "/v1/audio/transcriptions does not yet support DP-aware workers",
             );
+            record_pre_send_error(&resp);
+            return resp;
         }
         let available: Vec<Arc<dyn Worker>> = non_dp_workers
             .iter()
@@ -527,10 +554,12 @@ impl Router {
             .cloned()
             .collect();
         if available.is_empty() {
-            return error::service_unavailable(
+            let resp = error::service_unavailable(
                 "no_available_workers",
                 "All workers are unavailable (circuit breaker open or unhealthy)",
             );
+            record_pre_send_error(&resp);
+            return resp;
         }
 
         let policy = self.policy_registry.get_policy_or_default(model_id);
@@ -546,10 +575,12 @@ impl Router {
         ) {
             Some(i) => i,
             None => {
-                return error::service_unavailable(
+                let resp = error::service_unavailable(
                     "no_available_workers",
                     "Policy returned no eligible worker",
                 );
+                record_pre_send_error(&resp);
+                return resp;
             }
         };
         Metrics::record_worker_selection(
@@ -573,7 +604,9 @@ impl Router {
         let form = match build_transcription_form(body, audio) {
             Ok(f) => f,
             Err(e) => {
-                return error::bad_request("multipart_build_failed", e);
+                let resp = error::bad_request("multipart_build_failed", e);
+                record_pre_send_error(&resp);
+                return resp;
             }
         };
 
