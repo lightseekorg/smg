@@ -490,44 +490,76 @@ impl Router {
             bool_to_static_str(is_stream),
         );
 
-        let worker = match self.select_worker_for_model(model_id, Some(&text), headers) {
-            Some(w) => w,
-            None => {
-                let model_filter = if model_id == crate::worker::UNKNOWN_MODEL_ID {
-                    None
-                } else {
-                    Some(model_id)
-                };
-                let total = self.worker_registry.get_workers_filtered(
-                    model_filter,
-                    Some(WorkerType::Regular),
-                    Some(ConnectionMode::Http),
-                    None,
-                    false,
-                );
-                return if total.is_empty() {
-                    error::model_not_found(model_id)
-                } else {
-                    error::service_unavailable(
-                        "no_available_workers",
-                        "All workers are unavailable (circuit breaker open or unhealthy)",
-                    )
-                };
-            }
-        };
-
         // Multipart transcription can't route through `worker.prepare_request`,
         // which is the hook that injects `data_parallel_rank` for DP-aware
-        // workers. Fail loudly instead of silently sending to an arbitrary DP
-        // shard.
-        if worker.is_dp_aware() {
+        // workers. Pre-filter DP-aware workers out of the candidate pool so
+        // the policy can pick a non-DP worker when one exists; only fall back
+        // to model_not_found / 400 when every candidate is DP-aware.
+        let model_filter = if model_id == crate::worker::UNKNOWN_MODEL_ID {
+            None
+        } else {
+            Some(model_id)
+        };
+        let all_workers = self.worker_registry.get_workers_filtered(
+            model_filter,
+            Some(WorkerType::Regular),
+            Some(ConnectionMode::Http),
+            None,
+            false,
+        );
+        if all_workers.is_empty() {
+            return error::model_not_found(model_id);
+        }
+        let non_dp_workers: Vec<Arc<dyn Worker>> = all_workers
+            .iter()
+            .filter(|w| !w.is_dp_aware())
+            .cloned()
+            .collect();
+        if non_dp_workers.is_empty() {
             return error::bad_request(
                 "dp_aware_not_supported",
                 "/v1/audio/transcriptions does not yet support DP-aware workers",
             );
         }
+        let available: Vec<Arc<dyn Worker>> = non_dp_workers
+            .iter()
+            .filter(|w| w.is_available())
+            .cloned()
+            .collect();
+        if available.is_empty() {
+            return error::service_unavailable(
+                "no_available_workers",
+                "All workers are unavailable (circuit breaker open or unhealthy)",
+            );
+        }
 
         let policy = self.policy_registry.get_policy_or_default(model_id);
+        let hash_ring = self.worker_registry.get_hash_ring(model_id);
+        let idx = match policy.select_worker(
+            &available,
+            &SelectWorkerInfo {
+                request_text: Some(&text),
+                tokens: None,
+                headers,
+                hash_ring,
+            },
+        ) {
+            Some(i) => i,
+            None => {
+                return error::service_unavailable(
+                    "no_available_workers",
+                    "Policy returned no eligible worker",
+                );
+            }
+        };
+        Metrics::record_worker_selection(
+            metrics_labels::WORKER_REGULAR,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            policy.name(),
+        );
+        let worker = available[idx].clone();
+
         let load_guard = ["cache_aware", "manual"]
             .contains(&policy.name())
             .then(|| WorkerLoadGuard::new(worker.clone(), headers));
@@ -581,9 +613,22 @@ impl Router {
                     e
                 );
                 let err_resp = convert_reqwest_error(e);
+                let err_status = err_resp.status();
+                // Feed the synthetic status into the worker circuit breaker
+                // and worker-error metric; transport failures (timeouts,
+                // connect errors) must be visible to health tracking so the
+                // same bad worker isn't picked repeatedly.
+                worker.record_outcome(err_status.as_u16());
+                if err_status.is_server_error() {
+                    Metrics::record_worker_error(
+                        metrics_labels::WORKER_REGULAR,
+                        metrics_labels::CONNECTION_HTTP,
+                        error_type_from_status(err_status),
+                    );
+                }
                 Metrics::record_router_upstream_response(
                     metrics_labels::ROUTER_HTTP,
-                    err_resp.status().as_u16(),
+                    err_status.as_u16(),
                     extract_error_code_from_response(&err_resp),
                 );
                 // Mirror route_typed_request: a send failure must still bump
@@ -594,7 +639,7 @@ impl Router {
                     metrics_labels::CONNECTION_HTTP,
                     model_id,
                     endpoint,
-                    error_type_from_status(err_resp.status()),
+                    error_type_from_status(err_status),
                 );
                 return err_resp;
             }

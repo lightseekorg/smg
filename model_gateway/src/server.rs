@@ -396,11 +396,16 @@ async fn v1_audio_transcriptions(
         }
     }
 
-    if req.model.is_empty() {
+    // Reject blank/whitespace-only `model` before it reaches worker selection.
+    if req.model.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "Missing required 'model' field").into_response();
     }
+    req.model = req.model.trim().to_string();
     let bytes = match file_bytes {
-        Some(b) => b,
+        Some(b) if !b.is_empty() => b,
+        Some(_) => {
+            return (StatusCode::BAD_REQUEST, "Uploaded 'file' part is empty").into_response();
+        }
         None => {
             return (StatusCode::BAD_REQUEST, "Missing required 'file' part").into_response();
         }
