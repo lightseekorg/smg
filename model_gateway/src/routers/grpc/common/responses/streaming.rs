@@ -137,7 +137,6 @@ impl ResponseStreamEventEmitter {
                         Some("mcp_call")
                             | Some("web_search_call")
                             | Some("code_interpreter_call")
-                            | Some("image_generation_call")
                             | Some("file_search_call")
                     );
                     if is_tool_call
@@ -499,6 +498,10 @@ impl ResponseStreamEventEmitter {
         item_id: &str,
         response_format: &ResponseFormat,
     ) -> Option<serde_json::Value> {
+        #[expect(
+            clippy::unreachable,
+            reason = "image generation is rejected upstream by ensure_mcp_connection"
+        )]
         let event_type = match response_format {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
