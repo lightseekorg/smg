@@ -1,7 +1,8 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use smg_blob_storage::BlobKey;
 
 /// Top-level skill metadata stored in the control-plane database.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,7 +44,7 @@ pub struct SkillFileRecord {
     pub relative_path: String,
     pub media_type: Option<String>,
     pub size_bytes: u64,
-    pub blob_key: Option<String>,
+    pub blob_key: Option<BlobKey>,
 }
 
 /// Tenant-alias mapping for request-time tenant resolution.
@@ -56,7 +57,7 @@ pub struct TenantAliasRecord {
 }
 
 /// Opaque bundle-token claims used for executor bundle downloads.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BundleTokenClaim {
     pub token: String,
     pub tenant_id: String,
@@ -68,7 +69,7 @@ pub struct BundleTokenClaim {
 }
 
 /// Opaque continuation-cookie claims used for pause-turn resumption.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContinuationCookieClaim {
     pub cookie: String,
     pub tenant_id: String,
@@ -85,6 +86,33 @@ pub struct NormalizedSkillBundle {
     pub skill_md_path: String,
     pub openai_sidecar_path: Option<String>,
     pub has_code_files: bool,
+}
+
+impl fmt::Debug for BundleTokenClaim {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BundleTokenClaim")
+            .field("token", &"<redacted>")
+            .field("tenant_id", &self.tenant_id)
+            .field("exec_id", &self.exec_id)
+            .field("skill_id", &self.skill_id)
+            .field("skill_version", &self.skill_version)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl fmt::Debug for ContinuationCookieClaim {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContinuationCookieClaim")
+            .field("cookie", &"<redacted>")
+            .field("tenant_id", &self.tenant_id)
+            .field("exec_id", &self.exec_id)
+            .field("request_id", &self.request_id)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl NormalizedSkillBundle {

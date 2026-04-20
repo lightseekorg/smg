@@ -125,7 +125,7 @@ fn pg_v4_up(schema: &SchemaConfig) -> Vec<String> {
              name VARCHAR(64) NOT NULL, \
              short_description TEXT, \
              description TEXT, \
-             source VARCHAR(16) NOT NULL DEFAULT 'custom', \
+             source VARCHAR(64) NOT NULL DEFAULT 'custom', \
              has_code_files BOOLEAN NOT NULL DEFAULT false, \
              latest_version VARCHAR(64), \
              default_version VARCHAR(64), \
@@ -367,7 +367,7 @@ mod tests {
         let stmts = pg_v4_up(&schema);
         assert_eq!(stmts.len(), 2);
         assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS skills"));
-        assert!(stmts[0].contains("source VARCHAR(16) NOT NULL DEFAULT 'custom'"));
+        assert!(stmts[0].contains("source VARCHAR(64) NOT NULL DEFAULT 'custom'"));
         assert!(stmts[1].contains("idx_skills_tenant_name"));
     }
 

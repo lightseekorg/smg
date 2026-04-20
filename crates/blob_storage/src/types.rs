@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncRead;
 
 /// Canonical blob key used across blob-store backends.
+///
+/// This type is an opaque label, not a validated filesystem path. Concrete
+/// backends are responsible for validating and rejecting dangerous keys such as
+/// traversal attempts or absolute paths before using them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlobKey(pub String);
 
