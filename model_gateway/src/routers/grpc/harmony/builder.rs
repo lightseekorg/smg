@@ -408,12 +408,12 @@ impl HarmonyBuilder {
                 .map(|tools| {
                     tools
                         .iter()
-                        .map(|tool| match tool {
-                            ResponseTool::Function(_) => "function",
-                            ResponseTool::WebSearchPreview(_) => "web_search_preview",
-                            ResponseTool::CodeInterpreter(_) => "code_interpreter",
-                            ResponseTool::ImageGeneration(_) => "image_generation",
-                            ResponseTool::Mcp(_) => "mcp",
+                        .filter_map(|tool| match tool {
+                            ResponseTool::Function(_) => Some("function"),
+                            ResponseTool::WebSearchPreview(_) => Some("web_search_preview"),
+                            ResponseTool::CodeInterpreter(_) => Some("code_interpreter"),
+                            ResponseTool::ImageGeneration(_) => None,
+                            ResponseTool::Mcp(_) => Some("mcp"),
                         })
                         .collect()
                 })
