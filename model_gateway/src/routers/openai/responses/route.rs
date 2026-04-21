@@ -124,8 +124,9 @@ pub(in crate::routers::openai) async fn route_responses(
         Err(response) => return response,
     };
 
-    let memory_config = extract_conversation_memory_config(headers);
-    super::history::inject_memory_context(&memory_config, &mut request_body);
+    if let Some(memory_config) = extract_conversation_memory_config(headers) {
+        super::history::inject_memory_context(&memory_config, &mut request_body);
+    }
 
     request_body.store = Some(false);
     if let ResponseInput::Items(ref mut items) = request_body.input {
