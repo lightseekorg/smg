@@ -4,10 +4,11 @@ use std::collections::HashSet;
 
 use axum::response::Response;
 use openai_protocol::{
-    common::{ToolCall, ToolChoice, ToolChoiceValue},
+    common::ToolCall,
     responses::{
         ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
-        ResponseReasoningContent, ResponsesRequest, ResponsesResponse, StringOrContentParts,
+        ResponseReasoningContent, ResponsesRequest, ResponsesResponse, ResponsesToolChoice,
+        StringOrContentParts, ToolChoiceOptions,
     },
 };
 use serde_json::{from_value, to_string, Value};
@@ -159,7 +160,7 @@ pub(super) fn build_next_request_with_tools(
     // Switch tool_choice to "auto" for subsequent iterations
     // This prevents infinite loops when original tool_choice was "required" or specific function
     // After receiving tool results, the model should be free to decide whether to call more tools or finish
-    request.tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Auto));
+    request.tool_choice = Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto));
 
     request
 }

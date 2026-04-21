@@ -2,11 +2,11 @@
 
 use axum::http::StatusCode;
 use openai_protocol::{
-    common::{GenerationRequest, ToolChoice, ToolChoiceValue, UsageInfo},
+    common::{GenerationRequest, UsageInfo},
     responses::{
         CodeInterpreterTool, McpTool, ReasoningEffort, RequireApproval, RequireApprovalMode,
-        ResponseInput, ResponseReasoningParam, ResponseTool, ResponsesRequest, ServiceTier,
-        Truncation, WebSearchPreviewTool,
+        ResponseInput, ResponseReasoningParam, ResponseTool, ResponsesRequest, ResponsesToolChoice,
+        ServiceTier, ToolChoiceOptions, Truncation, WebSearchPreviewTool,
     },
 };
 use smg::{
@@ -84,7 +84,7 @@ async fn test_non_streaming_mcp_minimal_e2e_with_persistence() {
         store: Some(true),
         stream: Some(false),
         temperature: Some(0.2),
-        tool_choice: Some(ToolChoice::default()),
+        tool_choice: Some(ResponsesToolChoice::default()),
         tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
             authorization: None,
@@ -282,7 +282,7 @@ async fn test_non_streaming_mcp_returns_approval_request_when_required() {
         store: Some(true),
         stream: Some(false),
         temperature: Some(0.2),
-        tool_choice: Some(ToolChoice::default()),
+        tool_choice: Some(ResponsesToolChoice::default()),
         tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
             authorization: None,
@@ -412,7 +412,7 @@ async fn test_final_response_hides_internal_mcp_trace_items() {
         store: Some(true),
         stream: Some(false),
         temperature: Some(0.2),
-        tool_choice: Some(ToolChoice::default()),
+        tool_choice: Some(ResponsesToolChoice::default()),
         tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: None,
             authorization: None,
@@ -551,7 +551,7 @@ async fn test_previous_response_id_does_not_repeat_mcp_list_tools_for_existing_b
         store: Some(true),
         stream: Some(false),
         temperature: Some(0.2),
-        tool_choice: Some(ToolChoice::default()),
+        tool_choice: Some(ResponsesToolChoice::default()),
         tools: Some(vec![mcp_tool.clone()]),
         top_logprobs: Some(0),
         top_p: None,
@@ -606,7 +606,7 @@ async fn test_previous_response_id_does_not_repeat_mcp_list_tools_for_existing_b
         store: Some(true),
         stream: Some(false),
         temperature: Some(0.2),
-        tool_choice: Some(ToolChoice::default()),
+        tool_choice: Some(ResponsesToolChoice::default()),
         tools: Some(vec![mcp_tool]),
         top_logprobs: Some(0),
         top_p: None,
@@ -720,7 +720,7 @@ async fn test_final_response_hides_internal_mcp_error_details() {
         store: Some(true),
         stream: Some(false),
         temperature: Some(0.2),
-        tool_choice: Some(ToolChoice::default()),
+        tool_choice: Some(ResponsesToolChoice::default()),
         tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: None,
             authorization: None,
@@ -867,7 +867,7 @@ fn test_responses_request_creation() {
         store: Some(true),
         stream: Some(false),
         temperature: Some(0.7),
-        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+        tool_choice: Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto)),
         tools: Some(vec![ResponseTool::WebSearchPreview(
             WebSearchPreviewTool::default(),
         )]),
@@ -918,7 +918,7 @@ fn test_responses_request_sglang_extensions() {
         store: Some(true),
         stream: Some(false),
         temperature: Some(0.8),
-        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+        tool_choice: Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto)),
         tools: Some(vec![]),
         top_logprobs: Some(0),
         top_p: Some(0.95),
@@ -1063,7 +1063,7 @@ fn test_json_serialization() {
         store: Some(false),
         stream: Some(true),
         temperature: Some(0.9),
-        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
+        tool_choice: Some(ResponsesToolChoice::Options(ToolChoiceOptions::Required)),
         tools: Some(vec![ResponseTool::CodeInterpreter(
             CodeInterpreterTool::default(),
         )]),
@@ -1171,7 +1171,7 @@ async fn test_multi_turn_loop_with_mcp() {
         store: Some(true),
         stream: Some(false),
         temperature: Some(0.7),
-        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+        tool_choice: Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto)),
         tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
             authorization: None,
@@ -1330,7 +1330,7 @@ async fn test_max_tool_calls_limit() {
         store: Some(false),
         stream: Some(false),
         temperature: Some(0.7),
-        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+        tool_choice: Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto)),
         tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
             authorization: None,
@@ -1516,7 +1516,7 @@ async fn test_streaming_with_mcp_tool_calls() {
         store: Some(true),
         stream: Some(true), // KEY: Enable streaming
         temperature: Some(0.7),
-        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+        tool_choice: Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto)),
         tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
             authorization: None,
@@ -1800,7 +1800,7 @@ async fn test_streaming_multi_turn_with_mcp() {
         store: Some(true),
         stream: Some(true),
         temperature: Some(0.8),
-        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+        tool_choice: Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto)),
         tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
             authorization: None,

@@ -352,7 +352,7 @@ fn test_tool_choice_allowed_tools_invalid_mode() {
             tools: vec![ToolReference::Function {
                 name: "get_weather".to_string(),
             }],
-            tool_type: "function".to_string(),
+            tool_type: "allowed_tools".to_string(),
         }),
         ..Default::default()
     };
@@ -388,7 +388,7 @@ fn test_tool_choice_allowed_tools_valid_mode_auto() {
             tools: vec![ToolReference::Function {
                 name: "get_weather".to_string(),
             }],
-            tool_type: "function".to_string(),
+            tool_type: "allowed_tools".to_string(),
         }),
         ..Default::default()
     };
@@ -419,7 +419,7 @@ fn test_tool_choice_allowed_tools_valid_mode_required() {
             tools: vec![ToolReference::Function {
                 name: "get_weather".to_string(),
             }],
-            tool_type: "function".to_string(),
+            tool_type: "allowed_tools".to_string(),
         }),
         ..Default::default()
     };
@@ -450,7 +450,7 @@ fn test_tool_choice_allowed_tools_tool_not_found() {
             tools: vec![ToolReference::Function {
                 name: "nonexistent_tool".to_string(),
             }],
-            tool_type: "function".to_string(),
+            tool_type: "allowed_tools".to_string(),
         }),
         ..Default::default()
     };
@@ -502,7 +502,7 @@ fn test_tool_choice_allowed_tools_multiple_tools_valid() {
                     name: "get_time".to_string(),
                 },
             ],
-            tool_type: "function".to_string(),
+            tool_type: "allowed_tools".to_string(),
         }),
         ..Default::default()
     };
@@ -549,7 +549,7 @@ fn test_tool_choice_allowed_tools_one_invalid_among_valid() {
                     name: "nonexistent_tool".to_string(),
                 },
             ],
-            tool_type: "function".to_string(),
+            tool_type: "allowed_tools".to_string(),
         }),
         ..Default::default()
     };

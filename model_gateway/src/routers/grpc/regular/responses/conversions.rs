@@ -199,7 +199,7 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
         top_p: req.top_p,
         skip_special_tokens: true,
         tools,
-        tool_choice: req.tool_choice.clone(),
+        tool_choice: req.tool_choice.as_ref().map(|tc| tc.to_chat_tool_choice()),
         response_format: map_text_to_response_format(req.text.as_ref()),
         ..Default::default()
     })

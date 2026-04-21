@@ -1,8 +1,9 @@
 use openai_protocol::{
-    common::{Function, StringOrArray, ToolChoice, ToolChoiceValue},
+    common::{Function, StringOrArray},
     responses::{
         FunctionTool, IncludeField, McpTool, ResponseInput, ResponseInputOutputItem, ResponseTool,
-        ResponsesRequest, StringOrContentParts, TextConfig, TextFormat,
+        ResponsesRequest, ResponsesToolChoice, StringOrContentParts, TextConfig, TextFormat,
+        ToolChoiceOptions,
     },
 };
 use serde_json::json;
@@ -779,7 +780,7 @@ fn test_validate_tool_choice_requires_tools() {
                 strict: None,
             },
         })]),
-        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+        tool_choice: Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto)),
         ..Default::default()
     };
     assert!(
@@ -791,7 +792,7 @@ fn test_validate_tool_choice_requires_tools() {
     let request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
         tools: None,
-        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::None)),
+        tool_choice: Some(ResponsesToolChoice::Options(ToolChoiceOptions::None)),
         ..Default::default()
     };
     assert!(
@@ -803,7 +804,7 @@ fn test_validate_tool_choice_requires_tools() {
     let request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
         tools: None,
-        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+        tool_choice: Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto)),
         ..Default::default()
     };
     let result = request.validate();
@@ -1044,7 +1045,7 @@ fn test_normalize_tool_choice_auto() {
     assert!(
         matches!(
             request.tool_choice,
-            Some(ToolChoice::Value(ToolChoiceValue::Auto))
+            Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto))
         ),
         "tool_choice should default to auto when tools are present"
     );
@@ -1071,7 +1072,7 @@ fn test_normalize_tool_choice_none() {
     assert!(
         matches!(
             request.tool_choice,
-            Some(ToolChoice::Value(ToolChoiceValue::None))
+            Some(ResponsesToolChoice::Options(ToolChoiceOptions::None))
         ),
         "tool_choice should default to none when tools array is empty"
     );
@@ -1092,7 +1093,7 @@ fn test_normalize_tool_choice_no_override() {
                 strict: None,
             },
         })]),
-        tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
+        tool_choice: Some(ResponsesToolChoice::Options(ToolChoiceOptions::Required)),
         ..Default::default()
     };
 
@@ -1101,7 +1102,7 @@ fn test_normalize_tool_choice_no_override() {
     assert!(
         matches!(
             request.tool_choice,
-            Some(ToolChoice::Value(ToolChoiceValue::Required))
+            Some(ResponsesToolChoice::Options(ToolChoiceOptions::Required))
         ),
         "tool_choice should not be overridden if already set"
     );
