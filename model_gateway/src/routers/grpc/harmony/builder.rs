@@ -525,7 +525,9 @@ impl HarmonyBuilder {
                     .filter_map(|part| match part {
                         ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
                         ResponseContentPart::InputText { text } => Some(text.clone()),
-                        ResponseContentPart::Unknown => None,
+                        ResponseContentPart::InputFile { .. } | ResponseContentPart::Unknown => {
+                            None
+                        }
                     })
                     .collect();
 
@@ -677,7 +679,8 @@ impl HarmonyBuilder {
                             .filter_map(|part| match part {
                                 ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
                                 ResponseContentPart::InputText { text } => Some(text.clone()),
-                                ResponseContentPart::Unknown => None,
+                                ResponseContentPart::InputFile { .. }
+                                | ResponseContentPart::Unknown => None,
                             })
                             .collect::<Vec<_>>()
                             .join("\n")
@@ -962,5 +965,84 @@ impl HarmonyBuilder {
 impl Default for HarmonyBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::responses::{ResponseContentPart, ResponseInputOutputItem};
+
+    use super::*;
+
+    fn try_builder() -> Option<HarmonyBuilder> {
+        std::panic::catch_unwind(HarmonyBuilder::new).ok()
+    }
+
+    #[test]
+    fn test_parse_response_item_to_harmony_message_ignores_input_file_in_mixed_content() {
+        let Some(builder) = try_builder() else {
+            return;
+        };
+        let item = ResponseInputOutputItem::Message {
+            id: "msg_1".to_string(),
+            role: "user".to_string(),
+            content: vec![
+                ResponseContentPart::InputText {
+                    text: "alpha".to_string(),
+                },
+                ResponseContentPart::InputFile {
+                    data: serde_json::Map::from_iter([(
+                        "file_id".to_string(),
+                        serde_json::json!("file_123"),
+                    )]),
+                },
+                ResponseContentPart::OutputText {
+                    text: "beta".to_string(),
+                    annotations: vec![],
+                    logprobs: None,
+                },
+            ],
+            status: None,
+        };
+
+        let msg = builder
+            .parse_response_item_to_harmony_message(&item, &[])
+            .expect("harmony parse should succeed");
+
+        assert_eq!(msg.author.role, Role::User);
+        assert_eq!(msg.content.len(), 1);
+        match &msg.content[0] {
+            Content::Text(tc) => assert_eq!(tc.text, "alpha\nbeta"),
+            _ => panic!("expected text content"),
+        }
+    }
+
+    #[test]
+    fn test_parse_response_item_to_harmony_message_file_only_content_is_non_panicking() {
+        let Some(builder) = try_builder() else {
+            return;
+        };
+        let item = ResponseInputOutputItem::Message {
+            id: "msg_1".to_string(),
+            role: "user".to_string(),
+            content: vec![ResponseContentPart::InputFile {
+                data: serde_json::Map::from_iter([(
+                    "filename".to_string(),
+                    serde_json::json!("doc.pdf"),
+                )]),
+            }],
+            status: None,
+        };
+
+        let msg = builder
+            .parse_response_item_to_harmony_message(&item, &[])
+            .expect("harmony parse should succeed");
+
+        assert_eq!(msg.author.role, Role::User);
+        assert_eq!(msg.content.len(), 1);
+        match &msg.content[0] {
+            Content::Text(tc) => assert_eq!(tc.text, ""),
+            _ => panic!("expected text content"),
+        }
     }
 }

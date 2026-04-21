@@ -21,7 +21,8 @@ fn extract_text_for_routing_old(req: &ResponsesRequest) -> String {
                         .filter_map(|part| match part {
                             ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
                             ResponseContentPart::InputText { text } => Some(text.clone()),
-                            ResponseContentPart::Unknown => None,
+                            ResponseContentPart::InputFile { .. }
+                            | ResponseContentPart::Unknown => None,
                         })
                         .collect();
                     if texts.is_empty() {

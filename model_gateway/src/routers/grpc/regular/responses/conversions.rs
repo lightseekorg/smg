@@ -209,7 +209,7 @@ fn extract_text_from_content(content: &[ResponseContentPart]) -> String {
         .filter_map(|part| match part {
             ResponseContentPart::InputText { text } => Some(text.as_str()),
             ResponseContentPart::OutputText { text, .. } => Some(text.as_str()),
-            ResponseContentPart::Unknown => None,
+            ResponseContentPart::InputFile { .. } | ResponseContentPart::Unknown => None,
         })
         .collect::<Vec<_>>()
         .join("")
@@ -429,5 +429,71 @@ mod tests {
         // Empty text should still create a user message, so this should succeed
         let result = responses_to_chat(&req);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_items_input_conversion_ignores_input_file_in_mixed_content() {
+        let req = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::Message {
+                id: "msg_1".to_string(),
+                role: "user".to_string(),
+                content: vec![
+                    ResponseContentPart::InputText {
+                        text: "hello ".to_string(),
+                    },
+                    ResponseContentPart::InputFile {
+                        data: serde_json::Map::from_iter([(
+                            "file_id".to_string(),
+                            serde_json::json!("file_123"),
+                        )]),
+                    },
+                    ResponseContentPart::OutputText {
+                        text: "world".to_string(),
+                        annotations: vec![],
+                        logprobs: None,
+                    },
+                ],
+                status: None,
+            }]),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).expect("conversion should succeed");
+        assert_eq!(chat_req.messages.len(), 1);
+        match &chat_req.messages[0] {
+            ChatMessage::User {
+                content: MessageContent::Text(text),
+                ..
+            } => assert_eq!(text, "hello world"),
+            _ => panic!("expected user text message"),
+        }
+    }
+
+    #[test]
+    fn test_items_input_conversion_file_only_content_is_non_panicking() {
+        let req = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::Message {
+                id: "msg_1".to_string(),
+                role: "user".to_string(),
+                content: vec![ResponseContentPart::InputFile {
+                    data: serde_json::Map::from_iter([(
+                        "filename".to_string(),
+                        serde_json::json!("doc.pdf"),
+                    )]),
+                }],
+                status: None,
+            }]),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).expect("conversion should succeed");
+        assert_eq!(chat_req.messages.len(), 1);
+        match &chat_req.messages[0] {
+            ChatMessage::User {
+                content: MessageContent::Text(text),
+                ..
+            } => assert_eq!(text, ""),
+            _ => panic!("expected user text message"),
+        }
     }
 }

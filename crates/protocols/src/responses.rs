@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use validator::{Validate, ValidationError};
 
 use super::{
@@ -258,6 +258,12 @@ pub enum ResponseContentPart {
     },
     #[serde(rename = "input_text")]
     InputText { text: String },
+    #[serde(rename = "input_file")]
+    InputFile {
+        /// Preserve all fields for passthrough (file_url, file_id, file_data, filename, etc.)
+        #[serde(flatten)]
+        data: Map<String, Value>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -913,7 +919,8 @@ impl GenerationRequest for ResponsesRequest {
                                         Some(text.as_str())
                                     }
                                     ResponseContentPart::InputText { text } => Some(text.as_str()),
-                                    ResponseContentPart::Unknown => None,
+                                    ResponseContentPart::InputFile { .. }
+                                    | ResponseContentPart::Unknown => None,
                                 };
                                 if let Some(t) = text {
                                     append_text(t);
@@ -934,7 +941,8 @@ impl GenerationRequest for ResponsesRequest {
                                             ResponseContentPart::InputText { text } => {
                                                 Some(text.as_str())
                                             }
-                                            ResponseContentPart::Unknown => None,
+                                            ResponseContentPart::InputFile { .. }
+                                            | ResponseContentPart::Unknown => None,
                                         };
                                         if let Some(t) = text {
                                             append_text(t);
@@ -1589,6 +1597,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::common::GenerationRequest;
 
     #[test]
     fn test_responses_request_omitted_top_p_deserializes_to_none() {
@@ -1685,5 +1694,104 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn test_input_file_content_part_round_trip_in_request() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.4",
+            "input": [{
+                "type": "message",
+                "id": "msg_1",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_file",
+                        "file_id": "file_123",
+                        "filename": "doc.pdf",
+                        "file_url": "https://example.com/doc.pdf"
+                    }
+                ]
+            }]
+        }))
+        .expect("request should deserialize");
+
+        let ResponseInput::Items(items) = &request.input else {
+            panic!("expected structured items");
+        };
+        let ResponseInputOutputItem::Message { content, .. } = &items[0] else {
+            panic!("expected message item");
+        };
+        let ResponseContentPart::InputFile { data } = &content[0] else {
+            panic!("expected input_file content part");
+        };
+
+        assert_eq!(data.get("file_id"), Some(&json!("file_123")));
+        assert_eq!(data.get("filename"), Some(&json!("doc.pdf")));
+        assert_eq!(
+            data.get("file_url"),
+            Some(&json!("https://example.com/doc.pdf"))
+        );
+
+        let serialized = serde_json::to_value(&request).expect("request should serialize");
+        let part = &serialized["input"][0]["content"][0];
+        assert_eq!(part["type"], "input_file");
+        assert_eq!(part["file_id"], "file_123");
+        assert_eq!(part["filename"], "doc.pdf");
+        assert_eq!(part["file_url"], "https://example.com/doc.pdf");
+    }
+
+    #[test]
+    fn test_unknown_response_content_part_type_maps_to_unknown() {
+        let part: ResponseContentPart = serde_json::from_value(json!({
+            "type": "totally_new_part_type",
+            "field": "value"
+        }))
+        .expect("part should deserialize");
+
+        assert!(matches!(part, ResponseContentPart::Unknown));
+    }
+
+    #[test]
+    fn test_extract_text_for_routing_ignores_input_file_and_preserves_text_order() {
+        let request = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Items(vec![
+                ResponseInputOutputItem::Message {
+                    id: "msg_1".to_string(),
+                    role: "user".to_string(),
+                    content: vec![
+                        ResponseContentPart::InputText {
+                            text: "first".to_string(),
+                        },
+                        ResponseContentPart::InputFile {
+                            data: Map::from_iter([("file_id".to_string(), json!("file_1"))]),
+                        },
+                        ResponseContentPart::OutputText {
+                            text: "second".to_string(),
+                            annotations: vec![],
+                            logprobs: None,
+                        },
+                    ],
+                    status: None,
+                },
+                ResponseInputOutputItem::SimpleInputMessage {
+                    content: StringOrContentParts::Array(vec![
+                        ResponseContentPart::InputFile {
+                            data: Map::from_iter([("filename".to_string(), json!("a.txt"))]),
+                        },
+                        ResponseContentPart::InputText {
+                            text: "third".to_string(),
+                        },
+                    ]),
+                    role: "user".to_string(),
+                    r#type: None,
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let text = GenerationRequest::extract_text_for_routing(&request);
+        assert_eq!(text, "first second third");
     }
 }
