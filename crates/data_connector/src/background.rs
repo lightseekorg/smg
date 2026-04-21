@@ -94,7 +94,8 @@ pub type BackgroundRepositoryResult<T> = Result<T, BackgroundRepositoryError>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct EnqueueRequest {
-    /// Response ID (e.g. `resp_…`). Typically generated via `generate_id("resp")`.
+    /// Response ID. Typically generated via [`ResponseId::new()`], which
+    /// produces a ULID string (not a `resp_…`-prefixed identifier).
     pub response_id: ResponseId,
 
     /// The accepted client request, serialized after validation but before any
@@ -140,9 +141,9 @@ impl EnqueueRequest {
     /// `conversation_id`, `safety_identifier`, or `previous_response_id`.
     ///
     /// `EnqueueRequest` is `#[non_exhaustive]` so external crates cannot use
-    /// struct-literal construction. Use this constructor and then mutate the
-    /// optional fields via their public setters (all fields are `pub`) to fill
-    /// in any additional metadata.
+    /// struct-literal construction. Use this constructor, then assign optional
+    /// metadata directly to the public fields (there are no setter methods —
+    /// every field is `pub`).
     pub fn new(
         response_id: ResponseId,
         model: String,
@@ -374,10 +375,18 @@ pub trait BackgroundResponseRepository: Send + Sync {
 
     /// Extend an active lease. Fails with [`BackgroundRepositoryError::LeaseNotHeld`]
     /// if the lease expired or another worker took over.
+    ///
+    /// `now` is the caller's reference time — used both to check that the
+    /// existing lease hasn't expired and to compute the new `lease_expires_at`
+    /// as `now + lease`. Passed explicitly (rather than calling `Utc::now()`
+    /// internally) so tests can drive the lease clock deterministically and
+    /// so `heartbeat` stays consistent with [`Self::claim_next`] and
+    /// [`Self::requeue_expired`], which also take `now`.
     async fn heartbeat(
         &self,
         response_id: &ResponseId,
         worker_id: &str,
+        now: DateTime<Utc>,
         lease: Duration,
     ) -> BackgroundRepositoryResult<()>;
 

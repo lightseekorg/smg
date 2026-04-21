@@ -326,27 +326,26 @@ fn pg_v10_up(schema: &SchemaConfig) -> Vec<String> {
                 {lease_expires_at} TIMESTAMPTZ, \
                 {worker_id} TEXT, \
                 {created_at} TIMESTAMPTZ NOT NULL DEFAULT now(), \
-                CONSTRAINT {table}_lease_pairing_chk \
+                CONSTRAINT bg_queue_lease_pairing_chk \
                     CHECK (({worker_id} IS NULL) = ({lease_expires_at} IS NULL))\
-            )",
-            table = q.table
+            )"
         ),
         // Claim index: partial index over unclaimed rows, ordered to match the
         // claim query (priority asc, next_attempt_at asc, created_at asc).
+        //
+        // Fixed names (not derived from the table identifier) so custom table
+        // names can't collide via Postgres' 63-byte identifier truncation, and
+        // so the matching Oracle names stay ≤30 chars.
         format!(
-            "CREATE INDEX IF NOT EXISTS {table}_claim_idx ON {queue_table} \
+            "CREATE INDEX IF NOT EXISTS bg_queue_claim_idx ON {queue_table} \
                 ({priority}, {next_attempt_at}, {created_at}) \
-                WHERE {lease_expires_at} IS NULL",
-            table = q.table
+                WHERE {lease_expires_at} IS NULL"
         ),
         // Lease-sweep index for the janitor that requeues expired leases.
-        // Named `_sweep_idx` rather than `_lease_sweep_idx` so the
-        // corresponding Oracle identifier stays ≤30 chars (pre-12.2 limit).
         format!(
-            "CREATE INDEX IF NOT EXISTS {table}_sweep_idx ON {queue_table} \
+            "CREATE INDEX IF NOT EXISTS bg_queue_sweep_idx ON {queue_table} \
                 ({lease_expires_at}) \
-                WHERE {lease_expires_at} IS NOT NULL",
-            table = q.table
+                WHERE {lease_expires_at} IS NOT NULL"
         ),
     ]
 }
@@ -683,12 +682,12 @@ mod tests {
             stmts[0].contains("ON DELETE CASCADE"),
             "FK must cascade: {stmts:?}"
         );
-        assert!(stmts[1].contains("background_queue_claim_idx"));
+        assert!(stmts[1].contains("bg_queue_claim_idx"));
         assert!(
             stmts[1].contains("WHERE lease_expires_at IS NULL"),
             "claim index must be partial over unclaimed rows: {stmts:?}"
         );
-        assert!(stmts[2].contains("background_queue_sweep_idx"));
+        assert!(stmts[2].contains("bg_queue_sweep_idx"));
         assert!(stmts[2].contains("WHERE lease_expires_at IS NOT NULL"));
     }
 
@@ -698,10 +697,29 @@ mod tests {
         let schema = SchemaConfig::default();
         let stmts = pg_v10_up(&schema);
         assert!(
-            stmts[0].contains("CONSTRAINT background_queue_lease_pairing_chk")
+            stmts[0].contains("CONSTRAINT bg_queue_lease_pairing_chk")
                 && stmts[0].contains("CHECK ((worker_id IS NULL) = (lease_expires_at IS NULL))"),
             "lease pairing CHECK constraint missing: {stmts:?}"
         );
+    }
+
+    #[test]
+    fn pg_v10_up_uses_fixed_object_names_independent_of_table_identifier() {
+        // If an operator customizes `background_queue.table` to a long name,
+        // Postgres truncates identifiers to 63 bytes — derived index names
+        // like `{table}_claim_idx` and `{table}_sweep_idx` would collide, and
+        // `CREATE INDEX IF NOT EXISTS` would silently skip the second one.
+        // Fix: fixed non-derived names.
+        let mut schema = SchemaConfig::default();
+        schema.background_queue.table =
+            "custom_background_queue_name_that_is_really_quite_long".to_string();
+        let stmts = pg_v10_up(&schema);
+        assert!(
+            stmts[0].contains("CONSTRAINT bg_queue_lease_pairing_chk"),
+            "constraint name must be fixed: {stmts:?}"
+        );
+        assert!(stmts[1].contains("bg_queue_claim_idx"));
+        assert!(stmts[2].contains("bg_queue_sweep_idx"));
     }
 
     // ── v11: create response_stream_chunks ─────────────────────────────────

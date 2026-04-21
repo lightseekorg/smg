@@ -359,14 +359,14 @@ fn oracle_v10_up(schema: &SchemaConfig) -> Vec<String> {
     let lease_expires_at = q.col("lease_expires_at").to_uppercase();
     let worker_id = q.col("worker_id").to_uppercase();
     let created_at = q.col("created_at").to_uppercase();
-    let queue_table_name = q.table.to_uppercase();
-    // Indexes live in their own namespace and need owner qualification in
-    // owner-scoped deployments (constraints are auto-qualified to the table's
+    // Fixed short names (not derived from the table identifier) so that
+    // operators who customize `schema.background_queue.table` to a long name
+    // can't accidentally push the emitted constraint / index names past
+    // Oracle's 30-char limit. Indexes live in their own namespace and need
+    // owner qualification (constraints are auto-qualified to the table's
     // owner, indexes are not).
-    // Index names kept ≤30 chars for Oracle pre-12.2 compatibility. Dropped
-    // `LEASE_` from the sweep name (redundant — the table is already a queue).
-    let claim_idx = oracle_qualified_name(schema, &format!("{queue_table_name}_CLAIM_IDX"));
-    let sweep_idx = oracle_qualified_name(schema, &format!("{queue_table_name}_SWEEP_IDX"));
+    let claim_idx = oracle_qualified_name(schema, "BG_QUEUE_CLAIM_IDX");
+    let sweep_idx = oracle_qualified_name(schema, "BG_QUEUE_SWEEP_IDX");
 
     vec![
         // ORA-00955 = "name is already used by an existing object"
@@ -379,9 +379,9 @@ fn oracle_v10_up(schema: &SchemaConfig) -> Vec<String> {
                 {lease_expires_at} TIMESTAMP WITH TIME ZONE, \
                 {worker_id} VARCHAR2(256), \
                 {created_at} TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL, \
-                CONSTRAINT {queue_table_name}_FK FOREIGN KEY ({response_id}) \
+                CONSTRAINT BG_QUEUE_FK FOREIGN KEY ({response_id}) \
                     REFERENCES {resp_table}({resp_id_col}) ON DELETE CASCADE, \
-                CONSTRAINT {queue_table_name}_LEASE_CHK \
+                CONSTRAINT BG_QUEUE_LEASE_CHK \
                     CHECK (({worker_id} IS NULL AND {lease_expires_at} IS NULL) \
                         OR ({worker_id} IS NOT NULL AND {lease_expires_at} IS NOT NULL))\
             )'; EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
@@ -415,10 +415,9 @@ fn oracle_v11_up(schema: &SchemaConfig) -> Vec<String> {
     let event_type = c.col("event_type").to_uppercase();
     let data = c.col("data").to_uppercase();
     let created_at = c.col("created_at").to_uppercase();
-    let chunks_table_name = c.table.to_uppercase();
-    // Fixed short name (not derived from the 22-char table name) — Oracle
-    // pre-12.2 rejects identifiers >30 chars and `{chunks_table_name}_CLEANUP_IDX`
-    // would be 34 chars. `STREAM_CHUNKS_CLEANUP_IDX` is 25 chars.
+    // Fixed short names (not derived from the table identifier) so custom
+    // table names can't push the emitted object names past Oracle's 30-char
+    // limit. `STREAM_CHUNKS_CLEANUP_IDX` is 25 chars.
     let cleanup_idx = oracle_qualified_name(schema, "STREAM_CHUNKS_CLEANUP_IDX");
 
     vec![
@@ -429,8 +428,8 @@ fn oracle_v11_up(schema: &SchemaConfig) -> Vec<String> {
                 {event_type} VARCHAR2(128) NOT NULL, \
                 {data} CLOB CHECK ({data} IS JSON) NOT NULL, \
                 {created_at} TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL, \
-                CONSTRAINT {chunks_table_name}_PK PRIMARY KEY ({response_id}, {sequence}), \
-                CONSTRAINT {chunks_table_name}_FK FOREIGN KEY ({response_id}) \
+                CONSTRAINT STREAM_CHUNKS_PK PRIMARY KEY ({response_id}, {sequence}), \
+                CONSTRAINT STREAM_CHUNKS_FK FOREIGN KEY ({response_id}) \
                     REFERENCES {resp_table}({resp_id_col}) ON DELETE CASCADE\
             )'; EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
         ),
@@ -577,13 +576,13 @@ mod tests {
             stmts[0].contains("SQLCODE != -955"),
             "idempotency via ORA-00955: {stmts:?}"
         );
-        assert!(stmts[1].contains("BACKGROUND_QUEUE_CLAIM_IDX"));
+        assert!(stmts[1].contains("BG_QUEUE_CLAIM_IDX"));
         // Oracle has no partial indexes — no WHERE clause on CREATE INDEX.
         assert!(
             !stmts[1].contains("WHERE"),
             "Oracle claim index must be plain composite (no WHERE): {stmts:?}"
         );
-        assert!(stmts[2].contains("BACKGROUND_QUEUE_SWEEP_IDX"));
+        assert!(stmts[2].contains("BG_QUEUE_SWEEP_IDX"));
     }
 
     #[test]
@@ -594,11 +593,11 @@ mod tests {
         };
         let stmts = oracle_v10_up(&schema);
         assert!(
-            stmts[1].contains("CREATE INDEX OWNER.BACKGROUND_QUEUE_CLAIM_IDX"),
+            stmts[1].contains("CREATE INDEX OWNER.BG_QUEUE_CLAIM_IDX"),
             "claim index must be owner-qualified: {stmts:?}"
         );
         assert!(
-            stmts[2].contains("CREATE INDEX OWNER.BACKGROUND_QUEUE_SWEEP_IDX"),
+            stmts[2].contains("CREATE INDEX OWNER.BG_QUEUE_SWEEP_IDX"),
             "sweep index must be owner-qualified: {stmts:?}"
         );
     }
@@ -608,7 +607,7 @@ mod tests {
         let schema = SchemaConfig::default();
         let stmts = oracle_v10_up(&schema);
         assert!(
-            stmts[0].contains("CONSTRAINT BACKGROUND_QUEUE_LEASE_CHK"),
+            stmts[0].contains("CONSTRAINT BG_QUEUE_LEASE_CHK"),
             "lease pairing CHECK constraint missing: {stmts:?}"
         );
         assert!(
@@ -616,6 +615,24 @@ mod tests {
                 && stmts[0].contains("WORKER_ID IS NOT NULL AND LEASE_EXPIRES_AT IS NOT NULL"),
             "CHECK body must enforce both-NULL-or-both-set: {stmts:?}"
         );
+    }
+
+    #[test]
+    fn oracle_v10_up_uses_fixed_object_names_independent_of_table_identifier() {
+        // Verify derived object names don't come from `schema.background_queue.table`:
+        // changing the table identifier must NOT change the emitted constraint or
+        // index names (otherwise a custom long table name could push them past
+        // Oracle's 30-char limit).
+        let mut schema = SchemaConfig::default();
+        schema.background_queue.table = "custom_bg_queue_with_a_very_long_name".to_string();
+        let stmts = oracle_v10_up(&schema);
+        assert!(
+            stmts[0].contains("CONSTRAINT BG_QUEUE_FK")
+                && stmts[0].contains("CONSTRAINT BG_QUEUE_LEASE_CHK"),
+            "constraint names must be fixed: {stmts:?}"
+        );
+        assert!(stmts[1].contains("BG_QUEUE_CLAIM_IDX"));
+        assert!(stmts[2].contains("BG_QUEUE_SWEEP_IDX"));
     }
 
     // ── v11: create response_stream_chunks ─────────────────────────────────
@@ -829,6 +846,14 @@ mod tests {
     /// ORA-00972. This test scans every identifier emitted by every migration
     /// and fails loudly if anything crosses the limit, so future contributors
     /// can't accidentally reintroduce the bug.
+    ///
+    /// Note: we deliberately do NOT strip the EXECUTE IMMEDIATE literal
+    /// content. Oracle DDL identifiers (table / column / constraint / index
+    /// names) live INSIDE those literals, so stripping would make the test
+    /// check only outer PL/SQL wrapper keywords (BEGIN, EXCEPTION, SQLCODE,
+    /// all ≤11 chars) and silently miss real violations. Doubled-quote
+    /// string values like `''completed''` tokenize to short words
+    /// (`completed` = 9 chars) that never trip the 30-char limit.
     #[test]
     fn all_oracle_migration_identifiers_are_within_30_chars() {
         let schema = SchemaConfig::default();
@@ -837,46 +862,16 @@ mod tests {
             .flat_map(|m| (m.up)(&schema))
             .collect();
 
-        // Tokenize on any char that cannot appear in an identifier. An
-        // identifier starts with a letter/underscore and contains
-        // alphanumerics/underscores. Skip tokens that look like quoted
-        // literals (bounded by '…').
         fn is_ident_char(c: char) -> bool {
             c.is_ascii_alphanumeric() || c == '_'
         }
         let mut violations: Vec<String> = Vec::new();
         for stmt in &all {
-            // Strip literals ('…') so we don't trip on default values like
-            // ''completed''. We're looking for table / column / constraint /
-            // index names, which live outside quote pairs.
-            let stripped: String = {
-                let mut out = String::with_capacity(stmt.len());
-                let mut in_lit = false;
-                let mut chars = stmt.chars().peekable();
-                while let Some(c) = chars.next() {
-                    if c == '\'' {
-                        // Doubled '' inside a literal is an escaped quote; leave
-                        // literal state unchanged.
-                        if in_lit && chars.peek() == Some(&'\'') {
-                            chars.next();
-                            continue;
-                        }
-                        in_lit = !in_lit;
-                        out.push(' ');
-                    } else if in_lit {
-                        out.push(' ');
-                    } else {
-                        out.push(c);
-                    }
-                }
-                out
-            };
             let mut token = String::new();
-            for c in stripped.chars().chain(std::iter::once(' ')) {
+            for c in stmt.chars().chain(std::iter::once(' ')) {
                 if is_ident_char(c) {
                     token.push(c);
                 } else {
-                    // At boundary; check the token we just finished building.
                     if token.len() > 30 && token.starts_with(|ch: char| !ch.is_ascii_digit()) {
                         violations.push(format!(
                             "identifier `{}` ({} chars) in: {}",
@@ -894,6 +889,37 @@ mod tests {
             "Oracle identifiers must be ≤30 chars (pre-12.2 limit, ORA-00972). \
              Violations:\n  {}",
             violations.join("\n  ")
+        );
+    }
+
+    /// Meta-test: plant a 31-char identifier inside an EXECUTE IMMEDIATE
+    /// literal and confirm the guard above catches it. Protects against
+    /// anyone accidentally reintroducing literal-stripping (which would make
+    /// the guard silently useless because real DDL identifiers live INSIDE
+    /// the literal).
+    #[test]
+    fn identifier_length_guard_catches_planted_violation() {
+        fn is_ident_char(c: char) -> bool {
+            c.is_ascii_alphanumeric() || c == '_'
+        }
+        let planted = "BEGIN EXECUTE IMMEDIATE \
+            'CREATE TABLE AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA (x INT)'; \
+            EXCEPTION WHEN OTHERS THEN RAISE; END;";
+        let mut hit_long = false;
+        let mut token = String::new();
+        for c in planted.chars().chain(std::iter::once(' ')) {
+            if is_ident_char(c) {
+                token.push(c);
+            } else {
+                if token.len() > 30 && token.starts_with(|ch: char| !ch.is_ascii_digit()) {
+                    hit_long = true;
+                }
+                token.clear();
+            }
+        }
+        assert!(
+            hit_long,
+            "guard regressed — must detect >30-char identifiers inside EXECUTE IMMEDIATE"
         );
     }
 }
