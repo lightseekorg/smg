@@ -12,7 +12,10 @@ use anyhow::Result;
 use bytes::Bytes;
 use rand::seq::{IndexedRandom, SliceRandom};
 use tokio::sync::{mpsc, watch, Mutex};
-use tonic::transport::{ClientTlsConfig, Endpoint};
+use tonic::{
+    metadata::MetadataValue,
+    transport::{ClientTlsConfig, Endpoint},
+};
 use tracing as log;
 use tracing::{instrument, Instrument};
 
@@ -1285,7 +1288,14 @@ impl MeshController {
         let (tx, rx) = mpsc::channel::<StreamMessage>(128);
         let outgoing_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-        let response = client.sync_stream(outgoing_stream).await.map_err(|e| {
+        let mut request = tonic::Request::new(outgoing_stream);
+        let peer_id_header = MetadataValue::try_from(self.self_name.as_str())
+            .map_err(|e| anyhow::anyhow!("Invalid sync_stream peer_id metadata: {e}"))?;
+        request
+            .metadata_mut()
+            .insert("x-mesh-peer-id", peer_id_header);
+
+        let response = client.sync_stream(request).await.map_err(|e| {
             log::error!("Failed to establish sync_stream with {}: {}", peer_name, e);
             anyhow::anyhow!("sync_stream RPC failed: {e}")
         })?;
