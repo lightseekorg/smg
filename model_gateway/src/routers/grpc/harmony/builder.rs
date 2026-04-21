@@ -60,7 +60,12 @@ pub(crate) fn convert_harmony_logprobs(proto_logprobs: &ProtoOutputLogProbs) -> 
 }
 
 /// Built-in tools that are added to the system message
-const BUILTIN_TOOLS: &[&str] = &["web_search_preview", "code_interpreter", "container"];
+const BUILTIN_TOOLS: &[&str] = &[
+    "web_search_preview",
+    "code_interpreter",
+    "container",
+    "file_search",
+];
 
 /// Trait for tool-like objects that can be converted to Harmony ToolDescription
 trait ToolLike {
@@ -426,6 +431,7 @@ impl HarmonyBuilder {
                             ResponseTool::WebSearchPreview(_) => "web_search_preview",
                             ResponseTool::CodeInterpreter(_) => "code_interpreter",
                             ResponseTool::Mcp(_) => "mcp",
+                            ResponseTool::FileSearch(_) => "file_search",
                         })
                         .collect()
                 })
@@ -519,13 +525,19 @@ impl HarmonyBuilder {
                     _ => Role::User, // Default to user for unknown roles
                 };
 
-                // Extract text from content parts
+                // Extract text from content parts. `Refusal` is losslessly
+                // representable as text and is preserved verbatim. Image /
+                // file parts are currently dropped (R1/R2/R3 will implement
+                // full media handling).
                 let text_parts: Vec<String> = content
                     .iter()
                     .filter_map(|part| match part {
                         ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
                         ResponseContentPart::InputText { text } => Some(text.clone()),
-                        ResponseContentPart::Unknown => None,
+                        ResponseContentPart::Refusal { refusal } => Some(refusal.clone()),
+                        // R1/R2/R3 will implement full media handling
+                        ResponseContentPart::InputImage { .. }
+                        | ResponseContentPart::InputFile { .. } => None,
                     })
                     .collect();
 
@@ -671,13 +683,19 @@ impl HarmonyBuilder {
                 let text = match content {
                     StringOrContentParts::String(s) => s.clone(),
                     StringOrContentParts::Array(parts) => {
-                        // Extract text from content parts
+                        // Extract text from content parts. `Refusal` is
+                        // losslessly representable as text and is preserved
+                        // verbatim. Image / file parts are currently dropped
+                        // (R1/R2/R3 will implement full media handling).
                         parts
                             .iter()
                             .filter_map(|part| match part {
                                 ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
                                 ResponseContentPart::InputText { text } => Some(text.clone()),
-                                ResponseContentPart::Unknown => None,
+                                ResponseContentPart::Refusal { refusal } => Some(refusal.clone()),
+                                // R1/R2/R3 will implement full media handling
+                                ResponseContentPart::InputImage { .. }
+                                | ResponseContentPart::InputFile { .. } => None,
                             })
                             .collect::<Vec<_>>()
                             .join("\n")

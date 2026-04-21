@@ -31,7 +31,8 @@ use crate::{
         error,
         grpc::{
             common::responses::{
-                ensure_mcp_connection, persist_response_if_needed, ResponsesContext,
+                collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
+                ResponsesContext,
             },
             harmony::processor::ResponsesIterationResult,
         },
@@ -101,6 +102,7 @@ async fn execute_with_mcp_loop(
     // Preserve original tools for response (before merging MCP tools)
     // The response should show the user's original request tools, not internal MCP tools
     let mut original_tools = current_request.tools.clone();
+    let user_function_names = collect_user_function_names(&current_request);
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
     let session_request_id = format!("resp_{}", uuid::Uuid::now_v7());
@@ -174,7 +176,7 @@ async fn execute_with_mcp_loop(
                 // discriminator is whether the name belongs to the MCP session.
                 let (mcp_tool_calls, function_tool_calls): (Vec<_>, Vec<_>) = tool_calls
                     .into_iter()
-                    .partition(|tc| session.has_exposed_tool(&tc.function.name));
+                    .partition(|tc| session.has_exposed_tool(tc.function.name.as_str()));
 
                 debug!(
                     mcp_calls = mcp_tool_calls.len(),
@@ -227,7 +229,12 @@ async fn execute_with_mcp_loop(
 
                     // Inject MCP metadata if any calls were executed
                     if mcp_tracking.total_calls() > 0 {
-                        inject_mcp_metadata(&mut response, &mcp_tracking, &session);
+                        inject_mcp_metadata(
+                            &mut response,
+                            &mcp_tracking,
+                            &session,
+                            &user_function_names,
+                        );
                     }
 
                     return Ok(response);
@@ -272,7 +279,12 @@ async fn execute_with_mcp_loop(
 
                     // Inject MCP metadata for all executed calls
                     if mcp_tracking.total_calls() > 0 {
-                        inject_mcp_metadata(&mut response, &mcp_tracking, &session);
+                        inject_mcp_metadata(
+                            &mut response,
+                            &mcp_tracking,
+                            &session,
+                            &user_function_names,
+                        );
                     }
 
                     return Ok(response);
@@ -304,7 +316,7 @@ async fn execute_with_mcp_loop(
                 );
 
                 // Inject MCP metadata into final response
-                inject_mcp_metadata(&mut response, &mcp_tracking, &session);
+                inject_mcp_metadata(&mut response, &mcp_tracking, &session, &user_function_names);
 
                 // Restore original tools (hide internal MCP tools from response)
                 response.tools = original_tools.take().unwrap_or_default();
@@ -386,14 +398,14 @@ fn build_tool_response(
 
     // Add reasoning output item if analysis exists
     if let Some(analysis_text) = analysis {
-        output.push(ResponseOutputItem::Reasoning {
-            id: format!("reasoning_{request_id}"),
-            summary: vec![],
-            content: vec![ResponseReasoningContent::ReasoningText {
+        output.push(ResponseOutputItem::new_reasoning(
+            format!("reasoning_{request_id}"),
+            vec![],
+            vec![ResponseReasoningContent::ReasoningText {
                 text: analysis_text,
             }],
-            status: Some("completed".to_string()),
-        });
+            Some("completed".to_string()),
+        ));
     }
 
     // Add message output item if partial text exists
@@ -407,6 +419,7 @@ fn build_tool_response(
                 logprobs: None,
             }],
             status: "completed".to_string(),
+            phase: None,
         });
     }
 

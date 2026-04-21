@@ -31,6 +31,7 @@ from sglang.srt.managers.io_struct import (
     ProfileReqOutput,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
+    WatchLoadUpdateReq,
 )
 from sglang.srt.observability.req_time_stats import (
     APIServerReqTimeStats,
@@ -731,6 +732,17 @@ class GrpcRequestManager:
                         del self.rid_to_state[request_id]
 
                 cleanup_tasks.append(asyncio.create_task(cleanup(rid)))
+
+        # Forward load info to DataParallelController for token-aware balancing.
+        # Mirrors TokenizerManager._handle_batch_output logic: when dp_size > 1,
+        # each scheduler piggybacks its load (num_reqs, num_tokens) on batch output.
+        # Without this, DPBudget stays at zero and total_tokens/total_requests
+        # policies degenerate to always picking rank 0.
+        if self.server_args.dp_size > 1 and batch_out.load is not None:
+            try:
+                await self._send_to_scheduler(WatchLoadUpdateReq(loads=[batch_out.load]))
+            except Exception as e:
+                logger.warning("Failed to forward DP load update: %s", e)
 
         # Execute all queue.put() operations in parallel
         if put_tasks:

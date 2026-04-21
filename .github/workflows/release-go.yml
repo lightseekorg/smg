@@ -1,0 +1,93 @@
+name: Release gRPC goLang packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/grpc_client/go/**'
+      - 'crates/grpc_client/proto/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/grpc_client/go/**'
+      - 'crates/grpc_client/proto/**'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 1.5.0)'
+        required: true
+
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Tag Release
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - name: Install protoc-gen-go
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+      - name: Generate Code
+        run: bash crates/grpc_client/go/generate.sh
+
+      - name: Commit Generated Code
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f crates/grpc_client/go/generated
+          if [ -d "crates/grpc_client/go/proto" ]; then
+            git add -f crates/grpc_client/go/proto
+          fi
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: include generated code for release [skip ci]"
+          fi
+
+      - name: Read Version
+        id: version
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            echo "Error: Version input is missing"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          TAG="crates/grpc_client/go/v${{ steps.version.outputs.version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and Push Tag
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          TAG="crates/grpc_client/go/v${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"

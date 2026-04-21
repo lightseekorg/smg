@@ -103,6 +103,11 @@ pub struct MockFailingMCPServer {
     harness: MockServerHarness,
 }
 
+/// Mock MCP server that returns configurable web search response formats.
+pub struct MockSearchResponseMCPServer {
+    harness: MockServerHarness,
+}
+
 /// Simple test server with mock search tools
 #[derive(Clone)]
 pub struct MockSearchServer {
@@ -122,10 +127,32 @@ pub struct MockFailingSearchServer {
     tool_router: ToolRouter<MockFailingSearchServer>,
 }
 
+#[derive(Clone, Copy)]
+pub enum MockSearchResponseMode {
+    Brave,
+    OpenAi,
+}
+
+/// Test server that returns configurable web search payloads.
+#[derive(Clone)]
+pub struct MockSearchResponseServer {
+    mode: MockSearchResponseMode,
+    tool_router: ToolRouter<MockSearchResponseServer>,
+}
+
 impl MockFailingSearchServer {
     pub fn new(error_marker: impl Into<String>) -> Self {
         Self {
             error_marker: error_marker.into(),
+            tool_router: Self::tool_router(),
+        }
+    }
+}
+
+impl MockSearchResponseServer {
+    pub fn new(mode: MockSearchResponseMode) -> Self {
+        Self {
+            mode,
             tool_router: Self::tool_router(),
         }
     }
@@ -166,6 +193,68 @@ impl MockSearchServer {
         Ok(CallToolResult::success(vec![Content::text(
             "Mock local search results",
         )]))
+    }
+}
+
+#[allow(
+    clippy::unused_self,
+    clippy::unnecessary_wraps,
+    reason = "proc macro generated"
+)]
+#[tool_router]
+impl MockSearchResponseServer {
+    #[tool(description = "Mock web search tool with configurable response shape")]
+    fn brave_web_search(
+        &self,
+        Parameters(params): Parameters<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let query = params
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("test");
+
+        match self.mode {
+            MockSearchResponseMode::Brave => Ok(CallToolResult::structured(serde_json::json!({
+                "results": [
+                    {
+                        "type": "url",
+                        "url": "https://example.com/brave-result"
+                    }
+                ]
+            }))),
+            MockSearchResponseMode::OpenAi => {
+                let embedded_payload = serde_json::json!({
+                    "execution_id": "1234",
+                    "brave_search_response": null,
+                    "openai_response": {
+                        "content": {
+                            "type": "output_text",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "title": "Example citation",
+                                    "url": "https://example.com/openai-result",
+                                    "start_index": 0,
+                                    "end_index": 10
+                                }
+                            ],
+                            "logprobs": [],
+                            "text": format!("OpenAI search results for: {query}")
+                        },
+                        "sources": [
+                            {
+                                "type": "url",
+                                "url": "https://example.com/openai-result"
+                            }
+                        ]
+                    }
+                });
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    embedded_payload.to_string(),
+                )]))
+            }
+        }
     }
 }
 
@@ -261,6 +350,26 @@ impl ServerHandler for MockFailingSearchServer {
     }
 }
 
+#[tool_handler]
+impl ServerHandler for MockSearchResponseServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            server_info: Implementation::from_build_env(),
+            instructions: Some("Mock search response server for testing".to_string()),
+        }
+    }
+
+    async fn initialize(
+        &self,
+        _request: InitializeRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        Ok(self.get_info())
+    }
+}
+
 impl MockFailingMCPServer {
     fn router(error_marker: String) -> axum::Router {
         let service = StreamableHttpService::new(
@@ -277,6 +386,38 @@ impl MockFailingMCPServer {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
             harness: MockServerHarness::start(Self::router(error_marker.to_string())).await?,
+        })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.harness.port()
+    }
+
+    pub fn url(&self) -> String {
+        self.harness.url()
+    }
+
+    pub async fn stop(&mut self) {
+        self.harness.stop().await;
+    }
+}
+
+impl MockSearchResponseMCPServer {
+    fn router(mode: MockSearchResponseMode) -> axum::Router {
+        let service = StreamableHttpService::new(
+            move || Ok(MockSearchResponseServer::new(mode)),
+            LocalSessionManager::default().into(),
+            Default::default(),
+        );
+
+        axum::Router::new().nest_service("/mcp", service)
+    }
+
+    pub async fn start(
+        mode: MockSearchResponseMode,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self {
+            harness: MockServerHarness::start(Self::router(mode)).await?,
         })
     }
 

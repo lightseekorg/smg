@@ -7,7 +7,7 @@ use std::{
 };
 
 use axum::{
-    extract::{Path, Query, Request, State},
+    extract::{multipart::MultipartError, Multipart, Path, Query, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -30,6 +30,7 @@ use openai_protocol::{
     rerank::{RerankRequest, V1RerankReqInput},
     responses::ResponsesRequest,
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
+    transcription::TranscriptionRequest,
     validated::ValidatedJson,
     worker::{WorkerSpec, WorkerUpdateRequest},
 };
@@ -62,7 +63,7 @@ use crate::{
         openai::realtime::ws::RealtimeQueryParams,
         parse, responses as response_handlers,
         router_manager::RouterManager,
-        tokenize, RouterTrait,
+        tokenize, AudioFile, RouterTrait,
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
@@ -288,6 +289,150 @@ async fn v1_classify(
         .router
         .route_classify(Some(&headers), &body, &body.model)
         .await
+}
+
+async fn v1_audio_transcriptions(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
+    let mut file_bytes: Option<bytes::Bytes> = None;
+    let mut file_name: Option<String> = None;
+    let mut file_content_type: Option<String> = None;
+    let mut req = TranscriptionRequest::default();
+    let mut timestamp_granularities: Vec<String> = Vec::new();
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to read multipart field: {e}"),
+                )
+                    .into_response();
+            }
+        };
+
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "file" => {
+                file_name = field.file_name().map(str::to_string);
+                file_content_type = field.content_type().map(str::to_string);
+                match field.bytes().await {
+                    Ok(b) => file_bytes = Some(b),
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("Failed to read audio file bytes: {e}"),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            "model" => match field.text().await {
+                Ok(t) => req.model = t,
+                Err(e) => return bad_text_field("model", e),
+            },
+            "language" => match field.text().await {
+                Ok(t) => req.language = Some(t),
+                Err(e) => return bad_text_field("language", e),
+            },
+            "prompt" => match field.text().await {
+                Ok(t) => req.prompt = Some(t),
+                Err(e) => return bad_text_field("prompt", e),
+            },
+            "response_format" => match field.text().await {
+                Ok(t) => req.response_format = Some(t),
+                Err(e) => return bad_text_field("response_format", e),
+            },
+            "temperature" => match field.text().await {
+                Ok(t) => match t.trim().parse::<f32>() {
+                    Ok(v) if v.is_finite() && (0.0..=1.0).contains(&v) => {
+                        req.temperature = Some(v);
+                    }
+                    Ok(v) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "Invalid 'temperature' value: {v} (must be a finite number in [0.0, 1.0])"
+                            ),
+                        )
+                            .into_response();
+                    }
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("Invalid 'temperature' value: {e}"),
+                        )
+                            .into_response();
+                    }
+                },
+                Err(e) => return bad_text_field("temperature", e),
+            },
+            "timestamp_granularities" | "timestamp_granularities[]" => match field.text().await {
+                Ok(t) => timestamp_granularities.push(t),
+                Err(e) => return bad_text_field("timestamp_granularities", e),
+            },
+            "stream" => match field.text().await {
+                Ok(t) => match t.as_str() {
+                    "true" | "True" | "TRUE" | "1" => req.stream = Some(true),
+                    "false" | "False" | "FALSE" | "0" => req.stream = Some(false),
+                    other => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("Invalid 'stream' value: '{other}' (expected true/false/1/0)"),
+                        )
+                            .into_response();
+                    }
+                },
+                Err(e) => return bad_text_field("stream", e),
+            },
+            _ => {
+                // Unknown field; drain to free resources but otherwise ignore.
+                let _ = field.bytes().await;
+            }
+        }
+    }
+
+    // Reject blank/whitespace-only `model` before it reaches worker selection.
+    if req.model.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "Missing required 'model' field").into_response();
+    }
+    req.model = req.model.trim().to_string();
+    let bytes = match file_bytes {
+        Some(b) if !b.is_empty() => b,
+        Some(_) => {
+            return (StatusCode::BAD_REQUEST, "Uploaded 'file' part is empty").into_response();
+        }
+        None => {
+            return (StatusCode::BAD_REQUEST, "Missing required 'file' part").into_response();
+        }
+    };
+
+    if !timestamp_granularities.is_empty() {
+        req.timestamp_granularities = Some(timestamp_granularities);
+    }
+
+    let audio = AudioFile {
+        bytes,
+        file_name: file_name.unwrap_or_else(|| "audio".to_string()),
+        content_type: file_content_type,
+    };
+
+    state
+        .router
+        .route_audio_transcriptions(Some(&headers), &req, audio, &req.model)
+        .await
+}
+
+fn bad_text_field(field: &str, e: MultipartError) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        format!("Failed to read '{field}' field: {e}"),
+    )
+        .into_response()
 }
 
 async fn v1_responses_get(
@@ -744,6 +889,22 @@ pub fn build_app(
             middleware::auth_middleware,
         ));
 
+    // Multipart upload routes: auth + concurrency but NO WASM middleware.
+    // The WASM OnRequest phase buffers the full body into a `Vec<u8>` subject
+    // to the WASM manager's `max_body_size` (10MB default). Audio uploads
+    // routinely exceed that, so WASM middleware would reject them with 400
+    // before reaching the handler.
+    let multipart_upload_routes = Router::new()
+        .route("/v1/audio/transcriptions", post(v1_audio_transcriptions))
+        .route_layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::concurrency_limit_middleware,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            auth_config.clone(),
+            middleware::auth_middleware,
+        ));
+
     let public_routes = Router::new()
         .route("/liveness", get(liveness))
         .route("/readiness", get(readiness))
@@ -827,6 +988,7 @@ pub fn build_app(
     Router::new()
         .merge(protected_routes)
         .merge(realtime_routes)
+        .merge(multipart_upload_routes)
         .merge(public_routes)
         .merge(admin_routes)
         .merge(worker_routes)

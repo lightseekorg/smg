@@ -93,12 +93,20 @@ impl ChatResponseProcessingStage {
         })?;
 
         if is_streaming {
+            // Read derived skip_special_tokens (set in preparation, survives request_building .take())
+            let skip_special_tokens = ctx
+                .state
+                .response
+                .skip_special_tokens
+                .unwrap_or_else(|| ctx.chat_request().skip_special_tokens);
+
             // Streaming: Use StreamingProcessor and return SSE response
             let response = self.streaming_processor.clone().process_streaming_response(
                 execution_result,
                 ctx.chat_request_arc(), // Cheap Arc clone (8 bytes)
                 dispatch,
                 tokenizer,
+                skip_special_tokens,
             );
 
             // Attach load guards to response body for proper RAII lifecycle

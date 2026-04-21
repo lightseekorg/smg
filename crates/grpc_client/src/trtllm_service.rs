@@ -441,7 +441,7 @@ impl TrtllmServiceClient {
             output_config: Some(output_config),
             max_tokens,
             streaming: body.stream.unwrap_or(false),
-            stop: vec![],
+            stop: vec![], // Does not pass through body.stop yet (follow-up fix)
             stop_token_ids: vec![],
             ignore_eos: false,
             bad: vec![],
@@ -524,59 +524,69 @@ impl TrtllmServiceClient {
         request: &ChatCompletionRequest,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<Option<proto::GuidedDecodingParams>, String> {
-        // Handle tool call constraint first
-        if let Some((constraint_type, constraint_value)) = tool_call_constraint {
-            let guide_type = match constraint_type.as_str() {
-                "structural_tag" => proto::guided_decoding_params::GuideType::StructuralTag,
-                "json_schema" => proto::guided_decoding_params::GuideType::JsonSchema,
-                "ebnf" | "grammar" => proto::guided_decoding_params::GuideType::EbnfGrammar,
-                "regex" => proto::guided_decoding_params::GuideType::Regex,
-                _ => return Err(format!("Unknown constraint type: {constraint_type}")),
-            };
-            return Ok(Some(proto::GuidedDecodingParams {
-                guide_type: guide_type as i32,
-                guide: constraint_value,
-            }));
-        }
+        // Collect non-tool constraint (response_format, ebnf, regex)
+        let mut guided = None;
 
-        // Handle response_format
         match &request.response_format {
             Some(ResponseFormat::JsonObject) => {
                 let schema = serde_json::json!({"type": "object"});
                 let schema_str = serde_json::to_string(&schema)
                     .map_err(|e| format!("Failed to serialize JSON schema: {e}"))?;
-                return Ok(Some(proto::GuidedDecodingParams {
+                guided = Some(proto::GuidedDecodingParams {
                     guide_type: proto::guided_decoding_params::GuideType::JsonSchema as i32,
                     guide: schema_str,
-                }));
+                });
             }
             Some(ResponseFormat::JsonSchema { json_schema }) => {
                 let schema_str = serde_json::to_string(&json_schema.schema)
                     .map_err(|e| format!("Failed to serialize JSON schema: {e}"))?;
-                return Ok(Some(proto::GuidedDecodingParams {
+                guided = Some(proto::GuidedDecodingParams {
                     guide_type: proto::guided_decoding_params::GuideType::JsonSchema as i32,
                     guide: schema_str,
-                }));
+                });
             }
             Some(ResponseFormat::Text) | None => {}
         }
 
-        // Handle ebnf/regex from request
-        if let Some(ebnf) = &request.ebnf {
-            return Ok(Some(proto::GuidedDecodingParams {
-                guide_type: proto::guided_decoding_params::GuideType::EbnfGrammar as i32,
-                guide: ebnf.clone(),
-            }));
+        if guided.is_none() {
+            if let Some(ebnf) = &request.ebnf {
+                guided = Some(proto::GuidedDecodingParams {
+                    guide_type: proto::guided_decoding_params::GuideType::EbnfGrammar as i32,
+                    guide: ebnf.clone(),
+                });
+            }
         }
 
-        if let Some(regex) = &request.regex {
-            return Ok(Some(proto::GuidedDecodingParams {
-                guide_type: proto::guided_decoding_params::GuideType::Regex as i32,
-                guide: regex.clone(),
-            }));
+        if guided.is_none() {
+            if let Some(regex) = &request.regex {
+                guided = Some(proto::GuidedDecodingParams {
+                    guide_type: proto::guided_decoding_params::GuideType::Regex as i32,
+                    guide: regex.clone(),
+                });
+            }
         }
 
-        Ok(None)
+        // Tool call constraint — drop if another constraint already set
+        // (matches TRT-LLM HTTP behavior where response_format takes priority)
+        if let Some((constraint_type, constraint_value)) = tool_call_constraint {
+            if guided.is_some() {
+                warn!("Constrained decoding is not compatible with tool calls, dropping tool constraint");
+            } else {
+                let guide_type = match constraint_type.as_str() {
+                    "structural_tag" => proto::guided_decoding_params::GuideType::StructuralTag,
+                    "json_schema" => proto::guided_decoding_params::GuideType::JsonSchema,
+                    "ebnf" | "grammar" => proto::guided_decoding_params::GuideType::EbnfGrammar,
+                    "regex" => proto::guided_decoding_params::GuideType::Regex,
+                    _ => return Err(format!("Unknown constraint type: {constraint_type}")),
+                };
+                guided = Some(proto::GuidedDecodingParams {
+                    guide_type: guide_type as i32,
+                    guide: constraint_value,
+                });
+            }
+        }
+
+        Ok(guided)
     }
 
     /// Build SamplingConfig from ResponsesRequest
@@ -584,7 +594,7 @@ impl TrtllmServiceClient {
         proto::SamplingConfig {
             beam_width: 1,
             num_return_sequences: 1,
-            top_k: None,
+            top_k: (request.top_k >= 0).then_some(request.top_k),
             top_p: Some(request.top_p.unwrap_or(1.0)),
             top_p_min: None,
             top_p_reset_ids: None,
@@ -593,14 +603,14 @@ impl TrtllmServiceClient {
             temperature: Some(request.temperature.unwrap_or(1.0)),
             min_tokens: None,
             beam_search_diversity_rate: None,
-            repetition_penalty: Some(1.0),
-            presence_penalty: None,
-            frequency_penalty: None,
+            repetition_penalty: Some(request.repetition_penalty),
+            presence_penalty: request.presence_penalty,
+            frequency_penalty: request.frequency_penalty,
             prompt_ignore_length: None,
             length_penalty: None,
             early_stopping: None,
             no_repeat_ngram_size: None,
-            min_p: None,
+            min_p: (request.min_p != 0.0).then_some(request.min_p),
             beam_width_array: vec![],
         }
     }
@@ -997,6 +1007,41 @@ mod tests {
         assert_eq!(config.temperature, None);
         assert_eq!(config.top_p, None);
         assert_eq!(config.top_k, None);
+    }
+
+    #[test]
+    fn test_responses_sampling_config_is_passed_through() {
+        use openai_protocol::responses::ResponsesRequest;
+
+        let request = ResponsesRequest {
+            top_k: 40,
+            min_p: 0.05,
+            repetition_penalty: 1.2,
+            frequency_penalty: Some(0.3),
+            presence_penalty: Some(-0.4),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            max_output_tokens: Some(128),
+            ..Default::default()
+        };
+
+        let cfg = TrtllmServiceClient::build_sampling_config_from_responses(&request);
+
+        assert_eq!(cfg.top_k, Some(40));
+        assert_eq!(cfg.min_p, Some(0.05));
+        assert_eq!(cfg.repetition_penalty, Some(1.2));
+        assert_eq!(cfg.frequency_penalty, Some(0.3));
+        assert_eq!(cfg.presence_penalty, Some(-0.4));
+
+        // Default top_k (-1) maps to None, letting TRT-LLM use its own default.
+        let disabled = ResponsesRequest {
+            top_k: -1,
+            ..Default::default()
+        };
+        let disabled_cfg = TrtllmServiceClient::build_sampling_config_from_responses(&disabled);
+        assert_eq!(disabled_cfg.top_k, None);
+        // Default min_p (0.0) maps to None for the same reason.
+        assert_eq!(disabled_cfg.min_p, None);
     }
 
     #[tokio::test]

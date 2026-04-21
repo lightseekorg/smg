@@ -2,7 +2,10 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use openai_protocol::chat::ChatCompletionRequest;
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    common::{ToolChoice, ToolChoiceValue},
+};
 use tracing::{debug, error};
 
 use crate::routers::{
@@ -176,14 +179,44 @@ impl ChatPreparationStage {
         }
 
         // Step 4: Build tool constraints if needed
-        let tool_call_constraint = if let Some(tools) = body_ref.tools.as_ref() {
-            utils::generate_tool_constraints(tools, request.tool_choice.as_ref(), &request.model)
+        // The tool parser registry handles both structural tag (for native format
+        // parsers like Mistral, KimiK2) and generic JSON schema fallback.
+        let tool_call_constraint = if let (Some(tools), Some(tool_choice)) =
+            (body_ref.tools.as_ref(), request.tool_choice.as_ref())
+        {
+            ctx.components
+                .tool_parser_factory
+                .registry()
+                .generate_tool_constraint(
+                    ctx.components.configured_tool_parser.as_deref(),
+                    tools,
+                    tool_choice,
+                )
                 .map_err(|e| {
                     error!(function = "ChatPreparationStage::execute", error = %e, "Invalid tool configuration");
-                    error::bad_request("invalid_tool_configuration", format!("Invalid tool configuration: {e}"))
+                    error::bad_request(
+                        "invalid_tool_configuration",
+                        format!("Invalid tool configuration: {e}"),
+                    )
                 })?
         } else {
             None
+        };
+
+        // Derive skip_special_tokens from constraint type:
+        // - json_schema: backend forces JSON, no trigger tokens to preserve
+        // - structural_tag or no constraint (auto): parser needs trigger tokens
+        let skip_special_tokens = match &tool_call_constraint {
+            Some(c) if c.is_json_schema() => request.skip_special_tokens,
+            _ if request.tools.is_some()
+                && !matches!(
+                    request.tool_choice,
+                    Some(ToolChoice::Value(ToolChoiceValue::None))
+                ) =>
+            {
+                false
+            }
+            _ => request.skip_special_tokens,
         };
 
         // Step 5: Create stop sequence decoder (build once, reuse in non-stream)
@@ -191,7 +224,7 @@ impl ChatPreparationStage {
             &tokenizer,
             request.stop.as_ref(),
             request.stop_token_ids.as_ref(),
-            request.skip_special_tokens,
+            skip_special_tokens,
             request.no_stop_trim,
             request.ignore_eos,
         );
@@ -203,11 +236,14 @@ impl ChatPreparationStage {
         ctx.state.preparation = Some(PreparationOutput::Chat {
             token_ids,
             processed_messages,
-            tool_constraints: tool_call_constraint,
+            tool_constraints: tool_call_constraint.map(|c| c.to_tuple()),
         });
 
-        // Store stop decoder for reuse in response processing
+        // Store stop decoder and derived skip_special_tokens for response processing.
+        // Stored on ResponseState because PreparationOutput is consumed by
+        // request_building before response_processing runs.
         ctx.state.response.stop_decoder = Some(stop_decoder);
+        ctx.state.response.skip_special_tokens = Some(skip_special_tokens);
 
         Ok(())
     }

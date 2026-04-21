@@ -245,7 +245,6 @@ impl CircuitBreaker {
         self.consecutive_successes.store(0, Ordering::Release);
         let failures = self.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1;
 
-        // Update last failure time atomically
         self.last_failure_time_ms.store(now_ms(), Ordering::Release);
 
         let current_state = CircuitState::from_int(self.state.load(Ordering::Acquire));

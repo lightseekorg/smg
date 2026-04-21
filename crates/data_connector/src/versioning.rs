@@ -5,6 +5,10 @@
 //! (DDL syntax differs across databases) and migrations reference
 //! [`SchemaConfig`] so they work correctly even with custom table/column names.
 //!
+//! SMG migrations are intentionally forward-only. The runner records applied
+//! versions and can auto-apply pending `up` steps, but it does not model or
+//! execute down-migrations.
+//!
 //! # Version tracking
 //!
 //! A `_schema_versions` table records which migrations have been applied.
@@ -30,7 +34,7 @@ use crate::schema::SchemaConfig;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-/// A single schema migration.
+/// A single forward-only schema migration.
 ///
 /// Migrations are functions (not static SQL strings) so they can reference
 /// [`SchemaConfig`] for table/column names. `up` returns a `Vec<String>`

@@ -23,6 +23,7 @@ use openai_protocol::{
     },
     rerank::RerankRequest,
     responses::ResponsesRequest,
+    transcription::TranscriptionRequest,
 };
 
 pub mod anthropic;
@@ -43,6 +44,20 @@ pub mod tokenize;
 pub use factory::RouterFactory;
 // Re-export HTTP routers for convenience
 pub use http::{pd_router, pd_types, router};
+
+/// Binary audio payload for `/v1/audio/transcriptions`.
+///
+/// The transcription endpoint uses multipart/form-data, so the file bytes
+/// travel alongside the JSON-like `TranscriptionRequest` rather than inside it.
+#[derive(Debug, Clone)]
+pub struct AudioFile {
+    /// Raw audio bytes (wav/mp3/m4a/etc.).
+    pub bytes: bytes::Bytes,
+    /// Original filename from the multipart part. Forwarded verbatim to the worker.
+    pub file_name: String,
+    /// Original content-type of the audio part (e.g. `audio/wav`), if the client supplied one.
+    pub content_type: Option<String>,
+}
 
 /// Core trait for all router implementations
 ///
@@ -164,6 +179,26 @@ pub trait RouterTrait: Send + Sync + Debug {
         _model_id: &str,
     ) -> Response {
         (StatusCode::NOT_IMPLEMENTED, "Classify not implemented").into_response()
+    }
+
+    /// Route audio transcription requests (OpenAI-compatible /v1/audio/transcriptions).
+    ///
+    /// Unlike the JSON-bodied endpoints, `/v1/audio/transcriptions` uses
+    /// multipart/form-data: the server handler parses the form, packs text
+    /// fields into `body` and the audio part into `audio`, and routers forward
+    /// both to a worker capable of audio transcription.
+    async fn route_audio_transcriptions(
+        &self,
+        _headers: Option<&HeaderMap>,
+        _body: &TranscriptionRequest,
+        _audio: AudioFile,
+        _model_id: &str,
+    ) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Audio transcriptions not implemented",
+        )
+            .into_response()
     }
 
     /// Route rerank requests

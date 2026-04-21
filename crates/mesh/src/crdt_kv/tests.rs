@@ -1,4 +1,4 @@
-use std::{sync::Once, thread};
+use std::{sync::Once, thread, time::Duration};
 
 use tracing::info;
 use tracing_subscriber::{
@@ -349,4 +349,58 @@ fn test_distributed_scenario() {
     assert_eq!(replica1.get("user:1"), Some(b"Alice_Updated".to_vec()));
     assert_eq!(replica1.get("user:3"), Some(b"Charlie".to_vec()));
     assert_eq!(replica1.get("user:4"), Some(b"David".to_vec()));
+}
+
+// ============================================================================
+// Tombstone GC Grace Period Tests
+// ============================================================================
+
+#[test]
+fn test_gc_tombstones_respects_grace_period() {
+    init_test_logging();
+    let map = CrdtOrMap::new();
+
+    map.insert("key1".to_string(), b"value1".to_vec());
+    map.remove("key1");
+
+    // GC with a long grace period — tombstone is too young, should NOT be collected.
+    let removed = map.gc_tombstones_with_grace(Duration::from_secs(3600));
+    assert_eq!(removed, 0, "Young tombstone should not be GC'd");
+
+    // GC with zero grace period — tombstone should be collected immediately.
+    let removed = map.gc_tombstones_with_grace(Duration::ZERO);
+    assert_eq!(removed, 1, "Expired tombstone should be GC'd");
+}
+
+#[test]
+fn test_gc_tombstones_does_not_remove_live_keys() {
+    init_test_logging();
+    let map = CrdtOrMap::new();
+
+    map.insert("key1".to_string(), b"value1".to_vec());
+    map.insert("key2".to_string(), b"value2".to_vec());
+
+    // GC should not remove live (non-tombstoned) keys.
+    let removed = map.gc_tombstones_with_grace(Duration::ZERO);
+    assert_eq!(removed, 0);
+    assert_eq!(map.get("key1"), Some(b"value1".to_vec()));
+    assert_eq!(map.get("key2"), Some(b"value2".to_vec()));
+}
+
+#[test]
+fn test_gc_tombstones_multiple_keys() {
+    init_test_logging();
+    let map = CrdtOrMap::new();
+
+    map.insert("key1".to_string(), b"v1".to_vec());
+    map.insert("key2".to_string(), b"v2".to_vec());
+    map.insert("key3".to_string(), b"v3".to_vec());
+
+    map.remove("key1");
+    map.remove("key3");
+    // key2 stays alive.
+
+    let removed = map.gc_tombstones_with_grace(Duration::ZERO);
+    assert_eq!(removed, 2, "Two tombstoned keys should be GC'd");
+    assert_eq!(map.get("key2"), Some(b"v2".to_vec()));
 }

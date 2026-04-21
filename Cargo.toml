@@ -1,5 +1,5 @@
 [workspace]
-members = ["model_gateway", "crates/protocols", "crates/reasoning_parser", "crates/tool_parser", "crates/workflow", "crates/tokenizer", "crates/auth", "crates/mcp", "crates/kv_index", "crates/data_connector", "crates/multimodal", "crates/wasm", "crates/mesh", "crates/grpc_client", "bindings/python", "bindings/golang", "clients/rust", "clients/openapi-gen", "tui"]
+members = ["model_gateway", "crates/protocols", "crates/reasoning_parser", "crates/tool_parser", "crates/workflow", "crates/tokenizer", "crates/auth", "crates/mcp", "crates/kv_index", "crates/data_connector", "crates/multimodal", "crates/wasm", "crates/mesh", "crates/grpc_client", "crates/skills", "crates/blob_storage", "bindings/python", "bindings/golang", "clients/rust", "clients/openapi-gen", "tui"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -17,6 +17,8 @@ llm-multimodal = { version = "1.5.0", path = "crates/multimodal" }
 smg-wasm = { version = "1.1.0", path = "crates/wasm", package = "smg-wasm" }
 smg-mesh = { version = "1.3.0", path = "crates/mesh", package = "smg-mesh" }
 smg-grpc-client = { version = "1.5.1", path = "crates/grpc_client" }
+smg-skills = { version = "0.1.0", path = "crates/skills" }
+smg-blob-storage = { version = "0.1.0", path = "crates/blob_storage" }
 smg-tui = { version = "0.1.0", path = "tui" }
 
 # Shared dependencies
@@ -34,7 +36,7 @@ bytemuck = { version = "1.21" }
 chrono = { version = "0.4" }
 dashmap = "6.1.0"
 http = "1.1.0"
-lru = "0.16.2"
+lru = "0.17.0"
 num-traits = "0.2"
 parking_lot = "0.12.4"
 rand = "0.9.2"

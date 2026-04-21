@@ -45,6 +45,49 @@ pub struct MistralParser {
 }
 
 impl MistralParser {
+    /// Build structural tag for Mistral tool call format.
+    ///
+    /// Mistral outputs tool calls as a JSON array after `[TOOL_CALLS]`:
+    /// `[TOOL_CALLS] [{"name":"func1", "arguments": {...}}, {"name":"func2", "arguments": {...}}]`
+    ///
+    /// Uses `triggered_tags` with a nested `tags_with_separator` to support
+    /// parallel tool calls (multiple objects separated by `, ` in one array).
+    pub fn build_structural_tag(tools: &[Tool], at_least_one: bool) -> Value {
+        let mut tags = Vec::new();
+        for tool in tools {
+            let name = &tool.function.name;
+            if name.is_empty() {
+                continue;
+            }
+            let schema = &tool.function.parameters;
+            let name_json = serde_json::to_string(name).unwrap_or_default();
+            tags.push(serde_json::json!({
+                "begin": format!("{{\"name\": {name_json}, \"arguments\": "),
+                "content": {
+                    "type": "json_schema",
+                    "json_schema": schema,
+                },
+                "end": "}",
+            }));
+        }
+        serde_json::json!({
+            "format": {
+                "type": "triggered_tags",
+                "triggers": ["[TOOL_CALLS]"],
+                "tags": [{
+                    "begin": "[TOOL_CALLS] [",
+                    "content": {
+                        "type": "tags_with_separator",
+                        "tags": tags,
+                        "separator": ", ",
+                    },
+                    "end": "]",
+                }],
+                "at_least_one": at_least_one,
+            }
+        })
+    }
+
     /// Create a new Mistral parser
     pub fn new() -> Self {
         Self {

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
 
-use crate::validated::Normalizable;
+use crate::{skills::MessagesSkillRef, validated::Normalizable};
 
 // ============================================================================
 // Request Types
@@ -1074,7 +1074,7 @@ pub struct ContainerConfig {
     pub id: Option<String>,
 
     /// Skills to be loaded in the container
-    pub skills: Option<Vec<String>>,
+    pub skills: Option<Vec<MessagesSkillRef>>,
 }
 
 /// MCP server configuration (beta)

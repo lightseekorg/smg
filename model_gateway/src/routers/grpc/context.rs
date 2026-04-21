@@ -88,10 +88,11 @@ impl std::fmt::Display for FinalResponse {
 /// Shared components (injected once at creation)
 pub(crate) struct SharedComponents {
     pub tokenizer_registry: Arc<TokenizerRegistry>,
-    #[expect(dead_code)]
     pub tool_parser_factory: ToolParserFactory,
     #[expect(dead_code)]
     pub reasoning_parser_factory: ReasoningParserFactory,
+    /// Configured tool parser name (from CLI `--tool-call-parser`)
+    pub configured_tool_parser: Option<String>,
     /// Multimodal processing components (initialized at router creation)
     pub multimodal: Option<Arc<MultimodalComponents>>,
 }
@@ -261,6 +262,11 @@ impl LoadGuards {
 pub(crate) struct ResponseState {
     /// Stop sequence decoder
     pub stop_decoder: Option<StopSequenceDecoder>,
+
+    /// Derived skip_special_tokens for streaming (set in preparation, read in response_processing).
+    /// Stored here because PreparationOutput is consumed by request_building before
+    /// response_processing runs.
+    pub skip_special_tokens: Option<bool>,
 
     /// Execution result (streams from workers)
     pub execution_result: Option<ExecutionResult>,

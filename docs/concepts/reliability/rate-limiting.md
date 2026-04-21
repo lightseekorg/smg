@@ -99,8 +99,8 @@ smg \
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--max-concurrent-requests` | `-1` (unlimited) | Maximum concurrent requests |
-| `--rate-limit-tokens-per-second` | none | Token refill rate (only active when explicitly set) |
+| `--max-concurrent-requests` | `-1` (disabled) | Token bucket capacity. When `<= 0` the limiter is disabled entirely and requests pass through. |
+| `--rate-limit-tokens-per-second` | unset (refills at `max_concurrent_requests`) | Token bucket refill rate in tokens per second. |
 | `--queue-size` | `100` | Maximum queued requests |
 | `--queue-timeout-secs` | `60` | Maximum queue wait time |
 
@@ -113,7 +113,7 @@ smg \
 | `--worker-startup-timeout-secs` | `1800` (30 min) | Timeout for worker startup/model loading |
 
 !!! note "Concurrency vs. Rate Limiting"
-    Setting `--max-concurrent-requests` alone enables **concurrency limiting** (bounds simultaneous requests). To enable **rate limiting** (bounds requests per second using a token bucket), you must explicitly set `--rate-limit-tokens-per-second`.
+    Setting `--max-concurrent-requests` alone creates a token bucket whose capacity *and* refill rate both equal `max_concurrent_requests`, so it enforces both burst capacity and a sustained rate. Set `--rate-limit-tokens-per-second` when you want the sustained rate to differ from the burst capacity (for example, capacity `100` with refill `50` allows short bursts of 100 while sustaining 50 req/s).
 
 ---
 
@@ -121,32 +121,18 @@ smg \
 
 | Code | Meaning | When |
 |------|---------|------|
-| **429** | Too Many Requests | Queue is full |
+| **429** | Too Many Requests | Queue is full, or queuing is disabled and no token is available |
 | **408** | Request Timeout | Queue wait exceeded timeout |
 
-### 429 Response
+The local rate limiter returns a status-only response with no JSON body (clients should read the HTTP status and `X-Request-Id` to distinguish cases). SMG does not currently emit a `Retry-After` header with the response.
+
+When the mesh global rate limit is enabled and exceeded, the 429 response carries a JSON body:
 
 ```json
 {
-  "error": {
-    "message": "Rate limit exceeded. Please retry later.",
-    "type": "rate_limit_error",
-    "code": "rate_limit_exceeded"
-  }
-}
-```
-
-Includes `Retry-After` header with recommended wait time.
-
-### 408 Response
-
-```json
-{
-  "error": {
-    "message": "Request timed out waiting in queue.",
-    "type": "timeout_error",
-    "code": "queue_timeout"
-  }
+  "error": "Rate limit exceeded",
+  "current_count": 123,
+  "limit": 100
 }
 ```
 
@@ -287,7 +273,7 @@ histogram_quantile(0.99,
 
 ### Retry Strategy
 
-Clients should implement exponential backoff when receiving 429:
+Clients should implement exponential backoff when receiving 429. SMG does not set a `Retry-After` header today, so clients must compute their own wait:
 
 ```python
 import time
@@ -298,8 +284,8 @@ def request_with_retry(url, data, max_retries=5):
         response = requests.post(url, json=data)
 
         if response.status_code == 429:
-            retry_after = int(response.headers.get('Retry-After', 2 ** attempt))
-            time.sleep(retry_after)
+            # SMG does not emit Retry-After; fall back to exponential backoff.
+            time.sleep(2 ** attempt)
             continue
 
         return response

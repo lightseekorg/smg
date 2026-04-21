@@ -104,11 +104,9 @@ impl StreamingResponseAccumulator {
         };
 
         match get_event_type(event_name, &parsed) {
-            ResponseEvent::CREATED => {
-                if self.initial_response.is_none() {
-                    if let Some(response) = parsed.get("response") {
-                        self.initial_response = Some(response.clone());
-                    }
+            ResponseEvent::CREATED if self.initial_response.is_none() => {
+                if let Some(response) = parsed.get("response") {
+                    self.initial_response = Some(response.clone());
                 }
             }
             ResponseEvent::COMPLETED => {

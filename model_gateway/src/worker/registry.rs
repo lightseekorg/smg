@@ -295,36 +295,27 @@ impl WorkerRegistry {
             self.get_all()
         };
 
-        // Apply remaining filters
         workers
             .into_iter()
             .filter(|w| {
-                // Check worker_type if specified
                 if let Some(ref wtype) = worker_type {
                     if *w.worker_type() != *wtype {
                         return false;
                     }
                 }
-
-                // Check connection_mode if specified
                 if let Some(ref conn) = connection_mode {
                     if w.connection_mode() != conn {
                         return false;
                     }
                 }
-
-                // Check runtime_type if specified
                 if let Some(ref rt) = runtime_type {
                     if w.metadata().spec.runtime_type != *rt {
                         return false;
                     }
                 }
-
-                // Check health if required
                 if healthy_only && !w.is_healthy() {
                     return false;
                 }
-
                 true
             })
             .collect()
@@ -510,10 +501,7 @@ impl WorkerRegistry {
             .map(|v| v.len())
             .unwrap_or(0);
 
-        // Get total workers count efficiently from DashMap
         let total_workers = self.workers.len();
-
-        // PD workers are any workers that are not Regular
         let pd_count = total_workers.saturating_sub(regular_count);
 
         (regular_count, pd_count)
@@ -682,7 +670,6 @@ impl WorkerRegistry {
             self.rebuild_hash_ring(kept_model);
         }
 
-        // Update type index if changed
         if old_worker.worker_type() != new_worker.worker_type() {
             if let Some(mut type_workers) = self.type_workers.get_mut(old_worker.worker_type()) {
                 type_workers.retain(|id| id != worker_id);
@@ -693,7 +680,6 @@ impl WorkerRegistry {
                 .push(worker_id.clone());
         }
 
-        // Update connection mode index if changed
         if old_worker.connection_mode() != new_worker.connection_mode() {
             if let Some(mut conn_workers) = self
                 .connection_workers
@@ -897,27 +883,23 @@ impl WorkerRegistry {
         let _guard = lock.lock();
 
         if let Some((_, worker)) = self.workers.remove(worker_id) {
-            // Remove from URL mapping
             self.url_to_id.remove(worker.url());
-            // Clean up replace lock (after we release it)
-            // Note: we hold _guard, so drop the DashMap entry but the Mutex stays alive via Arc
+            // We hold _guard; drop the DashMap entry but the Mutex stays alive via Arc.
             self.worker_mutation_locks.remove(worker_id);
 
             for model_id in Self::worker_model_ids(&worker) {
                 self.remove_worker_from_model_index(&model_id, worker.url());
-                // Clean up per-model retry config when no workers remain for this model
+                // Drop the per-model retry config when the last worker leaves.
                 let model_empty = self.model_index.get(&model_id).is_none_or(|w| w.is_empty());
                 if model_empty {
                     self.model_retry_configs.remove(&model_id);
                 }
             }
 
-            // Remove from type index
             if let Some(mut type_workers) = self.type_workers.get_mut(worker.worker_type()) {
                 type_workers.retain(|id| id != worker_id);
             }
 
-            // Remove from connection mode index
             if let Some(mut conn_workers) =
                 self.connection_workers.get_mut(worker.connection_mode())
             {
@@ -1042,7 +1024,6 @@ impl WorkerRegistry {
             return None;
         }
 
-        // Store worker
         self.workers.insert(worker_id.clone(), worker.clone());
 
         // Update model index for O(1) lookups using copy-on-write.
@@ -1315,7 +1296,6 @@ mod tests {
     fn test_worker_registry() {
         let registry = WorkerRegistry::new();
 
-        // Create a worker with labels
         let mut labels = HashMap::new();
         labels.insert("model_id".to_string(), "llama-3-8b".to_string());
         labels.insert("priority".to_string(), "50".to_string());
@@ -1343,7 +1323,6 @@ mod tests {
         assert_eq!(stats.total_workers, 1);
         assert_eq!(stats.total_models, 1);
 
-        // Remove worker
         registry.remove(&worker_id);
         assert!(registry.get(&worker_id).is_none());
     }
@@ -1352,7 +1331,6 @@ mod tests {
     fn test_model_index_fast_lookup() {
         let registry = WorkerRegistry::new();
 
-        // Create workers for different models
         let mut labels1 = HashMap::new();
         labels1.insert("model_id".to_string(), "llama-3".to_string());
         let worker1: Box<dyn Worker> = Box::new(
@@ -1768,10 +1746,8 @@ mod tests {
     fn test_model_retry_config_last_write_wins() {
         let registry = WorkerRegistry::new();
 
-        // No config initially
         assert!(registry.get_retry_config("llama-3").is_none());
 
-        // Set config for a model (retries enabled)
         let config1 = RetryConfig {
             max_retries: 3,
             ..RetryConfig::default()
@@ -1823,7 +1799,6 @@ mod tests {
         let id1 = registry.register(worker1).unwrap();
         let id2 = registry.register(worker2).unwrap();
 
-        // Set retry config for the model
         registry.set_model_retry_config(
             "llama-3",
             RetryConfig {
@@ -1978,7 +1953,6 @@ mod tests {
         let registry = WorkerRegistry::new();
         let mut rx = registry.subscribe_events();
 
-        // Create and register a worker
         let mut labels = HashMap::new();
         labels.insert("model_id".to_string(), "test-model".to_string());
 
@@ -2002,7 +1976,6 @@ mod tests {
             other => panic!("Expected Registered event, got: {other:?}"),
         }
 
-        // Remove the worker
         registry.remove(&worker_id);
 
         // Should receive Removed event

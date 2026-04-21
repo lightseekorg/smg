@@ -7,7 +7,7 @@
 use crate::{schema::SchemaConfig, versioning::Migration};
 
 /// Oracle migration list. Append new migrations here.
-pub(crate) static ORACLE_MIGRATIONS: [Migration; 3] = [
+pub(crate) static ORACLE_MIGRATIONS: [Migration; 8] = [
     Migration {
         version: 1,
         description: "Add safety_identifier column to responses",
@@ -23,6 +23,31 @@ pub(crate) static ORACLE_MIGRATIONS: [Migration; 3] = [
         description:
             "Drop redundant output, metadata, instructions, tool_calls columns from responses",
         up: oracle_v3_up,
+    },
+    Migration {
+        version: 4,
+        description: "Create skills table",
+        up: oracle_v4_up,
+    },
+    Migration {
+        version: 5,
+        description: "Create skill_versions table",
+        up: oracle_v5_up,
+    },
+    Migration {
+        version: 6,
+        description: "Create tenant_aliases table",
+        up: oracle_v6_up,
+    },
+    Migration {
+        version: 7,
+        description: "Create bundle_tokens table",
+        up: oracle_v7_up,
+    },
+    Migration {
+        version: 8,
+        description: "Create continuation_cookies table",
+        up: oracle_v8_up,
     },
 ];
 
@@ -93,6 +118,134 @@ fn oracle_v3_up(schema: &SchemaConfig) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn oracle_idempotent_ddl(ddl: &str) -> String {
+    let escaped = ddl.replace('\'', "''");
+    format!(
+        "BEGIN EXECUTE IMMEDIATE '{escaped}'; \
+         EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
+    )
+}
+
+fn oracle_v4_up(schema: &SchemaConfig) -> Vec<String> {
+    let table = oracle_qualified_name(schema, "SKILLS");
+    let index = oracle_qualified_name(schema, "IDX_SKILLS_TENANT_NAME");
+    vec![
+        oracle_idempotent_ddl(&format!(
+            "CREATE TABLE {table} (\
+             SKILL_ID VARCHAR2(64) PRIMARY KEY, \
+            TENANT_ID VARCHAR2(64) NOT NULL, \
+            NAME VARCHAR2(64) NOT NULL, \
+            SHORT_DESCRIPTION CLOB, \
+            DESCRIPTION CLOB, \
+            SOURCE VARCHAR2(64) DEFAULT 'custom' NOT NULL, \
+            HAS_CODE_FILES NUMBER(1) DEFAULT 0 NOT NULL, \
+            LATEST_VERSION VARCHAR2(64), \
+            DEFAULT_VERSION VARCHAR2(64), \
+            CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL, \
+             UPDATED_AT TIMESTAMP WITH TIME ZONE NOT NULL)"
+        )),
+        oracle_idempotent_ddl(&format!(
+            "CREATE INDEX {index} ON {table} (TENANT_ID, NAME)"
+        )),
+    ]
+}
+
+fn oracle_v5_up(schema: &SchemaConfig) -> Vec<String> {
+    let skills_table = oracle_qualified_name(schema, "SKILLS");
+    let table = oracle_qualified_name(schema, "SKILL_VERSIONS");
+    let index = oracle_qualified_name(schema, "IDX_SKILL_VERSION_NUMBER");
+    vec![
+        oracle_idempotent_ddl(&format!(
+            "CREATE TABLE {table} (\
+             SKILL_ID VARCHAR2(64) NOT NULL, \
+             VERSION VARCHAR2(64) NOT NULL, \
+             VERSION_NUMBER NUMBER(10) NOT NULL, \
+             NAME VARCHAR2(64) NOT NULL, \
+             SHORT_DESCRIPTION CLOB, \
+             DESCRIPTION CLOB NOT NULL, \
+             INTERFACE CLOB CHECK (INTERFACE IS JSON), \
+             DEPENDENCIES CLOB CHECK (DEPENDENCIES IS JSON), \
+             POLICY CLOB CHECK (POLICY IS JSON), \
+             DEPRECATED NUMBER(1) DEFAULT 0 NOT NULL, \
+             FILE_MANIFEST CLOB NOT NULL CHECK (FILE_MANIFEST IS JSON), \
+             INSTRUCTION_TOKEN_COUNTS CLOB NOT NULL CHECK (INSTRUCTION_TOKEN_COUNTS IS JSON), \
+             CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL, \
+             CONSTRAINT PK_SKILL_VERSIONS PRIMARY KEY (SKILL_ID, VERSION), \
+             CONSTRAINT FK_SKILL_VERSIONS_SKILL FOREIGN KEY (SKILL_ID) REFERENCES {skills_table}(SKILL_ID) ON DELETE CASCADE)"
+        )),
+        oracle_idempotent_ddl(&format!(
+            "CREATE UNIQUE INDEX {index} ON {table} (SKILL_ID, VERSION_NUMBER)"
+        )),
+    ]
+}
+
+fn oracle_v6_up(schema: &SchemaConfig) -> Vec<String> {
+    let table = oracle_qualified_name(schema, "TENANT_ALIASES");
+    let index = oracle_qualified_name(schema, "IDX_TENANT_ALIASES_CANONICAL");
+    vec![
+        oracle_idempotent_ddl(&format!(
+            "CREATE TABLE {table} (\
+             ALIAS_TENANT_ID VARCHAR2(64) PRIMARY KEY, \
+             CANONICAL_TENANT_ID VARCHAR2(64) NOT NULL, \
+             CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL, \
+             EXPIRES_AT TIMESTAMP WITH TIME ZONE)"
+        )),
+        oracle_idempotent_ddl(&format!(
+            "CREATE INDEX {index} ON {table} (CANONICAL_TENANT_ID)"
+        )),
+    ]
+}
+
+fn oracle_v7_up(schema: &SchemaConfig) -> Vec<String> {
+    let table = oracle_qualified_name(schema, "BUNDLE_TOKENS");
+    let exec_index = oracle_qualified_name(schema, "IDX_BUNDLE_TOKENS_EXEC_ID");
+    let expires_index = oracle_qualified_name(schema, "IDX_BUNDLE_TOKENS_EXPIRES_AT");
+    vec![
+        oracle_idempotent_ddl(&format!(
+            "CREATE TABLE {table} (\
+             TOKEN_HASH VARCHAR2(64) PRIMARY KEY, \
+             TENANT_ID VARCHAR2(64) NOT NULL, \
+             EXEC_ID VARCHAR2(64) NOT NULL, \
+             SKILL_ID VARCHAR2(64) NOT NULL, \
+             SKILL_VERSION VARCHAR2(64) NOT NULL, \
+             CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL, \
+             EXPIRES_AT TIMESTAMP WITH TIME ZONE NOT NULL)"
+        )),
+        oracle_idempotent_ddl(&format!("CREATE INDEX {exec_index} ON {table} (EXEC_ID)")),
+        oracle_idempotent_ddl(&format!(
+            "CREATE INDEX {expires_index} ON {table} (EXPIRES_AT)"
+        )),
+    ]
+}
+
+fn oracle_v8_up(schema: &SchemaConfig) -> Vec<String> {
+    let table = oracle_qualified_name(schema, "CONTINUATION_COOKIES");
+    let exec_index = oracle_qualified_name(schema, "IDX_CONTINUATION_COOKIES_EXEC");
+    let expires_index = oracle_qualified_name(schema, "IDX_CONTINUATION_COOKIES_EXP");
+    vec![
+        oracle_idempotent_ddl(&format!(
+            "CREATE TABLE {table} (\
+             COOKIE_HASH VARCHAR2(64) PRIMARY KEY, \
+             TENANT_ID VARCHAR2(64) NOT NULL, \
+             EXEC_ID VARCHAR2(64) NOT NULL, \
+             REQUEST_ID VARCHAR2(64) NOT NULL, \
+             CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL, \
+             EXPIRES_AT TIMESTAMP WITH TIME ZONE NOT NULL)"
+        )),
+        oracle_idempotent_ddl(&format!("CREATE INDEX {exec_index} ON {table} (EXEC_ID)")),
+        oracle_idempotent_ddl(&format!(
+            "CREATE INDEX {expires_index} ON {table} (EXPIRES_AT)"
+        )),
+    ]
+}
+
+fn oracle_qualified_name(schema: &SchemaConfig, object_name: &str) -> String {
+    match &schema.owner {
+        Some(owner) => format!("{owner}.{object_name}"),
+        None => object_name.to_string(),
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -197,5 +350,115 @@ mod tests {
                 "should skip OUTPUT when mapped: {stmt}"
             );
         }
+    }
+
+    #[test]
+    fn oracle_v4_up_creates_skills_table_and_index() {
+        let schema = SchemaConfig::default();
+        let stmts = oracle_v4_up(&schema);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("CREATE TABLE SKILLS"));
+        assert!(stmts[0].contains("SKILL_ID VARCHAR2(64) PRIMARY KEY"));
+        assert!(stmts[0].contains("SOURCE VARCHAR2(64) DEFAULT ''custom'' NOT NULL"));
+        assert!(stmts[0].contains("CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
+        assert!(stmts[0].contains("UPDATED_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
+        assert!(stmts[1].contains("IDX_SKILLS_TENANT_NAME"));
+    }
+
+    #[test]
+    fn oracle_v5_up_creates_skill_versions_table_and_index() {
+        let schema = SchemaConfig::default();
+        let stmts = oracle_v5_up(&schema);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("CREATE TABLE SKILL_VERSIONS"));
+        assert!(stmts[0].contains("CHECK (FILE_MANIFEST IS JSON)"));
+        assert!(stmts[0].contains("REFERENCES SKILLS(SKILL_ID) ON DELETE CASCADE"));
+        assert!(stmts[0].contains("CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
+        assert!(stmts[1].contains("IDX_SKILL_VERSION_NUMBER"));
+    }
+
+    #[test]
+    fn oracle_v6_up_creates_tenant_aliases_table() {
+        let schema = SchemaConfig::default();
+        let stmts = oracle_v6_up(&schema);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("CREATE TABLE TENANT_ALIASES"));
+        assert!(stmts[0].contains("CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
+        assert!(stmts[0].contains("EXPIRES_AT TIMESTAMP WITH TIME ZONE"));
+        assert!(stmts[1].contains("IDX_TENANT_ALIASES_CANONICAL"));
+    }
+
+    #[test]
+    fn oracle_v7_up_creates_bundle_tokens_table() {
+        let schema = SchemaConfig::default();
+        let stmts = oracle_v7_up(&schema);
+        assert_eq!(stmts.len(), 3);
+        assert!(stmts[0].contains("CREATE TABLE BUNDLE_TOKENS"));
+        assert!(stmts[0].contains("TOKEN_HASH VARCHAR2(64) PRIMARY KEY"));
+        assert!(stmts[0].contains("CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
+        assert!(stmts[0].contains("EXPIRES_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
+        assert!(stmts[1].contains("IDX_BUNDLE_TOKENS_EXEC_ID"));
+        assert!(stmts[2].contains("IDX_BUNDLE_TOKENS_EXPIRES_AT"));
+    }
+
+    #[test]
+    fn oracle_v8_up_creates_continuation_cookies_table() {
+        let schema = SchemaConfig::default();
+        let stmts = oracle_v8_up(&schema);
+        assert_eq!(stmts.len(), 3);
+        assert!(stmts[0].contains("CREATE TABLE CONTINUATION_COOKIES"));
+        assert!(stmts[0].contains("COOKIE_HASH VARCHAR2(64) PRIMARY KEY"));
+        assert!(stmts[0].contains("CREATED_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
+        assert!(stmts[0].contains("EXPIRES_AT TIMESTAMP WITH TIME ZONE NOT NULL"));
+        assert!(stmts[1].contains("IDX_CONTINUATION_COOKIES_EXEC"));
+        assert!(stmts[2].contains("IDX_CONTINUATION_COOKIES_EXP"));
+    }
+
+    #[test]
+    fn oracle_idempotent_ddl_escapes_single_quotes() {
+        let stmt = oracle_idempotent_ddl("CREATE TABLE T (SOURCE VARCHAR2(64) DEFAULT 'custom')");
+        assert!(stmt.contains("DEFAULT ''custom''"));
+        assert!(stmt.contains("SQLCODE != -955"));
+    }
+
+    #[test]
+    fn oracle_v4_to_v8_qualify_objects_with_owner() {
+        let schema = SchemaConfig {
+            owner: Some("OWNER".to_string()),
+            ..Default::default()
+        };
+
+        let v4 = oracle_v4_up(&schema);
+        assert!(v4[0].contains("CREATE TABLE OWNER.SKILLS"));
+        assert!(v4[1].contains("CREATE INDEX OWNER.IDX_SKILLS_TENANT_NAME ON OWNER.SKILLS"));
+
+        let v5 = oracle_v5_up(&schema);
+        assert!(v5[0].contains("CREATE TABLE OWNER.SKILL_VERSIONS"));
+        assert!(v5[0].contains("REFERENCES OWNER.SKILLS(SKILL_ID) ON DELETE CASCADE"));
+        assert!(v5[1].contains(
+            "CREATE UNIQUE INDEX OWNER.IDX_SKILL_VERSION_NUMBER ON OWNER.SKILL_VERSIONS"
+        ));
+
+        let v6 = oracle_v6_up(&schema);
+        assert!(v6[0].contains("CREATE TABLE OWNER.TENANT_ALIASES"));
+        assert!(v6[1]
+            .contains("CREATE INDEX OWNER.IDX_TENANT_ALIASES_CANONICAL ON OWNER.TENANT_ALIASES"));
+
+        let v7 = oracle_v7_up(&schema);
+        assert!(v7[0].contains("CREATE TABLE OWNER.BUNDLE_TOKENS"));
+        assert!(
+            v7[1].contains("CREATE INDEX OWNER.IDX_BUNDLE_TOKENS_EXEC_ID ON OWNER.BUNDLE_TOKENS")
+        );
+        assert!(v7[2]
+            .contains("CREATE INDEX OWNER.IDX_BUNDLE_TOKENS_EXPIRES_AT ON OWNER.BUNDLE_TOKENS"));
+
+        let v8 = oracle_v8_up(&schema);
+        assert!(v8[0].contains("CREATE TABLE OWNER.CONTINUATION_COOKIES"));
+        assert!(v8[1].contains(
+            "CREATE INDEX OWNER.IDX_CONTINUATION_COOKIES_EXEC ON OWNER.CONTINUATION_COOKIES"
+        ));
+        assert!(v8[2].contains(
+            "CREATE INDEX OWNER.IDX_CONTINUATION_COOKIES_EXP ON OWNER.CONTINUATION_COOKIES"
+        ));
     }
 }

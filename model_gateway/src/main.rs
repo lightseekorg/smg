@@ -464,6 +464,21 @@ struct CliArgs {
     #[arg(long, help_heading = "Parsers")]
     mcp_config_path: Option<String>,
 
+    // ==================== Skills ====================
+    /// Enable the skills subsystem scaffolding.
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::value_parser!(bool),
+        help_heading = "Skills"
+    )]
+    skills_enabled: Option<bool>,
+
+    /// Path to a YAML file with the nested skills configuration.
+    #[arg(long, help_heading = "Skills")]
+    skills_config_path: Option<String>,
+
     // ==================== Backend ====================
     /// Backend runtime to use (auto-detected if not specified)
     #[arg(long, value_enum, alias = "runtime", help_heading = "Backend")]
@@ -1157,6 +1172,10 @@ impl CliArgs {
             _ => (None, None, None),
         };
 
+        let skills_enabled = self
+            .skills_enabled
+            .unwrap_or_else(|| self.skills_config_path.is_some());
+
         let builder = RouterConfig::builder()
             .mode(mode)
             .policy(policy)
@@ -1225,6 +1244,8 @@ impl CliArgs {
             .maybe_reasoning_parser(self.reasoning_parser.as_ref())
             .maybe_tool_call_parser(self.tool_call_parser.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())
+            .skills_enabled(skills_enabled)
+            .maybe_skills_config_path(self.skills_config_path.as_ref())
             .dp_aware(self.dp_aware)
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
@@ -1418,7 +1439,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server_config = cli_args.to_server_config(router_config)?;
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async move { server::startup(server_config).await })?;
+    runtime.block_on(Box::pin(server::startup(server_config)))?;
     if is_otel_enabled() {
         shutdown_otel();
     }

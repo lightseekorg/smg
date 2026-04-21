@@ -99,7 +99,6 @@ Reasoning parsers extract chain-of-thought content from model outputs. Essential
 
 | Option | `--reasoning-parser` |
 |--------|---------------------|
-| Environment | `SMG_REASONING_PARSER` |
 | Default | Auto-detected from model name |
 
 ### Supported Parsers
@@ -202,7 +201,6 @@ Tool call parsers extract function calls from model output and validate argument
 
 | Option | `--tool-call-parser` |
 |--------|----------------|
-| Environment | `SMG_TOOL_CALL_PARSER` |
 | Default | Auto-detected from model name |
 
 ### Supported Parsers
@@ -249,9 +247,9 @@ Qwen model JSON tool calling format.
 
 <div class="card" markdown>
 
-**Qwen Coder**
+**Qwen XML**
 
-Qwen Coder XML format with parameter tags.
+Qwen3-Coder / Qwen3.5+ XML format with parameter tags.
 
 ```xml
 <tool_call><function=get_weather><parameter=location>NYC</parameter></function></tool_call>
@@ -269,7 +267,7 @@ Qwen Coder XML format with parameter tags.
 | `json` | `gpt-*`, `claude-*`, `gemini-*` | Standard JSON function calls |
 | `mistral` | `mistral-*`, `mixtral-*` | Mistral-specific format |
 | `qwen` | `qwen*`, `Qwen*` | JSON tool calls |
-| `qwen_coder` | `Qwen*-Coder*`, `qwen*-coder*` | XML with parameter tags |
+| `qwen_xml` | `Qwen3-Coder*`, `Qwen3.5*` | XML with parameter tags |
 | `pythonic` | `llama-4*`, `deepseek-*` | Python-style function syntax |
 | `llama` | `llama-3.2*` | Python tag with JSON |
 | `deepseek` | `deepseek-v3*` | XML with function syntax |
@@ -376,10 +374,7 @@ smg \
 
 | Metric | Description |
 |--------|-------------|
-| `smg_pipeline_stage_duration_seconds` | Time spent in each pipeline stage |
-| `smg_reasoning_extractions_total` | Reasoning tokens extracted |
-| `smg_tool_calls_total` | Tool calls parsed by type |
-| `smg_tool_execution_duration_seconds` | Tool execution time |
+| `smg_router_stage_duration_seconds` | Time spent in each pipeline stage |
 | `smg_mcp_tool_calls_total` | MCP tool invocations |
 
 ### Debug Logging

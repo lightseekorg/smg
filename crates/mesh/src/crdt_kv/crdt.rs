@@ -1,4 +1,8 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use dashmap::{mapref::entry::Entry as MapEntry, DashMap};
 use parking_lot::{Mutex, RwLock};
@@ -14,13 +18,32 @@ use super::{
 // CRDT OR-Map - Observed-Remove Map Implementation
 // ============================================================================
 
+/// Default tombstone grace period. Tombstones younger than this are not
+/// garbage collected, preventing data resurrection from stale peers.
+/// Gossip converges in seconds for small clusters, so 5 minutes is very
+/// conservative.
+pub const DEFAULT_TOMBSTONE_GRACE: Duration = Duration::from_secs(300);
+
 /// Value metadata for CRDT OR-Map
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct ValueMetadata {
     timestamp: u64,
     replica_id: ReplicaId,
     is_tombstone: bool, // Marks if this version is a tombstone (deletion)
+    /// Monotonic timestamp for tombstone GC. Tombstones younger than
+    /// `tombstone_grace` are not garbage collected to prevent data resurrection.
+    created_at: Instant,
 }
+
+impl PartialEq for ValueMetadata {
+    fn eq(&self, other: &Self) -> bool {
+        self.timestamp == other.timestamp
+            && self.replica_id == other.replica_id
+            && self.is_tombstone == other.is_tombstone
+    }
+}
+
+impl Eq for ValueMetadata {}
 
 impl ValueMetadata {
     fn new(timestamp: u64, replica_id: ReplicaId) -> Self {
@@ -28,6 +51,7 @@ impl ValueMetadata {
             timestamp,
             replica_id,
             is_tombstone: false,
+            created_at: Instant::now(),
         }
     }
 
@@ -36,6 +60,7 @@ impl ValueMetadata {
             timestamp,
             replica_id,
             is_tombstone: true,
+            created_at: Instant::now(),
         }
     }
 
@@ -298,6 +323,11 @@ impl CrdtOrMap {
         self.store.generation()
     }
 
+    /// Get all keys without cloning values.
+    pub fn keys(&self) -> Vec<String> {
+        self.store.keys()
+    }
+
     /// Get all key-value pairs
     pub fn all(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
         self.store.all()
@@ -320,9 +350,24 @@ impl CrdtOrMap {
     /// Remove tombstoned keys from the metadata and key_locks maps.
     /// Keys that are not in the live store and whose latest metadata entry
     /// is a tombstone are cleaned up to prevent unbounded memory growth.
+    ///
+    /// Tombstones younger than `grace` are NOT removed, preventing data
+    /// resurrection from stale peers that haven't received the tombstone yet
+    /// Default grace period: 5 minutes.
+    ///
     /// Returns the number of entries removed.
     pub fn gc_tombstones(&self) -> usize {
+        self.gc_tombstones_with_grace(DEFAULT_TOMBSTONE_GRACE)
+    }
+
+    /// Like `gc_tombstones` but with a custom grace period.
+    /// Useful for testing with shorter durations.
+    pub fn gc_tombstones_with_grace(&self, grace: Duration) -> usize {
+        let now = Instant::now();
         let mut removed = 0;
+        // Collect-then-remove: collect keys to check first (read-only iteration),
+        // then remove individually. This avoids locking all DashMap shards
+        // simultaneously, which would stall concurrent writers.
         let keys_to_check: Vec<String> = self
             .metadata
             .iter()
@@ -341,15 +386,19 @@ impl CrdtOrMap {
                 Arc::strong_count(lock) <= 2 && lock.try_lock().is_some()
             });
             // Atomically remove metadata only if the key is still not in the
-            // live store AND still tombstoned. The remove_if closure runs
-            // under the DashMap shard lock, preventing a concurrent insert
-            // from racing between check and remove.
+            // live store AND still tombstoned AND the tombstone is older than
+            // the grace period. The remove_if closure runs under the DashMap
+            // shard lock, preventing a concurrent insert from racing between
+            // check and remove.
             let was_removed = self.metadata.remove_if(&key, |_, versions| {
                 !self.store.contains_key(&key)
                     && versions
                         .iter()
                         .max_by_key(|v| v.version_key())
-                        .is_none_or(|winner| winner.is_tombstone)
+                        .is_none_or(|winner| {
+                            winner.is_tombstone
+                                && now.saturating_duration_since(winner.created_at) >= grace
+                        })
             });
             if was_removed.is_some() {
                 removed += 1;

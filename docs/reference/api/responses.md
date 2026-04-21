@@ -60,7 +60,7 @@ POST /v1/responses
 | `max_output_tokens` | integer | No | Maximum tokens to generate |
 | `max_tool_calls` | integer | No | Maximum number of tool calls per request |
 | `temperature` | number | No | Sampling temperature (0-2), default: 1.0 |
-| `top_p` | number | No | Nucleus sampling parameter (0-1), default: 1.0 |
+| `top_p` | number | No | Nucleus sampling parameter (0-1) |
 | `stream` | boolean | No | Enable streaming responses |
 | `store` | boolean | No | Store response for later retrieval, default: true |
 | `tools` | array | No | Available tools (function, mcp, web_search_preview, code_interpreter) |

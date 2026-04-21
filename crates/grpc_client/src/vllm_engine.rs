@@ -10,7 +10,7 @@ use std::{
 
 use openai_protocol::{
     chat::ChatCompletionRequest,
-    common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
+    common::{ResponseFormat, StringOrArray},
     completion::CompletionRequest,
     generate::GenerateRequest,
     messages::CreateMessageRequest,
@@ -372,16 +372,9 @@ impl VllmEngineClient {
 
         let max_tokens = request.max_completion_tokens;
 
-        // Handle skip_special_tokens: set to false if tools are present and tool_choice is not "none"
-        let skip_special_tokens = if request.tools.is_some() {
-            match &request.tool_choice {
-                Some(ToolChoice::Value(ToolChoiceValue::None)) => request.skip_special_tokens,
-                Some(_) => false, // tool_choice is not "none"
-                None => false, // TODO: this assumes tool_choice defaults to "auto" when tools present
-            }
-        } else {
-            request.skip_special_tokens
-        };
+        // Hardcode to true: gRPC backends return raw token IDs, not decoded text.
+        // Detokenization happens on the SMG Rust side (StopDecoder/Sequence).
+        let skip_special_tokens = true;
 
         // Map logprobs: if request.logprobs is true, use top_logprobs value (or 1 if not specified)
         // OpenAI API only exposes output logprobs, not prompt logprobs, for chat completions
@@ -456,10 +449,15 @@ impl VllmEngineClient {
             constraints.push(proto::sampling_params::Constraint::Regex(regex.clone()));
         }
 
-        // Handle tool call constraint from preparation stage
+        // Handle tool call constraint from preparation stage.
+        // If response_format already set a constraint, clear it — tool constraint wins
+        // (matches vLLM HTTP behavior where tool calling overrides response_format).
         if let Some((constraint_type, constraint_value)) = tool_call_constraint {
             if !constraints.is_empty() {
-                return Err("Constrained decoding is not compatible with tool calls.".to_string());
+                warn!(
+                    "Constrained decoding is not compatible with tool calls, using tool constraint"
+                );
+                constraints.clear();
             }
             let tool_constraint = match constraint_type.as_str() {
                 "structural_tag" => {
@@ -493,14 +491,14 @@ impl VllmEngineClient {
         Ok(proto::SamplingParams {
             temperature: request.temperature,
             top_p: request.top_p.unwrap_or(1.0),
-            top_k: 0,   // ResponsesRequest doesn't expose top_k (0 means disabled)
-            min_p: 0.0, // ResponsesRequest doesn't expose min_p
-            frequency_penalty: 0.0, // ResponsesRequest doesn't expose frequency_penalty
-            presence_penalty: 0.0, // ResponsesRequest doesn't expose presence_penalty
-            repetition_penalty: 1.0, // ResponsesRequest doesn't expose repetition_penalty
+            top_k: request.top_k.max(0) as u32,
+            min_p: request.min_p,
+            frequency_penalty: request.frequency_penalty.unwrap_or(0.0),
+            presence_penalty: request.presence_penalty.unwrap_or(0.0),
+            repetition_penalty: request.repetition_penalty,
             max_tokens,
-            stop: vec![],               // No stop sequences in Responses API
-            stop_token_ids: vec![],     // Handled by Harmony stop tokens
+            stop: vec![], // Does not pass through request.stop yet (follow-up fix)
+            stop_token_ids: vec![], // Handled by Harmony stop tokens
             skip_special_tokens: false, // Keep special tokens for Harmony
             spaces_between_special_tokens: true,
             ignore_eos: false,
@@ -576,9 +574,8 @@ impl VllmEngineClient {
     ) -> Result<proto::SamplingParams, String> {
         let stop_sequences = request.stop_sequences.clone().unwrap_or_default();
 
-        // skip_special_tokens: false when tools are present (same logic as chat)
-        let skip_special_tokens =
-            tool_call_constraint.is_none() && request.tools.as_ref().is_none_or(|t| t.is_empty());
+        // Hardcode to true: gRPC backends return raw token IDs, not decoded text.
+        let skip_special_tokens = true;
 
         Ok(proto::SamplingParams {
             temperature: Some(request.temperature.unwrap_or(1.0) as f32),
@@ -925,6 +922,42 @@ mod tests {
     // vLLM handles multimodal inputs differently than SGLang
 
     // TODO: SessionParams not in current proto - skip test
+
+    #[test]
+    fn test_responses_sampling_params_are_passed_through() {
+        use openai_protocol::responses::ResponsesRequest;
+
+        let request = ResponsesRequest {
+            top_k: 40,
+            min_p: 0.05,
+            repetition_penalty: 1.2,
+            frequency_penalty: Some(0.3),
+            presence_penalty: Some(-0.4),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            max_output_tokens: Some(128),
+            ..Default::default()
+        };
+
+        let params = VllmEngineClient::build_grpc_sampling_params_from_responses(&request, None)
+            .expect("build sampling params");
+
+        assert_eq!(params.top_k, 40);
+        assert!((params.min_p - 0.05).abs() < 1e-6);
+        assert!((params.repetition_penalty - 1.2).abs() < 1e-6);
+        assert!((params.frequency_penalty - 0.3).abs() < 1e-6);
+        assert!((params.presence_penalty - (-0.4)).abs() < 1e-6);
+
+        // Negative top_k is clamped to 0 (vLLM's "disabled" sentinel).
+        let disabled = ResponsesRequest {
+            top_k: -1,
+            ..Default::default()
+        };
+        let disabled_params =
+            VllmEngineClient::build_grpc_sampling_params_from_responses(&disabled, None)
+                .expect("build sampling params");
+        assert_eq!(disabled_params.top_k, 0);
+    }
 
     #[test]
     fn test_embed_request() {

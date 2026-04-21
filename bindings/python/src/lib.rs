@@ -1131,7 +1131,7 @@ impl Router {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         runtime.block_on(async move {
-            server::startup(server::ServerConfig {
+            Box::pin(server::startup(server::ServerConfig {
                 host: self.host.clone(),
                 port: self.port,
                 router_config,
@@ -1197,7 +1197,7 @@ impl Router {
                 },
                 webrtc_bind_addr: None,
                 webrtc_stun_server: None,
-            })
+            }))
             .await
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
         })

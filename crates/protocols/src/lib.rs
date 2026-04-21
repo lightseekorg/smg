@@ -28,6 +28,8 @@ pub mod realtime_session;
 pub mod rerank;
 pub mod responses;
 pub mod sampling_params;
+pub mod skills;
 pub mod tokenize;
+pub mod transcription;
 pub mod validated;
 pub mod worker;

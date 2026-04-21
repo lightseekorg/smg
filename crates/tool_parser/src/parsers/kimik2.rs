@@ -51,6 +51,54 @@ pub struct KimiK2Parser {
 }
 
 impl KimiK2Parser {
+    /// Build structural tag for Kimi K2 tool call format.
+    ///
+    /// Uses dual triggers following sglang's approach:
+    /// - `<|tool_calls_section_begin|>` for the first tool call
+    /// - `<|tool_call_begin|>` for subsequent parallel tool calls
+    pub fn build_structural_tag(tools: &[Tool], at_least_one: bool) -> Value {
+        let mut tags = Vec::new();
+        for (index, tool) in tools.iter().enumerate() {
+            let name = &tool.function.name;
+            if name.is_empty() {
+                continue;
+            }
+            let schema = &tool.function.parameters;
+
+            // Tag for FIRST tool call (includes outer section wrapper)
+            tags.push(serde_json::json!({
+                "begin": format!(
+                    "<|tool_calls_section_begin|><|tool_call_begin|>functions.{name}:{index}<|tool_call_argument_begin|>"
+                ),
+                "content": {
+                    "type": "json_schema",
+                    "json_schema": schema,
+                },
+                "end": "<|tool_call_end|>",
+            }));
+
+            // Tag for SUBSEQUENT tool calls (no outer section wrapper)
+            tags.push(serde_json::json!({
+                "begin": format!(
+                    "<|tool_call_begin|>functions.{name}:{index}<|tool_call_argument_begin|>"
+                ),
+                "content": {
+                    "type": "json_schema",
+                    "json_schema": schema,
+                },
+                "end": "<|tool_call_end|>",
+            }));
+        }
+        serde_json::json!({
+            "format": {
+                "type": "triggered_tags",
+                "triggers": ["<|tool_calls_section_begin|>", "<|tool_call_begin|>"],
+                "tags": tags,
+                "at_least_one": at_least_one,
+            }
+        })
+    }
+
     /// Create a new Kimi K2 parser
     #[expect(
         clippy::expect_used,

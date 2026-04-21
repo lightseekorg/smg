@@ -77,6 +77,16 @@ Plugins register at specific points in the request lifecycle:
 | **OnRequest** | Before forwarding to worker | Authentication, rate limiting, validation, header injection |
 | **OnResponse** | After receiving worker response | Response transformation, error normalization, logging |
 
+!!! warning "Streaming responses bypass OnResponse"
+    To avoid buffering entire streams into memory, SMG skips the
+    **OnResponse** phase when the upstream reply is streaming — that is,
+    when the response uses `Content-Type: text/event-stream`,
+    `Content-Type: application/x-ndjson`, or a chunked
+    `Transfer-Encoding`. The gateway logs a warning and passes the
+    streaming response through untouched, so plugins attached only at
+    OnResponse will not observe streaming traffic. OnRequest runs
+    normally for streaming endpoints.
+
 ---
 
 ## Example Plugins

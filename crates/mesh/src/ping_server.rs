@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
@@ -17,8 +18,11 @@ use tracing as log;
 use tracing::instrument;
 
 use super::{
+    chunking::{
+        build_stream_batches, chunk_value, dispatch_stream_batch, next_generation,
+        DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_STREAM_CHUNK_BYTES,
+    },
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
-    incremental::IncrementalUpdateCollector,
     metrics::{
         record_ack, record_batch_sent, record_nack, record_peer_reconnect, record_snapshot_bytes,
         record_snapshot_duration, record_snapshot_trigger, update_peer_connections,
@@ -40,6 +44,7 @@ use super::{
     stores::{StateStores, StoreType as LocalStoreType},
     sync::MeshSyncManager,
 };
+use crate::collector::{PeerWatermark, RoundBatch};
 
 #[derive(Debug)]
 pub struct GossipService {
@@ -52,6 +57,20 @@ pub struct GossipService {
     state_machine: Option<Arc<NodeStateMachine>>,
     partition_detector: Option<Arc<PartitionDetector>>,
     mtls_manager: Option<Arc<MTLSManager>>,
+    /// Shared reference to the current RoundBatch, updated once per round by
+    /// the MeshController's central collector. Server-side sync_stream handlers
+    /// read from this and apply per-peer watermark filtering.
+    current_batch: Option<Arc<parking_lot::RwLock<Arc<RoundBatch>>>>,
+    /// Shared reference to the current stream RoundBatch, drained once
+    /// per round by the MeshController. Server-side handlers read
+    /// broadcast drain_entries and also emit targeted_entries addressed
+    /// to the remote peer learned from the first inbound message, so
+    /// publish_to(peer) works in both directions of a peer pair.
+    current_stream_batch: Option<Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>>>,
+    /// Node-wide MeshKV handle. Owns the stream buffers, subscriber
+    /// registry, and chunk assembler shared with the client-side
+    /// SyncStream handlers.
+    mesh_kv: Option<Arc<crate::kv::MeshKV>>,
 }
 
 impl GossipService {
@@ -277,7 +296,43 @@ impl GossipService {
             state_machine: None,
             partition_detector: None,
             mtls_manager: None,
+            current_batch: None,
+            current_stream_batch: None,
+            mesh_kv: None,
         }
+    }
+
+    /// Attach the shared RoundBatch reference from the MeshController.
+    /// Server-side sync_stream handlers read from this single batch
+    /// produced by the CentralCollector rather than re-collecting per peer.
+    pub fn with_current_batch(
+        mut self,
+        current_batch: Arc<parking_lot::RwLock<Arc<RoundBatch>>>,
+    ) -> Self {
+        self.current_batch = Some(current_batch);
+        self
+    }
+
+    /// Attach the shared stream RoundBatch reference. Server-side
+    /// handlers emit broadcast drain_entries plus targeted_entries
+    /// whose target matches the remote peer learned from the first
+    /// inbound StreamMessage, so publish_to() works in both directions
+    /// of a peer pair.
+    pub fn with_current_stream_batch(
+        mut self,
+        current_stream_batch: Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>>,
+    ) -> Self {
+        self.current_stream_batch = Some(current_stream_batch);
+        self
+    }
+
+    /// Attach the node-wide MeshKV handle. Plumbed from the server
+    /// builder so stream buffers, subscribers, and the chunk assembler
+    /// are shared between the client-side (outbound) and server-side
+    /// (inbound) SyncStream handlers.
+    pub fn with_mesh_kv(mut self, mesh_kv: Arc<crate::kv::MeshKV>) -> Self {
+        self.mesh_kv = Some(mesh_kv);
+        self
     }
 
     pub fn with_stores(mut self, stores: Arc<StateStores>) -> Self {
@@ -419,39 +474,53 @@ impl Gossip for GossipService {
         let state = self.state.clone();
         let stores = self.stores.clone();
         let sync_manager = self.sync_manager.clone();
+        let mesh_kv = self.mesh_kv.clone();
 
         // Create output stream with flow control
         const CHANNEL_CAPACITY: usize = 128;
         let (tx, rx) = mpsc::channel::<Result<StreamMessage, Status>>(CHANNEL_CAPACITY);
         let size_validator = MessageSizeValidator::default();
 
-        // Create incremental update collector if stores are available
-        let collector = stores.as_ref().map(|stores| {
-            Arc::new(IncrementalUpdateCollector::new(
-                stores.clone(),
-                self_name.clone(),
-            ))
-        });
+        // Remote peer identity, discovered from inbound StreamMessage.peer_id.
+        // Shared between the inbound handler (writer) and the server-side
+        // sender task (reader) so the sender can emit targeted_entries whose
+        // `target` matches the learned peer. Before the first inbound message
+        // this is `None` and the sender emits only broadcast drain_entries —
+        // the targeted entries for that first round are dropped under
+        // at-most-once semantics and the application retries.
+        let learned_peer: Arc<parking_lot::RwLock<Option<String>>> =
+            Arc::new(parking_lot::RwLock::new(None));
 
-        // Spawn task to periodically send incremental updates
-        let incremental_sender_handle = if let Some(collector) = collector {
+        // Spawn task to periodically send incremental updates.
+        // Uses PeerWatermark reading from the shared RoundBatch (central collector).
+        // If current_batch is not set (e.g., temporary GossipService for snapshots),
+        // skip the sender task.
+        let incremental_sender_handle = if let Some(batch_handle) = self.current_batch.clone() {
             let tx_incremental = tx.clone();
             let self_name_incremental = self_name.clone();
             let size_validator_clone = size_validator.clone();
+            // The remote peer's name isn't known until the first stream message
+            // arrives. Use a placeholder label for debug output — this doesn't
+            // affect filtering correctness (each task has its own watermark).
+            let peer_name_for_watermark = "server-inbound".to_string();
+            let stream_batch_handle = self.current_stream_batch.clone();
+            let learned_peer_sender = learned_peer.clone();
             #[expect(
                 clippy::disallowed_methods,
                 reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes or handle is aborted"
             )]
             Some(tokio::spawn(async move {
-                // Use 1 second interval for rate limit counter sync (faster than other stores)
-                let mut interval = tokio::time::interval(Duration::from_secs(1)); // Send every 1 second
+                let mut watermark = PeerWatermark::new(peer_name_for_watermark);
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
                 let mut sequence_counter: u64 = 0;
+                let mut last_stream_batch: Option<Arc<crate::kv::RoundBatch>> = None;
 
                 loop {
                     interval.tick().await;
 
-                    // Collect all incremental updates
-                    let all_updates = collector.collect_all_updates();
+                    // Read the centrally collected batch and filter by this peer's watermark.
+                    let batch = batch_handle.read().clone();
+                    let all_updates = watermark.filter(&batch);
 
                     if !all_updates.is_empty() {
                         for (store_type, updates) in all_updates {
@@ -469,10 +538,7 @@ impl Gossip for GossipService {
                                     size_validator_clone.max_size()
                                 );
                                 // Mark as sent to prevent infinite retry loop.
-                                // Without this, the same oversized update is re-collected,
-                                // re-serialized, and re-skipped every second forever,
-                                // burning CPU and memory.
-                                collector.mark_sent(store_type, &updates);
+                                watermark.mark_sent(store_type, &updates);
                                 continue;
                             }
 
@@ -489,20 +555,16 @@ impl Gossip for GossipService {
                                 peer_id: self_name_incremental.clone(),
                             };
 
-                            // Check backpressure using try_send (mpsc::Sender doesn't have len())
+                            // Check backpressure using try_send
                             match tx_incremental.try_send(Ok(incremental_update)) {
                                 Ok(()) => {
-                                    // Successfully queued
-                                    // Record metrics
                                     record_batch_sent(&self_name_incremental, batch_size);
-                                    // Mark as sent after successful transmission
-                                    collector.mark_sent(store_type, &updates);
+                                    watermark.mark_sent(store_type, &updates);
                                 }
                                 Err(mpsc::error::TrySendError::Full(_)) => {
                                     log::debug!(
                                         "Backpressure: channel full, skipping send (will retry next interval)"
                                     );
-                                    // Don't mark as sent, will retry next interval
                                     continue;
                                 }
                                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -520,6 +582,94 @@ impl Gossip for GossipService {
                             );
                         }
                     }
+
+                    // Server-side stream emission: broadcast drain_entries
+                    // plus targeted_entries addressed to the learned remote
+                    // peer. Covers the non-initiator → initiator direction
+                    // of each peer pair; the client-side sender in
+                    // controller.rs handles the other direction. Before
+                    // learned_peer is set (first inbound message not yet
+                    // received), targeted entries in this round are dropped
+                    // under at-most-once. On channel full, drop without retry.
+                    if let Some(sbh) = &stream_batch_handle {
+                        let stream_batch = sbh.read().clone();
+                        let fresh_batch = last_stream_batch
+                            .as_ref()
+                            .is_none_or(|last| !Arc::ptr_eq(last, &stream_batch));
+                        if fresh_batch {
+                            // Advance the tracker for every fresh Arc, not just
+                            // ones that produced work — otherwise a batch with
+                            // empty drain_entries stays "fresh" across ticks and
+                            // we keep re-checking it.
+                            last_stream_batch = Some(stream_batch.clone());
+                        }
+                        let peer_for_targeted = learned_peer_sender.read().clone();
+                        let has_targeted = peer_for_targeted.as_ref().is_some_and(|p| {
+                            stream_batch.targeted_entries.iter().any(|(t, _, _)| t == p)
+                        });
+                        if fresh_batch && (!stream_batch.drain_entries.is_empty() || has_targeted) {
+                            let mut entries = Vec::new();
+                            // Generation is per-value so concurrent publishes
+                            // to the same key get distinct tags.
+                            for (key, value) in &stream_batch.drain_entries {
+                                entries.extend(chunk_value(
+                                    key.clone(),
+                                    next_generation(),
+                                    value.clone(),
+                                    MAX_STREAM_CHUNK_BYTES,
+                                ));
+                            }
+                            if let Some(ref peer) = peer_for_targeted {
+                                for (target, key, value) in &stream_batch.targeted_entries {
+                                    if target == peer {
+                                        entries.extend(chunk_value(
+                                            key.clone(),
+                                            next_generation(),
+                                            value.clone(),
+                                            MAX_STREAM_CHUNK_BYTES,
+                                        ));
+                                    }
+                                }
+                            }
+                            if !entries.is_empty() {
+                                for batch in build_stream_batches(
+                                    entries,
+                                    DEFAULT_MAX_CHUNKS_PER_BATCH,
+                                    MAX_STREAM_CHUNK_BYTES,
+                                ) {
+                                    sequence_counter += 1;
+                                    let msg = StreamMessage {
+                                        message_type: StreamMessageType::StreamBatch as i32,
+                                        payload: Some(
+                                            gossip::stream_message::Payload::StreamBatch(batch),
+                                        ),
+                                        sequence: sequence_counter,
+                                        peer_id: self_name_incremental.clone(),
+                                    };
+                                    match tx_incremental.try_send(Ok(msg)) {
+                                        Ok(()) => {}
+                                        Err(mpsc::error::TrySendError::Full(_)) => {
+                                            log::debug!(
+                                                "server-side stream batch dropped on backpressure"
+                                            );
+                                            // TODO(metrics): bump
+                                            // stream_dropped_on_backpressure
+                                            break;
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                                            log::warn!(
+                                                "server-side stream sender: channel closed, stopping"
+                                            );
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if last_stream_batch.is_some() {
+                        // If handle became None (shouldn't normally), clear state.
+                        last_stream_batch = None;
+                    }
                 }
             }))
         } else {
@@ -533,9 +683,9 @@ impl Gossip for GossipService {
         // Track snapshot reception state: store_type -> (received_chunks, expected_total)
         // Keyed by store_type only — a new snapshot request for the same store
         // replaces any incomplete previous attempt (prevents stale chunk mixing).
-        use std::collections::HashMap;
         let mut snapshot_state: HashMap<LocalStoreType, (Vec<SnapshotChunk>, u64)> = HashMap::new();
 
+        let learned_peer_inbound = learned_peer.clone();
         #[expect(
             clippy::disallowed_methods,
             reason = "server-side stream handler that runs for the lifetime of the sync_stream gRPC connection; terminates when the stream closes"
@@ -593,11 +743,63 @@ impl Gossip for GossipService {
             }
 
             const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+            // Short-circuits the RwLock::read() once we've accepted an
+            // identity for this stream — learned_peer_inbound is
+            // write-once-per-connection, so after the first learn every
+            // subsequent message would otherwise take a pointless lock.
+            let mut peer_learned = false;
             loop {
                 match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming.next()).await {
                     Ok(Some(Ok(msg))) => {
                         sequence += 1;
-                        peer_id.clone_from(&msg.peer_id);
+                        // Accept the claimed peer_id before copying it into
+                        // the task-local `peer_id`: the task-local drives
+                        // the teardown log and connection-gauge decrement
+                        // below, and if we wrote a mismatched value here
+                        // before the reject, the cleanup would attribute
+                        // the close to the spoofed peer and leak the real
+                        // peer's connection gauge.
+                        //
+                        // Reject mid-stream peer_id changes: the stream's
+                        // remote identity is fixed for the connection, so
+                        // a different peer_id on a later message is either
+                        // a bug or a peer trying to claim another node's
+                        // targeted entries. Close the stream and let the
+                        // client reconnect. Pre-mTLS-binding defence;
+                        // mTLS-derived identity is the authoritative
+                        // long-term fix.
+                        if !peer_learned && !msg.peer_id.is_empty() {
+                            let mut learned = learned_peer_inbound.write();
+                            match learned.as_ref() {
+                                None => {
+                                    *learned = Some(msg.peer_id.clone());
+                                    peer_id.clone_from(&msg.peer_id);
+                                    peer_learned = true;
+                                }
+                                Some(existing) if existing == &msg.peer_id => {
+                                    peer_id.clone_from(existing);
+                                    peer_learned = true;
+                                }
+                                Some(existing) => {
+                                    log::warn!(
+                                        expected_peer_id = %existing,
+                                        received_peer_id = %msg.peer_id,
+                                        "peer_id changed mid-stream; closing sync_stream"
+                                    );
+                                    break;
+                                }
+                            }
+                        } else if peer_learned && msg.peer_id != peer_id {
+                            // Empty peer_id after learn is also an identity
+                            // change — a stream bound to a learned peer
+                            // shouldn't accept unowned frames.
+                            log::warn!(
+                                expected_peer_id = %peer_id,
+                                received_peer_id = %msg.peer_id,
+                                "peer_id changed mid-stream; closing sync_stream"
+                            );
+                            break;
+                        }
 
                         match msg.message_type() {
                             StreamMessageType::IncrementalUpdate => {
@@ -932,6 +1134,9 @@ impl Gossip for GossipService {
                                         state_machine: None,
                                         partition_detector: None,
                                         mtls_manager: None,
+                                        current_batch: None,
+                                        current_stream_batch: None,
+                                        mesh_kv: None,
                                     };
                                     let chunks = service.create_snapshot_chunks(store_type, 100); // chunk_size = 100 entries
                                     let total_chunks = chunks.len() as u64;
@@ -1230,6 +1435,16 @@ impl Gossip for GossipService {
                                 };
                                 if tx.send(Ok(heartbeat)).await.is_err() {
                                     break;
+                                }
+                            }
+                            StreamMessageType::StreamBatch => {
+                                if let Some(mesh_kv) = &mesh_kv {
+                                    if let Some(gossip::stream_message::Payload::StreamBatch(
+                                        batch,
+                                    )) = msg.payload
+                                    {
+                                        dispatch_stream_batch(mesh_kv, &msg.peer_id, batch.entries);
+                                    }
                                 }
                             }
                             _ => {

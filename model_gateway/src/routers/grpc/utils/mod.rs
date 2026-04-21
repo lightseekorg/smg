@@ -8,7 +8,7 @@ mod parsers;
 pub(crate) mod tonic_ext;
 
 // Re-export all public items so consumer imports stay unchanged.
-pub use chat_utils::{create_stop_decoder, generate_tool_constraints, process_chat_messages};
+pub use chat_utils::{create_stop_decoder, process_chat_messages};
 pub(crate) use chat_utils::{
     filter_chat_request_by_tool_choice, filter_tools_by_tool_choice, generate_tool_call_id,
     get_history_tool_calls_count, parse_finish_reason, parse_json_schema_response,

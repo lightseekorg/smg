@@ -114,7 +114,6 @@ impl TokenBucket {
             );
 
             loop {
-                // Wait for notify signal from return_tokens()
                 self.notify.notified().await;
 
                 if self.try_acquire(tokens).is_ok() {
@@ -238,11 +237,10 @@ mod tests {
         // No more tokens available
         assert!(bucket.try_acquire(1.0).is_err());
 
-        // Wait - should NOT refill automatically
+        // refill_rate=0 should NOT refill automatically even after waiting
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(bucket.try_acquire(1.0).is_err());
 
-        // Return a token - now we should be able to acquire
         bucket.return_tokens(1.0);
         assert!(bucket.try_acquire(1.0).is_ok());
 

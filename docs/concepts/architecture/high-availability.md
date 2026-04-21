@@ -127,12 +127,15 @@ smg --enable-mesh --mesh-host 0.0.0.0 --mesh-advertise-host 10.0.0.2 --mesh-port
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--enable-mesh` | `false` | Enable mesh networking for HA deployments |
-| `--mesh-server-name` | (auto) | Unique identifier for this node in the cluster |
+| `--mesh-server-name` | `Mesh_<4 random chars>` | Unique identifier for this node in the cluster |
 | `--mesh-host` | `0.0.0.0` | Bind address for mesh communication |
 | `--mesh-advertise-host` | `--mesh-host` | Routable address advertised to mesh peers |
 | `--mesh-port` | `39527` | Port for mesh gRPC communication |
-| `--mesh-peer-urls` | (none) | Initial peer URLs for cluster bootstrap |
+| `--mesh-peer-urls` | (none) | Initial peer URLs for cluster bootstrap; only the first entry is used as the bootstrap peer |
 | `--router-selector` | (none) | Label selector for Kubernetes pod discovery (e.g. `app=smg tier=router`) |
+
+!!! note "`--mesh-advertise-host` is required when `--mesh-host` is unspecified"
+    If `--mesh-host` is set to an unspecified bind address (for example `0.0.0.0`), the gateway refuses to start unless `--mesh-advertise-host` is set to a routable node IP. This prevents other peers from trying to dial an unroutable address.
 
 ### Python Entrypoint
 
@@ -191,25 +194,17 @@ smg --enable-mesh \
     --mesh-host 0.0.0.0 \
     --mesh-advertise-host 10.0.0.13 \
     --mesh-port 39527 \
-    --mesh-peer-urls "10.0.0.11:39527,10.0.0.12:39527" \
+    --mesh-peer-urls 10.0.0.11:39527 \
     --host 0.0.0.0 \
     --port 8000
 ```
 
-</div>
+!!! tip "Only the first peer bootstraps membership"
+    Later peers are learned via gossip after the initial connection. Pass exactly one reachable peer for cluster bootstrap — additional values on `--mesh-peer-urls` are currently ignored.
 
 </div>
 
-### Environment Variables
-
-```bash
-export SMG_ENABLE_MESH=true
-export SMG_MESH_SERVER_NAME=node1
-export SMG_MESH_HOST=0.0.0.0
-export SMG_MESH_ADVERTISE_HOST=10.0.0.11
-export SMG_MESH_PORT=39527
-export SMG_MESH_PEER_URLS="10.0.0.11:39527,10.0.0.12:39527"
-```
+</div>
 
 ---
 
@@ -303,12 +298,8 @@ Routing policy configuration and state.
 
 Cache-aware routing policy state is synchronized across mesh nodes. This ensures that KV cache routing decisions are consistent across all routers in the cluster, preventing redundant cache misses and enabling optimal prefix reuse regardless of which router handles the request.
 
-!!! info "Sync Endpoints"
-    The following endpoints expose cache-aware state across the mesh:
-
-    - `GET /mesh/cluster/status` — Cluster membership
-    - `GET /mesh/workers/state` — Worker state sync
-    - `GET /mesh/policies/state` — Policy state sync
+!!! info "Cluster introspection endpoints"
+    Use the HA management API under `/ha/*` (listed below) to inspect cluster membership, synchronized worker state, and policy state.
 
 ### CRDT Implementation
 
@@ -344,10 +335,10 @@ SMG uses several CRDT types for conflict-free synchronization:
 **Configuration**
 
 ```bash
-# All nodes
+# All nodes — point at one reachable peer for bootstrap
 smg --enable-mesh \
-    --mesh-peer-urls "node1:39527,node2:39527,node3:39527" \
-    --worker-urls http://worker1:8000,http://worker2:8000
+    --mesh-peer-urls node1:39527 \
+    --worker-urls http://worker1:8000 http://worker2:8000
 ```
 
 </div>
@@ -373,10 +364,10 @@ smg --enable-mesh \
 **Configuration**
 
 ```bash
-# All nodes
+# All nodes — point at one reachable peer for bootstrap
 smg --enable-mesh \
-    --mesh-peer-urls "node1:39527,node2:39527,node3:39527,node4:39527,node5:39527" \
-    --worker-urls http://worker1:8000,http://worker2:8000
+    --mesh-peer-urls node1:39527 \
+    --worker-urls http://worker1:8000 http://worker2:8000
 ```
 
 </div>
@@ -414,7 +405,7 @@ spec:
         - --mesh-host=0.0.0.0
         - --mesh-advertise-host=$(POD_IP)
         - --mesh-port=39527
-        - --mesh-peer-urls=smg-0.smg-mesh:39527,smg-1.smg-mesh:39527,smg-2.smg-mesh:39527
+        - --mesh-peer-urls=smg-0.smg-mesh:39527
         - --worker-urls=$(WORKER_URLS)
         env:
         - name: POD_NAME
@@ -479,16 +470,20 @@ smg --enable-mesh --service-discovery --router-selector app=smg tier=router
   "node_name": "node1",
   "node_count": 3,
   "nodes": [
-    {"name": "node1", "status": "ALIVE", "address": "node1:39527"},
-    {"name": "node2", "status": "ALIVE", "address": "node2:39527"},
-    {"name": "node3", "status": "ALIVE", "address": "node3:39527"}
+    {"name": "node1", "address": "node1:39527", "status": "1", "version": 1},
+    {"name": "node2", "address": "node2:39527", "status": "1", "version": 1},
+    {"name": "node3", "address": "node3:39527", "status": "1", "version": 1}
   ],
   "stores": {
-    "workers": {"entry_count": 5, "last_sync": "2024-01-15T10:30:00Z"},
-    "policies": {"entry_count": 2, "last_sync": "2024-01-15T10:30:00Z"}
+    "membership_count": 3,
+    "worker_count": 0,
+    "policy_count": 0,
+    "app_count": 0
   }
 }
 ```
+
+The `status` field is emitted as the stringified discriminant of the `NodeStatus` prost enum: `"0"` INIT, `"1"` ALIVE, `"2"` SUSPECTED, `"3"` DOWN, `"4"` LEAVING.
 
 ---
 

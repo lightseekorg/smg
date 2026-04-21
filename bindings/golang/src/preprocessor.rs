@@ -15,7 +15,7 @@ use std::{
 
 use llm_tokenizer::{create_tokenizer_from_file, traits::Tokenizer};
 use openai_protocol::chat::ChatCompletionRequest;
-use smg::routers::grpc::utils::{generate_tool_constraints, process_chat_messages};
+use smg::routers::grpc::utils::process_chat_messages;
 
 use super::{
     error::{set_error_message, SglErrorCode},
@@ -58,14 +58,14 @@ fn preprocess_impl(
     let prompt_tokens = token_ids.len() as i32;
 
     // Generate tool constraints if tools are present
-    let tool_constraints = if let Some(tools) = chat_request.tools.as_ref() {
-        match generate_tool_constraints(
-            tools,
-            chat_request.tool_choice.as_ref(),
-            &chat_request.model,
-        ) {
-            Ok(Some(constraints)) => {
-                let json_str = serde_json::to_string(&constraints).map_err(|e| {
+    let registry = super::runtime::PARSER_FACTORY.registry();
+    let tool_constraints = if let (Some(tools), Some(tool_choice)) = (
+        chat_request.tools.as_ref(),
+        chat_request.tool_choice.as_ref(),
+    ) {
+        match registry.generate_tool_constraint(None, tools, tool_choice) {
+            Ok(Some(c)) => {
+                let json_str = serde_json::to_string(&c.to_tuple()).map_err(|e| {
                     (
                         SglErrorCode::ParsingError,
                         format!("Failed to serialize tool constraints: {e}"),

@@ -21,7 +21,10 @@ use smg_data_connector::{
 use smg_mcp::McpToolSession;
 use tracing::{debug, warn};
 
-use crate::routers::{error, grpc::common::responses::ResponsesContext};
+use crate::routers::{
+    common::persistence_utils::split_stored_message_content, error,
+    grpc::common::responses::ResponsesContext,
+};
 
 // ============================================================================
 // Tool Loop State
@@ -269,14 +272,20 @@ pub(super) async fn load_conversation_history(
                 let mut items: Vec<ResponseInputOutputItem> = Vec::new();
                 for item in stored_items {
                     if item.item_type == "message" {
+                        // Stored content may be either the raw content array
+                        // (legacy) or an object `{content: [...], phase: ...}`
+                        // when the message carried a phase label (P3).
+                        let (content_value, stored_phase) =
+                            split_stored_message_content(item.content.clone());
                         if let Ok(content_parts) =
-                            serde_json::from_value::<Vec<ResponseContentPart>>(item.content.clone())
+                            serde_json::from_value::<Vec<ResponseContentPart>>(content_value)
                         {
                             items.push(ResponseInputOutputItem::Message {
                                 id: item.id.0.clone(),
                                 role: item.role.clone().unwrap_or_else(|| "user".to_string()),
                                 content: content_parts,
                                 status: item.status.clone(),
+                                phase: stored_phase,
                             });
                         }
                     }
@@ -290,6 +299,7 @@ pub(super) async fn load_conversation_history(
                             role: "user".to_string(),
                             content: vec![ResponseContentPart::InputText { text: text.clone() }],
                             status: Some("completed".to_string()),
+                            phase: None,
                         });
                     }
                     ResponseInput::Items(current_items) => {
@@ -322,6 +332,7 @@ pub(super) async fn load_conversation_history(
                     role: "user".to_string(),
                     content: vec![ResponseContentPart::InputText { text: text.clone() }],
                     status: Some("completed".to_string()),
+                    phase: None,
                 });
             }
             ResponseInput::Items(current_items) => {
@@ -357,6 +368,7 @@ pub(super) fn build_next_request(
             role: "user".to_string(),
             content: vec![ResponseContentPart::InputText { text: text.clone() }],
             status: Some("completed".to_string()),
+            phase: None,
         }],
         ResponseInput::Items(items) => items.iter().map(responses::normalize_input_item).collect(),
     };
@@ -394,6 +406,16 @@ pub(super) fn build_next_request(
         frequency_penalty: current_request.frequency_penalty,
         presence_penalty: current_request.presence_penalty,
         stop: current_request.stop,
+        // Responses API top-level fields (P2): propagate per-request knobs so
+        // multi-turn tool-loop continuations keep the same prompt template,
+        // cache key, safety identifier, streaming options, and context-
+        // management config as the original request.
+        prompt: current_request.prompt,
+        prompt_cache_key: current_request.prompt_cache_key,
+        prompt_cache_retention: current_request.prompt_cache_retention,
+        safety_identifier: current_request.safety_identifier,
+        stream_options: current_request.stream_options,
+        context_management: current_request.context_management,
         top_k: current_request.top_k,
         min_p: current_request.min_p,
         repetition_penalty: current_request.repetition_penalty,

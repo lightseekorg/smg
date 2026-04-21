@@ -320,9 +320,7 @@ class TestOpenAIServerFunctionCalling:
         assert str(args_obj["a"]) == "5", "Parameter a should be 5"
         assert str(args_obj["b"]) == "7", "Parameter b should be 7"
 
-    @pytest.mark.skip(
-        reason="Skipping function call strict test as it is not supported by the router"
-    )
+    @pytest.mark.skip(reason="strict mode is not supported yet")
     def test_function_call_strict(self, model, api_client):
         """Test: Whether the strict mode of function calling works as expected.
 
@@ -1483,7 +1481,7 @@ class _TestToolChoiceBase:
         # Verify the error message indicates conflicting tool definitions
         error_msg = str(exc_info.value).lower()
         assert "invalid tool configuration" in error_msg
-        assert "not supported" in error_msg
+        assert "conflicting" in error_msg
 
 
 # =============================================================================
@@ -1533,16 +1531,7 @@ class TestToolChoiceQwen(_TestToolChoiceBase):
 @pytest.mark.engine("sglang", "vllm", "trtllm")
 @pytest.mark.gpu(1)
 @pytest.mark.model("mistralai/Mistral-7B-Instruct-v0.3")
-@pytest.mark.gateway(
-    extra_args=[
-        "--tool-call-parser",
-        "mistral",
-        "--history-backend",
-        "memory",
-        "--chat-template",
-        "e2e_test/fixtures/chat_templates/tool_chat_template_mistral_parallel.jinja",
-    ]
-)
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "mistral", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestToolChoiceMistral(_TestToolChoiceBase):
@@ -1554,10 +1543,16 @@ class TestToolChoiceMistral(_TestToolChoiceBase):
         "test_multi_tool_scenario_required",
     }
 
-    @pytest.mark.skip(reason="Fails due to whitespace issue with Mistral - skipping")
     def test_complex_parameters_required_non_streaming(self, model, api_client):
         """Validate complex nested parameter schemas in non-streaming required mode."""
         super().test_complex_parameters_required_non_streaming(model, api_client)
+
+    @pytest.mark.skip(
+        reason="Structural tags handle each tool's schema independently — "
+        "$defs conflicts are irrelevant when not consolidated into a single array schema"
+    )
+    def test_conflicting_defs_required_tool_choice(self, model, api_client):
+        """Skip: Mistral uses structural tags which don't consolidate $defs."""
 
 
 # =============================================================================

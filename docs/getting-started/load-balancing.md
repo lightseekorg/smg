@@ -51,7 +51,7 @@ smg \
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--cache-threshold` | `0.3` | Minimum prefix match ratio (0.0–1.0) to route to highest-match worker. Below this, routes to worker with most available cache space |
+| `--cache-threshold` | `0.3` | Minimum prefix match ratio (0.0–1.0) to route to highest-match worker. At or below this threshold, routes to the least-loaded healthy worker |
 | `--balance-abs-threshold` | `64` | Absolute load difference threshold — triggers load balancing when exceeded |
 | `--balance-rel-threshold` | `1.5` | Relative load ratio threshold — triggers load balancing when max_load > min_load × ratio |
 | `--eviction-interval` | `120` | Seconds between LRU eviction cycles for the radix trees |

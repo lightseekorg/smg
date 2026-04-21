@@ -10,7 +10,7 @@ This guide covers setting up a development environment and contributing code to 
 
 ## Prerequisites
 
-- **Rust**: 1.90 or later
+- **Rust**: 1.95 or later
 - **Docker**: For running integration tests
 - **Git**: For version control
 
@@ -130,8 +130,8 @@ cargo test test_round_robin
 # Run with output
 cargo test -- --nocapture
 
-# Run integration tests (requires Docker)
-cargo test --test integration
+# Run a specific integration test binary (files under model_gateway/tests/)
+cargo test --test routing_tests
 ```
 
 ### Linting and Formatting (Rust)
@@ -156,7 +156,9 @@ Python code in `e2e_test/`, `bindings/python/`, and `scripts/` is checked with
 [ruff](https://docs.astral.sh/ruff/) (linting + formatting) and
 [mypy](https://mypy-lang.org/) (type checking).
 
-**Pre-commit hooks** run these checks automatically on every commit. To set up:
+**Pre-commit hooks** run `rustfmt`, `clippy`, and `ruff` / `ruff-format`
+automatically on every commit. `mypy` is run manually or in CI (it is not
+wired into pre-commit). To set up:
 
 ```bash
 pip install pre-commit

@@ -4,9 +4,9 @@ use axum::http::StatusCode;
 use openai_protocol::{
     common::{GenerationRequest, ToolChoice, ToolChoiceValue, UsageInfo},
     responses::{
-        CodeInterpreterTool, McpTool, ReasoningEffort, RequireApproval, ResponseInput,
-        ResponseReasoningParam, ResponseTool, ResponsesRequest, ServiceTier, Truncation,
-        WebSearchPreviewTool,
+        CodeInterpreterTool, McpTool, ReasoningEffort, RequireApproval, RequireApprovalMode,
+        ResponseInput, ResponseReasoningParam, ResponseTool, ResponsesRequest, ServiceTier,
+        Truncation, WebSearchPreviewTool,
     },
 };
 use smg::{
@@ -104,6 +104,12 @@ async fn test_non_streaming_mcp_minimal_e2e_with_persistence() {
         frequency_penalty: Some(0.0),
         presence_penalty: Some(0.0),
         stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
         top_k: -1,
         min_p: 0.0,
         repetition_penalty: 1.0,
@@ -221,6 +227,136 @@ async fn test_non_streaming_mcp_minimal_e2e_with_persistence() {
 }
 
 #[tokio::test]
+async fn test_non_streaming_mcp_returns_approval_request_when_required() {
+    let mut mcp = MockMCPServer::start().await.expect("start mcp");
+
+    let mcp_yaml = format!(
+        "servers:\n  - name: mock\n    protocol: streamable\n    url: {}\n",
+        mcp.url()
+    );
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let cfg_path = dir.path().join("mcp.yaml");
+    std::fs::write(&cfg_path, mcp_yaml).expect("write mcp cfg");
+
+    let mut worker = MockWorker::new(MockWorkerConfig {
+        port: 0,
+        worker_type: WorkerType::Regular,
+        health_status: HealthStatus::Healthy,
+        response_delay_ms: 0,
+        fail_rate: 0.0,
+    });
+    let worker_url = worker.start().await.expect("start worker");
+
+    let router_cfg = RouterConfig::builder()
+        .openai_mode(vec![worker_url])
+        .random_policy()
+        .host("127.0.0.1")
+        .port(0)
+        .max_payload_size(8 * 1024 * 1024)
+        .request_timeout_secs(60)
+        .worker_startup_timeout_secs(5)
+        .worker_startup_check_interval_secs(1)
+        .log_level("warn")
+        .max_concurrent_requests(32)
+        .queue_timeout_secs(5)
+        .build_unchecked();
+
+    let ctx =
+        crate::common::create_test_context_with_mcp_config(router_cfg, cfg_path.to_str().unwrap())
+            .await;
+    let router = RouterFactory::create_router(&ctx).await.expect("router");
+
+    let req = ResponsesRequest {
+        background: Some(false),
+        include: None,
+        input: ResponseInput::Text("search something".to_string()),
+        instructions: Some("Be brief".to_string()),
+        max_output_tokens: Some(64),
+        max_tool_calls: None,
+        metadata: None,
+        model: "mock-model".to_string(),
+        parallel_tool_calls: Some(true),
+        previous_response_id: None,
+        reasoning: None,
+        service_tier: Some(ServiceTier::Auto),
+        store: Some(true),
+        stream: Some(false),
+        temperature: Some(0.2),
+        tool_choice: Some(ToolChoice::default()),
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
+            server_url: Some(mcp.url()),
+            authorization: None,
+            headers: None,
+            server_label: "mock".to_string(),
+            server_description: None,
+            require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Always)),
+            allowed_tools: None,
+        })]),
+        top_logprobs: Some(0),
+        top_p: None,
+        truncation: Some(Truncation::Disabled),
+        text: None,
+        user: None,
+        request_id: Some("resp_test_mcp_approval_interrupt".to_string()),
+        priority: 0,
+        frequency_penalty: Some(0.0),
+        presence_penalty: Some(0.0),
+        stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
+        top_k: -1,
+        min_p: 0.0,
+        repetition_penalty: 1.0,
+        conversation: None,
+    };
+
+    let resp = router.route_responses(None, &req, req.model.as_str()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read response body");
+    let body_json: serde_json::Value =
+        serde_json::from_slice(&body_bytes).expect("Failed to parse response JSON");
+
+    assert_eq!(body_json["status"], "completed");
+
+    let output = body_json["output"]
+        .as_array()
+        .expect("response output missing");
+
+    let approval_item = output
+        .iter()
+        .find(|entry| {
+            entry.get("type") == Some(&serde_json::Value::String("mcp_approval_request".into()))
+        })
+        .expect("missing mcp_approval_request output item");
+
+    assert_eq!(
+        approval_item.get("server_label").and_then(|v| v.as_str()),
+        Some("mock")
+    );
+    assert_eq!(
+        approval_item.get("name").and_then(|v| v.as_str()),
+        Some("brave_web_search")
+    );
+    assert!(approval_item.get("arguments").is_some());
+    assert!(
+        output
+            .iter()
+            .all(|entry| entry.get("type") != Some(&serde_json::Value::String("mcp_call".into()))),
+        "response should interrupt before emitting mcp_call"
+    );
+
+    worker.stop().await;
+    mcp.stop().await;
+}
+
+#[tokio::test]
 async fn test_final_response_hides_internal_mcp_trace_items() {
     let mut mcp = MockMCPServer::start().await.expect("start mcp");
 
@@ -296,6 +432,12 @@ async fn test_final_response_hides_internal_mcp_trace_items() {
         frequency_penalty: Some(0.0),
         presence_penalty: Some(0.0),
         stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
         top_k: -1,
         min_p: 0.0,
         repetition_penalty: 1.0,
@@ -389,7 +531,7 @@ async fn test_previous_response_id_does_not_repeat_mcp_list_tools_for_existing_b
         headers: None,
         server_label: "mock".to_string(),
         server_description: None,
-        require_approval: Some(RequireApproval::Never),
+        require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Never)),
         allowed_tools: None,
     });
 
@@ -421,6 +563,12 @@ async fn test_previous_response_id_does_not_repeat_mcp_list_tools_for_existing_b
         frequency_penalty: Some(0.0),
         presence_penalty: Some(0.0),
         stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
         top_k: -1,
         min_p: 0.0,
         repetition_penalty: 1.0,
@@ -470,6 +618,12 @@ async fn test_previous_response_id_does_not_repeat_mcp_list_tools_for_existing_b
         frequency_penalty: Some(0.0),
         presence_penalty: Some(0.0),
         stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
         top_k: -1,
         min_p: 0.0,
         repetition_penalty: 1.0,
@@ -586,6 +740,12 @@ async fn test_final_response_hides_internal_mcp_error_details() {
         frequency_penalty: Some(0.0),
         presence_penalty: Some(0.0),
         stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
         top_k: -1,
         min_p: 0.0,
         repetition_penalty: 1.0,
@@ -721,6 +881,12 @@ fn test_responses_request_creation() {
         frequency_penalty: Some(0.0),
         presence_penalty: Some(0.0),
         stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
         top_k: -1,
         min_p: 0.0,
         repetition_penalty: 1.0,
@@ -764,6 +930,12 @@ fn test_responses_request_sglang_extensions() {
         frequency_penalty: Some(0.1),
         presence_penalty: Some(0.2),
         stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
         // SGLang-specific extensions:
         top_k: 10,
         min_p: 0.05,
@@ -905,6 +1077,12 @@ fn test_json_serialization() {
         frequency_penalty: Some(0.3),
         presence_penalty: Some(0.4),
         stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
         top_k: 50,
         min_p: 0.1,
         repetition_penalty: 1.2,
@@ -1000,7 +1178,7 @@ async fn test_multi_turn_loop_with_mcp() {
             headers: None,
             server_label: "mock".to_string(),
             server_description: Some("Mock MCP server for testing".to_string()),
-            require_approval: Some(RequireApproval::Never),
+            require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Never)),
             allowed_tools: None,
         })]),
         top_logprobs: Some(0),
@@ -1013,6 +1191,12 @@ async fn test_multi_turn_loop_with_mcp() {
         frequency_penalty: Some(0.0),
         presence_penalty: Some(0.0),
         stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
         top_k: 50,
         min_p: 0.0,
         repetition_penalty: 1.0,
@@ -1166,6 +1350,12 @@ async fn test_max_tool_calls_limit() {
         frequency_penalty: Some(0.0),
         presence_penalty: Some(0.0),
         stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
         top_k: 50,
         min_p: 0.0,
         repetition_penalty: 1.0,
@@ -1333,7 +1523,7 @@ async fn test_streaming_with_mcp_tool_calls() {
             headers: None,
             server_label: "mock".to_string(),
             server_description: Some("Mock MCP for streaming test".to_string()),
-            require_approval: Some(RequireApproval::Never),
+            require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Never)),
             allowed_tools: None,
         })]),
         top_logprobs: Some(0),
@@ -1346,6 +1536,12 @@ async fn test_streaming_with_mcp_tool_calls() {
         frequency_penalty: Some(0.0),
         presence_penalty: Some(0.0),
         stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
         top_k: 50,
         min_p: 0.0,
         repetition_penalty: 1.0,
@@ -1624,6 +1820,12 @@ async fn test_streaming_multi_turn_with_mcp() {
         frequency_penalty: Some(0.0),
         presence_penalty: Some(0.0),
         stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
         top_k: 50,
         min_p: 0.0,
         repetition_penalty: 1.0,

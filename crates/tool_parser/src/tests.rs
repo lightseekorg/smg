@@ -2,7 +2,7 @@ use openai_protocol::common::{Function, Tool};
 
 use super::*;
 use crate::{
-    parsers::{JsonParser, QwenCoderParser},
+    parsers::{JsonParser, QwenXmlParser},
     partial_json::PartialJson,
     traits::ToolParser,
 };
@@ -574,7 +574,7 @@ mod stress_tests {
 }
 
 #[cfg(test)]
-mod qwen_coder_tests {
+mod qwen_xml_tests {
     use super::*;
 
     fn create_test_tools() -> Vec<Tool> {
@@ -596,8 +596,8 @@ mod qwen_coder_tests {
     }
 
     #[tokio::test]
-    async fn test_qwen_coder_incremental_parameter_streaming() {
-        let mut parser = QwenCoderParser::new();
+    async fn test_qwen_xml_incremental_parameter_streaming() {
+        let mut parser = QwenXmlParser::new();
         let tools = create_test_tools();
 
         let chunks = [
@@ -651,8 +651,8 @@ mod qwen_coder_tests {
     }
 
     #[tokio::test]
-    async fn test_qwen_coder_incremental_parameter_streaming_with_partial_values() {
-        let mut parser = QwenCoderParser::new();
+    async fn test_qwen_xml_incremental_parameter_streaming_with_partial_values() {
+        let mut parser = QwenXmlParser::new();
         let tools = create_test_tools();
 
         // Test with parameter values that arrive in multiple chunks
@@ -691,8 +691,8 @@ mod qwen_coder_tests {
     }
 
     #[tokio::test]
-    async fn test_qwen_coder_nested_json_parameter() {
-        let mut parser = QwenCoderParser::new();
+    async fn test_qwen_xml_nested_json_parameter() {
+        let mut parser = QwenXmlParser::new();
         let tools = vec![Tool {
             tool_type: "function".to_string(),
             function: Function {
@@ -733,5 +733,54 @@ mod qwen_coder_tests {
             params_str.contains("nested"),
             "Should contain nested parameter"
         );
+    }
+}
+
+#[cfg(test)]
+mod qwen_mapping_tests {
+    use crate::factory::ParserFactory;
+
+    #[test]
+    fn test_qwen_xml_model_mappings() {
+        let factory = ParserFactory::new();
+        let registry = factory.registry();
+
+        for model in [
+            "Qwen3.5-32B",
+            "Qwen/Qwen3.5-4B",
+            "qwen3.5-72b",
+            "qwen/qwen3.5-32b",
+            "Qwen3-Coder-480B",
+            "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+            "qwen3-coder-7b",
+            "qwen/qwen3-coder-32b",
+        ] {
+            assert_eq!(
+                registry.resolve_model_to_parser(model),
+                Some("qwen_xml".to_string()),
+                "{model} should resolve to qwen_xml"
+            );
+        }
+    }
+
+    #[test]
+    fn test_qwen_json_model_mappings() {
+        let factory = ParserFactory::new();
+        let registry = factory.registry();
+
+        for model in [
+            "Qwen2.5-72B-Instruct",
+            "Qwen2.5-Coder-32B-Instruct",
+            "qwen2.5-coder-7b",
+            "Qwen3-32B",
+            "Qwen/Qwen3-235B-A22B",
+            "qwen3-8b",
+        ] {
+            assert_eq!(
+                registry.resolve_model_to_parser(model),
+                Some("qwen".to_string()),
+                "{model} should resolve to qwen"
+            );
+        }
     }
 }

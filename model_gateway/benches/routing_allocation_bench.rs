@@ -21,7 +21,9 @@ fn extract_text_for_routing_old(req: &ResponsesRequest) -> String {
                         .filter_map(|part| match part {
                             ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
                             ResponseContentPart::InputText { text } => Some(text.clone()),
-                            ResponseContentPart::Unknown => None,
+                            ResponseContentPart::InputImage { .. }
+                            | ResponseContentPart::InputFile { .. }
+                            | ResponseContentPart::Refusal { .. } => None,
                         })
                         .collect();
                     if texts.is_empty() {
@@ -92,6 +94,7 @@ fn create_bench_request() -> ResponsesRequest {
             role: "user".to_string(),
             content,
             status: None,
+            phase: None,
         });
     }
 

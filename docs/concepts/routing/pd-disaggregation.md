@@ -209,8 +209,8 @@ Use label selectors to automatically discover prefill and decode workers.
 smg \
   --service-discovery \
   --pd-disaggregation \
-  --prefill-selector "app=sglang,role=prefill" \
-  --decode-selector "app=sglang,role=decode" \
+  --prefill-selector app=sglang role=prefill \
+  --decode-selector app=sglang role=decode \
   --service-discovery-namespace inference
 ```
 
@@ -440,8 +440,8 @@ curl http://smg:3001/workers | jq '.[] | {url, role}'
 smg \
   --service-discovery \
   --pd-disaggregation \
-  --prefill-selector "app=sglang,role=prefill" \
-  --decode-selector "app=sglang,role=decode" \
+  --prefill-selector app=sglang role=prefill \
+  --decode-selector app=sglang role=decode \
   --prefill-policy cache_aware \
   --decode-policy power_of_two \
   --cb-failure-threshold 3 \

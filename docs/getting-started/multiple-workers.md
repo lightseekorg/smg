@@ -54,7 +54,7 @@ See [gRPC Workers](grpc-workers.md) for details on what gRPC mode enables.
 
 ## Cloud API Workers
 
-Route to cloud providers by setting `--backend openai` and passing the provider URL. API keys are read from environment variables. SMG auto-detects the provider (OpenAI, Anthropic, xAI, Gemini) from the model name and applies the correct API transformations.
+Route to cloud providers by setting `--backend` and passing the provider URL. API keys are either passed by the caller through the `Authorization` header (BYOK) or stored on the worker record when registering via the admin API. SMG auto-detects the provider (OpenAI, Anthropic, xAI, Gemini) from the model name and applies the correct API transformations.
 
 === "OpenAI"
 
@@ -164,7 +164,7 @@ The `POST /workers` endpoint accepts additional fields:
 |-------|---------|-------------|
 | `url` | (required) | Worker URL (`http://`, `grpc://`, or `https://` for cloud) |
 | `api_key` | — | API key for authenticated workers |
-| `runtime` | `sglang` | Runtime: `sglang`, `vllm`, `trtllm`, or `external` |
+| `runtime` | (auto-detect) | Runtime: `sglang`, `vllm`, `trtllm`, `mlx`, or `external` |
 | `worker_type` | `regular` | Type: `regular`, `prefill`, or `decode` |
 | `priority` | `50` | Routing priority (0–100, higher = preferred) |
 | `cost` | `1.0` | Cost multiplier for cost-aware routing |

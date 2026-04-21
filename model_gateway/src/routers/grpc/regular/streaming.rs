@@ -95,6 +95,7 @@ impl StreamingProcessor {
         chat_request: Arc<ChatCompletionRequest>,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
+        skip_special_tokens: bool,
     ) -> Response {
         use bytes::Bytes;
         use tokio::sync::mpsc;
@@ -102,7 +103,7 @@ impl StreamingProcessor {
         let stop_params = (
             chat_request.stop.clone(),
             chat_request.stop_token_ids.clone(),
-            chat_request.skip_special_tokens,
+            skip_special_tokens,
             chat_request.no_stop_trim,
             chat_request.ignore_eos,
         );
@@ -251,15 +252,26 @@ impl StreamingProcessor {
         let think_in_prefill = tokenizer.think_in_prefill();
 
         // Check if JSON schema constraint was used (specific function or required mode)
-        let used_json_schema = match tool_choice {
-            Some(ToolChoice::Function { .. }) => true,
-            Some(ToolChoice::Value(ToolChoiceValue::Required)) => true,
-            Some(ToolChoice::AllowedTools { mode, .. }) => mode == "required",
-            _ => false,
+        let has_structural_tag = self
+            .tool_parser_factory
+            .registry()
+            .has_structural_tag_for_parser(self.configured_tool_parser.as_deref());
+        let used_json_schema = if has_structural_tag {
+            false
+        } else {
+            match tool_choice {
+                Some(ToolChoice::Function { .. }) => true,
+                Some(ToolChoice::Value(ToolChoiceValue::Required)) => true,
+                Some(ToolChoice::AllowedTools { mode, .. }) => mode == "required",
+                _ => false,
+            }
         };
 
-        // Check if this is the specific function case (LLM generates parameters only, no name field)
-        let is_specific_function = matches!(tool_choice, Some(ToolChoice::Function { .. }));
+        // Check if this is the specific function case (LLM generates parameters only, no name field).
+        // Only applies when json_schema is used — structural tags include framing tokens
+        // that the parser must handle.
+        let is_specific_function =
+            used_json_schema && matches!(tool_choice, Some(ToolChoice::Function { .. }));
 
         let tool_parser_available = tools.is_some()
             && utils::check_tool_parser_availability(
@@ -1440,6 +1452,7 @@ impl StreamingProcessor {
         messages_request: Arc<CreateMessageRequest>,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
+        skip_special_tokens: bool,
     ) -> Response {
         let stop_params = (
             messages_request
@@ -1447,9 +1460,9 @@ impl StreamingProcessor {
                 .clone()
                 .map(StringOrArray::Array),
             None::<Vec<u32>>, // No stop_token_ids in Messages API
-            true,             // always skip special tokens
-            false,            // no_stop_trim
-            false,            // ignore_eos — not available in Messages API
+            skip_special_tokens,
+            false, // no_stop_trim
+            false, // ignore_eos — not available in Messages API
         );
 
         let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -1625,16 +1638,23 @@ impl StreamingProcessor {
                 model,
             );
 
-        let used_json_schema = matches!(
-            &original_request.tool_choice,
-            Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
-        );
+        let has_structural_tag = self
+            .tool_parser_factory
+            .registry()
+            .has_structural_tag_for_parser(self.configured_tool_parser.as_deref());
+        let used_json_schema = !has_structural_tag
+            && matches!(
+                &original_request.tool_choice,
+                Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
+            );
 
-        // Check if model output is arguments-only for a specific function (ToolChoice::Tool)
-        let is_specific_function = matches!(
-            &original_request.tool_choice,
-            Some(messages::ToolChoice::Tool { .. })
-        );
+        // Check if model output is arguments-only for a specific function (ToolChoice::Tool).
+        // Only applies when json_schema is used — structural tags include framing tokens.
+        let is_specific_function = used_json_schema
+            && matches!(
+                &original_request.tool_choice,
+                Some(messages::ToolChoice::Tool { .. })
+            );
 
         let history_tool_calls_count =
             message_utils::get_history_tool_calls_count_messages(&original_request);

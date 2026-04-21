@@ -54,7 +54,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 # Workspace dependencies (with extra features)
-axum = { workspace = true, features = ["macros", "ws", "tracing"] }
+axum = { workspace = true, features = ["macros", "multipart", "ws", "tracing"] }
 bytemuck = { workspace = true, features = ["derive"] }
 reqwest = { workspace = true, features = ["stream", "blocking", "json", "rustls-tls", "multipart"] }
 serde = { workspace = true, features = ["derive"] }
@@ -76,6 +76,8 @@ llm-multimodal.workspace = true
 smg-wasm = { workspace = true, features = ["storage-hooks"] }
 smg-mesh.workspace = true
 smg-grpc-client.workspace = true
+smg-skills.workspace = true
+smg-blob-storage.workspace = true
 
 # External dependencies (not in workspace)
 bincode = "1.3"
@@ -133,7 +135,7 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 portpicker = "0.1"
 lazy_static = "1.4"
-wasm-encoder = "0.246"
+wasm-encoder = "0.247"
 npyz = { version = "0.8", features = ["npz"] }
 opentelemetry-proto = { version = "0.31", features = ["gen-tonic"] }
 serial_test = "3.0"

@@ -10,7 +10,7 @@ use std::{
 
 use openai_protocol::{
     chat::ChatCompletionRequest,
-    common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
+    common::{ResponseFormat, StringOrArray},
     completion::CompletionRequest,
     generate::GenerateRequest,
     messages::CreateMessageRequest,
@@ -456,16 +456,9 @@ impl SglangSchedulerClient {
 
         let max_new_tokens = request.max_completion_tokens;
 
-        // Handle skip_special_tokens: set to false if tools are present and tool_choice is not "none"
-        let skip_special_tokens = if request.tools.is_some() {
-            match &request.tool_choice {
-                Some(ToolChoice::Value(ToolChoiceValue::None)) => request.skip_special_tokens,
-                Some(_) => false, // tool_choice is not "none"
-                None => false, // TODO: this assumes tool_choice defaults to "auto" when tools present
-            }
-        } else {
-            request.skip_special_tokens
-        };
+        // Hardcode to true: gRPC backends return raw token IDs, not decoded text.
+        // Detokenization happens on the SMG Rust side (StopDecoder/Sequence).
+        let skip_special_tokens = true;
 
         Ok(proto::SamplingParams {
             temperature: request.temperature.unwrap_or(1.0),
@@ -533,21 +526,26 @@ impl SglangSchedulerClient {
             constraints.push(proto::sampling_params::Constraint::Regex(regex.clone()));
         }
 
-        // Handle tool call constraint from preparation stage
+        // Handle tool call constraint from preparation stage.
+        // If response_format already set a constraint, drop the tool constraint
+        // (matches SGLang HTTP behavior where response_format takes priority).
         if let Some((constraint_type, constraint_value)) = tool_call_constraint {
-            if !constraints.is_empty() {
-                return Err("Constrained decoding is not compatible with tool calls.".to_string());
+            if constraints.is_empty() {
+                let tool_constraint = match constraint_type.as_str() {
+                    "structural_tag" => {
+                        proto::sampling_params::Constraint::StructuralTag(constraint_value)
+                    }
+                    "json_schema" => {
+                        proto::sampling_params::Constraint::JsonSchema(constraint_value)
+                    }
+                    "ebnf" => proto::sampling_params::Constraint::EbnfGrammar(constraint_value),
+                    "regex" => proto::sampling_params::Constraint::Regex(constraint_value),
+                    _ => return Err(format!("Unknown constraint type: {constraint_type}")),
+                };
+                constraints.push(tool_constraint);
+            } else {
+                warn!("Constrained decoding is not compatible with tool calls, dropping tool constraint");
             }
-            let tool_constraint = match constraint_type.as_str() {
-                "structural_tag" => {
-                    proto::sampling_params::Constraint::StructuralTag(constraint_value)
-                }
-                "json_schema" => proto::sampling_params::Constraint::JsonSchema(constraint_value),
-                "ebnf" => proto::sampling_params::Constraint::EbnfGrammar(constraint_value),
-                "regex" => proto::sampling_params::Constraint::Regex(constraint_value),
-                _ => return Err(format!("Unknown constraint type: {constraint_type}")),
-            };
-            constraints.push(tool_constraint);
         }
 
         match constraints.len() {
@@ -570,14 +568,14 @@ impl SglangSchedulerClient {
         Ok(proto::SamplingParams {
             temperature: request.temperature.unwrap_or(1.0),
             top_p: request.top_p.unwrap_or(1.0),
-            top_k: -1,               // ResponsesRequest doesn't expose top_k
-            min_p: 0.0,              // ResponsesRequest doesn't expose min_p
-            frequency_penalty: 0.0,  // ResponsesRequest doesn't expose frequency_penalty
-            presence_penalty: 0.0,   // ResponsesRequest doesn't expose presence_penalty
-            repetition_penalty: 1.0, // ResponsesRequest doesn't expose repetition_penalty
+            top_k: request.top_k,
+            min_p: request.min_p,
+            frequency_penalty: request.frequency_penalty.unwrap_or(0.0),
+            presence_penalty: request.presence_penalty.unwrap_or(0.0),
+            repetition_penalty: request.repetition_penalty,
             max_new_tokens,
-            stop: vec![],               // No stop sequences in Responses API
-            stop_token_ids: vec![],     // Handled by Harmony stop tokens
+            stop: vec![], // Does not pass through request.stop yet (follow-up fix)
+            stop_token_ids: vec![], // Handled by Harmony stop tokens
             skip_special_tokens: false, // Keep special tokens for Harmony
             spaces_between_special_tokens: true,
             ignore_eos: false,
@@ -657,9 +655,8 @@ impl SglangSchedulerClient {
     ) -> Result<proto::SamplingParams, String> {
         let stop_sequences = request.stop_sequences.clone().unwrap_or_default();
 
-        // skip_special_tokens: false when tools are present (same logic as chat)
-        let skip_special_tokens =
-            tool_call_constraint.is_none() && request.tools.as_ref().is_none_or(|t| t.is_empty());
+        // Hardcode to true: gRPC backends return raw token IDs, not decoded text.
+        let skip_special_tokens = true;
 
         Ok(proto::SamplingParams {
             temperature: request.temperature.unwrap_or(1.0) as f32,
@@ -1007,6 +1004,43 @@ mod tests {
     }
 
     // TODO: SessionParams not in current proto - skip test
+
+    #[test]
+    fn test_responses_sampling_params_are_passed_through() {
+        use openai_protocol::responses::ResponsesRequest;
+
+        let request = ResponsesRequest {
+            top_k: 40,
+            min_p: 0.05,
+            repetition_penalty: 1.2,
+            frequency_penalty: Some(0.3),
+            presence_penalty: Some(-0.4),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            max_output_tokens: Some(128),
+            ..Default::default()
+        };
+
+        let params =
+            SglangSchedulerClient::build_grpc_sampling_params_from_responses(&request, None)
+                .expect("build sampling params");
+
+        assert_eq!(params.top_k, 40);
+        assert!((params.min_p - 0.05).abs() < 1e-6);
+        assert!((params.repetition_penalty - 1.2).abs() < 1e-6);
+        assert!((params.frequency_penalty - 0.3).abs() < 1e-6);
+        assert!((params.presence_penalty - (-0.4)).abs() < 1e-6);
+
+        // Default top_k (-1) passes through as SGLang's disabled sentinel.
+        let disabled = ResponsesRequest {
+            top_k: -1,
+            ..Default::default()
+        };
+        let disabled_params =
+            SglangSchedulerClient::build_grpc_sampling_params_from_responses(&disabled, None)
+                .expect("build sampling params");
+        assert_eq!(disabled_params.top_k, -1);
+    }
 
     #[test]
     fn test_embed_request() {
