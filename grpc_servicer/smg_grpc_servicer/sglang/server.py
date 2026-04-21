@@ -26,6 +26,9 @@ from sglang.utils import get_exception_traceback
 from smg_grpc_proto import sglang_scheduler_pb2, sglang_scheduler_pb2_grpc
 
 from smg_grpc_servicer.sglang.health_checks import HealthChecker
+from smg_grpc_servicer.sglang.health_checks.prefill_bootstrap_queue import (
+    PrefillBootstrapQueueStalledChecker,
+)
 from smg_grpc_servicer.sglang.health_servicer import SGLangHealthServicer
 from smg_grpc_servicer.sglang.request_manager import GrpcRequestManager
 from smg_grpc_servicer.sglang.scheduler_launcher import launch_scheduler_process_only
@@ -123,8 +126,18 @@ async def serve_grpc(
     # Create standard health service (for Kubernetes probes). Register
     # engine-level health checkers so they can override a SERVING base
     # status when they observe a stall the base status can't see.
-    # Specific checker implementations are wired up below as they apply.
     health_checkers: list[HealthChecker] = []
+    if (
+        server_args.disaggregation_mode == "prefill"
+        and isinstance(getattr(server_args, "max_queued_requests", None), int)
+        and server_args.max_queued_requests > 0
+    ):
+        health_checkers.append(
+            PrefillBootstrapQueueStalledChecker(
+                request_manager=request_manager,
+                server_args=server_args,
+            )
+        )
     health_servicer = SGLangHealthServicer(
         request_manager=request_manager,
         scheduler_info=scheduler_info,
