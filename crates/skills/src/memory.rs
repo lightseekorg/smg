@@ -100,11 +100,15 @@ impl SkillMetadataStore for InMemorySkillStore {
         }
 
         state.skills.remove(skill_id);
-        if let Some(skill_ids) = state.skill_ids_by_tenant.get_mut(tenant_id) {
-            skill_ids.remove(skill_id);
-            if skill_ids.is_empty() {
-                state.skill_ids_by_tenant.remove(tenant_id);
-            }
+        let tenant_has_no_skills =
+            if let Some(skill_ids) = state.skill_ids_by_tenant.get_mut(tenant_id) {
+                skill_ids.remove(skill_id);
+                skill_ids.is_empty()
+            } else {
+                false
+            };
+        if tenant_has_no_skills {
+            state.skill_ids_by_tenant.remove(tenant_id);
         }
         if let Some(versions) = state.skill_versions_by_skill.remove(skill_id) {
             for version in versions {

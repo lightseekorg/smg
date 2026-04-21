@@ -343,3 +343,48 @@ async fn cached_store_starts_from_an_empty_process_local_directory() -> Result<(
     assert_eq!(inner.get_calls.load(Ordering::SeqCst), 2);
     Ok(())
 }
+
+#[tokio::test]
+async fn cached_store_instances_with_shared_root_do_not_clobber_each_other() -> Result<()> {
+    let blob_root = TempDir::new()?;
+    let cache_root = TempDir::new()?;
+    let inner = Arc::new(CountingBlobStore {
+        inner: FilesystemBlobStore::new(blob_root.path())?,
+        get_calls: AtomicUsize::new(0),
+        etag: None,
+    });
+    let key = BlobKey::from("skills/t1/s1/v1/shared-root.txt");
+
+    inner.put_stream(&key, put_request(b"shared-root")).await?;
+
+    let first_store = Arc::new(smg_blob_storage::CachedBlobStore::new(
+        inner.clone() as Arc<dyn BlobStore>,
+        &BlobCacheConfig {
+            path: cache_root.path().display().to_string(),
+            max_size_mb: 8,
+        },
+    )?) as Arc<dyn BlobStore>;
+    assert_eq!(
+        read_all(first_store.get(&key).await?).await?,
+        b"shared-root"
+    );
+
+    let second_store = Arc::new(smg_blob_storage::CachedBlobStore::new(
+        inner.clone() as Arc<dyn BlobStore>,
+        &BlobCacheConfig {
+            path: cache_root.path().display().to_string(),
+            max_size_mb: 8,
+        },
+    )?) as Arc<dyn BlobStore>;
+    assert_eq!(
+        read_all(second_store.get(&key).await?).await?,
+        b"shared-root"
+    );
+    assert_eq!(
+        read_all(first_store.get(&key).await?).await?,
+        b"shared-root"
+    );
+
+    assert_eq!(inner.get_calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
