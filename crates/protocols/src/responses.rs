@@ -41,6 +41,10 @@ pub enum ResponseTool {
     /// MCP server tool.
     #[serde(rename = "mcp")]
     Mcp(McpTool),
+
+    /// Built-in file search tool over vector stores.
+    #[serde(rename = "file_search")]
+    FileSearch(FileSearchTool),
 }
 
 #[serde_with::skip_serializing_none]
@@ -50,6 +54,92 @@ pub struct FunctionTool {
     /// Flatten to match Responses API tool JSON shape.
     #[serde(flatten)]
     pub function: Function,
+}
+
+/// File search tool configuration.
+///
+/// Spec: `{ type: "file_search", vector_store_ids, filters?, max_num_results?, ranking_options? }`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileSearchTool {
+    /// Vector store IDs to search over.
+    pub vector_store_ids: Vec<String>,
+    /// Optional filter applied to candidate documents.
+    pub filters: Option<FileSearchFilter>,
+    /// Maximum number of results to return.
+    pub max_num_results: Option<u32>,
+    /// Ranking options for the search.
+    pub ranking_options: Option<FileSearchRankingOptions>,
+}
+
+/// Filter expression for file search.
+///
+/// Either a single comparison or a boolean compound (`and` / `or`) over nested filters.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+pub enum FileSearchFilter {
+    #[serde(rename = "eq")]
+    Eq(ComparisonFilter),
+    #[serde(rename = "ne")]
+    Ne(ComparisonFilter),
+    #[serde(rename = "gt")]
+    Gt(ComparisonFilter),
+    #[serde(rename = "gte")]
+    Gte(ComparisonFilter),
+    #[serde(rename = "lt")]
+    Lt(ComparisonFilter),
+    #[serde(rename = "lte")]
+    Lte(ComparisonFilter),
+    #[serde(rename = "in")]
+    In(ComparisonFilter),
+    #[serde(rename = "nin")]
+    Nin(ComparisonFilter),
+    #[serde(rename = "and")]
+    And(CompoundFilter),
+    #[serde(rename = "or")]
+    Or(CompoundFilter),
+}
+
+/// Key/value comparison used by the `eq`/`ne`/`gt`/`gte`/`lt`/`lte`/`in`/`nin` filter variants.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct ComparisonFilter {
+    pub key: String,
+    /// Spec allows `string | number | boolean | array of string | number`.
+    pub value: Value,
+}
+
+/// Boolean composition over nested filters (used by `and` / `or` variants).
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct CompoundFilter {
+    pub filters: Vec<FileSearchFilter>,
+}
+
+/// Ranking options for file search results.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileSearchRankingOptions {
+    pub hybrid_search: Option<HybridSearchOptions>,
+    pub ranker: Option<FileSearchRanker>,
+    pub score_threshold: Option<f64>,
+}
+
+/// Weights combining embedding-based and text-based similarity.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HybridSearchOptions {
+    pub embedding_weight: f64,
+    pub text_weight: f64,
+}
+
+/// Ranker selection for file search.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+pub enum FileSearchRanker {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "default-2024-11-15")]
+    Default20241115,
 }
 
 #[serde_with::skip_serializing_none]
@@ -1805,5 +1895,36 @@ mod tests {
             serialized,
             json!(["web_search_call.action.sources", "web_search_call.results"])
         );
+    }
+
+    #[test]
+    fn test_file_search_tool_round_trip() {
+        // Spec fixture (openai-responses-api-spec.md §tools): `file_search` with
+        // vector_store_ids, compound filter, and ranking_options incl. hybrid_search,
+        // ranker enum, and score_threshold.
+        let payload = json!({
+            "type": "file_search",
+            "vector_store_ids": ["vs_1234567890"],
+            "max_num_results": 20,
+            "filters": {
+                "type": "and",
+                "filters": [
+                    {"type": "eq", "key": "region", "value": "us-east-1"},
+                    {"type": "in", "key": "tag", "value": ["alpha", "beta"]}
+                ]
+            },
+            "ranking_options": {
+                "ranker": "default-2024-11-15",
+                "score_threshold": 0.5,
+                "hybrid_search": {"embedding_weight": 0.7, "text_weight": 0.3}
+            }
+        });
+
+        let tool: ResponseTool =
+            serde_json::from_value(payload.clone()).expect("file_search tool should deserialize");
+        assert!(matches!(tool, ResponseTool::FileSearch(_)));
+
+        let serialized = serde_json::to_value(&tool).expect("file_search tool should serialize");
+        assert_eq!(serialized, payload);
     }
 }
