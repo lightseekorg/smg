@@ -104,6 +104,63 @@ pub enum BuiltInToolChoiceType {
     CodeInterpreter,
 }
 
+/// Canonical payload for the Responses API `Function` tool-choice variant.
+///
+/// Serializes as the spec-flat shape `{"type": "function", "name": "..."}`.
+///
+/// Deserialization accepts **both** wire shapes for backward compatibility
+/// with smg clients written against the pre-split shared `ToolChoice` type
+/// (which used the Chat-style nested `{"function": {"name": "..."}}` layout
+/// on the Responses endpoint):
+///
+/// * Canonical flat: `{"type": "function", "name": "..."}`
+/// * Legacy nested:  `{"type": "function", "function": {"name": "..."}}`
+///
+/// Either shape normalizes to `name: String` at deserialize time so the rest
+/// of the gateway only ever sees the canonical form.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ResponsesFunctionToolChoice {
+    #[serde(rename = "type")]
+    pub tool_type: FunctionToolChoiceTag,
+    pub name: String,
+}
+
+impl<'de> Deserialize<'de> for ResponsesFunctionToolChoice {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Accept either the spec-flat `{type, name}` or the legacy
+        // Chat-nested `{type, function: {name}}` shape. The helper lets
+        // both fields be absent so serde can bind whichever wire form
+        // the caller sent; we then pick one and fail loudly if neither
+        // provides a function name.
+        #[derive(Deserialize)]
+        struct Helper {
+            #[serde(rename = "type")]
+            tool_type: FunctionToolChoiceTag,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            function: Option<FunctionChoice>,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        let name = helper
+            .name
+            .or_else(|| helper.function.map(|f| f.name))
+            .ok_or_else(|| {
+                serde::de::Error::custom(
+                    "tool_choice function requires a `name` field or a `function.name` field",
+                )
+            })?;
+        Ok(Self {
+            tool_type: helper.tool_type,
+            name,
+        })
+    }
+}
+
 /// `tool_choice` accepted on the Responses API (`POST /v1/responses`).
 ///
 /// The Responses spec enumerates eight concrete wire shapes, each with a
@@ -141,14 +198,18 @@ pub enum ResponsesToolChoice {
 
     /// `{"type": "function", "name": "..."}` — Responses spec flat shape.
     ///
-    /// The Chat Completions API wraps the name in a nested `function` object
-    /// instead (`{"type": "function", "function": {"name": "..."}}`). Those
-    /// are two different wire shapes and MUST NOT share a type.
-    Function {
-        #[serde(rename = "type")]
-        tool_type: FunctionToolChoiceTag,
-        name: String,
-    },
+    /// Accepts both the spec-canonical flat wire shape and the legacy
+    /// Chat-style nested shape (`{"type": "function", "function": {"name": "..."}}`)
+    /// on deserialize to preserve backward compatibility with smg clients
+    /// written against the pre-split shared `ToolChoice` type. Always
+    /// serializes as the canonical flat shape per the OpenAI Responses spec
+    /// — Postel's law: liberal on input, conservative on output.
+    ///
+    /// The nested legacy shape is gated behind a custom `Deserialize` impl on
+    /// `ResponsesFunctionToolChoice`; the untagged outer enum still pins the
+    /// `"type": "function"` discriminator via `FunctionToolChoiceTag` so
+    /// payloads without that tag cannot reach this variant.
+    Function(ResponsesFunctionToolChoice),
 
     /// `{"type": "allowed_tools", "mode": "auto"|"required", "tools": [...]}`.
     ///
@@ -212,6 +273,20 @@ impl ResponsesToolChoice {
             .unwrap_or_else(|| "auto".to_string())
     }
 
+    /// Return the pinned function name for the `Function` variant, regardless
+    /// of which wire shape (spec-flat `name` or legacy nested `function.name`)
+    /// was used at deserialize time. `None` for any non-`Function` variant.
+    ///
+    /// Consumers that need to project / validate the function name should go
+    /// through this accessor rather than pattern-matching so future wire
+    /// shapes can be added without touching call sites.
+    pub fn function_name(&self) -> Option<&str> {
+        match self {
+            Self::Function(payload) => Some(payload.name.as_str()),
+            _ => None,
+        }
+    }
+
     /// Project the Responses-level tool_choice onto a Chat Completions
     /// tool_choice when a Responses request is being routed through the
     /// Chat Completions gRPC pipeline.
@@ -236,9 +311,11 @@ impl ResponsesToolChoice {
             Self::Options(ToolChoiceOptions::Required) => {
                 ChatToolChoice::Value(ChatToolChoiceValue::Required)
             }
-            Self::Function { name, .. } => ChatToolChoice::Function {
+            Self::Function(payload) => ChatToolChoice::Function {
                 tool_type: "function".to_string(),
-                function: FunctionChoice { name: name.clone() },
+                function: FunctionChoice {
+                    name: payload.name.clone(),
+                },
             },
             Self::AllowedTools { mode, tools, .. } => ChatToolChoice::AllowedTools {
                 tool_type: "allowed_tools".to_string(),
@@ -1526,16 +1603,21 @@ fn validate_tool_choice_with_tools(request: &ResponsesRequest) -> Result<(), Val
 
     // Validate tool references exist
     match tool_choice {
-        ResponsesToolChoice::Function { name, .. } => {
-            if !function_tool_names.contains(&name.as_str()) {
-                let mut e = ValidationError::new("tool_choice_function_not_found");
-                e.message = Some(
-                    format!(
-                        "Invalid value for 'tool_choice': function '{name}' not found in 'tools'.",
-                    )
-                    .into(),
-                );
-                return Err(e);
+        ResponsesToolChoice::Function(_) => {
+            // Accessor goes through `function_name()` so we stay agnostic to
+            // the underlying wire shape (flat vs. legacy nested) — both are
+            // normalized at deserialize time.
+            if let Some(name) = tool_choice.function_name() {
+                if !function_tool_names.contains(&name) {
+                    let mut e = ValidationError::new("tool_choice_function_not_found");
+                    e.message = Some(
+                        format!(
+                            "Invalid value for 'tool_choice': function '{name}' not found in 'tools'.",
+                        )
+                        .into(),
+                    );
+                    return Err(e);
+                }
             }
         }
         ResponsesToolChoice::AllowedTools {
@@ -2683,26 +2765,73 @@ mod tests {
         }
     }
 
-    /// Function: `{"type": "function", "name": "..."}` — flat Responses shape.
-    /// Ensures the payload does NOT round-trip through the Chat nested shape.
+    /// Function: `{"type": "function", "name": "..."}` — spec-canonical flat
+    /// shape round-trips unchanged.
     #[test]
     fn responses_tool_choice_function_round_trip() {
         let payload = json!({"type": "function", "name": "get_weather"});
         let choice: ResponsesToolChoice = serde_json::from_value(payload.clone())
             .expect("function flat shape should deserialize");
         match &choice {
-            ResponsesToolChoice::Function { name, .. } => assert_eq!(name, "get_weather"),
+            ResponsesToolChoice::Function(payload) => assert_eq!(payload.name, "get_weather"),
             other => panic!("expected Function, got {other:?}"),
         }
+        assert_eq!(choice.function_name(), Some("get_weather"));
         let reserialized = serde_json::to_value(&choice).expect("serialize");
         assert_eq!(reserialized, payload);
+    }
 
-        // Negative: the Chat-style nested shape must NOT deserialize as the
-        // Responses `Function` variant.
-        let chat_nested = json!({"type": "function", "function": {"name": "get_weather"}});
+    /// Backward compat: the Chat-style nested `{"function": {"name": ...}}`
+    /// wire shape was accepted on the Responses endpoint before the P7
+    /// split and existing smg clients + e2e tests rely on it. We accept it
+    /// on deserialize (Postel: liberal on input) but always emit the
+    /// canonical flat shape on serialize (conservative on output).
+    #[test]
+    fn responses_tool_choice_function_accepts_legacy_nested() {
+        let legacy_nested = json!({
+            "type": "function",
+            "function": {"name": "search_web"}
+        });
+        let choice: ResponsesToolChoice = serde_json::from_value(legacy_nested)
+            .expect("legacy nested function shape must deserialize for backward compat");
+
+        // Internal state is normalized to the flat `name` field regardless of
+        // which wire shape we read.
+        match &choice {
+            ResponsesToolChoice::Function(payload) => {
+                assert_eq!(payload.name, "search_web");
+                assert_eq!(payload.tool_type, FunctionToolChoiceTag::Function);
+            }
+            other => panic!("expected Function, got {other:?}"),
+        }
+        assert_eq!(choice.function_name(), Some("search_web"));
+
+        // Serialize MUST emit the canonical flat shape, not the nested legacy
+        // shape that came in on the wire.
+        let reserialized = serde_json::to_value(&choice).expect("serialize");
+        assert_eq!(
+            reserialized,
+            json!({"type": "function", "name": "search_web"}),
+            "Responses `Function` must serialize as canonical flat even when \
+             deserialized from the legacy nested shape"
+        );
         assert!(
-            serde_json::from_value::<ResponsesToolChoice>(chat_nested).is_err(),
-            "Chat-style nested function shape must be rejected by ResponsesToolChoice"
+            reserialized.get("function").is_none(),
+            "canonical flat serialize must not emit a nested `function` object"
+        );
+    }
+
+    /// Payloads without either `name` or `function.name` must fail —
+    /// we accept both wire shapes, but at least one of them must carry the
+    /// function name. (The exact error string comes from serde's untagged
+    /// enum routing which swallows inner errors, so we assert only that
+    /// deserialization fails.)
+    #[test]
+    fn responses_tool_choice_function_rejects_missing_name() {
+        let payload = json!({"type": "function"});
+        assert!(
+            serde_json::from_value::<ResponsesToolChoice>(payload).is_err(),
+            "function without `name` or `function.name` must be rejected",
         );
     }
 
@@ -2833,10 +2962,10 @@ mod tests {
             ChatToolChoice::Value(ChatToolChoiceValue::Required)
         ));
 
-        let fn_choice = ResponsesToolChoice::Function {
+        let fn_choice = ResponsesToolChoice::Function(ResponsesFunctionToolChoice {
             tool_type: FunctionToolChoiceTag::Function,
             name: "get_weather".to_string(),
-        };
+        });
         match fn_choice.to_chat_tool_choice() {
             ChatToolChoice::Function {
                 tool_type,
