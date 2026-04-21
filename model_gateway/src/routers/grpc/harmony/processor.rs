@@ -266,12 +266,12 @@ impl HarmonyResponseProcessor {
 
         // Map analysis channel → ResponseOutputItem::Reasoning
         if let Some(analysis) = parsed.analysis {
-            let reasoning_item = ResponseOutputItem::Reasoning {
-                id: format!("reasoning_{}", dispatch.request_id),
-                summary: vec![],
-                content: vec![ResponseReasoningContent::ReasoningText { text: analysis }],
-                status: Some("completed".to_string()),
-            };
+            let reasoning_item = ResponseOutputItem::new_reasoning(
+                format!("reasoning_{}", dispatch.request_id),
+                vec![],
+                vec![ResponseReasoningContent::ReasoningText { text: analysis }],
+                Some("completed".to_string()),
+            );
             output.push(reasoning_item);
         }
 
@@ -292,6 +292,7 @@ impl HarmonyResponseProcessor {
                     logprobs,
                 }],
                 status: "completed".to_string(),
+                phase: None,
             };
             output.push(message_item);
         }

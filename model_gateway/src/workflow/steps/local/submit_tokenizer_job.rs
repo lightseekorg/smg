@@ -9,9 +9,12 @@ use llm_tokenizer::TokenizerRegistry;
 use tracing::{debug, info, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::workflow::{
-    data::{WorkerKind, WorkerWorkflowData},
-    Job, TokenizerConfigRequest,
+use crate::{
+    worker::ConnectionMode,
+    workflow::{
+        data::{WorkerKind, WorkerWorkflowData},
+        Job, TokenizerConfigRequest,
+    },
 };
 
 /// Step: Submit tokenizer registration job for the worker's model
@@ -28,6 +31,11 @@ impl StepExecutor<WorkerWorkflowData> for SubmitTokenizerJobStep {
         context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
         if context.data.worker_kind != Some(WorkerKind::Local) {
+            return Ok(StepResult::Skip);
+        }
+
+        // HTTP mode has no gRPC fallback and doesn't consult the tokenizer registry.
+        if context.data.connection_mode == Some(ConnectionMode::Http) {
             return Ok(StepResult::Skip);
         }
 

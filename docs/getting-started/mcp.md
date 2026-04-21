@@ -24,7 +24,7 @@ servers:
   - name: brave
     protocol: sse
     url: "https://mcp.brave.com/sse"
-    token: "${BRAVE_API_KEY}"
+    token: "${BRAVE_API_KEY}"  # literal placeholder — substitute before loading
     required: true
 
     tools:
@@ -49,6 +49,14 @@ servers:
 #     brave:
 #       trust_level: trusted
 ```
+
+SMG parses `mcp.yaml` as plain YAML and does not expand `${VAR}`
+placeholders inside server `token` values. Substitute credentials
+externally before the gateway loads the file — for example, render the
+YAML through `envsubst` from a shell wrapper, use a templating tool
+(Helm, Kustomize, Jinja), or inject the final config via a secret mount.
+See [Keeping Credentials Out of Config Files](../concepts/extensibility/mcp.md#keeping-credentials-out-of-config-files)
+for details.
 
 ---
 

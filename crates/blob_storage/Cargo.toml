@@ -1,0 +1,36 @@
+[package]
+name = "smg-blob-storage"
+version = "0.1.0"
+edition = "2021"
+description = "Generic blob/object storage contracts for SMG"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+    "Keyang Ru <rukeyang@gmail.com>",
+]
+keywords = ["blob", "storage", "s3", "gcs", "azure"]
+categories = ["filesystem", "web-programming"]
+
+[lib]
+name = "smg_blob_storage"
+
+[dependencies]
+async-trait.workspace = true
+blake3.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+lru.workspace = true
+parking_lot.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+anyhow.workspace = true
+tempfile = "3.15"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

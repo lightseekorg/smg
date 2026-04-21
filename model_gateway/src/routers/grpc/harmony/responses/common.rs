@@ -1,5 +1,7 @@
 //! Shared helpers and state tracking for Harmony Responses
 
+use std::collections::HashSet;
+
 use axum::response::Response;
 use openai_protocol::{
     common::{ToolCall, ToolChoice, ToolChoiceValue},
@@ -75,6 +77,7 @@ pub(super) fn build_next_request_with_tools(
                 content: StringOrContentParts::String(text),
                 role: "user".to_string(),
                 r#type: None,
+                phase: None,
             }]
         }
     };
@@ -85,14 +88,14 @@ pub(super) fn build_next_request_with_tools(
 
     // Add reasoning if present (from analysis channel)
     if let Some(analysis_text) = analysis {
-        items.push(ResponseInputOutputItem::Reasoning {
-            id: format!("reasoning_{assistant_id}"),
-            summary: vec![],
-            content: vec![ResponseReasoningContent::ReasoningText {
+        items.push(ResponseInputOutputItem::new_reasoning(
+            format!("reasoning_{assistant_id}"),
+            vec![],
+            vec![ResponseReasoningContent::ReasoningText {
                 text: analysis_text,
             }],
-            status: Some("completed".to_string()),
-        });
+            Some("completed".to_string()),
+        ));
     }
 
     // Add message content if present (from final channel)
@@ -106,6 +109,7 @@ pub(super) fn build_next_request_with_tools(
                 logprobs: None,
             }],
             status: Some("completed".to_string()),
+            phase: None,
         });
     }
 
@@ -164,6 +168,7 @@ pub(super) fn inject_mcp_metadata(
     response: &mut ResponsesResponse,
     tracking: &McpCallTracking,
     session: &McpToolSession<'_>,
+    user_function_names: &HashSet<String>,
 ) {
     let tool_output_items: Vec<ResponseOutputItem> = tracking
         .tool_calls
@@ -171,7 +176,11 @@ pub(super) fn inject_mcp_metadata(
         .map(|record| record.output_item.clone())
         .collect();
 
-    session.inject_mcp_output_items(&mut response.output, tool_output_items);
+    session.inject_client_visible_mcp_output_items(
+        &mut response.output,
+        tool_output_items,
+        user_function_names,
+    );
 }
 
 /// Load previous conversation messages from storage
@@ -278,6 +287,7 @@ pub(super) async fn load_previous_messages(
                 content: StringOrContentParts::String(text),
                 role: "user".to_string(),
                 r#type: None,
+                phase: None,
             });
             history_items
         }

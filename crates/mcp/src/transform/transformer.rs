@@ -4,6 +4,7 @@ use openai_protocol::responses::{
     CodeInterpreterCallStatus, CodeInterpreterOutput, FileSearchCallStatus, FileSearchResult,
     ResponseOutputItem, WebSearchAction, WebSearchCallStatus, WebSearchSource,
 };
+use tracing::warn;
 
 use super::ResponseFormat;
 
@@ -26,6 +27,32 @@ pub fn mcp_response_item_id(source_id: &str) -> String {
     format!("mcp_{source_id}")
 }
 
+/// Extract non-null `openai_response` objects from embedded MCP text-block payloads.
+pub fn extract_embedded_openai_responses(result: &serde_json::Value) -> Vec<serde_json::Value> {
+    let text_blocks = result
+        .as_array()
+        .map(|items| items.as_slice())
+        .unwrap_or(&[]);
+
+    let mut openai_responses = Vec::new();
+
+    for item in text_blocks {
+        let Some(payload) = parse_text_block_payload(item) else {
+            continue;
+        };
+
+        let Some(openai_response) = payload.get("openai_response") else {
+            continue;
+        };
+
+        if !openai_response.is_null() {
+            openai_responses.push(openai_response.clone());
+        }
+    }
+
+    openai_responses
+}
+
 /// Transforms MCP CallToolResult to OpenAI Responses API output items.
 pub struct ResponseTransformer;
 
@@ -45,7 +72,9 @@ impl ResponseTransformer {
             ResponseFormat::Passthrough => {
                 Self::to_mcp_call(result, tool_call_id, server_label, tool_name, arguments)
             }
-            ResponseFormat::WebSearchCall => Self::to_web_search_call(result, tool_call_id),
+            ResponseFormat::WebSearchCall => {
+                Self::to_web_search_call(result, tool_call_id, arguments)
+            }
             ResponseFormat::CodeInterpreterCall => {
                 Self::to_code_interpreter_call(result, tool_call_id)
             }
@@ -133,15 +162,20 @@ impl ResponseTransformer {
     }
 
     /// Transform MCP web search results to OpenAI web_search_call format.
-    fn to_web_search_call(result: &serde_json::Value, tool_call_id: &str) -> ResponseOutputItem {
+    fn to_web_search_call(
+        result: &serde_json::Value,
+        tool_call_id: &str,
+        arguments: &str,
+    ) -> ResponseOutputItem {
         let sources = Self::extract_web_sources(result);
         let queries = Self::extract_queries(result);
+        let query = Self::extract_query_from_arguments(arguments);
 
         ResponseOutputItem::WebSearchCall {
             id: format!("ws_{tool_call_id}"),
             status: WebSearchCallStatus::Completed,
             action: WebSearchAction::Search {
-                query: queries.first().cloned(),
+                query,
                 queries,
                 sources,
             },
@@ -201,41 +235,116 @@ impl ResponseTransformer {
 
     /// Extract web sources from MCP result.
     fn extract_web_sources(result: &serde_json::Value) -> Vec<WebSearchSource> {
-        let maybe_array = result.as_array().or_else(|| {
-            result
-                .as_object()
-                .and_then(|obj| obj.get("results"))
-                .and_then(|v| v.as_array())
-        });
+        let mut sources = Vec::new();
 
-        maybe_array
-            .map(|arr| arr.iter().filter_map(Self::parse_web_source).collect())
-            .unwrap_or_default()
+        if result.is_array() {
+            for openai_response in extract_embedded_openai_responses(result) {
+                let Some(raw_sources) = openai_response.get("sources") else {
+                    continue;
+                };
+
+                let source_items = raw_sources
+                    .as_array()
+                    .map(|items| items.as_slice())
+                    .unwrap_or_else(|| {
+                        warn!("Expected openai_response.sources to be an array");
+                        &[]
+                    });
+
+                for source_item in source_items {
+                    match Self::parse_web_source(source_item) {
+                        Some(source) => sources.push(source),
+                        None => warn!("Skipping malformed web source item"),
+                    }
+                }
+            }
+
+            if !sources.is_empty() {
+                return sources;
+            }
+        }
+
+        let fallback_items = result
+            .as_array()
+            .or_else(|| result.as_object()?.get("results")?.as_array())
+            .map(|items| items.as_slice())
+            .unwrap_or_default();
+
+        for source_item in fallback_items {
+            match Self::parse_web_source(source_item) {
+                Some(source) => sources.push(source),
+                None => warn!("Skipping malformed web source item"),
+            }
+        }
+
+        sources
     }
 
     /// Parse a single web source from JSON.
     fn parse_web_source(item: &serde_json::Value) -> Option<WebSearchSource> {
         let obj = item.as_object()?;
         let url = obj.get("url").and_then(|v| v.as_str())?;
+        let source_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("url");
         Some(WebSearchSource {
-            source_type: "url".to_string(),
+            source_type: source_type.to_string(),
             url: url.to_string(),
         })
     }
 
     /// Extract queries from MCP result.
     fn extract_queries(result: &serde_json::Value) -> Vec<String> {
+        let mut queries = Vec::new();
+
+        if let Some(text_blocks) = result.as_array() {
+            for item in text_blocks {
+                let Some(payload) = parse_text_block_payload(item) else {
+                    continue;
+                };
+
+                let Some(raw_queries) = payload.get("queries") else {
+                    continue;
+                };
+
+                let query_items = raw_queries
+                    .as_array()
+                    .map(|items| items.as_slice())
+                    .unwrap_or_else(|| {
+                        warn!("Expected queries to be an array");
+                        &[]
+                    });
+
+                queries.extend(
+                    query_items
+                        .iter()
+                        .filter_map(|query| query.as_str().map(String::from)),
+                );
+            }
+
+            if !queries.is_empty() {
+                return queries;
+            }
+        }
+
         result
             .as_object()
             .and_then(|obj| obj.get("queries"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(String::from)
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|query| query.as_str().map(String::from))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or(queries)
+    }
+
+    fn extract_query_from_arguments(arguments: &str) -> Option<String> {
+        let args_json = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+        args_json
+            .as_object()
+            .and_then(|obj| obj.get("query"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string)
     }
 
     /// Extract code interpreter outputs from MCP result.
@@ -311,6 +420,30 @@ impl ResponseTransformer {
             score,
             attributes: None,
         })
+    }
+}
+
+fn parse_text_block_payload(item: &serde_json::Value) -> Option<serde_json::Value> {
+    let Some(obj) = item.as_object() else {
+        warn!("Expected MCP result item to be an object");
+        return None;
+    };
+
+    if obj.get("type").and_then(|v| v.as_str()) != Some("text") {
+        return None;
+    }
+
+    let Some(text) = obj.get("text").and_then(|v| v.as_str()) else {
+        warn!("MCP text block is missing a text field");
+        return None;
+    };
+
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(payload) => Some(payload),
+        Err(error) => {
+            warn!("Failed to parse embedded MCP text block payload: {error}");
+            None
+        }
     }
 }
 
@@ -534,12 +667,20 @@ mod tests {
 
     #[test]
     fn test_web_search_transform() {
-        let result = json!({
-            "results": [
-                {"url": "https://example.com", "title": "Example"},
-                {"url": "https://rust-lang.org", "title": "Rust"}
-            ]
-        });
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{
+                  "queries": ["rust examples"],
+                  "openai_response": {
+                    "sources": [
+                      {"url": "https://example.com", "title": "Example"},
+                      {"url": "https://rust-lang.org", "title": "Rust"}
+                    ]
+                  }
+                }"#
+            }
+        ]);
 
         let transformed = ResponseTransformer::transform(
             &result,
@@ -547,7 +688,7 @@ mod tests {
             "req-123",
             "server",
             "web_search",
-            "{}",
+            r#"{"query":"rust from args"}"#,
         );
 
         match transformed {
@@ -555,13 +696,101 @@ mod tests {
                 assert_eq!(id, "ws_req-123");
                 assert_eq!(status, WebSearchCallStatus::Completed);
                 match action {
-                    WebSearchAction::Search { sources, .. } => {
+                    WebSearchAction::Search {
+                        query,
+                        queries,
+                        sources,
+                    } => {
+                        assert_eq!(query, Some("rust from args".to_string()));
+                        assert_eq!(queries, vec!["rust examples".to_string()]);
                         assert_eq!(sources.len(), 2);
                         assert_eq!(sources[0].url, "https://example.com");
                     }
                     _ => panic!("Expected Search action"),
                 }
             }
+            _ => panic!("Expected WebSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_web_search_transform_extracts_sources_and_query_from_embedded_json_text() {
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{
+                  "execution_id": "123",
+                  "openai_response": {
+                    "sources": [
+                      {"type": "url", "url": "https://example.com/a"},
+                      {"type": "url", "url": "https://example.com/b"}
+                    ]
+                  }
+                }"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::WebSearchCall,
+            "req-embedded",
+            "server",
+            "web_search",
+            r#"{"query":"positive news story April 8 2026"}"#,
+        );
+
+        match transformed {
+            ResponseOutputItem::WebSearchCall { action, .. } => match action {
+                WebSearchAction::Search {
+                    query,
+                    queries,
+                    sources,
+                } => {
+                    assert_eq!(query, Some("positive news story April 8 2026".to_string()));
+                    assert!(queries.is_empty());
+                    assert_eq!(sources.len(), 2);
+                    assert_eq!(sources[0].url, "https://example.com/a");
+                    assert_eq!(sources[1].url, "https://example.com/b");
+                }
+                _ => panic!("Expected Search action"),
+            },
+            _ => panic!("Expected WebSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_web_search_transform_falls_back_to_results_sources() {
+        let result = json!({
+            "results": [
+                {"type": "url", "url": "https://example.com/legacy-a"},
+                {"type": "url", "url": "https://example.com/legacy-b"}
+            ]
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::WebSearchCall,
+            "req-legacy",
+            "server",
+            "web_search",
+            r#"{"query":"legacy search"}"#,
+        );
+
+        match transformed {
+            ResponseOutputItem::WebSearchCall { action, .. } => match action {
+                WebSearchAction::Search {
+                    query,
+                    queries,
+                    sources,
+                } => {
+                    assert_eq!(query, Some("legacy search".to_string()));
+                    assert!(queries.is_empty());
+                    assert_eq!(sources.len(), 2);
+                    assert_eq!(sources[0].url, "https://example.com/legacy-a");
+                    assert_eq!(sources[1].url, "https://example.com/legacy-b");
+                }
+                _ => panic!("Expected Search action"),
+            },
             _ => panic!("Expected WebSearchCall"),
         }
     }

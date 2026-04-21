@@ -1,5 +1,10 @@
 # SMG SchemaConfig for genai-data-plane Oracle tables (Flyway-managed)
-version: 3
+#
+# This schema is owned by Flyway, so the gateway must not try to apply its own
+# forward migrations during e2e startup. Keep this pinned to the latest router
+# migration version unless the Flyway-managed schema begins exercising those
+# new tables directly.
+version: 8
 auto_migrate: false
 
 conversations:

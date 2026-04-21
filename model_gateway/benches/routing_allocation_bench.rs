@@ -92,6 +92,7 @@ fn create_bench_request() -> ResponsesRequest {
             role: "user".to_string(),
             content,
             status: None,
+            phase: None,
         });
     }
 

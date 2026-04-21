@@ -12,12 +12,17 @@ use openai_protocol::{
 };
 use serde_json::Value;
 use smg_data_connector::{ConversationId, ListParams, ResponseId, ResponseStorageError, SortOrder};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::super::context::ResponsesComponents;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::error,
+    routers::{
+        common::{
+            header_utils::ConversationMemoryConfig, persistence_utils::split_stored_message_content,
+        },
+        error,
+    },
 };
 
 const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
@@ -149,7 +154,13 @@ pub(crate) async fn load_input_history(
                 for item in stored_items {
                     match item.item_type.as_str() {
                         "message" => {
-                            match serde_json::from_value::<Vec<ResponseContentPart>>(item.content) {
+                            // Stored content may be either the raw content array
+                            // (legacy shape) or an object `{content: [...], phase: ...}`
+                            // when the message carried a phase label (P3).
+                            let (content_value, stored_phase) =
+                                split_stored_message_content(item.content);
+                            match serde_json::from_value::<Vec<ResponseContentPart>>(content_value)
+                            {
                                 Ok(content_parts) => {
                                     items.push(ResponseInputOutputItem::Message {
                                         id: item.id.0.clone(),
@@ -159,6 +170,7 @@ pub(crate) async fn load_input_history(
                                             .unwrap_or_else(|| "user".to_string()),
                                         content: content_parts,
                                         status: item.status.clone(),
+                                        phase: stored_phase,
                                     });
                                 }
                                 Err(e) => {
@@ -271,11 +283,76 @@ fn append_current_input(
                 role: "user".to_string(),
                 content: vec![ResponseContentPart::InputText { text: text.clone() }],
                 status: Some("completed".to_string()),
+                phase: None,
             });
         }
         ResponseInput::Items(current_items) => {
             for item in current_items {
                 items.push(openai_protocol::responses::normalize_input_item(item));
+            }
+        }
+    }
+}
+
+/// Memory hook entrypoint for Responses API.
+///
+/// This is intentionally a no-op in this PR: it confirms header parsing is
+/// connected to request flow and logs activation state for follow-up retrieval work.
+pub(crate) fn inject_memory_context(
+    config: &ConversationMemoryConfig,
+    _request_body: &mut ResponsesRequest,
+) {
+    if config.long_term_memory.enabled {
+        debug!(
+            has_subject_id = config.long_term_memory.subject_id.is_some(),
+            has_embedding_model = config.long_term_memory.embedding_model_id.is_some(),
+            has_extraction_model = config.long_term_memory.extraction_model_id.is_some(),
+            "LTM recall requested - retrieval not yet implemented"
+        );
+    }
+
+    if config.short_term_memory.enabled {
+        debug!(
+            has_condenser_model = config.short_term_memory.condenser_model_id.is_some(),
+            "STM recall requested - retrieval not yet implemented"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::responses::{ResponseInput, ResponsesRequest};
+
+    use super::inject_memory_context;
+    use crate::routers::common::header_utils::{
+        ConversationMemoryConfig, LongTermMemoryConfig, ShortTermMemoryConfig,
+    };
+
+    #[test]
+    fn inject_memory_context_is_no_op_for_now() {
+        let config = ConversationMemoryConfig {
+            long_term_memory: LongTermMemoryConfig {
+                enabled: true,
+                subject_id: Some("subj-1".to_string()),
+                embedding_model_id: Some("embed-1".to_string()),
+                extraction_model_id: Some("extract-1".to_string()),
+            },
+            short_term_memory: ShortTermMemoryConfig {
+                enabled: true,
+                condenser_model_id: Some("condense-1".to_string()),
+            },
+        };
+        let mut request = ResponsesRequest {
+            input: ResponseInput::Text("hello".to_string()),
+            ..Default::default()
+        };
+
+        inject_memory_context(&config, &mut request);
+
+        match request.input {
+            ResponseInput::Text(text) => assert_eq!(text, "hello"),
+            ResponseInput::Items(_) => {
+                panic!("request input should remain unchanged for no-op hook")
             }
         }
     }

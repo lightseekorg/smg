@@ -100,6 +100,7 @@ Controls how requests are distributed across workers.
 | `--balance-rel-threshold` | Relative threshold for load balancing trigger | `1.5` |
 | `--eviction-interval` | Interval in seconds between cache eviction operations | `120` |
 | `--max-tree-size` | Maximum size of the approximation tree | `67108864` |
+| `--block-size` | KV cache block size for event-driven cache-aware routing | `16` |
 
 ### Prefix Hash Policy Options
 
@@ -127,6 +128,7 @@ Controls how requests are distributed across workers.
 | `--dp-aware` | Enable data parallelism aware scheduling | `false` |
 | `--enable-igw` | Enable IGW (Inference Gateway) mode for multi-model support | `false` |
 | `--dp-minimum-tokens-scheduler` | Enable minimum tokens scheduler for data parallel group | `false` |
+| `--load-monitor-interval` | Interval in seconds between load monitor checks for PowerOfTwo routing | `10` |
 
 ---
 
@@ -226,6 +228,18 @@ Note: Enabling service discovery automatically enables IGW mode.
 |--------|-------------|
 | `--prefill-selector` | Label selector for prefill server pods |
 | `--decode-selector` | Label selector for decode server pods |
+
+### HA Mesh Router Discovery
+
+| Option | Description |
+|--------|-------------|
+| `--router-selector` | Label selector for router pod discovery in HA mesh mode (format: `key=value`) |
+
+### Per-Worker Model ID Override
+
+| Option | Description |
+|--------|-------------|
+| `--model-id-from` | Override each worker's `model_id` from pod metadata. Accepted values: `namespace`, `label:<key>`, or `annotation:<key>`. |
 
 ---
 
@@ -344,6 +358,7 @@ Note: Enabling service discovery automatically enables IGW mode.
 | `--oracle-dsn` | `ATP_DSN` | Oracle connection descriptor/DSN |
 | `--oracle-user` | `ATP_USER` | Oracle database username |
 | `--oracle-password` | `ATP_PASSWORD` | Oracle database password |
+| `--oracle-external-auth` | `ATP_EXTERNAL_AUTH` | Enable Oracle external authentication (default: `false`) |
 | `--oracle-pool-min` | `ATP_POOL_MIN` | Minimum connection pool size (default: 1) |
 | `--oracle-pool-max` | `ATP_POOL_MAX` | Maximum connection pool size (default: 16) |
 | `--oracle-pool-timeout-secs` | `ATP_POOL_TIMEOUT_SECS` | Pool timeout in seconds (default: 30) |
@@ -374,6 +389,31 @@ Note: Enabling service discovery automatically enables IGW mode.
 | Environment | - |
 | Default | `false` |
 | Description | Enable WebAssembly support |
+
+### Storage Hook WASM Component
+
+| Option | `--storage-hook-wasm-path` |
+|--------|----------------------------|
+| Environment | - |
+| Default | None |
+| Description | Path to a WASM component implementing storage hooks. When set, wraps all storage backends with hook-based interceptors. |
+
+### Schema Config File
+
+| Option | `--schema-config` |
+|--------|-------------------|
+| Environment | - |
+| Default | None |
+| Description | Path to a YAML schema config file for storage table/column remapping. |
+
+---
+
+## WebRTC Configuration
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--webrtc-bind-addr` | Bind address for WebRTC UDP sockets (client-facing ICE candidate IP). Set to `127.0.0.1` for local development on the same machine. | `0.0.0.0` (auto-detect via routing table) |
+| `--webrtc-stun-server` | STUN server for ICE candidate gathering (`host:port`). Set to your own STUN server for enterprise deployments that restrict outbound traffic to external STUN servers. | `stun.l.google.com:19302` |
 
 ---
 
@@ -702,6 +742,14 @@ RUST_LOG=smg=debug,hyper=warn smg ...
 | Default | None (console only) |
 | Description | Directory to store log files |
 
+### JSON Logs
+
+| Option | `--log-json` |
+|--------|--------------|
+| Environment | - |
+| Default | `false` |
+| Description | Output logs as JSON (structured). Defaults to human-readable text logs. |
+
 ---
 
 ## Configuration Examples
@@ -846,6 +894,7 @@ smg \
 | `ATP_DSN` | `--oracle-dsn` | Oracle DSN |
 | `ATP_USER` | `--oracle-user` | Oracle username |
 | `ATP_PASSWORD` | `--oracle-password` | Oracle password |
+| `ATP_EXTERNAL_AUTH` | `--oracle-external-auth` | Enable Oracle external authentication |
 | `ATP_POOL_MIN` | `--oracle-pool-min` | Oracle min pool size |
 | `ATP_POOL_MAX` | `--oracle-pool-max` | Oracle max pool size |
 | `ATP_POOL_TIMEOUT_SECS` | `--oracle-pool-timeout-secs` | Oracle pool timeout |

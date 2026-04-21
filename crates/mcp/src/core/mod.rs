@@ -22,7 +22,8 @@ pub use config::{
 pub use handler::{HandlerRequestContext, RefreshRequest, SmgClientHandler};
 pub use metrics::{LatencySnapshot, McpMetrics, MetricsSnapshot};
 pub use orchestrator::{
-    McpOrchestrator, McpRequestContext, ToolCallResult, ToolExecutionInput, ToolExecutionOutput,
+    McpOrchestrator, McpRequestContext, PendingToolExecution, ToolCallResult, ToolExecutionInput,
+    ToolExecutionOutput, ToolExecutionResult,
 };
 pub use pool::{McpConnectionPool, PoolKey};
 pub use reconnect::ReconnectionManager;

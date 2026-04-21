@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::Result;
+use bytes::Bytes;
 use rand::seq::{IndexedRandom, SliceRandom};
 use tokio::sync::{mpsc, watch, Mutex};
 use tonic::transport::{ClientTlsConfig, Endpoint};
@@ -30,8 +31,14 @@ use super::{
     sync::MeshSyncManager,
 };
 use crate::{
+    chunking::{
+        build_stream_batches, chunk_value, dispatch_stream_batch, next_generation,
+        DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_STREAM_CHUNK_BYTES,
+    },
+    collector::{CentralCollector, PeerWatermark, RoundBatch},
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
     metrics,
+    service::gossip::IncrementalUpdate,
 };
 
 pub struct MeshController {
@@ -44,6 +51,19 @@ pub struct MeshController {
     mtls_manager: Option<Arc<MTLSManager>>,
     // Track active sync_stream connections
     sync_connections: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// Central collector that runs once per gossip round.
+    central_collector: Arc<CentralCollector>,
+    /// Current round batch, updated once per round by the central collector.
+    /// Per-peer senders read and apply their own watermark filtering.
+    current_batch: Arc<parking_lot::RwLock<Arc<RoundBatch>>>,
+    /// Current stream round batch, drained once per round from MeshKV.
+    /// Per-peer senders read this and filter targeted entries to their
+    /// own peer; drain_entries are broadcast to every peer.
+    current_stream_batch: Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>>,
+    /// Node-wide MeshKV handle. Owns the stream buffers, subscriber
+    /// registry, and chunk assembler shared with the server-side
+    /// SyncStream handlers.
+    mesh_kv: Option<Arc<crate::kv::MeshKV>>,
 }
 
 impl MeshController {
@@ -57,6 +77,8 @@ impl MeshController {
         sync_manager: Arc<MeshSyncManager>,
         mtls_manager: Option<Arc<MTLSManager>>,
     ) -> Self {
+        let central_collector =
+            Arc::new(CentralCollector::new(stores.clone(), self_name.to_string()));
         Self {
             state,
             self_name: self_name.to_string(),
@@ -66,7 +88,35 @@ impl MeshController {
             sync_manager,
             mtls_manager,
             sync_connections: Arc::new(Mutex::new(HashMap::new())),
+            central_collector,
+            current_batch: Arc::new(parking_lot::RwLock::new(Arc::new(RoundBatch::default()))),
+            current_stream_batch: Arc::new(parking_lot::RwLock::new(Arc::new(
+                crate::kv::RoundBatch::default(),
+            ))),
+            mesh_kv: None,
         }
+    }
+
+    /// Attach the node-wide MeshKV handle. Plumbed from the server
+    /// builder so stream buffers, subscribers, and the chunk assembler
+    /// are shared between client-side (outbound) and server-side
+    /// (inbound) SyncStream handlers.
+    pub fn with_mesh_kv(mut self, mesh_kv: Arc<crate::kv::MeshKV>) -> Self {
+        self.mesh_kv = Some(mesh_kv);
+        self
+    }
+
+    /// Get a handle to the shared RoundBatch. Used by GossipService to
+    /// share the centrally collected batch with server-side sync_stream handlers.
+    pub fn current_batch(&self) -> Arc<parking_lot::RwLock<Arc<RoundBatch>>> {
+        self.current_batch.clone()
+    }
+
+    /// Get a handle to the shared stream RoundBatch. Used by GossipService
+    /// so server-side sync_stream handlers see the same drained stream
+    /// entries as client-side handlers.
+    pub fn current_stream_batch(&self) -> Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>> {
+        self.current_stream_batch.clone()
     }
 
     #[instrument(fields(name = %self.self_name), skip(self, signal))]
@@ -127,6 +177,17 @@ impl MeshController {
             // This keeps the periodic structure snapshot fresh.
             if cnt.is_multiple_of(10) {
                 self.sync_manager.checkpoint_tree_states();
+            }
+
+            // Chunk assembler GC: every 5 rounds (~5s), drop partial
+            // assemblies older than 30s. Partial chunks the receiver has
+            // been holding for a full assembly timeout are assumed lost;
+            // the sender will re-publish on its own retry cycle with a
+            // fresh generation.
+            if cnt.is_multiple_of(5) {
+                if let Some(mesh_kv) = &self.mesh_kv {
+                    mesh_kv.chunk_assembler().gc(Duration::from_secs(30));
+                }
             }
 
             // Periodic GC: clean up tombstoned CRDT metadata every 60 rounds (~60s)
@@ -195,6 +256,25 @@ impl MeshController {
 
                 // Clean up retry managers for peers no longer in cluster state
                 retry_managers.retain(|peer_name, _| map.contains_key(peer_name));
+            }
+
+            // Central collection: run once per round. Drains tenant deltas
+            // (destructive) and collects all store changes into one batch.
+            // Per-peer senders read this batch and filter by their watermarks.
+            {
+                let batch = self.central_collector.collect();
+                *self.current_batch.write() = Arc::new(batch);
+                self.central_collector.advance_generations();
+            }
+
+            // Stream round collection: drain stream namespace buffers and
+            // drain callbacks exactly once per round (destructive). Per-peer
+            // senders filter targeted_entries by their own peer_id and
+            // broadcast drain_entries to all peers. Empty batch if no
+            // MeshKV is attached (legacy path pre-Step 3).
+            if let Some(mesh_kv) = &self.mesh_kv {
+                let stream_batch = mesh_kv.collect_round_batch();
+                *self.current_stream_batch.write() = Arc::new(stream_batch);
             }
 
             tokio::select! {
@@ -414,6 +494,9 @@ impl MeshController {
         let stores = self.stores.clone();
         let sync_manager = self.sync_manager.clone();
         let sync_connections = self.sync_connections.clone();
+        let current_batch = self.current_batch.clone();
+        let current_stream_batch = self.current_stream_batch.clone();
+        let mesh_kv = self.mesh_kv.clone();
 
         // Log connection lifecycle: spawn
         log::debug!(
@@ -454,37 +537,38 @@ impl MeshController {
                     return;
                 }
 
-                // Spawn a task to periodically send incremental updates (client-side sender)
+                // Spawn a task to periodically send incremental updates (client-side sender).
+                // Uses PeerWatermark to filter the centrally collected batch.
                 let incremental_sender_handle = {
-                    use super::{
-                        incremental::IncrementalUpdateCollector, service::gossip::IncrementalUpdate,
-                    };
-
-                    let collector = Arc::new(IncrementalUpdateCollector::new(
-                        stores.clone(),
-                        self_name.clone(),
-                    ));
+                    let mut watermark = PeerWatermark::new(peer_name.clone());
                     log::debug!(
                         peer = %peer_name,
-                        "IncrementalUpdateCollector created"
+                        "PeerWatermark created for centralized gossip"
                     );
                     let tx_incremental = tx.clone();
                     let self_name_incremental = self_name.clone();
                     let peer_name_incremental = peer_name.clone();
                     let shared_sequence = sequence.clone();
                     let size_validator = MessageSizeValidator::default();
+                    let batch_handle = current_batch.clone();
+                    let stream_batch_handle = current_stream_batch.clone();
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
                         let mut interval = tokio::time::interval(Duration::from_secs(1));
+                        // Skip re-emission of an unchanged stream batch (main
+                        // loop hasn't collected a new one since last tick).
+                        let mut last_stream_batch: Option<Arc<crate::kv::RoundBatch>> = None;
 
                         loop {
                             interval.tick().await;
 
                             let round_start = std::time::Instant::now();
 
-                            // Collect all incremental updates
-                            let all_updates = collector.collect_all_updates();
+                            // Read the centrally collected batch and filter by
+                            // this peer's watermark. No collection happens here.
+                            let batch = batch_handle.read().clone();
+                            let all_updates = watermark.filter(&batch);
 
                             let collect_elapsed = round_start.elapsed();
 
@@ -516,13 +600,11 @@ impl MeshController {
                                             size_validator.max_size()
                                         );
                                         // Mark non-tree stores as sent to prevent infinite
-                                        // retry loops (PR #808). Tree updates (tenant deltas,
-                                        // structure snapshots) are retried next round with
-                                        // updated data from the live tree.
+                                        // retry loops. Tree updates are retried next round.
                                         let is_tree_update =
                                             updates.iter().any(|u| u.key.starts_with("tree:"));
                                         if !is_tree_update {
-                                            collector.mark_sent(*store_type, updates);
+                                            watermark.mark_sent(*store_type, updates);
                                         }
                                         continue;
                                     }
@@ -552,7 +634,7 @@ impl MeshController {
                                     match tx_incremental.try_send(incremental_update) {
                                         Ok(()) => {
                                             // Mark as sent after successful transmission
-                                            collector.mark_sent(*store_type, updates);
+                                            watermark.mark_sent(*store_type, updates);
                                         }
                                         Err(mpsc::error::TrySendError::Full(_)) => {
                                             log::debug!(
@@ -565,6 +647,77 @@ impl MeshController {
                                                 "Channel closed, stopping incremental update sender"
                                             );
                                             break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Stream batches: drain-portion (broadcast) +
+                            // targeted entries addressed to this peer. Each
+                            // entry is chunked if oversized. On channel
+                            // full, the round's stream traffic for this
+                            // peer is dropped — no retry (at-most-once).
+                            // Application regenerates on its own retry cycle.
+                            let stream_batch = stream_batch_handle.read().clone();
+                            let fresh_batch = last_stream_batch
+                                .as_ref()
+                                .is_none_or(|last| !Arc::ptr_eq(last, &stream_batch));
+                            if fresh_batch {
+                                last_stream_batch = Some(stream_batch.clone());
+                                let mut entries = Vec::new();
+                                // Drain entries are broadcast: every peer emits.
+                                // Generation is per-value so concurrent publishes
+                                // to the same key get distinct tags.
+                                for (key, value) in &stream_batch.drain_entries {
+                                    entries.extend(chunk_value(
+                                        key.clone(),
+                                        next_generation(),
+                                        Bytes::from(value.clone()),
+                                        MAX_STREAM_CHUNK_BYTES,
+                                    ));
+                                }
+                                // Targeted entries: only those addressed to this peer.
+                                for (target, key, value) in &stream_batch.targeted_entries {
+                                    if target == &peer_name_incremental {
+                                        entries.extend(chunk_value(
+                                            key.clone(),
+                                            next_generation(),
+                                            value.clone(),
+                                            MAX_STREAM_CHUNK_BYTES,
+                                        ));
+                                    }
+                                }
+                                if !entries.is_empty() {
+                                    for batch in build_stream_batches(
+                                        entries,
+                                        DEFAULT_MAX_CHUNKS_PER_BATCH,
+                                        MAX_STREAM_CHUNK_BYTES,
+                                    ) {
+                                        let msg = StreamMessage {
+                                            message_type: StreamMessageType::StreamBatch as i32,
+                                            payload: Some(StreamPayload::StreamBatch(batch)),
+                                            sequence: shared_sequence
+                                                .fetch_add(1, Ordering::Relaxed),
+                                            peer_id: self_name_incremental.clone(),
+                                        };
+                                        match tx_incremental.try_send(msg) {
+                                            Ok(()) => {}
+                                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                                log::debug!(
+                                                    peer = %peer_name_incremental,
+                                                    "stream batch dropped on backpressure"
+                                                );
+                                                // TODO(metrics): bump
+                                                // stream_dropped_on_backpressure
+                                                break;
+                                            }
+                                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                                log::warn!(
+                                                    peer = %peer_name_incremental,
+                                                    "stream sender: channel closed, stopping"
+                                                );
+                                                return;
+                                            }
                                         }
                                     }
                                 }
@@ -988,6 +1141,19 @@ impl MeshController {
                                         msg.message_type,
                                         peer_name
                                     );
+                                }
+                                StreamMessageType::StreamBatch => {
+                                    if let Some(mesh_kv) = &mesh_kv {
+                                        if let Some(StreamPayload::StreamBatch(batch)) =
+                                            msg.payload
+                                        {
+                                            dispatch_stream_batch(
+                                                mesh_kv,
+                                                &msg.peer_id,
+                                                batch.entries,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }

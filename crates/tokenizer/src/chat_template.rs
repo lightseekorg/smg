@@ -247,12 +247,11 @@ impl<'a> Detector<'a> {
                         }
                     }
                 }
-                Stmt::IfCond(ic) => {
+                Stmt::IfCond(ic)
                     if Self::body_has_think_tag(&ic.true_body)
-                        || Self::body_has_think_tag(&ic.false_body)
-                    {
-                        return true;
-                    }
+                        || Self::body_has_think_tag(&ic.false_body) =>
+                {
+                    return true;
                 }
                 _ => {}
             }
@@ -320,12 +319,11 @@ impl<'a> Detector<'a> {
                 self.inspect_expr_for_structure(&e.expr);
             }
             // {% set content = message.content %}
-            Stmt::Set(s) => {
+            Stmt::Set(s)
                 if Self::is_var_access(&s.target, "content")
-                    && self.is_any_scope_var_content(&s.expr)
-                {
-                    self.flags.saw_assignment = true;
-                }
+                    && self.is_any_scope_var_content(&s.expr) =>
+            {
+                self.flags.saw_assignment = true;
             }
             Stmt::Macro(m) => {
                 // Heuristic: macro that checks type (via `is` test) and also has any loop
@@ -347,13 +345,12 @@ impl<'a> Detector<'a> {
 
         match expr {
             // content[0] or message.content[0]
-            Expr::GetItem(gi) => {
+            Expr::GetItem(gi)
                 if (matches!(&gi.expr, Expr::Var(v) if v.id == "content")
                     || self.is_any_scope_var_content(&gi.expr))
-                    && Self::is_numeric_const(&gi.subscript_expr)
-                {
-                    self.flags.saw_structure = true;
-                }
+                    && Self::is_numeric_const(&gi.subscript_expr) =>
+            {
+                self.flags.saw_structure = true;
             }
             // content|length or message.content|length
             Expr::Filter(f) => {

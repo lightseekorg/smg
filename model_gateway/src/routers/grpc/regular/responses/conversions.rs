@@ -302,6 +302,7 @@ pub(crate) fn chat_to_responses(
                     logprobs: choice.logprobs.clone(),
                 }],
                 status: "completed".to_string(),
+                phase: None,
             });
         }
     }
@@ -309,14 +310,14 @@ pub(crate) fn chat_to_responses(
     // Convert reasoning content if present (O1-style models)
     if let Some(reasoning) = &choice.message.reasoning_content {
         if !reasoning.is_empty() {
-            output.push(ResponseOutputItem::Reasoning {
-                id: format!("reasoning_{}", chat_resp.id),
-                summary: vec![],
-                content: vec![ReasoningText {
+            output.push(ResponseOutputItem::new_reasoning(
+                format!("reasoning_{}", chat_resp.id),
+                vec![],
+                vec![ReasoningText {
                     text: reasoning.clone(),
                 }],
-                status: Some("completed".to_string()),
-            });
+                Some("completed".to_string()),
+            ));
         }
     }
 
@@ -400,6 +401,7 @@ mod tests {
                         text: "Hello!".to_string(),
                     }],
                     status: None,
+                    phase: None,
                 },
                 ResponseInputOutputItem::Message {
                     id: "msg_2".to_string(),
@@ -410,6 +412,7 @@ mod tests {
                         logprobs: None,
                     }],
                     status: None,
+                    phase: None,
                 },
             ]),
             ..Default::default()

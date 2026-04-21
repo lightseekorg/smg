@@ -63,6 +63,7 @@ enum StreamMessageType {
   ACK = 4;
   NACK = 5;
   HEARTBEAT = 6;
+  STREAM_BATCH = 7;
 }
 
 message StreamMessage {
@@ -72,6 +73,7 @@ message StreamMessage {
     SnapshotRequest snapshot_request = 3;
     SnapshotChunk snapshot_chunk = 4;
     StreamAck ack = 5;
+    StreamBatch stream_batch = 8;
   }
   uint64 sequence = 6; // Sequence number for ordering
   string peer_id = 7;   // Sender peer ID
@@ -111,6 +113,24 @@ message StreamAck {
   uint64 sequence = 1;
   bool success = 2;
   string error_message = 3;
+}
+
+// One stream value for a single key. Values that fit in a single gRPC
+// message use total_chunks = 1 and chunk_index = 0. Values exceeding
+// max_message_size are split into N chunks with chunk_index in
+// [0, total_chunks). The receiver reassembles via ChunkAssembler.
+// Tree repair pages MUST stay bounded and always use total_chunks = 1.
+message StreamEntry {
+  string key = 1;
+  uint64 generation = 2;
+  uint32 chunk_index = 3;
+  uint32 total_chunks = 4;
+  bytes data = 5;
+}
+
+// One or more stream entries delivered in a single gossip round.
+message StreamBatch {
+  repeated StreamEntry entries = 1;
 }
 
 enum StoreType {

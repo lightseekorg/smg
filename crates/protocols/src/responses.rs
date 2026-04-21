@@ -14,7 +14,9 @@ use super::{
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
-use crate::{builders::ResponsesResponseBuilder, validated::Normalizable};
+use crate::{
+    builders::ResponsesResponseBuilder, skills::ResponsesSkillEntry, validated::Normalizable,
+};
 
 // ============================================================================
 // Response Tools (MCP and others)
@@ -39,6 +41,10 @@ pub enum ResponseTool {
     /// MCP server tool.
     #[serde(rename = "mcp")]
     Mcp(McpTool),
+
+    /// Built-in file search tool over vector stores.
+    #[serde(rename = "file_search")]
+    FileSearch(FileSearchTool),
 }
 
 #[serde_with::skip_serializing_none]
@@ -48,6 +54,96 @@ pub struct FunctionTool {
     /// Flatten to match Responses API tool JSON shape.
     #[serde(flatten)]
     pub function: Function,
+}
+
+/// File search tool configuration.
+///
+/// Spec: `{ type: "file_search", vector_store_ids, filters?, max_num_results?, ranking_options? }`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileSearchTool {
+    /// Vector store IDs to search over.
+    pub vector_store_ids: Vec<String>,
+    /// Optional filter applied to candidate documents.
+    pub filters: Option<FileSearchFilter>,
+    /// Maximum number of results to return.
+    pub max_num_results: Option<u32>,
+    /// Ranking options for the search.
+    pub ranking_options: Option<FileSearchRankingOptions>,
+}
+
+/// Filter expression for file search.
+///
+/// Either a single comparison or a boolean compound (`and` / `or`) over nested filters.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+pub enum FileSearchFilter {
+    #[serde(rename = "eq")]
+    Eq(ComparisonFilter),
+    #[serde(rename = "ne")]
+    Ne(ComparisonFilter),
+    #[serde(rename = "gt")]
+    Gt(ComparisonFilter),
+    #[serde(rename = "gte")]
+    Gte(ComparisonFilter),
+    #[serde(rename = "lt")]
+    Lt(ComparisonFilter),
+    #[serde(rename = "lte")]
+    Lte(ComparisonFilter),
+    #[serde(rename = "in")]
+    In(ComparisonFilter),
+    #[serde(rename = "nin")]
+    Nin(ComparisonFilter),
+    #[serde(rename = "and")]
+    And(CompoundFilter),
+    #[serde(rename = "or")]
+    Or(CompoundFilter),
+}
+
+/// Key/value comparison used by the `eq`/`ne`/`gt`/`gte`/`lt`/`lte`/`in`/`nin` filter variants.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComparisonFilter {
+    pub key: String,
+    /// Spec allows `string | number | boolean | array of string | number`.
+    pub value: Value,
+}
+
+/// Boolean composition over nested filters (used by `and` / `or` variants).
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompoundFilter {
+    pub filters: Vec<FileSearchFilter>,
+}
+
+/// Ranking options for file search results.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileSearchRankingOptions {
+    pub hybrid_search: Option<HybridSearchOptions>,
+    pub ranker: Option<FileSearchRanker>,
+    pub score_threshold: Option<f64>,
+}
+
+/// Weights combining embedding-based and text-based similarity.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HybridSearchOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_weight: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_weight: Option<f64>,
+}
+
+/// Ranker selection for file search.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+pub enum FileSearchRanker {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "default-2024-11-15")]
+    Default20241115,
 }
 
 #[serde_with::skip_serializing_none]
@@ -78,14 +174,45 @@ pub struct WebSearchPreviewTool {
 #[serde(deny_unknown_fields)]
 pub struct CodeInterpreterTool {
     pub container: Option<Value>,
+    pub environment: Option<ResponseToolEnvironment>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseToolEnvironment {
+    pub skills: Option<Vec<ResponsesSkillEntry>>,
 }
 
 /// `require_approval` values.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(untagged)]
 pub enum RequireApproval {
+    Mode(RequireApprovalMode),
+    Rules(RequireApprovalRules),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RequireApprovalMode {
     Always,
     Never,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequireApprovalRules {
+    pub always: Option<RequireApprovalFilter>,
+    pub never: Option<RequireApprovalFilter>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequireApprovalFilter {
+    pub tool_names: Option<Vec<String>>,
+    pub read_only: Option<bool>,
 }
 
 // ============================================================================
@@ -137,6 +264,20 @@ pub enum StringOrContentParts {
     Array(Vec<ResponseContentPart>),
 }
 
+/// Phase label for assistant messages in the Responses API.
+///
+/// For gpt-5.3-codex+ multi-turn conversations, preserving and resending the
+/// original `phase` value avoids quality / latency degradation — the model
+/// relies on it to disambiguate commentary-style reasoning from the final
+/// answer. Opaque to SMG otherwise; preserved verbatim through store+retrieve,
+/// SSE output, and upstream passthrough.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagePhase {
+    Commentary,
+    FinalAnswer,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -148,14 +289,25 @@ pub enum ResponseInputOutputItem {
         content: Vec<ResponseContentPart>,
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
+        /// Optional phase label, preserved from previous assistant output so
+        /// gpt-5.3-codex+ multi-turn does not degrade (spec: ResponseOutputMessage.phase).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<MessagePhase>,
     },
     #[serde(rename = "reasoning")]
+    #[non_exhaustive]
     Reasoning {
         id: String,
-        summary: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        summary: Vec<SummaryTextContent>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         #[serde(default)]
         content: Vec<ResponseReasoningContent>,
+        /// Encrypted reasoning payload for gpt-5 / o-series round-trip via
+        /// `previous_response_id`. Opaque to SMG; preserved verbatim.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        encrypted_content: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
@@ -201,6 +353,12 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "type")]
         r#type: Option<String>,
+        /// Optional phase label (spec: EasyInputMessage.phase).
+        ///
+        /// Preserved through conversation storage so gpt-5.3-codex+ does not
+        /// lose the commentary/final_answer distinction across turns.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<MessagePhase>,
     },
 }
 
@@ -231,6 +389,19 @@ pub enum ResponseReasoningContent {
     ReasoningText { text: String },
 }
 
+/// Tagged content element carried in `Reasoning.summary`.
+///
+/// OpenAI spec: `summary: array of SummaryTextContent { text, type: "summary_text" }`.
+/// Replaces the prior `Vec<String>` wire-type that broke bidirectional
+/// interoperability with spec-compliant clients.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryTextContent {
+    #[serde(rename = "summary_text")]
+    SummaryText { text: String },
+}
+
 /// MCP Tool information for the mcp_list_tools output item
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -252,12 +423,25 @@ pub enum ResponseOutputItem {
         role: String,
         content: Vec<ResponseContentPart>,
         status: String,
+        /// Optional phase label (spec: ResponseOutputMessage.phase).
+        ///
+        /// Labels assistant messages; for gpt-5.3-codex+ we must preserve and
+        /// resend this on subsequent turns to avoid perf degradation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<MessagePhase>,
     },
     #[serde(rename = "reasoning")]
+    #[non_exhaustive]
     Reasoning {
         id: String,
-        summary: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        summary: Vec<SummaryTextContent>,
         content: Vec<ResponseReasoningContent>,
+        /// Encrypted reasoning payload for gpt-5 / o-series round-trip.
+        /// Opaque to SMG; preserved verbatim.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        encrypted_content: Option<String>,
         status: Option<String>,
     },
     #[serde(rename = "function_call")]
@@ -426,10 +610,12 @@ pub enum Truncation {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ResponseStatus {
     Queued,
     InProgress,
     Completed,
+    Incomplete,
     Failed,
     Cancelled,
 }
@@ -487,6 +673,10 @@ pub enum IncludeField {
     MessageOutputTextLogprobs,
     #[serde(rename = "reasoning.encrypted_content")]
     ReasoningEncryptedContent,
+    #[serde(rename = "web_search_call.action.sources")]
+    WebSearchCallActionSources,
+    #[serde(rename = "web_search_call.results")]
+    WebSearchCallResults,
 }
 
 // ============================================================================
@@ -1236,7 +1426,12 @@ fn validate_text_format(text: &TextConfig) -> Result<(), ValidationError> {
 /// A normalized ResponseInputOutputItem (either Message if converted, or original if not SimpleInputMessage)
 pub fn normalize_input_item(item: &ResponseInputOutputItem) -> ResponseInputOutputItem {
     match item {
-        ResponseInputOutputItem::SimpleInputMessage { content, role, .. } => {
+        ResponseInputOutputItem::SimpleInputMessage {
+            content,
+            role,
+            phase,
+            ..
+        } => {
             let content_vec = match content {
                 StringOrContentParts::String(s) => {
                     vec![ResponseContentPart::InputText { text: s.clone() }]
@@ -1249,6 +1444,7 @@ pub fn normalize_input_item(item: &ResponseInputOutputItem) -> ResponseInputOutp
                 role: role.clone(),
                 content: content_vec,
                 status: Some("completed".to_string()),
+                phase: *phase,
             }
         }
         _ => item.clone(),
@@ -1267,6 +1463,7 @@ pub fn generate_id(prefix: &str) -> String {
 
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[non_exhaustive]
 pub struct ResponsesResponse {
     /// Response ID
     pub id: String,
@@ -1275,8 +1472,21 @@ pub struct ResponsesResponse {
     #[serde(default = "default_object_type")]
     pub object: String,
 
-    /// Creation timestamp
+    /// Creation timestamp (unix seconds)
     pub created_at: i64,
+
+    /// Completion timestamp (unix seconds). `None` until the response reaches
+    /// a terminal state (`completed`, `incomplete`, `failed`, `cancelled`).
+    #[serde(default)]
+    pub completed_at: Option<i64>,
+
+    /// Whether the response was created in background mode.
+    #[serde(default)]
+    pub background: Option<bool>,
+
+    /// Conversation this response is linked to, if any.
+    #[serde(default)]
+    pub conversation: Option<String>,
 
     /// Response status
     pub status: ResponseStatus,
@@ -1376,10 +1586,56 @@ impl ResponsesResponse {
     pub fn is_failed(&self) -> bool {
         matches!(self.status, ResponseStatus::Failed)
     }
+
+    /// Check if the response terminated as incomplete (max_output_tokens / content_filter)
+    pub fn is_incomplete(&self) -> bool {
+        matches!(self.status, ResponseStatus::Incomplete)
+    }
+}
+
+impl ResponseInputOutputItem {
+    /// Create a new reasoning input/output item.
+    ///
+    /// `encrypted_content` defaults to `None`; use
+    /// [`Self::new_reasoning_encrypted`] when round-tripping gpt-5 /
+    /// o-series encrypted reasoning.
+    pub fn new_reasoning(
+        id: String,
+        summary: Vec<SummaryTextContent>,
+        content: Vec<ResponseReasoningContent>,
+        status: Option<String>,
+    ) -> Self {
+        Self::Reasoning {
+            id,
+            summary,
+            content,
+            encrypted_content: None,
+            status,
+        }
+    }
+
+    /// Create a new reasoning input/output item carrying an encrypted
+    /// reasoning payload. The `encrypted_content` must be the opaque
+    /// ciphertext.
+    pub fn new_reasoning_encrypted(
+        id: String,
+        summary: Vec<SummaryTextContent>,
+        content: Vec<ResponseReasoningContent>,
+        encrypted_content: String,
+        status: Option<String>,
+    ) -> Self {
+        Self::Reasoning {
+            id,
+            summary,
+            content,
+            encrypted_content: Some(encrypted_content),
+            status,
+        }
+    }
 }
 
 impl ResponseOutputItem {
-    /// Create a new message output item
+    /// Create a new message output item (no phase).
     pub fn new_message(
         id: String,
         role: String,
@@ -1391,13 +1647,18 @@ impl ResponseOutputItem {
             role,
             content,
             status,
+            phase: None,
         }
     }
 
-    /// Create a new reasoning output item
+    /// Create a new reasoning output item.
+    ///
+    /// `encrypted_content` defaults to `None`; use
+    /// [`Self::new_reasoning_encrypted`] when carrying gpt-5 / o-series
+    /// encrypted reasoning.
     pub fn new_reasoning(
         id: String,
-        summary: Vec<String>,
+        summary: Vec<SummaryTextContent>,
         content: Vec<ResponseReasoningContent>,
         status: Option<String>,
     ) -> Self {
@@ -1405,6 +1666,28 @@ impl ResponseOutputItem {
             id,
             summary,
             content,
+            encrypted_content: None,
+            status,
+        }
+    }
+
+    /// Create a new reasoning output item carrying an encrypted reasoning payload.
+    ///
+    /// The `encrypted_content` must be the opaque ciphertext; a `None` value
+    /// would defeat the purpose of the `_encrypted` constructor — callers
+    /// without ciphertext should use [`Self::new_reasoning`] instead.
+    pub fn new_reasoning_encrypted(
+        id: String,
+        summary: Vec<SummaryTextContent>,
+        content: Vec<ResponseReasoningContent>,
+        encrypted_content: String,
+        status: Option<String>,
+    ) -> Self {
+        Self::Reasoning {
+            id,
+            summary,
+            content,
+            encrypted_content: Some(encrypted_content),
             status,
         }
     }
@@ -1458,6 +1741,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn summary_text_content_round_trips_spec_shape() {
+        // Spec: `summary: array of SummaryTextContent { text, type: "summary_text" }`.
+        let item: ResponseOutputItem = serde_json::from_value(json!({
+            "type": "reasoning",
+            "id": "r_1",
+            "summary": [{"text": "step 1", "type": "summary_text"}],
+            "content": [],
+            "status": "completed",
+        }))
+        .expect("spec-shape reasoning should deserialize");
+
+        match &item {
+            ResponseOutputItem::Reasoning { summary, .. } => {
+                assert_eq!(summary.len(), 1);
+                match &summary[0] {
+                    SummaryTextContent::SummaryText { text } => {
+                        assert_eq!(text, "step 1");
+                    }
+                }
+            }
+            _ => panic!("expected Reasoning variant"),
+        }
+
+        let v = serde_json::to_value(&item).expect("serialize");
+        assert_eq!(
+            v["summary"],
+            json!([{"text": "step 1", "type": "summary_text"}])
+        );
+    }
+
+    #[test]
+    fn legacy_vec_string_summary_fails_to_deserialize() {
+        let legacy = r#"{"type":"reasoning","id":"r_x","summary":["text"]}"#;
+        let result: Result<ResponseInputOutputItem, _> = serde_json::from_str(legacy);
+        assert!(
+            result.is_err(),
+            "legacy Vec<String> summary must no longer deserialize"
+        );
+    }
+
+    #[test]
     fn test_responses_request_omitted_top_p_deserializes_to_none() {
         let request: ResponsesRequest = serde_json::from_value(json!({
             "model": "gpt-5.4",
@@ -1496,5 +1820,150 @@ mod tests {
         .expect("request should deserialize");
 
         assert_eq!(request.top_p, Some(0.9));
+    }
+
+    #[test]
+    fn test_require_approval_string_round_trip() {
+        let tool: McpTool = serde_json::from_value(json!({
+            "server_label": "deepwiki",
+            "require_approval": "never"
+        }))
+        .expect("mcp tool should deserialize");
+
+        assert_eq!(
+            tool.require_approval,
+            Some(RequireApproval::Mode(RequireApprovalMode::Never))
+        );
+
+        let serialized = serde_json::to_value(&tool).expect("mcp tool should serialize");
+        assert_eq!(serialized["require_approval"], json!("never"));
+    }
+
+    #[test]
+    fn test_require_approval_object_round_trip() {
+        let tool: McpTool = serde_json::from_value(json!({
+            "server_label": "deepwiki",
+            "require_approval": {
+                "always": null,
+                "never": {
+                    "tool_names": ["ask_question", "read_wiki_structure"],
+                    "read_only": null
+                }
+            }
+        }))
+        .expect("mcp tool should deserialize");
+
+        assert_eq!(
+            tool.require_approval,
+            Some(RequireApproval::Rules(RequireApprovalRules {
+                always: None,
+                never: Some(RequireApprovalFilter {
+                    tool_names: Some(vec![
+                        "ask_question".to_string(),
+                        "read_wiki_structure".to_string()
+                    ]),
+                    read_only: None,
+                }),
+            }))
+        );
+
+        let serialized = serde_json::to_value(&tool).expect("mcp tool should serialize");
+        assert_eq!(
+            serialized["require_approval"],
+            json!({
+                "never": {
+                    "tool_names": ["ask_question", "read_wiki_structure"]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_include_field_web_search_call_variants_round_trip() {
+        let fields: Vec<IncludeField> = serde_json::from_value(json!([
+            "web_search_call.action.sources",
+            "web_search_call.results",
+        ]))
+        .expect("include fields should deserialize");
+
+        assert_eq!(
+            fields,
+            vec![
+                IncludeField::WebSearchCallActionSources,
+                IncludeField::WebSearchCallResults,
+            ]
+        );
+
+        let serialized = serde_json::to_value(&fields).expect("include fields should serialize");
+        assert_eq!(
+            serialized,
+            json!(["web_search_call.action.sources", "web_search_call.results"])
+        );
+    }
+
+    #[test]
+    fn test_file_search_tool_round_trip() {
+        // Spec fixture (openai-responses-api-spec.md §tools): `file_search` with
+        // vector_store_ids, compound filter, and ranking_options incl. hybrid_search,
+        // ranker enum, and score_threshold.
+        let payload = json!({
+            "type": "file_search",
+            "vector_store_ids": ["vs_1234567890"],
+            "max_num_results": 20,
+            "filters": {
+                "type": "and",
+                "filters": [
+                    {"type": "eq", "key": "region", "value": "us-east-1"},
+                    {"type": "in", "key": "tag", "value": ["alpha", "beta"]}
+                ]
+            },
+            "ranking_options": {
+                "ranker": "default-2024-11-15",
+                "score_threshold": 0.5,
+                "hybrid_search": {"embedding_weight": 0.7, "text_weight": 0.3}
+            }
+        });
+
+        let tool: ResponseTool =
+            serde_json::from_value(payload.clone()).expect("file_search tool should deserialize");
+        assert!(matches!(tool, ResponseTool::FileSearch(_)));
+
+        let serialized = serde_json::to_value(&tool).expect("file_search tool should serialize");
+        assert_eq!(serialized, payload);
+    }
+
+    #[test]
+    fn test_file_search_tool_round_trip_hybrid_weights_omitted() {
+        // Spec (openai-responses-api-spec.md §tools): `embedding_weight` and
+        // `text_weight` are optional. When omitted they must deserialize to
+        // `None` and be absent again on re-serialization (absent→None→absent).
+        let payload = json!({
+            "type": "file_search",
+            "vector_store_ids": ["vs_1234567890"],
+            "ranking_options": {
+                "hybrid_search": {}
+            }
+        });
+
+        let tool: ResponseTool = serde_json::from_value(payload.clone())
+            .expect("file_search tool with empty hybrid_search should deserialize");
+        match &tool {
+            ResponseTool::FileSearch(fs) => {
+                let ranking = fs
+                    .ranking_options
+                    .as_ref()
+                    .expect("ranking_options should be present");
+                let hybrid = ranking
+                    .hybrid_search
+                    .as_ref()
+                    .expect("hybrid_search should be present");
+                assert!(hybrid.embedding_weight.is_none());
+                assert!(hybrid.text_weight.is_none());
+            }
+            other => panic!("expected FileSearch variant, got {other:?}"),
+        }
+
+        let serialized = serde_json::to_value(&tool).expect("file_search tool should serialize");
+        assert_eq!(serialized, payload);
     }
 }

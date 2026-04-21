@@ -21,8 +21,8 @@ use openai_protocol::{
 };
 use serde_json::{json, to_value, Value};
 use smg_mcp::{
-    mcp_response_item_id, McpServerBinding, McpToolSession, ResponseFormat, ResponseTransformer,
-    ToolExecutionInput,
+    extract_embedded_openai_responses, mcp_response_item_id, McpServerBinding, McpToolSession,
+    ResponseFormat, ResponseTransformer, ToolExecutionInput, ToolExecutionResult,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -74,6 +74,7 @@ impl ToolLoopState {
     /// transformed output item (to avoid re-transformation later).
     pub fn record_call(
         &mut self,
+        is_builtin_tool: bool,
         call_id: String,
         tool_name: String,
         args_json_str: String,
@@ -96,7 +97,55 @@ impl ToolLoopState {
         self.conversation_history.push(output_item);
 
         self.mcp_call_items.push(transformed_item);
+
+        if is_builtin_tool {
+            let openai_output_items = extract_openai_response_output_items(&output_str);
+            if !openai_output_items.is_empty() {
+                debug!(
+                    call_id = %call_id,
+                    extracted_items = openai_output_items.len(),
+                    "Extracted intermediary OpenAI response items from MCP tool output"
+                );
+                self.mcp_call_items.extend(openai_output_items);
+            }
+        }
     }
+}
+
+fn extract_openai_response_output_items(output_str: &str) -> Vec<Value> {
+    let result = match serde_json::from_str::<Value>(output_str) {
+        Ok(value) => value,
+        _ => return Vec::new(),
+    };
+
+    extract_embedded_openai_responses(&result)
+        .into_iter()
+        .filter_map(build_message_from_openai_response)
+        .collect()
+}
+
+fn build_message_from_openai_response(openai_response: Value) -> Option<Value> {
+    let obj = openai_response.as_object()?;
+
+    let content_value = obj.get("content")?;
+
+    let content = match content_value {
+        Value::Array(items) => items.clone(),
+        Value::Object(_) => vec![content_value.clone()],
+        _ => return None,
+    };
+
+    if content.is_empty() {
+        return None;
+    }
+
+    Some(json!({
+        "id": generate_id("msg"),
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": content
+    }))
 }
 
 /// Execute detected tool calls and send completion events to client
@@ -162,6 +211,7 @@ pub(crate) async fn execute_streaming_tool_calls(
                     return false;
                 }
                 state.record_call(
+                    session.is_builtin_tool(&call.name),
                     call.call_id,
                     call.name,
                     call.arguments_buffer,
@@ -219,6 +269,7 @@ pub(crate) async fn execute_streaming_tool_calls(
         }
 
         state.record_call(
+            session.is_builtin_tool(&call.name),
             call.call_id,
             call.name,
             call.arguments_buffer,
@@ -530,6 +581,10 @@ fn non_streaming_tool_item_id_source(item_id: &str, response_format: &ResponseFo
     }
 }
 
+fn approval_request_item_id_source(item_id: &str) -> String {
+    normalize_tool_item_id_with_prefix(item_id, "mcpr_")
+}
+
 pub(crate) fn mcp_list_tools_bindings_to_emit(
     existing_labels: &HashSet<String>,
     bindings: &[McpServerBinding],
@@ -588,6 +643,101 @@ pub(crate) fn inject_mcp_metadata_streaming(
         );
         obj.insert("output".to_string(), Value::Array(output_items));
     }
+}
+
+fn build_approval_response(
+    mut response: Value,
+    state: ToolLoopState,
+    session: &McpToolSession<'_>,
+    original_body: &ResponsesRequest,
+    approval_item: Value,
+) -> Result<Value, String> {
+    let obj = response
+        .as_object_mut()
+        .ok_or_else(|| "response not an object".to_string())?;
+    obj.insert("status".to_string(), Value::String("completed".to_string()));
+
+    let list_tools_bindings = mcp_list_tools_bindings_to_emit(
+        &state.existing_mcp_list_tools_labels,
+        session.mcp_servers(),
+    );
+
+    match obj.get_mut("output").and_then(|v| v.as_array_mut()) {
+        Some(output_array) => {
+            let retained_items = retained_output_items(output_array, original_body);
+            let prefix =
+                approval_prefix_items(&state, session, &list_tools_bindings, approval_item);
+
+            output_array.clear();
+            output_array.extend(prefix);
+            output_array.extend(retained_items);
+        }
+        None => {
+            let output_items =
+                approval_prefix_items(&state, session, &list_tools_bindings, approval_item);
+            obj.insert("output".to_string(), Value::Array(output_items));
+        }
+    }
+
+    Ok(response)
+}
+
+fn retained_output_items(output_array: &[Value], original_body: &ResponsesRequest) -> Vec<Value> {
+    let user_function_names: HashSet<&str> = original_body
+        .tools
+        .as_deref()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| match tool {
+                    ResponseTool::Function(function_tool) => {
+                        Some(function_tool.function.name.as_str())
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    output_array
+        .iter()
+        .filter(|item| {
+            let item_type = item.get("type").and_then(|value| value.as_str());
+            if !item_type.is_some_and(is_function_call_type) {
+                return true;
+            }
+
+            item.get("name")
+                .and_then(|value| value.as_str())
+                .is_some_and(|name| user_function_names.contains(name))
+        })
+        .cloned()
+        .collect()
+}
+
+fn approval_prefix_items(
+    state: &ToolLoopState,
+    session: &McpToolSession<'_>,
+    list_tools_bindings: &[(String, String)],
+    approval_item: Value,
+) -> Vec<Value> {
+    let mut prefix = Vec::with_capacity(list_tools_bindings.len() + state.mcp_call_items.len() + 1);
+    for (list_server_label, server_key) in list_tools_bindings {
+        if !session.is_internal_server_label(list_server_label) {
+            prefix.push(session.build_mcp_list_tools_json(list_server_label, server_key));
+        }
+    }
+    prefix.extend(
+        state
+            .mcp_call_items
+            .iter()
+            .filter(|item| !is_internal_mcp_response_item(item, session))
+            .cloned(),
+    );
+    if !is_internal_mcp_response_item(&approval_item, session) {
+        prefix.push(approval_item);
+    }
+    prefix
 }
 
 pub(crate) struct ToolLoopExecutionContext<'a> {
@@ -716,6 +866,7 @@ pub(crate) async fn execute_tool_loop(
                     );
 
                     state.record_call(
+                        session.is_builtin_tool(&call.name),
                         call.call_id,
                         call.name,
                         call.arguments,
@@ -730,13 +881,37 @@ pub(crate) async fn execute_tool_loop(
                 "Calling MCP tool '{}' with args: {}",
                 call.name, call.arguments
             );
-            let tool_output = session
-                .execute_tool(ToolExecutionInput {
+            let tool_result = session
+                .execute_tool_result(ToolExecutionInput {
                     call_id: call.call_id.clone(),
                     tool_name: call.name.clone(),
                     arguments,
                 })
                 .await;
+
+            let response_format = session.tool_response_format(&call.name);
+            let server_label = session.resolve_tool_server_label(&call.name);
+            let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, &response_format);
+            let approval_request_id = approval_request_item_id_source(&call.item_id);
+
+            let tool_output = match tool_result {
+                ToolExecutionResult::Executed(tool_output) => tool_output,
+                ToolExecutionResult::PendingApproval(pending) => {
+                    let approval_item = build_mcp_approval_request_item(
+                        &approval_request_id,
+                        &pending.tool_name,
+                        &call.arguments,
+                        &server_label,
+                    );
+                    return build_approval_response(
+                        response_json,
+                        state,
+                        session,
+                        original_body,
+                        approval_item,
+                    );
+                }
+            };
 
             Metrics::record_mcp_tool_duration(
                 &original_body.model,
@@ -754,9 +929,6 @@ pub(crate) async fn execute_tool_loop(
             );
 
             let output_str = tool_output.output.to_string();
-            let response_format = session.tool_response_format(&call.name);
-            let server_label = session.resolve_tool_server_label(&call.name);
-            let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, &response_format);
             let transformed_item = build_transformed_mcp_call_item(
                 &tool_output.output,
                 &response_format,
@@ -767,6 +939,7 @@ pub(crate) async fn execute_tool_loop(
             );
 
             state.record_call(
+                session.is_builtin_tool(&call.name),
                 call.call_id,
                 call.name,
                 call.arguments,
@@ -936,6 +1109,21 @@ fn build_mcp_call_item(
     })
 }
 
+fn build_mcp_approval_request_item(
+    approval_request_id: &str,
+    tool_name: &str,
+    arguments: &str,
+    server_label: &str,
+) -> Value {
+    json!({
+        "id": approval_request_id,
+        "type": "mcp_approval_request",
+        "arguments": arguments,
+        "name": tool_name,
+        "server_label": server_label,
+    })
+}
+
 /// Build a transformed output item using ResponseTransformer
 ///
 /// Converts the output using the tool's response_format to the correctly-typed
@@ -1020,8 +1208,9 @@ mod tests {
     };
 
     use super::{
-        build_transformed_mcp_call_item, is_internal_mcp_response_item,
-        mcp_list_tools_bindings_to_emit,
+        build_transformed_mcp_call_item, extract_openai_response_output_items,
+        is_internal_mcp_response_item, mcp_list_tools_bindings_to_emit, ResponseInput,
+        ToolLoopState,
     };
 
     fn test_tool(name: &str) -> Tool {
@@ -1213,5 +1402,117 @@ mod tests {
             bindings_to_emit,
             vec![("deepwiki_ask".to_string(), "server-ask".to_string())]
         );
+    }
+
+    #[test]
+    fn extract_openai_response_output_items_from_embedded_text_json() {
+        let output = r#"[{"type":"text","text":"{\"execution_id\":\"abc\",\"openai_response\":{\"content\":{\"type\":\"output_text\",\"annotations\":[{\"type\":\"url_citation\",\"title\":\"Example citation\",\"url\":\"https://example.com/openai-result\",\"start_index\":0,\"end_index\":10}],\"logprobs\":[],\"text\":\"intermediate summary\"}}}"}]"#;
+
+        let extracted = extract_openai_response_output_items(output);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0]["type"], "message");
+        assert_eq!(extracted[0]["role"], "assistant");
+        assert_eq!(extracted[0]["content"][0]["type"], "output_text");
+        assert_eq!(extracted[0]["content"][0]["text"], "intermediate summary");
+        assert_eq!(
+            extracted[0]["content"][0]["annotations"][0]["type"],
+            "url_citation"
+        );
+        assert_eq!(
+            extracted[0]["content"][0]["annotations"][0]["title"],
+            "Example citation"
+        );
+        assert_eq!(
+            extracted[0]["content"][0]["annotations"][0]["url"],
+            "https://example.com/openai-result"
+        );
+        assert_eq!(
+            extracted[0]["content"][0]["annotations"][0]["start_index"],
+            0
+        );
+        assert_eq!(
+            extracted[0]["content"][0]["annotations"][0]["end_index"],
+            10
+        );
+    }
+
+    #[test]
+    fn record_call_appends_openai_response_output_after_tool_item() {
+        let mut state = ToolLoopState::new(ResponseInput::Text("hello".to_string()), Vec::new());
+        let transformed = json!({
+            "type": "web_search_call",
+            "id": "ws_test",
+            "status": "completed",
+            "action": {"type": "search"}
+        });
+        let output = r#"[{"type":"text","text":"{\"openai_response\":{\"content\":{\"type\":\"output_text\",\"annotations\":[{\"type\":\"url_citation\",\"title\":\"Example citation\",\"url\":\"https://example.com/openai-result\",\"start_index\":0,\"end_index\":10}],\"logprobs\":[],\"text\":\"intermediate\"}}}"}]"#;
+
+        state.record_call(
+            true,
+            "call_123".to_string(),
+            "search_web".to_string(),
+            "{\"query\":\"x\"}".to_string(),
+            output.to_string(),
+            transformed,
+        );
+
+        assert_eq!(state.mcp_call_items.len(), 2);
+        assert_eq!(state.mcp_call_items[0]["type"], "web_search_call");
+        assert_eq!(state.mcp_call_items[1]["type"], "message");
+        assert_eq!(
+            state.mcp_call_items[1]["content"][0]["text"],
+            "intermediate"
+        );
+        assert_eq!(
+            state.mcp_call_items[1]["content"][0]["annotations"][0]["type"],
+            "url_citation"
+        );
+        assert_eq!(
+            state.mcp_call_items[1]["content"][0]["annotations"][0]["title"],
+            "Example citation"
+        );
+        assert_eq!(
+            state.mcp_call_items[1]["content"][0]["annotations"][0]["url"],
+            "https://example.com/openai-result"
+        );
+        assert_eq!(
+            state.mcp_call_items[1]["content"][0]["annotations"][0]["start_index"],
+            0
+        );
+        assert_eq!(
+            state.mcp_call_items[1]["content"][0]["annotations"][0]["end_index"],
+            10
+        );
+    }
+
+    #[test]
+    fn record_call_does_not_append_openai_response_output_for_non_builtin_tools() {
+        let mut state = ToolLoopState::new(ResponseInput::Text("hello".to_string()), Vec::new());
+        let transformed = json!({
+            "type": "web_search_call",
+            "id": "ws_test",
+            "status": "completed",
+            "action": {"type": "search"}
+        });
+        let output = r#"[{"type":"text","text":"{\"openai_response\":{\"content\":{\"type\":\"output_text\",\"annotations\":[],\"logprobs\":[],\"text\":\"intermediate\"}}}"}]"#;
+
+        state.record_call(
+            false,
+            "call_123".to_string(),
+            "internal_search_web".to_string(),
+            "{\"query\":\"x\"}".to_string(),
+            output.to_string(),
+            transformed,
+        );
+
+        assert_eq!(state.mcp_call_items.len(), 1);
+        assert_eq!(state.mcp_call_items[0]["type"], "web_search_call");
+    }
+
+    #[test]
+    fn extract_openai_response_output_items_ignores_null_openai_response() {
+        let output = r#"[{"type":"text","text":"{\"openai_response\":null}"}]"#;
+        let extracted = extract_openai_response_output_items(output);
+        assert!(extracted.is_empty());
     }
 }

@@ -19,8 +19,21 @@ fi
 
 echo "Using uv version: $(uv --version)"
 
+# Pin vLLM below 0.19.1. vLLM 0.19.1 bundled the transformers v5 upgrade,
+# which breaks intfloat/e5-mistral-7b-instruct embedding quality
+# (self-similarity ~0.33 instead of ~1.0) via an EOS / last-token pooling
+# regression. Last-known-good combo is:
+#   vllm==0.19.0 + transformers==4.57.6   (run 24591985132, 82a3fb1a)
+# Regression first appeared in run 24608587304 (dcede344). Failure signature:
+# https://github.com/lightseekorg/smg/actions/runs/24644816475/job/72068881582
+#
+# We rely on vllm 0.19.0's own wheel metadata (transformers<5,>=4.56.0) to
+# force transformers back to 4.x. Not pinning transformers separately — if
+# we ship vllm we don't want to second-guess the library's own dep range;
+# drop this pin whenever vllm publishes a release that re-verifies embedding
+# correctness post-transformers-v5.
 echo "Installing vLLM..."
-uv pip install vllm
+uv pip install "vllm<0.19.1"
 
 # Install nixl for vLLM PD disaggregation (NIXL KV transfer)
 echo "Installing nixl..."

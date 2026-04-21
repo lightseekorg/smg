@@ -52,15 +52,15 @@ Track all control plane operations for security monitoring and compliance.
 
 | Method | Use Case | Configuration |
 |--------|----------|---------------|
-| **JWT/OIDC** | Enterprise SSO integration with identity providers | `--jwt-issuer`, `--jwt-audience` |
-| **API Keys** | Service accounts and programmatic access | `--control-plane-api-keys` |
-| **Worker API Key** | Gateway-to-worker authentication | `--api-key` |
+| **Control plane JWT/OIDC** | Enterprise SSO integration with identity providers (admin routes) | `--jwt-issuer`, `--jwt-audience` |
+| **Control plane API keys** | Service accounts and programmatic access (admin routes) | `--control-plane-api-keys` |
+| **Data plane API key** | Shared bearer token gating data plane routes and forwarded to workers | `--api-key` |
 
 ### When to Use Each Method
 
-- **JWT/OIDC**: Use for enterprise deployments with existing identity providers (Keycloak, Auth0, Azure AD, Okta). Provides centralized user management and SSO.
-- **API Keys**: Use for service-to-service communication, CI/CD pipelines, and automated tooling. Simpler to set up but requires manual key management.
-- **Worker API Key**: Use when workers require authentication for data parallel (DP) aware scheduling or when workers are deployed with API key protection.
+- **Control plane JWT/OIDC**: Use for enterprise deployments with existing identity providers (Keycloak, Auth0, Azure AD, Okta). Provides centralized user management and SSO for control plane operations.
+- **Control plane API keys**: Use for service-to-service automation against admin endpoints (CI/CD pipelines, tooling). Simpler to set up but requires manual key management.
+- **Data plane API key**: Use when you want a single shared secret that both clients (calling chat/completions/responses/etc.) and the gateway → worker hop must present.
 
 ---
 
@@ -330,23 +330,42 @@ curl -H "Authorization: Bearer sk-admin-key-12345" \
 
 ---
 
-## Worker API Key Authentication
+## Data Plane API Key (`--api-key`)
 
-The `--api-key` option configures an API key for gateway-to-worker communication:
+The `--api-key` option configures a single bearer token that does two things:
 
 ```bash
 smg \
   --worker-urls http://worker:8000 \
-  --api-key "worker-secret-key"
+  --api-key "shared-secret-key"
 ```
+
+1. **Gates incoming data plane requests.** The gateway requires every client
+   request to data plane routes (`/v1/chat/completions`, `/v1/completions`,
+   `/v1/responses`, `/v1/embeddings`, `/v1/rerank`, `/v1/messages`,
+   `/v1/realtime/*`, etc.) to present `Authorization: Bearer <api-key>`.
+   Requests without a valid token receive `401 Unauthorized`.
+2. **Propagates to workers.** When a worker has no per-worker `api_key`, the
+   gateway forwards this same token to the worker as
+   `Authorization: Bearer <api-key>`.
 
 This is useful when:
 
+- Clients and workers share a common token
 - Workers require authentication (e.g., deployed with API key protection)
 - Using DP-aware scheduling that requires authenticated worker queries
 - Workers are behind an authentication proxy
 
-The gateway automatically adds `Authorization: Bearer <api-key>` to requests sent to workers.
+Control plane routes (`/workers`, `/wasm`, `/v1/tokenizers`, etc.) use
+their own middleware stack. When `--control-plane-api-keys` or
+`--jwt-*` are configured they take over as the admin auth backend
+(with role-based access control and audit logging); when neither is
+set, admin routes fall back to the same `--api-key` bearer check that
+guards the data plane. If you run with **only** `--api-key`, the same
+shared secret therefore gates both the data plane and the control
+plane — which is rarely what you want in production. See
+[Control Plane Auth](../../getting-started/control-plane-auth.md) for
+configuring JWT/OIDC or dedicated control-plane keys.
 
 ---
 

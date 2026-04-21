@@ -42,7 +42,7 @@ Adds a new tokenizer from a local path or HuggingFace model ID.
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "pending",
-  "message": "Tokenizer loading initiated"
+  "message": "Tokenizer 'llama3-tokenizer' registration job submitted. Loading from: meta-llama/Meta-Llama-3-8B"
 }
 ```
 
@@ -94,8 +94,8 @@ Returns details for a specific tokenizer.
 ```json
 {
   "error": {
-    "message": "Tokenizer not found",
-    "type": "not_found"
+    "message": "Tokenizer 'llama3-tokenizer' not found",
+    "type": "tokenizer_not_found"
   }
 }
 ```
@@ -115,7 +115,7 @@ Returns the loading status of a tokenizer.
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "completed",
-  "message": "Tokenizer loaded successfully",
+  "message": "Tokenizer 'llama3-tokenizer' is loaded and ready",
   "vocab_size": 128256
 }
 ```
@@ -141,7 +141,7 @@ Removes a tokenizer.
 ```json
 {
   "success": true,
-  "message": "Tokenizer removed successfully"
+  "message": "Tokenizer 'llama3-tokenizer' removed successfully"
 }
 ```
 
@@ -176,7 +176,7 @@ Registers a new backend worker.
 | `url` | string | Yes | Worker base URL |
 | `worker_type` | string | No | `regular`, `prefill`, or `decode` (default: `regular`) |
 | `connection_mode` | string | No | `http` or `grpc` (default: `http`) |
-| `runtime_type` | string | No | `sglang`, `vllm`, `trtllm`, or `external` (default: auto-detect) |
+| `runtime_type` | string | No | `sglang`, `vllm`, `trtllm`, `mlx`, `external`, or `unspecified` (default: `unspecified`, which triggers auto-detection) |
 | `models` | array | No | Model cards served by this worker (empty = wildcard) |
 | `api_key` | string | No | API key for worker authentication |
 | `priority` | integer | No | Routing priority (higher = preferred, default: 50) |
@@ -194,13 +194,13 @@ Registers a new backend worker.
 
 ---
 
-### Update Worker
+### Update Worker (partial)
 
 ```
-PUT /workers/{worker_id}
+PATCH /workers/{worker_id}
 ```
 
-Updates worker configuration.
+Partially updates worker configuration. Only the fields you include are changed.
 
 **Request Body:**
 ```json
@@ -216,6 +216,7 @@ Updates worker configuration.
 | `cost` | number | New cost factor |
 | `labels` | object | Updated labels |
 | `api_key` | string | New API key (for key rotation) |
+| `health` | object | Partial health-check overrides (`timeout_secs`, `check_interval_secs`, `success_threshold`, `failure_threshold`, `disable_health_check`) |
 
 **Response:** `202 Accepted`
 ```json
@@ -225,6 +226,18 @@ Updates worker configuration.
   "message": "Worker update queued for background processing"
 }
 ```
+
+---
+
+### Replace Worker (full)
+
+```
+PUT /workers/{worker_id}
+```
+
+Re-runs the full worker registration workflow (model discovery and all). The request body must be a complete `WorkerSpec` whose `url` matches the existing worker's URL — URL changes are not supported via `PUT`; use `DELETE` + `POST` instead.
+
+**Response:** `202 Accepted` with the same shape as `PATCH`.
 
 ---
 
@@ -257,15 +270,20 @@ Manage the routing cache and load information.
 POST /flush_cache
 ```
 
-Flushes the KV cache on all workers.
+Flushes the KV cache on all HTTP workers. gRPC workers are skipped. The response status is `200 OK` on full success and `206 Partial Content` when some workers fail.
 
 **Response:** `200 OK`
 ```json
 {
-  "flushed_workers": 3,
-  "success": true
+  "status": "success",
+  "message": "Successfully flushed cache on all 3 HTTP workers",
+  "workers_flushed": 3,
+  "total_http_workers": 3,
+  "total_workers": 3
 }
 ```
+
+On partial failure, the response additionally includes `successful` (list of worker URLs) and `failed` (list of `{worker, error}` entries), and `status` becomes `"partial_success"`.
 
 ---
 
@@ -275,18 +293,34 @@ Flushes the KV cache on all workers.
 GET /get_loads
 ```
 
-Returns current load distribution across workers.
+Returns the current load distribution across workers. The gateway fans out to every registered worker (HTTP and gRPC) and returns whatever each backend reports. The `load` field is the total number of KV-cache tokens in use across all data-parallel ranks for that worker; `-1` indicates the worker failed to respond.
 
 **Response:** `200 OK`
 ```json
 {
-  "loads": [
+  "workers": [
     {
-      "worker_id": "worker-1",
-      "url": "http://gpu1:8000",
-      "active_requests": 5,
-      "queue_depth": 2,
-      "cache_utilization": 0.75
+      "worker": "http://gpu1:8000",
+      "load": 1234,
+      "details": {
+        "timestamp": "2024-01-15T12:00:00Z",
+        "dp_rank_count": 1,
+        "loads": [
+          {
+            "dp_rank": 0,
+            "num_running_reqs": 5,
+            "num_waiting_reqs": 2,
+            "num_total_reqs": 7,
+            "num_used_tokens": 1234,
+            "max_total_num_tokens": 16384,
+            "token_usage": 0.075,
+            "gen_throughput": 45.2,
+            "cache_hit_rate": 0.82,
+            "utilization": 0.31,
+            "max_running_requests": 256
+          }
+        ]
+      }
     }
   ]
 }
@@ -363,7 +397,7 @@ Returns server information (proxied to workers).
 
 ## WASM Module Management
 
-Manage WebAssembly plugins.
+Manage WebAssembly plugins. Modules are registered from files accessible to the gateway process; the request body contains descriptors with paths, not binary payloads.
 
 ### Add WASM Module
 
@@ -371,16 +405,45 @@ Manage WebAssembly plugins.
 POST /wasm
 ```
 
-Uploads and registers a WASM module.
+Registers one or more WASM modules.
 
-**Request:** Multipart form with WASM binary
-
-**Response:** `201 Created`
+**Request Body:** JSON `WasmModuleAddRequest`
 ```json
 {
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "name": "custom-filter",
-  "status": "loaded"
+  "modules": [
+    {
+      "name": "custom-middleware",
+      "file_path": "/etc/smg/wasm/custom-middleware.wasm",
+      "module_type": "Middleware",
+      "attach_points": [
+        {"Middleware": "OnRequest"},
+        {"Middleware": "OnResponse"}
+      ]
+    }
+  ]
+}
+```
+
+The only supported `module_type` today is `Middleware`. Valid `Middleware` attach points are `OnRequest`, `OnResponse`, and `OnError`.
+
+**Response:** `200 OK` on full success, `400 Bad Request` if any module failed to register. The response body echoes every requested module with an `add_result` field indicating success (carrying the assigned UUID) or failure (carrying the error message).
+
+```json
+{
+  "modules": [
+    {
+      "name": "custom-middleware",
+      "file_path": "/etc/smg/wasm/custom-middleware.wasm",
+      "module_type": "Middleware",
+      "attach_points": [
+        {"Middleware": "OnRequest"},
+        {"Middleware": "OnResponse"}
+      ],
+      "add_result": {
+        "Success": "550e8400-e29b-41d4-a716-446655440000"
+      }
+    }
+  ]
 }
 ```
 
@@ -392,18 +455,36 @@ Uploads and registers a WASM module.
 GET /wasm
 ```
 
-Returns all registered WASM modules.
+Returns all registered WASM modules together with aggregate execution metrics.
 
 **Response:** `200 OK`
 ```json
 {
   "modules": [
     {
-      "id": "550e8400-e29b-41d4-a716-446655440000",
-      "name": "custom-filter",
-      "status": "loaded"
+      "module_uuid": "550e8400-e29b-41d4-a716-446655440000",
+      "module_meta": {
+        "name": "custom-middleware",
+        "file_path": "/etc/smg/wasm/custom-middleware.wasm",
+        "sha256_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 65536,
+        "created_at": "2024-01-15T12:00:00.000000000Z",
+        "last_accessed_at": "2024-01-15T12:05:00.000000000Z",
+        "access_count": 42,
+        "attach_points": [
+          {"Middleware": "OnRequest"}
+        ]
+      }
     }
-  ]
+  ],
+  "metrics": {
+    "total_executions": 42,
+    "successful_executions": 42,
+    "failed_executions": 0,
+    "total_execution_time_ms": 125,
+    "max_execution_time_ms": 8,
+    "average_execution_time_ms": 2.97
+  }
 }
 ```
 
@@ -415,15 +496,14 @@ Returns all registered WASM modules.
 DELETE /wasm/{module_uuid}
 ```
 
-Removes a WASM module.
+Removes a WASM module. The body is a plain text status message, not JSON.
 
 **Response:** `200 OK`
-```json
-{
-  "success": true,
-  "message": "Module removed successfully"
-}
 ```
+Module removed successfully
+```
+
+On failure returns `400 Bad Request` with the error text as the body.
 
 ---
 

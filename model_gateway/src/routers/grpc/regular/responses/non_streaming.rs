@@ -27,7 +27,8 @@ use crate::{
         common::mcp_utils::DEFAULT_MAX_ITERATIONS,
         error,
         grpc::common::responses::{
-            ensure_mcp_connection, persist_response_if_needed, ResponsesContext,
+            collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
+            ResponsesContext,
         },
     },
 };
@@ -154,6 +155,7 @@ pub(super) async fn execute_tool_loop(
         .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::now_v7()));
 
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
+    let user_function_names = collect_user_function_names(original_request);
 
     // Get MCP tools and convert to chat format (do this once before loop)
     let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&session);
@@ -224,8 +226,11 @@ pub(super) async fn execute_tool_loop(
 
             // Inject MCP metadata into output
             if state.total_calls > 0 {
-                session
-                    .inject_mcp_output_items(&mut responses_response.output, state.mcp_call_items);
+                session.inject_client_visible_mcp_output_items(
+                    &mut responses_response.output,
+                    state.mcp_call_items,
+                    &user_function_names,
+                );
 
                 trace!(
                     "Injected MCP metadata: {} mcp_list_tools + {} mcp_call items",

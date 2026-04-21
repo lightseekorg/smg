@@ -38,9 +38,10 @@ SMG watches for pods matching the selector and automatically adds or removes wor
 |-----------|---------|-------------|
 | `--service-discovery` | `false` | Enable Kubernetes service discovery |
 | `--selector` | — | Label selector for worker pods (required) |
-| `--service-discovery-namespace` | `default` | Kubernetes namespace to watch |
-| `--service-discovery-port` | `8000` | Port to use for worker connections |
-| `--service-discovery-protocol` | `http` | Protocol: `http` or `grpc` |
+| `--service-discovery-namespace` | (all namespaces) | Kubernetes namespace to watch |
+| `--service-discovery-port` | `80` | Port to use for worker connections |
+
+Connection mode (HTTP vs gRPC) is probed automatically during worker registration, so no protocol flag is required — the first protocol that responds successfully is used, with HTTP taking priority when both succeed.
 
 ---
 
@@ -54,17 +55,13 @@ smg --service-discovery --selector app=vllm
 
 ### Multiple Labels
 
-```bash
-smg --service-discovery --selector "app=sglang,environment=production"
-```
-
-Matches pods with both labels.
-
-### Set-Based Selectors
+Pass multiple `key=value` pairs separated by spaces:
 
 ```bash
-smg --service-discovery --selector "app in (sglang, vllm),tier=inference"
+smg --service-discovery --selector app=sglang environment=production
 ```
+
+Matches pods that carry every listed label.
 
 ---
 
@@ -76,8 +73,8 @@ For prefill-decode deployments, use separate selectors:
 smg \
   --service-discovery \
   --pd-disaggregation \
-  --prefill-selector "app=sglang,role=prefill" \
-  --decode-selector "app=sglang,role=decode" \
+  --prefill-selector app=sglang role=prefill \
+  --decode-selector app=sglang role=decode \
   --service-discovery-namespace inference
 ```
 

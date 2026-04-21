@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use openai_protocol::responses::{
-    generate_id, ResponseInput, ResponseInputOutputItem, ResponsesRequest, StringOrContentParts,
+    generate_id, MessagePhase, ResponseInput, ResponseInputOutputItem, ResponsesRequest,
+    StringOrContentParts,
 };
 use serde_json::{json, Value};
 use smg_data_connector::{
@@ -66,6 +67,18 @@ pub fn item_to_json(item: &ConversationItem) -> Value {
                 }
             }
         }
+    } else if item.item_type == "message" {
+        // Message items may store either a bare content array (legacy) or an
+        // object `{content: [...], phase: "..."}` when the message carried a
+        // phase label (P3). Either way, expose `content` and hoist `phase`
+        // back to the message level so round-trip is transparent to callers.
+        let (content_value, phase) = split_stored_message_content(item.content.clone());
+        obj.insert("content".to_string(), content_value);
+        if let Some(phase) = phase {
+            if let Ok(phase_value) = serde_json::to_value(phase) {
+                obj.insert("phase".to_string(), phase_value);
+            }
+        }
     } else {
         // Default: include content as-is
         obj.insert("content".to_string(), item.content.clone());
@@ -76,6 +89,30 @@ pub fn item_to_json(item: &ConversationItem) -> Value {
     }
 
     Value::Object(obj)
+}
+
+/// Split stored message content into (content_parts_value, phase).
+///
+/// Legacy messages were stored with their `content` field directly (an array of
+/// content parts). When a message carries a `phase` label (P3), persistence
+/// wraps it as `{"content": [...], "phase": "..."}`. This helper accepts both
+/// shapes so callers can round-trip phase without breaking existing rows.
+pub fn split_stored_message_content(raw: Value) -> (Value, Option<MessagePhase>) {
+    if let Value::Object(mut map) = raw {
+        // Only treat objects with an explicit `content` key as the wrapped
+        // shape; any other object is either malformed or a future extension
+        // and is returned unchanged so the caller's error path surfaces it.
+        if map.contains_key("content") {
+            let content = map.remove("content").unwrap_or(Value::Array(Vec::new()));
+            let phase = map
+                .get("phase")
+                .cloned()
+                .and_then(|v| serde_json::from_value::<MessagePhase>(v).ok());
+            return (content, phase);
+        }
+        return (Value::Object(map), None);
+    }
+    (raw, None)
 }
 
 // ============================================================================
@@ -183,7 +220,12 @@ fn extract_input_items(input: &ResponseInput) -> Result<Vec<Value>, String> {
                 .iter()
                 .map(|item| {
                     match item {
-                        ResponseInputOutputItem::SimpleInputMessage { content, role, .. } => {
+                        ResponseInputOutputItem::SimpleInputMessage {
+                            content,
+                            role,
+                            phase,
+                            ..
+                        } => {
                             // Convert SimpleInputMessage to standard message format with ID
                             let content_json = match content {
                                 StringOrContentParts::String(s) => {
@@ -195,13 +237,23 @@ fn extract_input_items(input: &ResponseInput) -> Result<Vec<Value>, String> {
                                 }
                             };
 
-                            Ok(json!({
+                            let mut msg = json!({
                                 "id": generate_id("msg"),
                                 "type": "message",
                                 "role": role,
                                 "content": content_json,
                                 "status": "completed"
-                            }))
+                            });
+                            // Preserve phase so it round-trips through
+                            // conversation storage (P3).
+                            if let Some(phase) = phase {
+                                if let (Some(obj), Ok(phase_val)) =
+                                    (msg.as_object_mut(), serde_json::to_value(phase))
+                                {
+                                    obj.insert("phase".to_string(), phase_val);
+                                }
+                            }
+                            Ok(msg)
                         }
                         _ => {
                             // For other item types, serialize and ensure ID
@@ -263,6 +315,13 @@ fn item_to_new_conversation_item(
 
     let content = if store_whole_item {
         item_value.clone()
+    } else if item_type == "message" && item_value.get("phase").is_some_and(|v| !v.is_null()) {
+        // Message carries a phase label: wrap the content array alongside
+        // `phase` so multi-turn retrieval preserves it (P3). `item_to_json`
+        // and the history load paths both recognize this shape.
+        let content_value = item_value.get("content").cloned().unwrap_or(json!([]));
+        let phase_value = item_value.get("phase").cloned().unwrap_or(Value::Null);
+        json!({ "content": content_value, "phase": phase_value })
     } else {
         item_value.get("content").cloned().unwrap_or(json!([]))
     };

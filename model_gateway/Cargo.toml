@@ -54,7 +54,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 # Workspace dependencies (with extra features)
-axum = { workspace = true, features = ["macros", "ws", "tracing"] }
+axum = { workspace = true, features = ["macros", "multipart", "ws", "tracing"] }
 bytemuck = { workspace = true, features = ["derive"] }
 reqwest = { workspace = true, features = ["stream", "blocking", "json", "rustls-tls", "multipart"] }
 serde = { workspace = true, features = ["derive"] }
@@ -76,6 +76,8 @@ llm-multimodal.workspace = true
 smg-wasm = { workspace = true, features = ["storage-hooks"] }
 smg-mesh.workspace = true
 smg-grpc-client.workspace = true
+smg-skills.workspace = true
+smg-blob-storage.workspace = true
 
 # External dependencies (not in workspace)
 bincode = "1.3"

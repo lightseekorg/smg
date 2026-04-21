@@ -61,6 +61,10 @@ pub struct MeshServerHandler {
     partition_detector: Option<Arc<PartitionDetector>>,
     state_machine: Option<Arc<NodeStateMachine>>,
     rate_limit_task_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Shared with the MeshServer so adapters can subscribe to stream
+    /// namespaces (broadcast/targeted) and publish values that reach
+    /// peers via the gossip loop.
+    mesh_kv: Arc<crate::kv::MeshKV>,
 }
 
 impl MeshServerHandler {
@@ -262,6 +266,13 @@ impl MeshServerHandler {
         // Merge operation log into our app store using CRDT merge
         self.stores.app.merge(log);
     }
+
+    /// Shared MeshKV handle — adapters subscribe to stream namespaces
+    /// and publish values through this. The handle is Arc-cloned, so
+    /// subscribers created here see the same events as the gossip loop.
+    pub fn mesh_kv(&self) -> &Arc<crate::kv::MeshKV> {
+        &self.mesh_kv
+    }
 }
 
 pub struct MeshServerBuilder {
@@ -321,6 +332,7 @@ impl MeshServerBuilder {
         ));
         // Initialize rate-limit hash ring with current membership
         sync_manager.update_rate_limit_membership();
+        let mesh_kv = Arc::new(crate::kv::MeshKV::new(self.self_name.clone()));
         (
             MeshServer {
                 state: self.state.clone(),
@@ -333,6 +345,7 @@ impl MeshServerBuilder {
                 signal_rx,
                 partition_detector: Some(partition_detector.clone()),
                 mtls_manager: self.mtls_manager.clone(),
+                mesh_kv: mesh_kv.clone(),
             },
             MeshServerHandler {
                 state: self.state.clone(),
@@ -344,6 +357,7 @@ impl MeshServerBuilder {
                 partition_detector: Some(partition_detector),
                 state_machine: Some(state_machine),
                 rate_limit_task_handle: std::sync::Mutex::new(None),
+                mesh_kv,
             },
         )
     }
@@ -375,6 +389,8 @@ pub struct MeshServer {
     signal_rx: watch::Receiver<bool>,
     partition_detector: Option<Arc<PartitionDetector>>,
     mtls_manager: Option<Arc<MTLSManager>>,
+    /// Node-wide MeshKV handle shared by controller + ping_server.
+    mesh_kv: Arc<crate::kv::MeshKV>,
 }
 
 impl MeshServer {
@@ -385,6 +401,7 @@ impl MeshServer {
             self.advertise_addr,
             &self.self_name,
         )
+        .with_mesh_kv(self.mesh_kv.clone())
     }
 
     fn build_controller(&self) -> MeshController {
@@ -397,6 +414,7 @@ impl MeshServer {
             self.sync_manager.clone(),
             self.mtls_manager.clone(),
         )
+        .with_mesh_kv(self.mesh_kv.clone())
     }
 
     pub async fn start(self) -> Result<()> {
@@ -435,6 +453,12 @@ impl MeshServer {
             .clone()
             .expect("partition detector missing");
 
+        // Build controller first so we can share its current_batch with the
+        // server-side sync_stream handlers. This ensures both client-side
+        // (outgoing connections) and server-side (incoming connections) use
+        // the same centrally collected RoundBatch.
+        let controller = self.build_controller();
+
         let mut service = self.build_ping_server();
         service = service.with_stores(self.stores.clone());
 
@@ -442,12 +466,15 @@ impl MeshServer {
 
         service = service.with_partition_detector(partition_detector);
 
+        // Share the controller's current_batch so server-side sync_stream
+        // handlers use the same centrally collected data as client-side.
+        service = service.with_current_batch(controller.current_batch());
+        service = service.with_current_stream_batch(controller.current_stream_batch());
+
         // Add mTLS support if configured
         if let Some(mtls_manager) = self.mtls_manager.clone() {
             service = service.with_mtls_manager(mtls_manager);
         }
-
-        let controller = self.build_controller();
 
         let mut service_shutdown = self.signal_rx.clone();
 

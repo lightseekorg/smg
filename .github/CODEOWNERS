@@ -26,12 +26,12 @@
 
 # Workspace crates
 /crates/auth @slin1237
-/crates/data_connector @key4ng
+/crates/data_connector @key4ng @zhoug9127 @zhaowenzi
 /crates/grpc_client @CatherineSue @slin1237
 /crates/grpc_client/proto/vllm_engine.proto @njhill @CatherineSue @slin1237
 /crates/grpc_client/proto/common.proto @njhill @CatherineSue @slin1237
 /crates/kv_index @slin1237
-/crates/mcp @key4ng @CatherineSue @slin1237
+/crates/mcp @key4ng @CatherineSue @slin1237 @zhoug9127 @zhaowenzi
 /crates/mesh @tonyluj @llfl @slin1237
 /crates/multimodal @slin1237 @CatherineSue
 /crates/protocols @CatherineSue @key4ng

@@ -9,7 +9,7 @@ Parser library for extracting tool/function calls from LLM model outputs. Suppor
 | `CohereParser` | Cohere Command (CMD3/CMD4) | `<\|START_ACTION\|>{...}<\|END_ACTION\|>` |
 | `MistralParser` | Mistral, Mixtral | `[TOOL_CALLS][{...}]` |
 | `QwenParser` | Qwen 2/2.5/3 | `<tool_call>{...}</tool_call>` |
-| `QwenCoderParser` | Qwen Coder | `<tool_call><function=name>...</function></tool_call>` |
+| `QwenXmlParser` | Qwen3-Coder, Qwen3.5+ | `<tool_call><function=name>...</function></tool_call>` |
 | `LlamaParser` | Llama 3.2 | `<\|python_tag\|>{...}` |
 | `PythonicParser` | Llama 4, DeepSeek R1 | `[func_name(arg="val")]` |
 | `DeepSeekParser` | DeepSeek V3 | `<\|tool▁calls▁begin\|>...<\|tool▁calls▁end\|>` |

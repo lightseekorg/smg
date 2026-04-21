@@ -211,11 +211,11 @@ smg --model-path /models/llama-3.1-8b-instruct ...
 smg --model-path /models/llama-3.1-8b-instruct/tokenizer.json ...
 ```
 
-When pointing to a directory, SMG automatically searches for:
-
-1. `tokenizer.json` (HuggingFace fast tokenizer format)
-2. `tokenizer_config.json` (fallback)
-3. `vocab.json` (fallback)
+When pointing to a local directory, SMG looks for either a HuggingFace
+`tokenizer.json` or a tiktoken file (`tiktoken.model` or `*.tiktoken`). When
+pulling from the HuggingFace Hub, SMG additionally falls back to
+`tokenizer_config.json` and `vocab.json` in the downloaded snapshot if a
+primary tokenizer file is not present.
 
 #### `--tokenizer-path`
 
@@ -302,7 +302,7 @@ Chat templates use Jinja2 syntax with access to:
 
 {{ message.content }}<|eot_id|>
 {% endfor %}
-{% if add_generation_prompt %}<|start_header_id|>assistant<|end_header_id|}
+{% if add_generation_prompt %}<|start_header_id|>assistant<|end_header_id|>
 
 {% endif %}
 ```
@@ -547,58 +547,25 @@ smg \
 
 ## Monitoring & Observability
 
-SMG exposes comprehensive Prometheus metrics for cache monitoring:
+The cache implementation tracks per-level hit/miss counters and L1 memory
+usage internally (`CacheStats` and `L1CacheStats` in the `tokenizer` crate).
+These statistics are not currently exported to the gateway's Prometheus
+`/metrics` endpoint, so hit-rate monitoring must rely on application-level
+logging or benchmark runs until dedicated metrics are wired up.
 
-### Cache Metrics
+### Sizing Signals to Watch
 
-| Metric | Description |
-|--------|-------------|
-| `smg_tokenizer_cache_l0_hits_total` | L0 cache hit count |
-| `smg_tokenizer_cache_l0_misses_total` | L0 cache miss count |
-| `smg_tokenizer_cache_l0_entries` | Current L0 cache entries |
-| `smg_tokenizer_cache_l1_hits_total` | L1 cache hit count |
-| `smg_tokenizer_cache_l1_misses_total` | L1 cache miss count |
-| `smg_tokenizer_cache_l1_memory_bytes` | Current L1 memory usage |
+Without dedicated cache metrics, use these indirect signals when tuning
+`--tokenizer-cache-l0-max-entries` and `--tokenizer-cache-l1-max-memory`:
 
-### Useful PromQL Queries
-
-<div class="grid" markdown>
-
-<div class="card" markdown>
-
-#### L0 Hit Rate
-
-```promql
-rate(smg_tokenizer_cache_l0_hits_total[5m]) /
-(rate(smg_tokenizer_cache_l0_hits_total[5m]) +
- rate(smg_tokenizer_cache_l0_misses_total[5m]))
-```
-
-</div>
-
-<div class="card" markdown>
-
-#### Combined Hit Rate
-
-```promql
-(rate(smg_tokenizer_cache_l0_hits_total[5m]) +
- rate(smg_tokenizer_cache_l1_hits_total[5m])) /
-(rate(smg_tokenizer_cache_l0_hits_total[5m]) +
- rate(smg_tokenizer_cache_l0_misses_total[5m]))
-```
-
-</div>
-
-</div>
-
-### Alert Thresholds
-
-| Metric | Warning | Critical | Action |
-|--------|---------|----------|--------|
-| L0 hit rate | <50% | <30% | Review prompt patterns |
-| L1 hit rate | <30% | <15% | Check conversation patterns |
-| L0 entries | >90% capacity | >95% | Increase `max-entries` |
-| L1 memory | >80% limit | >90% | Increase `max-memory` |
+- Rising tokenization latency at steady request rate suggests more unique
+  prompts than L0 can retain — increase `max-entries`.
+- Multi-turn chat traffic with growing context benefits from larger L1
+  memory budgets; set L1 based on the estimate of ~1 KB per active
+  conversation described in [L1 Cache Sizing](#l1-cache-sizing).
+- Resident process memory approaching the sum of L0 (~2.2 KB per entry)
+  plus L1 (`max-memory`) bounds indicates you are near the configured
+  cache budget.
 
 ---
 

@@ -195,7 +195,7 @@ Auto-detected from the model name. Override with `--tool-call-parser` if needed.
 | `deepseek` | DeepSeek-V3 |
 | `mistral` | Mistral, Mixtral |
 | `qwen` | Qwen |
-| `qwen_coder` | Qwen3-Coder, Qwen2.5-Coder |
+| `qwen_xml` | Qwen3-Coder, Qwen3.5+ |
 | `glm45_moe` | GLM-4.5, GLM-4.6 |
 | `glm47_moe` | GLM-4.7 |
 | `step3` | Step-3 |
