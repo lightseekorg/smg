@@ -506,6 +506,11 @@ impl ToolParser for QwenXmlParser {
         helpers::get_unstreamed_args(&self.prev_tool_call_arr, &self.streamed_args_for_tool)
     }
 
+    /// Count of tools whose name has been emitted to the client.
+    fn current_tool_index(&self) -> usize {
+        self.prev_tool_call_arr.len()
+    }
+
     fn reset(&mut self) {
         helpers::reset_parser_state(
             &mut self.buffer,
@@ -593,5 +598,112 @@ mod tests {
             safe_val("Tom &amp; Jerry"),
             Value::String("Tom & Jerry".to_string())
         );
+    }
+
+    fn weather_tool() -> openai_protocol::common::Tool {
+        use openai_protocol::common::{Function as ToolFunction, Tool};
+        Tool {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: serde_json::json!({}),
+                strict: None,
+            },
+        }
+    }
+
+    fn time_tool() -> openai_protocol::common::Tool {
+        use openai_protocol::common::{Function as ToolFunction, Tool};
+        Tool {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: "get_time".to_string(),
+                description: None,
+                parameters: serde_json::json!({}),
+                strict: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_current_tool_index_after_name_sent() {
+        let tools = vec![weather_tool()];
+        let mut parser = QwenXmlParser::new();
+        assert_eq!(parser.current_tool_index(), 0);
+
+        let _ = parser
+            .parse_incremental("<tool_call>\n<function=get_weather>\n", &tools)
+            .await
+            .unwrap();
+        assert_eq!(parser.current_tool_index(), 1);
+
+        let _ = parser
+            .parse_incremental("<parameter=location>SF</parameter>\n", &tools)
+            .await
+            .unwrap();
+        assert_eq!(parser.current_tool_index(), 1);
+
+        let _ = parser
+            .parse_incremental("</function>\n</tool_call>", &tools)
+            .await
+            .unwrap();
+        assert_eq!(parser.current_tool_index(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_current_tool_index_multiple_tools() {
+        let tools = vec![weather_tool(), time_tool()];
+        let mut parser = QwenXmlParser::new();
+
+        let _ = parser
+            .parse_incremental(
+                "<tool_call>\n<function=get_weather>\n<parameter=location>SF</parameter>\n</function>\n</tool_call>",
+                &tools,
+            )
+            .await
+            .unwrap();
+        assert_eq!(parser.current_tool_index(), 1);
+
+        let _ = parser
+            .parse_incremental("<tool_call>\n", &tools)
+            .await
+            .unwrap();
+        assert_eq!(parser.current_tool_index(), 1);
+
+        let _ = parser
+            .parse_incremental("<function=get_time>\n", &tools)
+            .await
+            .unwrap();
+        assert_eq!(parser.current_tool_index(), 2);
+    }
+
+    // Simulates the orchestrator's Complete-phase skip logic: streaming parser
+    // must report >= the count of tools the fallback re-parse finds.
+    #[tokio::test]
+    async fn test_phase2_no_duplicate_after_complete_stream() {
+        let tools = vec![weather_tool()];
+        let full = "<tool_call>\n<function=get_weather>\n<parameter=location>SF</parameter>\n</function>\n</tool_call>";
+
+        let mut parser = QwenXmlParser::new();
+        for chunk in [
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=location>SF",
+            "</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ] {
+            let _ = parser.parse_incremental(chunk, &tools).await.unwrap();
+        }
+
+        let (_normal, fallback_tcs) = QwenXmlParser::new()
+            .parse_complete_with_tools(full, &tools)
+            .await
+            .unwrap();
+
+        assert_eq!(fallback_tcs.len(), 1);
+        assert_eq!(parser.current_tool_index(), 1);
+        assert!(fallback_tcs.len() <= parser.current_tool_index());
     }
 }

@@ -251,6 +251,19 @@ impl ToolParser for QwenParser {
         helpers::get_unstreamed_args(&self.prev_tool_call_arr, &self.streamed_args_for_tool)
     }
 
+    /// Count of tools whose name has been emitted to the client.
+    /// `prev_tool_call_arr` is only populated after the first arg chunk, so
+    /// include `current_tool_name_sent` to cover the name-but-no-args window.
+    fn current_tool_index(&self) -> usize {
+        if self.current_tool_id < 0 {
+            0
+        } else if self.current_tool_name_sent {
+            self.current_tool_id as usize + 1
+        } else {
+            self.current_tool_id as usize
+        }
+    }
+
     fn reset(&mut self) {
         helpers::reset_parser_state(
             &mut self.buffer,
@@ -259,5 +272,58 @@ impl ToolParser for QwenParser {
             &mut self.current_tool_name_sent,
             &mut self.streamed_args_for_tool,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openai_protocol::common::{Function as ToolFunction, Tool};
+
+    fn weather_tool() -> Tool {
+        Tool {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: serde_json::json!({}),
+                strict: None,
+            },
+        }
+    }
+
+    // Case 1 emits the name but prev_tool_call_arr is empty until Case 2.
+    #[tokio::test]
+    async fn test_current_tool_index_after_name_before_args() {
+        let tools = vec![weather_tool()];
+        let mut parser = QwenParser::new();
+        assert_eq!(parser.current_tool_index(), 0);
+
+        let _ = parser
+            .parse_incremental(
+                "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": ",
+                &tools,
+            )
+            .await
+            .unwrap();
+
+        assert!(parser.current_tool_name_sent);
+        assert_eq!(parser.current_tool_index(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_current_tool_index_full_stream() {
+        let tools = vec![weather_tool()];
+        let mut parser = QwenParser::new();
+
+        let _ = parser
+            .parse_incremental(
+                "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"SF\"}}\n</tool_call>",
+                &tools,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(parser.current_tool_index(), 1);
     }
 }
