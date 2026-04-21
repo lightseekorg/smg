@@ -63,8 +63,9 @@ pub struct GossipService {
     current_batch: Option<Arc<parking_lot::RwLock<Arc<RoundBatch>>>>,
     /// Shared reference to the current stream RoundBatch, drained once
     /// per round by the MeshController. Server-side handlers read
-    /// broadcast entries from this (drain_entries); targeted entries
-    /// are handled client-side where peer_name is known at spawn.
+    /// broadcast drain_entries and also emit targeted_entries addressed
+    /// to the remote peer learned from the first inbound message, so
+    /// publish_to(peer) works in both directions of a peer pair.
     current_stream_batch: Option<Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>>>,
     /// Node-wide MeshKV handle. Owns the stream buffers, subscriber
     /// registry, and chunk assembler shared with the client-side
@@ -313,8 +314,10 @@ impl GossipService {
     }
 
     /// Attach the shared stream RoundBatch reference. Server-side
-    /// handlers emit broadcast drain_entries to their peer — targeted
-    /// entries stay on the client side where peer_name is known.
+    /// handlers emit broadcast drain_entries plus targeted_entries
+    /// whose target matches the remote peer learned from the first
+    /// inbound StreamMessage, so publish_to() works in both directions
+    /// of a peer pair.
     pub fn with_current_stream_batch(
         mut self,
         current_stream_batch: Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>>,
@@ -741,27 +744,43 @@ impl Gossip for GossipService {
             }
 
             const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+            // Short-circuits the RwLock::read() once we've accepted an
+            // identity for this stream — learned_peer_inbound is
+            // write-once-per-connection, so after the first learn every
+            // subsequent message would otherwise take a pointless lock.
+            let mut peer_learned = false;
             loop {
                 match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming.next()).await {
                     Ok(Some(Ok(msg))) => {
                         sequence += 1;
-                        peer_id.clone_from(&msg.peer_id);
-                        // Publish the learned remote peer id once it's known
-                        // so the server-side sender task can start emitting
-                        // targeted_entries addressed to this peer. Reject
-                        // mid-stream changes: the stream's remote identity
-                        // is fixed for the connection, so a different
-                        // peer_id on a subsequent message is either a bug
-                        // or a peer trying to claim another node's
+                        // Accept the claimed peer_id before copying it into
+                        // the task-local `peer_id`: the task-local drives
+                        // the teardown log and connection-gauge decrement
+                        // below, and if we wrote a mismatched value here
+                        // before the reject, the cleanup would attribute
+                        // the close to the spoofed peer and leak the real
+                        // peer's connection gauge.
+                        //
+                        // Reject mid-stream peer_id changes: the stream's
+                        // remote identity is fixed for the connection, so
+                        // a different peer_id on a later message is either
+                        // a bug or a peer trying to claim another node's
                         // targeted entries. Close the stream and let the
                         // client reconnect. Pre-mTLS-binding defence;
                         // mTLS-derived identity is the authoritative
                         // long-term fix.
-                        if !msg.peer_id.is_empty() {
+                        if !peer_learned && !msg.peer_id.is_empty() {
                             let mut learned = learned_peer_inbound.write();
                             match learned.as_ref() {
-                                None => *learned = Some(msg.peer_id.clone()),
-                                Some(existing) if existing == &msg.peer_id => {}
+                                None => {
+                                    *learned = Some(msg.peer_id.clone());
+                                    peer_id.clone_from(&msg.peer_id);
+                                    peer_learned = true;
+                                }
+                                Some(existing) if existing == &msg.peer_id => {
+                                    peer_id.clone_from(existing);
+                                    peer_learned = true;
+                                }
                                 Some(existing) => {
                                     log::warn!(
                                         expected_peer_id = %existing,
@@ -771,6 +790,14 @@ impl Gossip for GossipService {
                                     break;
                                 }
                             }
+                        } else if peer_learned && !msg.peer_id.is_empty() && msg.peer_id != peer_id
+                        {
+                            log::warn!(
+                                expected_peer_id = %peer_id,
+                                received_peer_id = %msg.peer_id,
+                                "peer_id changed mid-stream; closing sync_stream"
+                            );
+                            break;
                         }
 
                         match msg.message_type() {
