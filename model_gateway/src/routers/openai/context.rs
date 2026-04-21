@@ -45,7 +45,7 @@ pub struct ResponsesComponents {
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    pub conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
+    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
 }
 
 pub enum ComponentRefs {
@@ -101,7 +101,7 @@ impl ComponentRefs {
     pub fn conversation_memory_writer(&self) -> Option<&Arc<dyn ConversationMemoryWriter>> {
         match self {
             ComponentRefs::Shared(_) => None,
-            ComponentRefs::Responses(r) => r.conversation_memory_writer.as_ref(),
+            ComponentRefs::Responses(r) => Some(&r.conversation_memory_writer),
         }
     }
 }
@@ -249,8 +249,8 @@ pub struct StorageHandles {
     pub response: Arc<dyn ResponseStorage>,
     pub conversation: Arc<dyn ConversationStorage>,
     pub conversation_item: Arc<dyn ConversationItemStorage>,
-    /// Optional conversation memory writer.
-    pub conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
+    /// Conversation memory writer (can be NoOp depending on backend).
+    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
     pub request_context: Option<StorageRequestContext>,
     pub memory_execution_context: MemoryExecutionContext,
 }
@@ -287,6 +287,11 @@ impl RequestContext {
             .conversation_item_storage()
             .ok_or("Conversation item storage required")?
             .clone();
+        let conversation_memory_writer = self
+            .components
+            .conversation_memory_writer()
+            .ok_or("Conversation memory writer required")?
+            .clone();
 
         Ok(OwnedStreamingContext {
             url: payload_state.url,
@@ -298,7 +303,7 @@ impl RequestContext {
                 response,
                 conversation,
                 conversation_item,
-                conversation_memory_writer: self.components.conversation_memory_writer().cloned(),
+                conversation_memory_writer,
                 request_context: self.storage_request_context,
                 memory_execution_context: self.memory_execution_context,
             },

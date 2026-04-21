@@ -62,7 +62,7 @@ impl MemoryExecutionContext {
             if let Some(raw_policy) = headers.policy.as_deref() {
                 warn!(
                     policy = raw_policy,
-                    "Unrecognized x-smg-ltm-memory-policy value; falling back to unspecified policy"
+                    "Unrecognized memory policy value; falling back to no-op policy (none)"
                 );
             }
         }
@@ -98,15 +98,15 @@ enum Policy {
 
 impl Policy {
     fn from_value(value: Option<&str>) -> Self {
-        let Some(value) = value.map(normalize) else {
+        let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
             return Self::Unspecified;
         };
 
         match value {
-            v if v.eq_ignore_ascii_case("store_only") => Self::StoreOnly,
-            v if v.eq_ignore_ascii_case("store_and_recall") => Self::StoreAndRecall,
-            v if v.eq_ignore_ascii_case("recall_only") => Self::RecallOnly,
-            v if v.eq_ignore_ascii_case("none") => Self::None,
+            "store_only" => Self::StoreOnly,
+            "store_and_recall" => Self::StoreAndRecall,
+            "recall_only" => Self::RecallOnly,
+            "none" => Self::None,
             _ => Self::Unspecified,
         }
     }
@@ -118,10 +118,6 @@ impl Policy {
     fn allows_recall(self) -> bool {
         matches!(self, Self::StoreAndRecall | Self::RecallOnly)
     }
-}
-
-fn normalize(value: &str) -> &str {
-    value.trim()
 }
 
 fn parse_policy(raw_value: Option<&str>) -> (Policy, MemoryPolicyMode) {
@@ -143,7 +139,7 @@ fn parse_policy(raw_value: Option<&str>) -> (Policy, MemoryPolicyMode) {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{header::HeaderName, HeaderValue};
+    use axum::http::HeaderValue;
 
     use super::*;
 
@@ -166,30 +162,20 @@ mod tests {
     }
 
     #[test]
-    fn from_http_headers_trims_and_parses_case_insensitively() {
+    fn from_http_headers_reads_conversation_memory_config() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            HeaderName::from_static("x-smg-ltm-memory-policy"),
-            HeaderValue::from_static("  StOrE_OnLy  "),
-        );
-        headers.insert(
-            HeaderName::from_static("x-smg-ltm-memory-subject-id"),
-            HeaderValue::from_static("  subject_abc  "),
-        );
-        headers.insert(
-            HeaderName::from_static("x-smg-ltm-memory-embedding-model"),
-            HeaderValue::from_static("  text-embedding-3-small  "),
-        );
-        headers.insert(
-            HeaderName::from_static("x-smg-ltm-memory-extraction-model"),
-            HeaderValue::from_static("  gpt-4.1-mini  "),
+            "x-conversation-memory-config",
+            HeaderValue::from_static(
+                r#"{"long_term_memory":{"enabled":true,"policy":"store_and_recall","subject_id":"  subject_abc  ","embedding_model_id":"  text-embedding-3-small  ","extraction_model_id":"  gpt-4.1-mini  "}}"#,
+            ),
         );
 
         let ctx = MemoryExecutionContext::from_http_headers(&headers, &runtime(true));
 
         assert_eq!(ctx.store_ltm, MemoryExecutionState::Active);
-        assert_eq!(ctx.recall, MemoryExecutionState::NotRequested);
-        assert_eq!(ctx.policy_mode, MemoryPolicyMode::StoreOnly);
+        assert_eq!(ctx.recall, MemoryExecutionState::Active);
+        assert_eq!(ctx.policy_mode, MemoryPolicyMode::StoreAndRecall);
         assert_eq!(ctx.subject_id.as_deref(), Some("subject_abc"));
         assert_eq!(
             ctx.embedding_model.as_deref(),

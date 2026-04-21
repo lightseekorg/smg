@@ -5,7 +5,8 @@
 //! Structure:
 //! 1. MemoryConversationStorage
 //! 2. MemoryConversationItemStorage
-//! 3. MemoryResponseStorage
+//! 3. MemoryConversationMemoryWriter
+//! 4. MemoryResponseStorage
 
 use std::{
     collections::{BTreeMap, HashMap},

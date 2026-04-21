@@ -52,5 +52,6 @@ pub use factory::{
 pub use hooks::{BeforeHookResult, ExtraColumns, HookError, StorageHook, StorageOperation};
 // Re-export memory implementations for testing
 pub use memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage};
+pub use noop::NoOpConversationMemoryWriter;
 // Re-export schema config types
 pub use schema::{ColumnDef, SchemaConfig, TableConfig};

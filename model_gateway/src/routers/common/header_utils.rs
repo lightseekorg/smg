@@ -10,19 +10,11 @@ use tracing::debug;
 static HEADER_TARGET_WORKER: HeaderName = HeaderName::from_static("x-smg-target-worker");
 static HEADER_ROUTING_KEY: HeaderName = HeaderName::from_static("x-smg-routing-key");
 static HEADER_MCP: HeaderName = HeaderName::from_static("x-smg-mcp");
-static HEADER_LTM_MEMORY_POLICY: HeaderName = HeaderName::from_static("x-smg-ltm-memory-policy");
-static HEADER_LTM_MEMORY_SUBJECT_ID: HeaderName =
-    HeaderName::from_static("x-smg-ltm-memory-subject-id");
-static HEADER_LTM_MEMORY_EMBEDDING_MODEL: HeaderName =
-    HeaderName::from_static("x-smg-ltm-memory-embedding-model");
-static HEADER_LTM_MEMORY_EXTRACTION_MODEL: HeaderName =
-    HeaderName::from_static("x-smg-ltm-memory-extraction-model");
 
 /// Parsed and normalized memory-related request headers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryHeaderView {
-    /// Trimmed policy header value.
-    /// `Some("")` means header was present but blank/whitespace.
+    /// Normalized LTM policy value consumed by memory execution context.
     pub policy: Option<String>,
     pub subject_id: Option<String>,
     pub embedding_model: Option<String>,
@@ -30,20 +22,36 @@ pub struct MemoryHeaderView {
 }
 
 impl MemoryHeaderView {
-    /// Extract known memory headers.
-    /// Policy preserves present-but-blank as `Some("")` for validation/warnings.
+    /// Extract memory request settings from `x-conversation-memory-config`.
+    ///
+    /// `long_term_memory.enabled` is the top-level gate:
+    /// - `false`: LTM policy/settings are treated as unset.
+    /// - `true`: policy is read from `long_term_memory.policy` and defaults to
+    ///   `none` when omitted to preserve privacy by default.
     pub fn from_http_headers(headers: &HeaderMap) -> Self {
+        let Some(config) = extract_conversation_memory_config(Some(headers)) else {
+            return Self::default();
+        };
+        let ltm_enabled = config.long_term_memory.enabled;
+        let policy = if ltm_enabled {
+            config
+                .long_term_memory
+                .policy
+                .or_else(|| Some("none".to_string()))
+        } else {
+            None
+        };
         Self {
-            policy: extract_header_value_owned_allow_empty(headers, &HEADER_LTM_MEMORY_POLICY),
-            subject_id: extract_header_value_owned(headers, &HEADER_LTM_MEMORY_SUBJECT_ID),
-            embedding_model: extract_header_value_owned(
-                headers,
-                &HEADER_LTM_MEMORY_EMBEDDING_MODEL,
-            ),
-            extraction_model: extract_header_value_owned(
-                headers,
-                &HEADER_LTM_MEMORY_EXTRACTION_MODEL,
-            ),
+            policy,
+            subject_id: ltm_enabled
+                .then_some(config.long_term_memory.subject_id)
+                .flatten(),
+            embedding_model: ltm_enabled
+                .then_some(config.long_term_memory.embedding_model_id)
+                .flatten(),
+            extraction_model: ltm_enabled
+                .then_some(config.long_term_memory.extraction_model_id)
+                .flatten(),
         }
     }
 }
@@ -53,26 +61,6 @@ fn extract_header_value<'a>(headers: Option<&'a HeaderMap>, name: &HeaderName) -
         .and_then(|h| h.get(name))
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
-}
-
-fn extract_header_value_owned(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn extract_header_value_owned_allow_empty(
-    headers: &HeaderMap,
-    name: &HeaderName,
-) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .map(ToOwned::to_owned)
 }
 
 pub fn extract_target_worker(headers: Option<&HeaderMap>) -> Option<&str> {
@@ -328,6 +316,7 @@ pub(crate) struct ConversationMemoryConfig {
 pub(crate) struct LongTermMemoryConfig {
     #[serde(default)]
     pub enabled: bool,
+    pub policy: Option<String>,
     pub subject_id: Option<String>,
     pub embedding_model_id: Option<String>,
     pub extraction_model_id: Option<String>,
@@ -361,6 +350,7 @@ pub(crate) fn extract_conversation_memory_config(
 
     match serde_json::from_str::<ConversationMemoryConfig>(raw) {
         Ok(mut cfg) => {
+            cfg.long_term_memory.policy = normalize_optional_string(cfg.long_term_memory.policy);
             cfg.long_term_memory.subject_id =
                 normalize_optional_string(cfg.long_term_memory.subject_id);
             cfg.long_term_memory.embedding_model_id =
@@ -386,8 +376,6 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::HeaderValue;
-
     use super::*;
 
     #[test]
@@ -486,72 +474,47 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_header_view_policy_empty_other_headers_absent() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HEADER_LTM_MEMORY_POLICY.clone(),
-            HeaderValue::from_static(""),
-        );
-
+    fn test_memory_header_view_defaults_when_header_missing() {
+        let headers = HeaderMap::new();
         let view = MemoryHeaderView::from_http_headers(&headers);
 
-        assert_eq!(view.policy.as_deref(), Some(""));
+        assert_eq!(view.policy, None);
         assert_eq!(view.subject_id, None);
         assert_eq!(view.embedding_model, None);
         assert_eq!(view.extraction_model, None);
     }
 
     #[test]
-    fn test_memory_header_view_policy_empty_other_headers_empty() {
+    fn test_memory_header_view_defaults_when_ltm_disabled() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            HEADER_LTM_MEMORY_POLICY.clone(),
-            HeaderValue::from_static("   "),
-        );
-        headers.insert(
-            HEADER_LTM_MEMORY_SUBJECT_ID.clone(),
-            HeaderValue::from_static("  "),
-        );
-        headers.insert(
-            HEADER_LTM_MEMORY_EMBEDDING_MODEL.clone(),
-            HeaderValue::from_static(" "),
-        );
-        headers.insert(
-            HEADER_LTM_MEMORY_EXTRACTION_MODEL.clone(),
-            HeaderValue::from_static("   "),
+            "x-conversation-memory-config",
+            r#"{"long_term_memory":{"enabled":false,"policy":"store","subject_id":"s1","embedding_model_id":"e1","extraction_model_id":"x1"},"short_term_memory":{"enabled":true,"condenser_model_id":"cond-1"}}"#
+                .parse()
+                .unwrap(),
         );
 
         let view = MemoryHeaderView::from_http_headers(&headers);
 
-        assert_eq!(view.policy.as_deref(), Some(""));
+        assert_eq!(view.policy, None);
         assert_eq!(view.subject_id, None);
         assert_eq!(view.embedding_model, None);
         assert_eq!(view.extraction_model, None);
     }
 
     #[test]
-    fn test_memory_header_view_all_headers_non_empty() {
+    fn test_memory_header_view_uses_ltm_fields_from_conversation_config() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            HEADER_LTM_MEMORY_POLICY.clone(),
-            HeaderValue::from_static(" store_and_recall "),
-        );
-        headers.insert(
-            HEADER_LTM_MEMORY_SUBJECT_ID.clone(),
-            HeaderValue::from_static(" subject_1 "),
-        );
-        headers.insert(
-            HEADER_LTM_MEMORY_EMBEDDING_MODEL.clone(),
-            HeaderValue::from_static(" text-embedding-3-small "),
-        );
-        headers.insert(
-            HEADER_LTM_MEMORY_EXTRACTION_MODEL.clone(),
-            HeaderValue::from_static(" gpt-4.1-mini "),
+            "x-conversation-memory-config",
+            r#"{"long_term_memory":{"enabled":true,"policy":" store_only ","subject_id":" subject_1 ","embedding_model_id":" text-embedding-3-small ","extraction_model_id":" gpt-4.1-mini "}}"#
+                .parse()
+                .unwrap(),
         );
 
         let view = MemoryHeaderView::from_http_headers(&headers);
 
-        assert_eq!(view.policy.as_deref(), Some("store_and_recall"));
+        assert_eq!(view.policy.as_deref(), Some("store_only"));
         assert_eq!(view.subject_id.as_deref(), Some("subject_1"));
         assert_eq!(
             view.embedding_model.as_deref(),
@@ -565,7 +528,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-conversation-memory-config",
-            r#"{"long_term_memory":{"enabled":true,"subject_id":"sub-1","embedding_model_id":"emb-model","extraction_model_id":"ext-model"},"short_term_memory":{"enabled":true,"condenser_model_id":"cond-model"}}"#
+            r#"{"long_term_memory":{"enabled":true,"policy":"recall_only","subject_id":"sub-1","embedding_model_id":"emb-model","extraction_model_id":"ext-model"},"short_term_memory":{"enabled":true,"condenser_model_id":"cond-model"}}"#
                 .parse()
                 .unwrap(),
         );
@@ -573,6 +536,7 @@ mod tests {
         let cfg = extract_conversation_memory_config(Some(&headers));
 
         assert!(cfg.long_term_memory.enabled);
+        assert_eq!(cfg.long_term_memory.policy.as_deref(), Some("recall_only"));
         assert_eq!(cfg.long_term_memory.subject_id.as_deref(), Some("sub-1"));
         assert_eq!(
             cfg.long_term_memory.embedding_model_id.as_deref(),

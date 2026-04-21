@@ -16,7 +16,10 @@ use crate::{
         MemoryConversationItemStorage, MemoryConversationMemoryWriter, MemoryConversationStorage,
         MemoryResponseStorage,
     },
-    noop::{NoOpConversationItemStorage, NoOpConversationStorage, NoOpResponseStorage},
+    noop::{
+        NoOpConversationItemStorage, NoOpConversationMemoryWriter, NoOpConversationStorage,
+        NoOpResponseStorage,
+    },
     oracle::{OracleConversationItemStorage, OracleConversationStorage, OracleResponseStorage},
     postgres::{
         PostgresConversationItemStorage, PostgresConversationStorage, PostgresResponseStorage,
@@ -27,12 +30,12 @@ use crate::{
     },
 };
 
-/// Complete storage handles returned by the factory, including optional memory writer.
+/// Complete storage handles returned by the factory, including conversation memory writer.
 pub struct StorageBundle {
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    pub conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
+    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
 }
 
 /// Configuration for creating storage backends
@@ -52,7 +55,7 @@ pub const fn backend_supports_memory_writer(backend: &HistoryBackend) -> bool {
     matches!(backend, HistoryBackend::Memory)
 }
 
-/// Create all configured storage handles, including optional conversation memory writer.
+/// Create all configured storage handles, including conversation memory writer.
 ///
 /// # Errors
 /// Returns error string if required configuration is missing or initialization fails
@@ -64,7 +67,7 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageB
                 response_storage: Arc::new(MemoryResponseStorage::new()),
                 conversation_storage: Arc::new(MemoryConversationStorage::new()),
                 conversation_item_storage: Arc::new(MemoryConversationItemStorage::new()),
-                conversation_memory_writer: Some(Arc::new(MemoryConversationMemoryWriter::new())),
+                conversation_memory_writer: Arc::new(MemoryConversationMemoryWriter::new()),
             }
         }
         HistoryBackend::None => {
@@ -73,7 +76,7 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageB
                 response_storage: Arc::new(NoOpResponseStorage::new()),
                 conversation_storage: Arc::new(NoOpConversationStorage::new()),
                 conversation_item_storage: Arc::new(NoOpConversationItemStorage::new()),
-                conversation_memory_writer: None,
+                conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
             }
         }
         HistoryBackend::Oracle => {
@@ -183,7 +186,7 @@ fn create_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageBundle, Str
         response_storage: Arc::new(OracleResponseStorage::new(store.clone())),
         conversation_storage: Arc::new(OracleConversationStorage::new(store.clone())),
         conversation_item_storage: Arc::new(OracleConversationItemStorage::new(store)),
-        conversation_memory_writer: None,
+        conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
     })
 }
 
@@ -212,7 +215,7 @@ async fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<Storag
         response_storage: Arc::new(postgres_resp),
         conversation_storage: Arc::new(postgres_conv),
         conversation_item_storage: Arc::new(postgres_item),
-        conversation_memory_writer: None,
+        conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
     })
 }
 
@@ -226,7 +229,7 @@ fn create_redis_storage(redis_cfg: &RedisConfig) -> Result<StorageBundle, String
         response_storage: Arc::new(redis_resp),
         conversation_storage: Arc::new(redis_conv),
         conversation_item_storage: Arc::new(redis_item),
-        conversation_memory_writer: None,
+        conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
     })
 }
 
@@ -247,7 +250,6 @@ mod tests {
             hook: None,
         };
         let bundle = create_storage(config).await.unwrap();
-        assert!(bundle.conversation_memory_writer.is_some());
         let (resp, conv, items) = (
             bundle.response_storage,
             bundle.conversation_storage,
@@ -297,7 +299,6 @@ mod tests {
             hook: None,
         };
         let bundle = create_storage(config).await.unwrap();
-        assert!(bundle.conversation_memory_writer.is_none());
         let (resp, conv) = (bundle.response_storage, bundle.conversation_storage);
 
         // NoOp storage should accept writes but return nothing on reads
@@ -401,7 +402,6 @@ mod tests {
             hook: Some(Arc::new(NoOpHook)),
         };
         let bundle = create_storage(config).await.unwrap();
-        assert!(bundle.conversation_memory_writer.is_some());
         let (resp, conv, items) = (
             bundle.response_storage,
             bundle.conversation_storage,

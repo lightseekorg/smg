@@ -59,8 +59,8 @@ pub struct AppContext {
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    /// Optional writer used for long-term-memory persistence.
-    pub conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
+    /// Writer used for long-term-memory persistence (NoOp when backend does not support writes).
+    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
     pub worker_monitor: Option<Arc<WorkerMonitor>>,
     pub configured_reasoning_parser: Option<String>,
     pub configured_tool_parser: Option<String>,
@@ -236,12 +236,12 @@ impl AppContextBuilder {
         self
     }
 
-    /// Inject optional conversation memory writer for long-term-memory store operations.
+    /// Inject conversation memory writer for long-term-memory store operations.
     pub fn conversation_memory_writer(
         mut self,
-        conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
+        conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
     ) -> Self {
-        self.conversation_memory_writer = conversation_memory_writer;
+        self.conversation_memory_writer = Some(conversation_memory_writer);
         self
     }
 
@@ -323,11 +323,8 @@ impl AppContextBuilder {
             }
         }
 
-        validate_memory_writer_configuration(
-            &router_config,
-            self.conversation_memory_writer.is_some(),
-        )
-        .map_err(AppContextBuildError::InvalidConfig)?;
+        validate_memory_writer_configuration(&router_config)
+            .map_err(AppContextBuildError::InvalidConfig)?;
 
         let worker_registry = self
             .worker_registry
@@ -368,7 +365,9 @@ impl AppContextBuilder {
             conversation_item_storage: self.conversation_item_storage.ok_or(
                 AppContextBuildError::MissingField("conversation_item_storage"),
             )?,
-            conversation_memory_writer: self.conversation_memory_writer,
+            conversation_memory_writer: self.conversation_memory_writer.ok_or(
+                AppContextBuildError::MissingField("conversation_memory_writer"),
+            )?,
             worker_monitor: self.worker_monitor,
             configured_reasoning_parser,
             configured_tool_parser,
@@ -400,10 +399,7 @@ impl AppContextBuilder {
     ) -> Result<Self, String> {
         // Fail fast before storage initialization to avoid side effects
         // (e.g., migrations) for invalid memory_runtime/backend combinations.
-        validate_memory_writer_configuration(
-            &router_config,
-            backend_supports_memory_writer(&router_config.history_backend),
-        )?;
+        validate_memory_writer_configuration(&router_config)?;
 
         Ok(Self::new()
             .with_client(&router_config, request_timeout_secs)?
@@ -581,7 +577,7 @@ impl AppContextBuilder {
         self.response_storage = Some(bundle.response_storage);
         self.conversation_storage = Some(bundle.conversation_storage);
         self.conversation_item_storage = Some(bundle.conversation_item_storage);
-        self.conversation_memory_writer = bundle.conversation_memory_writer;
+        self.conversation_memory_writer = Some(bundle.conversation_memory_writer);
 
         Ok(self)
     }
@@ -720,10 +716,7 @@ impl Default for AppContextBuilder {
 }
 
 /// Enforce runtime-aware constraints for conversation memory writer availability.
-fn validate_memory_writer_configuration(
-    config: &RouterConfig,
-    memory_writer_available: bool,
-) -> Result<(), String> {
+fn validate_memory_writer_configuration(config: &RouterConfig) -> Result<(), String> {
     let backend_supports_memory_writer = backend_supports_memory_writer(&config.history_backend);
 
     if config.memory_runtime.enabled && !backend_supports_memory_writer {
@@ -732,16 +725,7 @@ fn validate_memory_writer_configuration(
         );
     }
 
-    if config.memory_runtime.enabled && !memory_writer_available {
-        return Err(
-            "memory_runtime.enabled is true but conversation memory writer is not available at runtime".to_string(),
-        );
-    }
-
-    if config.memory_runtime.enabled
-        && config.storage_hook_wasm_path.is_some()
-        && memory_writer_available
-    {
+    if config.memory_runtime.enabled && config.storage_hook_wasm_path.is_some() {
         return Err(
             "memory_runtime.enabled cannot be used with storage_hook_wasm_path until conversation memory writer hooks are implemented".to_string(),
         );
