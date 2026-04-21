@@ -38,7 +38,7 @@ use crate::{
     collector::{CentralCollector, PeerWatermark, RoundBatch},
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
     metrics,
-    service::gossip::IncrementalUpdate,
+    service::{gossip::IncrementalUpdate, MESH_PEER_ID_HEADER},
     stream_dispatch::{
         encode_stream_batches, StreamDispatch, TargetedPeerSubscription, TargetedRound,
     },
@@ -1380,7 +1380,7 @@ impl MeshController {
             .map_err(|e| anyhow::anyhow!("Invalid sync_stream peer_id metadata: {e}"))?;
         request
             .metadata_mut()
-            .insert("x-mesh-peer-id", peer_id_header);
+            .insert(MESH_PEER_ID_HEADER, peer_id_header);
 
         let response = client.sync_stream(request).await.map_err(|e| {
             log::error!("Failed to establish sync_stream with {}: {}", peer_name, e);

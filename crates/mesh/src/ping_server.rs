@@ -36,7 +36,7 @@ use super::{
             SnapshotChunk, SnapshotRequest, StateUpdate, StreamAck, StreamMessage,
             StreamMessageType,
         },
-        try_ping, ClusterState,
+        try_ping, ClusterState, MESH_PEER_ID_HEADER,
     },
     stores::{StateStores, StoreType as LocalStoreType},
     sync::MeshSyncManager,
@@ -730,7 +730,7 @@ impl Gossip for GossipService {
     ) -> Result<Response<Self::SyncStreamStream>, Status> {
         let metadata_peer_id = request
             .metadata()
-            .get("x-mesh-peer-id")
+            .get(MESH_PEER_ID_HEADER)
             .and_then(|value| value.to_str().ok())
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
