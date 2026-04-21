@@ -43,7 +43,9 @@ use super::{
 };
 use crate::{
     collector::{PeerWatermark, RoundBatch},
-    stream_dispatch::{encode_stream_batches, StreamDispatch, TargetedPeerSubscription},
+    stream_dispatch::{
+        encode_stream_batches, StreamDispatch, TargetedPeerSubscription, TargetedRound,
+    },
 };
 
 enum StreamRoundSendOutcome {
@@ -113,6 +115,7 @@ fn spawn_server_incremental_sender(
         let mut next_broadcast_round_id = stream_dispatch_handle.initial_broadcast_round_id();
         let mut targeted_subscription: TargetedPeerSubscription =
             stream_dispatch_handle.subscribe_targeted(&peer_name_incremental);
+        let mut pending_targeted_round: Option<Arc<TargetedRound>> = None;
 
         loop {
             interval.tick().await;
@@ -194,33 +197,39 @@ fn spawn_server_incremental_sender(
                     "broadcast",
                     round.broadcast_round_id,
                 ) {
-                    StreamRoundSendOutcome::Sent
-                    | StreamRoundSendOutcome::DroppedOnBackpressure => {
+                    StreamRoundSendOutcome::Sent => {
                         next_broadcast_round_id = round.broadcast_round_id + 1;
                     }
+                    StreamRoundSendOutcome::DroppedOnBackpressure => break,
                     StreamRoundSendOutcome::Closed => return,
                 }
             }
 
             loop {
-                match targeted_subscription.receiver.try_recv() {
-                    Ok(round) => {
-                        match try_send_stream_round(
-                            &tx_incremental,
-                            &self_name_incremental,
-                            &peer_name_incremental,
-                            &mut sequence_counter,
-                            round.entries.as_slice(),
-                            "targeted",
-                            round.dispatch_round_id,
-                        ) {
-                            StreamRoundSendOutcome::Sent
-                            | StreamRoundSendOutcome::DroppedOnBackpressure => {}
-                            StreamRoundSendOutcome::Closed => return,
-                        }
+                let round = match pending_targeted_round.take() {
+                    Some(round) => round,
+                    None => match targeted_subscription.receiver.try_recv() {
+                        Ok(round) => round,
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    },
+                };
+
+                match try_send_stream_round(
+                    &tx_incremental,
+                    &self_name_incremental,
+                    &peer_name_incremental,
+                    &mut sequence_counter,
+                    round.entries.as_slice(),
+                    "targeted",
+                    round.dispatch_round_id,
+                ) {
+                    StreamRoundSendOutcome::Sent => {}
+                    StreamRoundSendOutcome::DroppedOnBackpressure => {
+                        pending_targeted_round = Some(round);
+                        break;
                     }
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    StreamRoundSendOutcome::Closed => return,
                 }
             }
         }
