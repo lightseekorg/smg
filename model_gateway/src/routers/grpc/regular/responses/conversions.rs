@@ -302,6 +302,7 @@ pub(crate) fn chat_to_responses(
                     logprobs: choice.logprobs.clone(),
                 }],
                 status: "completed".to_string(),
+                phase: None,
             });
         }
     }
@@ -400,6 +401,7 @@ mod tests {
                         text: "Hello!".to_string(),
                     }],
                     status: None,
+                    phase: None,
                 },
                 ResponseInputOutputItem::Message {
                     id: "msg_2".to_string(),
@@ -410,6 +412,7 @@ mod tests {
                         logprobs: None,
                     }],
                     status: None,
+                    phase: None,
                 },
             ]),
             ..Default::default()

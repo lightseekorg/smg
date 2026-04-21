@@ -364,6 +364,7 @@ impl StreamingResponseAccumulator {
                     logprobs: None,
                 }],
                 status: "completed".to_string(),
+                phase: None,
             });
         }
 

@@ -77,6 +77,7 @@ pub(super) fn build_next_request_with_tools(
                 content: StringOrContentParts::String(text),
                 role: "user".to_string(),
                 r#type: None,
+                phase: None,
             }]
         }
     };
@@ -108,6 +109,7 @@ pub(super) fn build_next_request_with_tools(
                 logprobs: None,
             }],
             status: Some("completed".to_string()),
+            phase: None,
         });
     }
 
@@ -285,6 +287,7 @@ pub(super) async fn load_previous_messages(
                 content: StringOrContentParts::String(text),
                 role: "user".to_string(),
                 r#type: None,
+                phase: None,
             });
             history_items
         }

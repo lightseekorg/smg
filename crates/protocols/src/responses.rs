@@ -170,6 +170,20 @@ pub enum StringOrContentParts {
     Array(Vec<ResponseContentPart>),
 }
 
+/// Phase label for assistant messages in the Responses API.
+///
+/// For gpt-5.3-codex+ multi-turn conversations, preserving and resending the
+/// original `phase` value avoids quality / latency degradation — the model
+/// relies on it to disambiguate commentary-style reasoning from the final
+/// answer. Opaque to SMG otherwise; preserved verbatim through store+retrieve,
+/// SSE output, and upstream passthrough.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagePhase {
+    Commentary,
+    FinalAnswer,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -181,6 +195,10 @@ pub enum ResponseInputOutputItem {
         content: Vec<ResponseContentPart>,
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
+        /// Optional phase label, preserved from previous assistant output so
+        /// gpt-5.3-codex+ multi-turn does not degrade (spec: ResponseOutputMessage.phase).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<MessagePhase>,
     },
     #[serde(rename = "reasoning")]
     #[non_exhaustive]
@@ -240,6 +258,12 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "type")]
         r#type: Option<String>,
+        /// Optional phase label (spec: EasyInputMessage.phase).
+        ///
+        /// Preserved through conversation storage so gpt-5.3-codex+ does not
+        /// lose the commentary/final_answer distinction across turns.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<MessagePhase>,
     },
 }
 
@@ -291,6 +315,12 @@ pub enum ResponseOutputItem {
         role: String,
         content: Vec<ResponseContentPart>,
         status: String,
+        /// Optional phase label (spec: ResponseOutputMessage.phase).
+        ///
+        /// Labels assistant messages; for gpt-5.3-codex+ we must preserve and
+        /// resend this on subsequent turns to avoid perf degradation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<MessagePhase>,
     },
     #[serde(rename = "reasoning")]
     #[non_exhaustive]
@@ -1283,7 +1313,12 @@ fn validate_text_format(text: &TextConfig) -> Result<(), ValidationError> {
 /// A normalized ResponseInputOutputItem (either Message if converted, or original if not SimpleInputMessage)
 pub fn normalize_input_item(item: &ResponseInputOutputItem) -> ResponseInputOutputItem {
     match item {
-        ResponseInputOutputItem::SimpleInputMessage { content, role, .. } => {
+        ResponseInputOutputItem::SimpleInputMessage {
+            content,
+            role,
+            phase,
+            ..
+        } => {
             let content_vec = match content {
                 StringOrContentParts::String(s) => {
                     vec![ResponseContentPart::InputText { text: s.clone() }]
@@ -1296,6 +1331,7 @@ pub fn normalize_input_item(item: &ResponseInputOutputItem) -> ResponseInputOutp
                 role: role.clone(),
                 content: content_vec,
                 status: Some("completed".to_string()),
+                phase: *phase,
             }
         }
         _ => item.clone(),
@@ -1486,7 +1522,7 @@ impl ResponseInputOutputItem {
 }
 
 impl ResponseOutputItem {
-    /// Create a new message output item
+    /// Create a new message output item (no phase).
     pub fn new_message(
         id: String,
         role: String,
@@ -1498,6 +1534,24 @@ impl ResponseOutputItem {
             role,
             content,
             status,
+            phase: None,
+        }
+    }
+
+    /// Create a new message output item with a phase label.
+    pub fn new_message_with_phase(
+        id: String,
+        role: String,
+        content: Vec<ResponseContentPart>,
+        status: String,
+        phase: Option<MessagePhase>,
+    ) -> Self {
+        Self::Message {
+            id,
+            role,
+            content,
+            status,
+            phase,
         }
     }
 

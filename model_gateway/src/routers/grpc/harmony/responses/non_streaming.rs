@@ -419,6 +419,7 @@ fn build_tool_response(
                 logprobs: None,
             }],
             status: "completed".to_string(),
+            phase: None,
         });
     }
 

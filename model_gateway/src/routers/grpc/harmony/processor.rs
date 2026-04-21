@@ -292,6 +292,7 @@ impl HarmonyResponseProcessor {
                     logprobs,
                 }],
                 status: "completed".to_string(),
+                phase: None,
             };
             output.push(message_item);
         }

@@ -416,12 +416,14 @@ mod tests {
                 role: "assistant".to_string(),
                 content: vec![],
                 status: "completed".to_string(),
+                phase: None,
             })
             .add_output(ResponseOutputItem::Message {
                 id: "msg_2".to_string(),
                 role: "assistant".to_string(),
                 content: vec![],
                 status: "completed".to_string(),
+                phase: None,
             })
             .build();
 

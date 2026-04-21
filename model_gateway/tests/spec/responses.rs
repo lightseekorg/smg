@@ -525,6 +525,7 @@ fn test_validate_input_items_empty_content() {
             content: StringOrContentParts::String(String::new()),
             role: "user".to_string(),
             r#type: None,
+            phase: None,
         }]),
         ..Default::default()
     };
@@ -985,6 +986,7 @@ fn test_validate_input_items_structure() {
             content: StringOrContentParts::String("Hello".to_string()),
             role: "user".to_string(),
             r#type: None,
+            phase: None,
         }]),
         ..Default::default()
     };

@@ -17,7 +17,12 @@ use tracing::{debug, warn};
 use super::super::context::ResponsesComponents;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::{common::header_utils::ConversationMemoryConfig, error},
+    routers::{
+        common::{
+            header_utils::ConversationMemoryConfig, persistence_utils::split_stored_message_content,
+        },
+        error,
+    },
 };
 
 const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
@@ -149,7 +154,13 @@ pub(crate) async fn load_input_history(
                 for item in stored_items {
                     match item.item_type.as_str() {
                         "message" => {
-                            match serde_json::from_value::<Vec<ResponseContentPart>>(item.content) {
+                            // Stored content may be either the raw content array
+                            // (legacy shape) or an object `{content: [...], phase: ...}`
+                            // when the message carried a phase label (P3).
+                            let (content_value, stored_phase) =
+                                split_stored_message_content(item.content);
+                            match serde_json::from_value::<Vec<ResponseContentPart>>(content_value)
+                            {
                                 Ok(content_parts) => {
                                     items.push(ResponseInputOutputItem::Message {
                                         id: item.id.0.clone(),
@@ -159,6 +170,7 @@ pub(crate) async fn load_input_history(
                                             .unwrap_or_else(|| "user".to_string()),
                                         content: content_parts,
                                         status: item.status.clone(),
+                                        phase: stored_phase,
                                     });
                                 }
                                 Err(e) => {
@@ -271,6 +283,7 @@ fn append_current_input(
                 role: "user".to_string(),
                 content: vec![ResponseContentPart::InputText { text: text.clone() }],
                 status: Some("completed".to_string()),
+                phase: None,
             });
         }
         ResponseInput::Items(current_items) => {

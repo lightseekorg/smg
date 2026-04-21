@@ -1598,12 +1598,14 @@ mod tests {
             role: "assistant".to_string(),
             content: vec![],
             status: "completed".to_string(),
+            phase: None,
         };
         let existing_2 = ResponseOutputItem::Message {
             id: "msg_existing_2".to_string(),
             role: "assistant".to_string(),
             content: vec![],
             status: "completed".to_string(),
+            phase: None,
         };
 
         // Tool call items injected by the router.
