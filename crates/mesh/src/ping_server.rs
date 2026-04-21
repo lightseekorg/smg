@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
@@ -683,7 +684,6 @@ impl Gossip for GossipService {
         // Track snapshot reception state: store_type -> (received_chunks, expected_total)
         // Keyed by store_type only — a new snapshot request for the same store
         // replaces any incomplete previous attempt (prevents stale chunk mixing).
-        use std::collections::HashMap;
         let mut snapshot_state: HashMap<LocalStoreType, (Vec<SnapshotChunk>, u64)> = HashMap::new();
 
         let learned_peer_inbound = learned_peer.clone();
