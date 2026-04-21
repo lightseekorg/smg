@@ -208,35 +208,45 @@ impl ParserFactory {
             let config = ParserConfig {
                 think_start_token: "<think>".to_string(),
                 think_end_token: "</think>".to_string(),
-                stream_reasoning: true,
-                max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-                always_in_reasoning: false,
+                ..Default::default()
             };
             Box::new(BaseReasoningParser::new(config).with_model_type("deepseek_v31".to_string()))
         });
 
+        let kimi_tool_markers = vec!["<|tool_calls_section_begin|>".to_string()];
+
         // Register Kimi-K2.5 parser (standard think tokens, always_in_reasoning=false)
-        registry.register_parser("kimi_k25", || {
-            let config = ParserConfig {
-                think_start_token: "<think>".to_string(),
-                think_end_token: "</think>".to_string(),
-                stream_reasoning: true,
-                max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-                always_in_reasoning: false,
-            };
-            Box::new(BaseReasoningParser::new(config).with_model_type("kimi_k25".to_string()))
+        registry.register_parser("kimi_k25", {
+            let markers = kimi_tool_markers.clone();
+            move || {
+                let config = ParserConfig {
+                    think_start_token: "<think>".to_string(),
+                    think_end_token: "</think>".to_string(),
+                    stream_reasoning: true,
+                    max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
+                    always_in_reasoning: false,
+                    tool_section_start_markers: markers.clone(),
+                };
+                Box::new(BaseReasoningParser::new(config).with_model_type("kimi_k25".to_string()))
+            }
         });
 
         // Register Kimi-K2-Thinking parser (standard think tokens, always_in_reasoning=true)
-        registry.register_parser("kimi_thinking", || {
-            let config = ParserConfig {
-                think_start_token: "<think>".to_string(),
-                think_end_token: "</think>".to_string(),
-                stream_reasoning: true,
-                max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-                always_in_reasoning: true,
-            };
-            Box::new(BaseReasoningParser::new(config).with_model_type("kimi_thinking".to_string()))
+        registry.register_parser("kimi_thinking", {
+            let markers = kimi_tool_markers;
+            move || {
+                let config = ParserConfig {
+                    think_start_token: "<think>".to_string(),
+                    think_end_token: "</think>".to_string(),
+                    stream_reasoning: true,
+                    max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
+                    always_in_reasoning: true,
+                    tool_section_start_markers: markers.clone(),
+                };
+                Box::new(
+                    BaseReasoningParser::new(config).with_model_type("kimi_thinking".to_string()),
+                )
+            }
         });
 
         // Register model patterns
@@ -293,9 +303,7 @@ impl ParserFactory {
                     let config = ParserConfig {
                         think_start_token: String::new(),
                         think_end_token: String::new(),
-                        stream_reasoning: true,
-                        max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-                        always_in_reasoning: false,
+                        ..Default::default()
                     };
                     Box::new(
                         BaseReasoningParser::new(config).with_model_type("passthrough".to_string()),
@@ -320,9 +328,7 @@ impl ParserFactory {
         let config = ParserConfig {
             think_start_token: String::new(),
             think_end_token: String::new(),
-            stream_reasoning: true,
-            max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            always_in_reasoning: false,
+            ..Default::default()
         };
         Box::new(BaseReasoningParser::new(config).with_model_type("passthrough".to_string()))
     }

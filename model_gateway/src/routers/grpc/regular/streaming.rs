@@ -396,8 +396,12 @@ impl StreamingProcessor {
                             && tool_choice_enabled
                             && (tool_parser_available || used_json_schema)
                         {
-                            let tool_chunks = if is_specific_function {
-                                // Handle specific function case - emit tool call deltas with arguments
+                            let force_native_parser = self
+                                .configured_tool_parser
+                                .as_deref()
+                                .is_some_and(|p| p != "json")
+                                && tool_parser_available;
+                            let tool_chunks = if is_specific_function && !force_native_parser {
                                 Self::process_specific_function_stream(
                                     &delta,
                                     index,
@@ -410,7 +414,6 @@ impl StreamingProcessor {
                                     history_tool_calls_count,
                                 )
                             } else {
-                                // Use incremental parser for regular/required modes
                                 self.process_tool_calls_stream(
                                     &delta,
                                     index,
@@ -422,7 +425,7 @@ impl StreamingProcessor {
                                     created,
                                     system_fingerprint,
                                     history_tool_calls_count,
-                                    used_json_schema,
+                                    used_json_schema && !force_native_parser,
                                 )
                                 .await
                             };
@@ -1666,10 +1669,16 @@ impl StreamingProcessor {
             .map(message_utils::extract_chat_tools)
             .unwrap_or_default();
 
+        let force_native_parser = self
+            .configured_tool_parser
+            .as_deref()
+            .is_some_and(|p| p != "json")
+            && tool_parser_available;
+
         // Create fresh streaming tool parser (not pooled — streaming parsers maintain state)
         let mut streaming_tool_parser: Option<Box<dyn ToolParser>> =
             if has_tools && tool_choice_enabled && (tool_parser_available || used_json_schema) {
-                let parser_name = if used_json_schema {
+                let parser_name = if used_json_schema && !force_native_parser {
                     Some("json")
                 } else {
                     self.configured_tool_parser.as_deref()
@@ -1783,8 +1792,7 @@ impl StreamingProcessor {
 
                     // Tool call handling: incremental streaming parser
                     if !in_reasoning && streaming_tool_parser.is_some() {
-                        if is_specific_function {
-                            // Specific function: entire output is arguments for one tool
+                        if is_specific_function && !force_native_parser {
                             if !has_tool_calls {
                                 has_tool_calls = true;
                                 // Close text block if open before starting tool block
