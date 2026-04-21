@@ -135,7 +135,7 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 portpicker = "0.1"
 lazy_static = "1.4"
-wasm-encoder = "0.246"
+wasm-encoder = "0.247"
 npyz = { version = "0.8", features = ["npz"] }
 opentelemetry-proto = { version = "0.31", features = ["gen-tonic"] }
 serial_test = "3.0"
