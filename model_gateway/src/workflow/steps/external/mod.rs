@@ -7,6 +7,7 @@ mod create_workers;
 mod discover_models;
 
 pub use create_workers::CreateExternalWorkersStep;
+pub(crate) use discover_models::apply_provider_hint;
 pub use discover_models::{
     group_models_into_cards, infer_model_type_from_id, DiscoverModelsStep, ModelInfo,
     ModelsResponse,

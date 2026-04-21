@@ -434,6 +434,10 @@ pub enum WorkerModels {
 }
 
 impl WorkerModels {
+    fn allows_prefix_fallback(id: &str) -> bool {
+        id.contains('-') || id.contains('.') || id.bytes().any(|b| b.is_ascii_digit())
+    }
+
     /// Returns `true` if this is a wildcard (accepts any model).
     pub fn is_wildcard(&self) -> bool {
         matches!(self, Self::Wildcard)
@@ -457,13 +461,60 @@ impl WorkerModels {
         }
     }
 
-    /// Find a model by ID (checks aliases via `ModelCard::matches`).
+    /// Find a model by ID.
+    ///
+    /// Lookup order:
+    /// 1. Exact ID match
+    /// 2. Alias match
+    /// 3. Prefix fallback for versioned variants like `grok-4-0709` or
+    ///    `grok-4.20-0309-reasoning`, preferring the shortest matching ID
+    ///    first and then the highest `created_at` as a tiebreaker among cards
+    ///    whose IDs start with `{id}-` or `{id}.`, with lexical ID ordering
+    ///    as a final stable tiebreaker.
     pub fn find(&self, id: &str) -> Option<&ModelCard> {
-        match self {
+        let exact = match self {
             Self::Wildcard => None,
-            Self::Single(card) => card.matches(id).then_some(card.as_ref()),
-            Self::Multi(cards) => cards.iter().find(|m| m.matches(id)),
+            Self::Single(card) => (card.id == id).then_some(card.as_ref()),
+            Self::Multi(cards) => cards.iter().find(|card| card.id == id),
+        };
+        if exact.is_some() {
+            return exact;
         }
+
+        let alias = match self {
+            Self::Wildcard => None,
+            Self::Single(card) => card
+                .aliases
+                .iter()
+                .any(|alias| alias == id)
+                .then_some(card.as_ref()),
+            Self::Multi(cards) => cards
+                .iter()
+                .find(|card| card.aliases.iter().any(|alias| alias == id)),
+        };
+        if alias.is_some() {
+            return alias;
+        }
+
+        let candidates = self.all();
+        if candidates.is_empty() || !Self::allows_prefix_fallback(id) {
+            return None;
+        }
+
+        candidates
+            .iter()
+            .filter(|card| {
+                card.id
+                    .strip_prefix(id)
+                    .is_some_and(|rest| rest.starts_with('-') || rest.starts_with('.'))
+            })
+            .min_by_key(|card| {
+                (
+                    card.id.len(),
+                    std::cmp::Reverse(card.created_at),
+                    card.id.as_str(),
+                )
+            })
     }
 
     /// Returns `true` if the worker supports the given model ID.
@@ -519,6 +570,63 @@ impl JsonSchema for WorkerModels {
 
     fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
         Vec::<ModelCard>::json_schema(gen)
+    }
+}
+
+#[cfg(test)]
+mod worker_models_tests {
+    use super::WorkerModels;
+    use crate::model_card::ModelCard;
+
+    fn card(id: &str, created_at: u64) -> ModelCard {
+        ModelCard::new(id).with_created_at(created_at)
+    }
+
+    #[test]
+    fn find_exact_and_alias_matches_beat_prefix_fallback() {
+        let models = WorkerModels::from(vec![
+            ModelCard::new("grok-4-0709").with_alias("grok-4"),
+            card("grok-4", 1_752_019_201),
+            ModelCard::new("grok-4-fast-v1").with_alias("grok-4-fast"),
+        ]);
+
+        assert_eq!(models.find("grok-4").expect("exact id match").id, "grok-4");
+        assert_eq!(
+            models.find("grok-4-fast").expect("alias match").id,
+            "grok-4-fast-v1"
+        );
+    }
+
+    #[test]
+    fn find_prefix_fallback_picks_latest_created_variant() {
+        let models = WorkerModels::from(vec![
+            card("grok-4-fast-v1", 1_756_944_000),
+            card("grok-4-fast-v2", 1_756_944_001),
+        ]);
+
+        let result = models.find("grok-4-fast").expect("latest prefix match");
+
+        assert_eq!(result.id, "grok-4-fast-v2");
+    }
+
+    #[test]
+    fn find_prefix_fallback_handles_shortest_dot_and_guard_cases() {
+        let models = WorkerModels::from(vec![
+            card("grok-4-0709", 1_752_019_200),
+            card("grok-4.20-0309-reasoning", 1_773_014_400),
+            card("grok-40", 1_773_014_399),
+        ]);
+
+        assert_eq!(
+            models.find("grok-4").expect("shortest prefix match").id,
+            "grok-4-0709"
+        );
+        assert_eq!(
+            models.find("grok-4.20").expect("dot prefix match").id,
+            "grok-4.20-0309-reasoning"
+        );
+        assert!(models.find("grok-4x").is_none());
+        assert!(models.find("grok").is_none());
     }
 }
 

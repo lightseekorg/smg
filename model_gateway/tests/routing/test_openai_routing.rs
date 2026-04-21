@@ -13,7 +13,7 @@ use axum::{
     extract::Request,
     http::{Method, StatusCode},
     response::Response,
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use openai_protocol::{
@@ -21,7 +21,9 @@ use openai_protocol::{
     common::StringOrArray,
     completion::CompletionRequest,
     generate::GenerateRequest,
+    model_card::ModelCard,
     responses::{ResponseInput, ResponsesRequest},
+    worker::{WorkerModels, WorkerSpec},
 };
 use serde_json::json;
 use smg::{
@@ -30,7 +32,7 @@ use smg::{
         factory::router_ids, openai::OpenAIRouter, router_manager::RouterManager, RouterFactory,
         RouterTrait,
     },
-    worker::{BasicWorkerBuilder, RuntimeType, Worker, WorkerType},
+    worker::{BasicWorkerBuilder, ProviderType, RuntimeType, Worker, WorkerType},
 };
 use smg_data_connector::{ResponseId, StoredResponse};
 use tokio::{
@@ -305,6 +307,139 @@ async fn test_openai_router_responses_with_mock() {
 
     assert_eq!(stored1.raw_response, body1);
     assert_eq!(stored2.raw_response, body2);
+
+    server.abort();
+}
+
+#[expect(clippy::disallowed_methods, reason = "test infrastructure")]
+#[tokio::test]
+async fn test_openai_router_responses_refreshes_versioned_xai_model_alias() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let models_counter = Arc::new(AtomicUsize::new(0));
+    let responses_counter = Arc::new(AtomicUsize::new(0));
+    let models_payload = json!({
+        "object": "list",
+        "data": [
+            {
+                "id": "grok-4-0709",
+                "created": 1_752_019_200u64,
+                "object": "model",
+                "owned_by": "xai"
+            },
+            {
+                "id": "grok-4.20-0309-reasoning",
+                "created": 1_773_014_400u64,
+                "object": "model",
+                "owned_by": "xai"
+            }
+        ]
+    });
+
+    let app = Router::new()
+        .route(
+            "/v1/models",
+            get({
+                let models_counter = Arc::clone(&models_counter);
+                let models_payload = models_payload.clone();
+                move || {
+                    let models_counter = Arc::clone(&models_counter);
+                    let models_payload = models_payload.clone();
+                    async move {
+                        models_counter.fetch_add(1, Ordering::SeqCst);
+                        Json(models_payload)
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v1/responses",
+            post({
+                let responses_counter = Arc::clone(&responses_counter);
+                move |Json(request): Json<serde_json::Value>| {
+                    let responses_counter = Arc::clone(&responses_counter);
+                    async move {
+                        responses_counter.fetch_add(1, Ordering::SeqCst);
+                        let model = request
+                            .get("model")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("grok-4")
+                            .to_string();
+
+                        Json(json!({
+                            "id": "resp_grok_alias",
+                            "object": "response",
+                            "created_at": 1_752_019_201,
+                            "status": "completed",
+                            "model": model,
+                            "output": [{
+                                "type": "message",
+                                "id": "msg_grok_alias",
+                                "role": "assistant",
+                                "status": "completed",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": "grok alias ok",
+                                    "annotations": []
+                                }]
+                            }],
+                            "metadata": {}
+                        }))
+                    }
+                }
+            }),
+        );
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let base_url = format!("http://{addr}");
+
+    let ctx = create_test_app_context().await;
+    // Register as an OpenAI-compatible external worker so the OpenAI router's
+    // refresh path will probe it, while refreshed model cards still infer xAI
+    // from the upstream model IDs.
+    let mut spec = WorkerSpec::new(&base_url);
+    spec.runtime_type = RuntimeType::External;
+    spec.worker_type = WorkerType::Regular;
+    spec.provider = Some(ProviderType::OpenAI);
+    spec.models = vec![ModelCard::new("placeholder-model")].into();
+
+    let worker: Arc<dyn Worker> = Arc::new(
+        BasicWorkerBuilder::from_spec(spec)
+            .health_config(openai_protocol::worker::HealthCheckConfig {
+                disable_health_check: true,
+                ..Default::default()
+            })
+            .build(),
+    );
+    ctx.worker_registry.register(worker);
+    let router = OpenAIRouter::new(&ctx).await.unwrap();
+
+    let request = ResponsesRequest {
+        model: "grok-4".to_string(),
+        input: ResponseInput::Text("Tell me about Quang Nam".to_string()),
+        ..Default::default()
+    };
+
+    let response = router.route_responses(None, &request, &request.model).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(models_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(responses_counter.load(Ordering::SeqCst), 1);
+
+    let worker = ctx
+        .worker_registry
+        .get_by_url(&base_url)
+        .expect("refreshed worker should still exist");
+    let refreshed_lookup = WorkerModels::from(worker.models());
+    assert_eq!(
+        refreshed_lookup
+            .find("grok-4")
+            .expect("grok-4 should resolve after refresh")
+            .id,
+        "grok-4-0709"
+    );
 
     server.abort();
 }

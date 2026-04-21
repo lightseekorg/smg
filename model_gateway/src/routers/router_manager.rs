@@ -60,6 +60,32 @@ pub struct RouterManager {
     enable_igw: bool,
 }
 
+fn collect_alias_fallback_workers(
+    workers: impl IntoIterator<Item = Arc<dyn crate::worker::Worker>>,
+    model_id: &str,
+) -> Vec<Arc<dyn crate::worker::Worker>> {
+    let mut specific_matches = Vec::new();
+    let mut wildcard_matches = Vec::new();
+
+    for worker in workers {
+        if !worker.supports_model(model_id) {
+            continue;
+        }
+
+        if worker.has_models_discovered() {
+            specific_matches.push(worker);
+        } else {
+            wildcard_matches.push(worker);
+        }
+    }
+
+    if specific_matches.is_empty() {
+        wildcard_matches
+    } else {
+        specific_matches
+    }
+}
+
 impl RouterManager {
     pub fn new(worker_registry: Arc<WorkerRegistry>, client: reqwest::Client) -> Self {
         Self {
@@ -188,7 +214,18 @@ impl RouterManager {
     }
 
     pub fn get_router_for_model(&self, model_id: &str) -> Option<Arc<dyn RouterTrait>> {
-        let workers = self.worker_registry.get_by_model(model_id);
+        let indexed_workers = self.worker_registry.get_by_model(model_id);
+        let supported_indexed_workers: Vec<_> = indexed_workers
+            .iter()
+            .filter(|worker| worker.supports_model(model_id))
+            .cloned()
+            .collect();
+        let alias_workers = supported_indexed_workers
+            .is_empty()
+            .then(|| collect_alias_fallback_workers(self.worker_registry.get_all(), model_id));
+        let workers = alias_workers
+            .as_deref()
+            .unwrap_or(&supported_indexed_workers);
 
         // Find the best router ID based on worker capabilities
         // Priority: external (provider-specific) > grpc-pd > http-pd > grpc-regular > http-regular
@@ -814,5 +851,107 @@ impl std::fmt::Debug for RouterManager {
             .field("workers_count", &self.worker_registry.get_all().len())
             .field("default_router", &*default_router)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{any::Any, sync::Arc};
+
+    use async_trait::async_trait;
+    use openai_protocol::worker::{HealthCheckConfig, WorkerSpec};
+
+    use super::*;
+    use crate::{
+        routers::{factory::router_ids, RouterTrait},
+        worker::{BasicWorkerBuilder, Worker},
+    };
+
+    #[derive(Debug)]
+    struct FakeRouter(&'static str);
+
+    #[async_trait]
+    impl RouterTrait for FakeRouter {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn router_type(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    fn ready_external_worker(
+        url: &str,
+        provider: ProviderType,
+        models: impl Into<openai_protocol::worker::WorkerModels>,
+    ) -> Arc<dyn Worker> {
+        let mut spec = WorkerSpec::new(url);
+        spec.runtime_type = RuntimeType::External;
+        spec.worker_type = WorkerType::Regular;
+        spec.provider = Some(provider);
+        spec.models = models.into();
+
+        Arc::new(
+            BasicWorkerBuilder::from_spec(spec)
+                .health_config(HealthCheckConfig {
+                    disable_health_check: true,
+                    ..Default::default()
+                })
+                .build(),
+        )
+    }
+
+    #[test]
+    fn collect_alias_fallback_workers_prefers_specific_matches_over_wildcards() {
+        let wildcard = ready_external_worker(
+            "https://api.openai.com",
+            ProviderType::OpenAI,
+            openai_protocol::worker::WorkerModels::Wildcard,
+        );
+        let specific = ready_external_worker(
+            "https://api.anthropic.com",
+            ProviderType::Anthropic,
+            openai_protocol::worker::WorkerModels::Wildcard,
+        );
+        specific.set_models(vec![
+            ModelCard::new("claude-3-7-sonnet-20250219").with_alias("claude-3-7-sonnet")
+        ]);
+
+        let selected =
+            collect_alias_fallback_workers(vec![wildcard, specific.clone()], "claude-3-7-sonnet");
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].url(), specific.url());
+    }
+
+    #[test]
+    fn get_router_for_model_ignores_stale_indexed_workers_before_alias_fallback() {
+        let worker_registry = Arc::new(WorkerRegistry::new());
+        let stale_indexed = ready_external_worker(
+            "https://api.openai.com",
+            ProviderType::OpenAI,
+            vec![ModelCard::new("claude-3-7-sonnet")],
+        );
+        stale_indexed.set_models(vec![ModelCard::new("gpt-4o-mini")]);
+        worker_registry.register(stale_indexed);
+        worker_registry.register(ready_external_worker(
+            "https://api.anthropic.com",
+            ProviderType::Anthropic,
+            vec![ModelCard::new("claude-3-7-sonnet-20250219").with_alias("claude-3-7-sonnet")],
+        ));
+
+        let manager = RouterManager::new(worker_registry, reqwest::Client::new());
+        manager.register_router(router_ids::HTTP_OPENAI, Arc::new(FakeRouter("openai")));
+        manager.register_router(
+            router_ids::HTTP_ANTHROPIC,
+            Arc::new(FakeRouter("anthropic")),
+        );
+
+        let router = manager
+            .get_router_for_model("claude-3-7-sonnet")
+            .expect("router for alias model");
+
+        assert_eq!(router.router_type(), "anthropic");
     }
 }

@@ -1,13 +1,12 @@
 //! Model discovery step for external API endpoints.
 
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use openai_protocol::{model_card::ModelCard, model_type::ModelType, worker::ProviderType};
-use regex::Regex;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use tracing::{debug, info};
 use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
@@ -25,17 +24,10 @@ static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         .expect("Failed to create HTTP client")
 });
 
-// Regex to strip date suffix: -YYYY-MM-DD or -YYYY-MM
-#[expect(
-    clippy::expect_used,
-    reason = "Lazy static initialization — compile-time constant regex pattern cannot fail"
-)]
-static DATE_SUFFIX_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"-\d{4}-\d{2}(-\d{2})?$").expect("Invalid date regex"));
-
 /// OpenAI /v1/models response format.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelsResponse {
+    #[serde(default, deserialize_with = "deserialize_model_rows")]
     pub data: Vec<ModelInfo>,
     #[serde(default)]
     pub object: String,
@@ -45,6 +37,8 @@ pub struct ModelsResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
+    #[serde(default, deserialize_with = "deserialize_aliases")]
+    pub aliases: Vec<String>,
     #[serde(default)]
     pub object: String,
     #[serde(default)]
@@ -53,43 +47,78 @@ pub struct ModelInfo {
     pub owned_by: Option<String>,
 }
 
-/// Group models by base name (stripping date suffixes) and create ModelCards with aliases.
-///
-/// # Example
-/// Input:  `["gpt-4o", "gpt-4o-2024-05-13", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20"]`
-/// Output: `ModelCard { id: "gpt-4o", aliases: ["gpt-4o-2024-05-13", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20"] }`
-pub fn group_models_into_cards(models: Vec<ModelInfo>) -> Vec<ModelCard> {
-    // Group model IDs by base name (with date stripped)
-    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
-    for model in &models {
-        let base = DATE_SUFFIX_PATTERN.replace(&model.id, "").to_string();
-        groups.entry(base).or_default().push(model.id.clone());
+fn deserialize_aliases<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum AliasesField {
+        Values(Vec<String>),
+        Null(Option<()>),
+        Other(serde::de::IgnoredAny),
     }
 
-    // Create ModelCard for each group
-    groups
-        .into_values()
-        .map(|mut variants| {
-            // Sort: shortest first (base name), then alphabetically
-            variants.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+    Ok(match AliasesField::deserialize(deserializer)? {
+        AliasesField::Values(values) => values,
+        AliasesField::Null(_) | AliasesField::Other(_) => Vec::new(),
+    })
+}
 
-            let primary_id = variants.remove(0); // shortest = primary ID
-            let aliases = variants; // rest = aliases
+fn deserialize_model_rows<'de, D>(deserializer: D) -> Result<Vec<ModelInfo>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum DataField {
+        Rows(Vec<serde_json::Value>),
+        Other(serde::de::IgnoredAny),
+    }
 
-            let model_type = infer_model_type_from_id(&primary_id);
-            let provider = infer_provider_from_id(&primary_id);
+    Ok(match DataField::deserialize(deserializer)? {
+        DataField::Rows(rows) => rows
+            .into_iter()
+            .filter_map(|row| serde_json::from_value::<ModelInfo>(row).ok())
+            .collect(),
+        DataField::Other(_) => Vec::new(),
+    })
+}
 
-            let mut card = ModelCard::new(&primary_id)
-                .with_aliases(aliases)
-                .with_model_type(model_type);
+/// Convert a flat upstream `/v1/models` list into `ModelCard`s.
+///
+/// Upstream IDs are preserved as-is. Virtual short aliases like `grok-4` are
+/// resolved later by `WorkerModels::find` via prefix fallback.
+pub fn build_model_cards(models: Vec<ModelInfo>) -> Vec<ModelCard> {
+    models
+        .into_iter()
+        .map(|model| {
+            let mut card = ModelCard::new(&model.id)
+                .with_model_type(infer_model_type_from_id(&model.id))
+                .with_created_at(model.created.unwrap_or(0));
 
-            if let Some(p) = provider {
-                card = card.with_provider(p);
+            if !model.aliases.is_empty() {
+                card = card.with_aliases(model.aliases);
             }
 
+            card.provider = infer_provider_from_id(&card.id);
             card
         })
         .collect()
+}
+
+pub(crate) fn apply_provider_hint(model_cards: &mut [ModelCard], provider: Option<&ProviderType>) {
+    if let Some(provider) = provider {
+        for card in model_cards {
+            card.provider = Some(provider.clone());
+        }
+    }
+}
+
+/// Kept for backwards compatibility with existing call sites.
+#[inline]
+pub fn group_models_into_cards(models: Vec<ModelInfo>) -> Vec<ModelCard> {
+    build_model_cards(models)
 }
 
 /// Infer ModelType from model ID string.
@@ -129,13 +158,23 @@ pub fn infer_model_type_from_id(id: &str) -> ModelType {
         return ModelType::MODERATION_MODEL;
     }
 
+    // Reasoning models
+    let is_reasoning = id_lower.starts_with("o1")
+        || id_lower.starts_with("o3")
+        || (id_lower.contains("reasoning") && !id_lower.contains("non-reasoning"));
+
     // Vision LLM
-    if id_lower.contains("vision") || id_lower.contains("4o") {
+    let is_vision = id_lower.contains("vision") || id_lower.contains("4o");
+
+    if is_reasoning && is_vision {
+        return ModelType::FULL_LLM;
+    }
+
+    if is_vision {
         return ModelType::VISION_LLM;
     }
 
-    // Reasoning models
-    if id_lower.starts_with("o1") || id_lower.starts_with("o3") {
+    if is_reasoning {
         return ModelType::REASONING_LLM;
     }
 
@@ -247,7 +286,8 @@ async fn fetch_models(
         url
     );
 
-    let model_cards = group_models_into_cards(models_response.data);
+    let mut model_cards = group_models_into_cards(models_response.data);
+    apply_provider_hint(&mut model_cards, provider);
 
     debug!(
         "Grouped into {} model cards with aliases",
@@ -316,5 +356,63 @@ impl StepExecutor<WorkerWorkflowData> for DiscoverModelsStep {
 
     fn is_retryable(&self, _error: &WorkflowError) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::worker::ProviderType;
+    use serde_json::json;
+
+    use super::{apply_provider_hint, build_model_cards, ModelInfo, ModelsResponse};
+
+    #[test]
+    fn apply_provider_hint_uses_worker_provider_for_prefixed_ids() {
+        let mut cards = build_model_cards(vec![ModelInfo {
+            id: "models/gemini-2.5-pro".to_string(),
+            aliases: Vec::new(),
+            object: "model".to_string(),
+            created: Some(1_752_019_200),
+            owned_by: None,
+        }]);
+
+        assert_eq!(cards[0].provider, None);
+
+        apply_provider_hint(&mut cards, Some(&ProviderType::Gemini));
+
+        assert_eq!(cards[0].provider, Some(ProviderType::Gemini));
+    }
+
+    #[test]
+    fn models_response_tolerates_malformed_aliases_and_skips_bad_rows() {
+        let response: ModelsResponse = serde_json::from_value(json!({
+            "data": [
+                {
+                    "id": "grok-4-0709",
+                    "aliases": null,
+                    "object": "model",
+                    "created": 1_752_019_200
+                },
+                {
+                    "id": "grok-4-fast-reasoning",
+                    "aliases": "grok-4",
+                    "object": "model",
+                    "created": 1_752_019_200
+                },
+                {
+                    "id": 42,
+                    "object": "model",
+                    "created": 1_752_019_199
+                }
+            ],
+            "object": "list"
+        }))
+        .expect("bad rows should be skipped and bad aliases tolerated");
+
+        assert_eq!(response.data.len(), 2);
+        assert_eq!(response.data[0].id, "grok-4-0709");
+        assert_eq!(response.data[0].aliases, Vec::<String>::new());
+        assert_eq!(response.data[1].id, "grok-4-fast-reasoning");
+        assert_eq!(response.data[1].aliases, Vec::<String>::new());
     }
 }
