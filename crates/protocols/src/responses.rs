@@ -186,6 +186,7 @@ pub enum ResponseInputOutputItem {
     #[non_exhaustive]
     Reasoning {
         id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         summary: Vec<SummaryTextContent>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         #[serde(default)]
@@ -309,6 +310,7 @@ pub enum ResponseOutputItem {
     #[non_exhaustive]
     Reasoning {
         id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         summary: Vec<SummaryTextContent>,
         content: Vec<ResponseReasoningContent>,
         /// Encrypted reasoning payload for gpt-5 / o-series round-trip.
@@ -1631,6 +1633,16 @@ mod tests {
         assert_eq!(
             v["summary"],
             json!([{"text": "step 1", "type": "summary_text"}])
+        );
+    }
+
+    #[test]
+    fn legacy_vec_string_summary_fails_to_deserialize() {
+        let legacy = r#"{"type":"reasoning","id":"r_x","summary":["text"]}"#;
+        let result: Result<ResponseInputOutputItem, _> = serde_json::from_str(legacy);
+        assert!(
+            result.is_err(),
+            "legacy Vec<String> summary must no longer deserialize"
         );
     }
 
