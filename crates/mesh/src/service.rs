@@ -22,6 +22,14 @@ pub mod gossip {
     #![allow(clippy::trivially_copy_pass_by_ref, clippy::allow_attributes)]
     tonic::include_proto!("mesh.gossip");
 }
+
+/// gRPC request-metadata header the sync_stream client sets so the
+/// server can learn the remote peer identity at stream open, before
+/// any payload frames. A single constant on both sides avoids typo
+/// drift (e.g. `x-mesh-peer_id` vs `x-mesh-peer-id`) silently
+/// breaking the handshake and falling back to payload learning.
+/// Name lower-cased because HTTP/2 mandates lowercase header names.
+pub const MESH_PEER_ID_HEADER: &str = "x-mesh-peer-id";
 use gossip::{
     gossip_client, gossip_message, GossipMessage, NodeState, NodeStatus, NodeUpdate, Ping,
     StateSync,
@@ -469,7 +477,10 @@ impl MeshServer {
         // Share the controller's current_batch so server-side sync_stream
         // handlers use the same centrally collected data as client-side.
         service = service.with_current_batch(controller.current_batch());
-        service = service.with_current_stream_batch(controller.current_stream_batch());
+        // Share the controller's StreamDispatch so server-side handlers
+        // subscribe to the same broadcast ring and targeted queues as
+        // the client-side per-peer senders.
+        service = service.with_stream_dispatch(controller.stream_dispatch());
 
         // Add mTLS support if configured
         if let Some(mtls_manager) = self.mtls_manager.clone() {

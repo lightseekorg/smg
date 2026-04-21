@@ -38,7 +38,8 @@ use crate::{
     collector::{CentralCollector, PeerWatermark, RoundBatch},
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
     metrics,
-    service::gossip::IncrementalUpdate,
+    service::{gossip::IncrementalUpdate, MESH_PEER_ID_HEADER},
+    stream_dispatch::StreamDispatch,
 };
 
 pub struct MeshController {
@@ -56,10 +57,12 @@ pub struct MeshController {
     /// Current round batch, updated once per round by the central collector.
     /// Per-peer senders read and apply their own watermark filtering.
     current_batch: Arc<parking_lot::RwLock<Arc<RoundBatch>>>,
-    /// Current stream round batch, drained once per round from MeshKV.
-    /// Per-peer senders read this and filter targeted entries to their
-    /// own peer; drain_entries are broadcast to every peer.
-    current_stream_batch: Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>>,
+    /// Handoff transport between the central collector and per-peer
+    /// sender tasks for stream traffic. Broadcast drain entries ride a
+    /// retention ring; targeted entries fan out into bounded per-peer
+    /// queues. Replaces the single-slot `Arc<RoundBatch>` that could
+    /// silently drop rounds when a sender task tick was delayed.
+    stream_dispatch: Arc<StreamDispatch>,
     /// Node-wide MeshKV handle. Owns the stream buffers, subscriber
     /// registry, and chunk assembler shared with the server-side
     /// SyncStream handlers.
@@ -90,9 +93,7 @@ impl MeshController {
             sync_connections: Arc::new(Mutex::new(HashMap::new())),
             central_collector,
             current_batch: Arc::new(parking_lot::RwLock::new(Arc::new(RoundBatch::default()))),
-            current_stream_batch: Arc::new(parking_lot::RwLock::new(Arc::new(
-                crate::kv::RoundBatch::default(),
-            ))),
+            stream_dispatch: Arc::new(StreamDispatch::new()),
             mesh_kv: None,
         }
     }
@@ -112,11 +113,11 @@ impl MeshController {
         self.current_batch.clone()
     }
 
-    /// Get a handle to the shared stream RoundBatch. Used by GossipService
-    /// so server-side sync_stream handlers see the same drained stream
-    /// entries as client-side handlers.
-    pub fn current_stream_batch(&self) -> Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>> {
-        self.current_stream_batch.clone()
+    /// Get a handle to the shared stream dispatch transport. Used by
+    /// GossipService so server-side sync_stream handlers subscribe to
+    /// the same broadcast ring and targeted queues as client-side.
+    pub fn stream_dispatch(&self) -> Arc<StreamDispatch> {
+        self.stream_dispatch.clone()
     }
 
     #[instrument(fields(name = %self.self_name), skip(self, signal))]
@@ -267,14 +268,23 @@ impl MeshController {
                 self.central_collector.advance_generations();
             }
 
-            // Stream round collection: drain stream namespace buffers and
-            // drain callbacks exactly once per round (destructive). Per-peer
-            // senders filter targeted_entries by their own peer_id and
-            // broadcast drain_entries to all peers. Empty batch if no
-            // MeshKV is attached (legacy path pre-Step 3).
+            // Stream round collection: drain stream namespace buffers
+            // and drain callbacks exactly once per round (destructive),
+            // then publish one round into the StreamDispatch transport.
+            // drain_entries convert Vec<u8> → Bytes here so the broadcast
+            // ring retains one shared allocation per round; targeted
+            // entries are grouped by target peer inside publish_round
+            // into one TargetedRound per peer per round. Empty round if
+            // no MeshKV is attached (legacy path pre-Step 3).
             if let Some(mesh_kv) = &self.mesh_kv {
                 let stream_batch = mesh_kv.collect_round_batch();
-                *self.current_stream_batch.write() = Arc::new(stream_batch);
+                let drain_entries: Vec<(String, Bytes)> = stream_batch
+                    .drain_entries
+                    .into_iter()
+                    .map(|(k, v)| (k, Bytes::from(v)))
+                    .collect();
+                self.stream_dispatch
+                    .publish_round(drain_entries, stream_batch.targeted_entries);
             }
 
             tokio::select! {
@@ -495,7 +505,7 @@ impl MeshController {
         let sync_manager = self.sync_manager.clone();
         let sync_connections = self.sync_connections.clone();
         let current_batch = self.current_batch.clone();
-        let current_stream_batch = self.current_stream_batch.clone();
+        let stream_dispatch = self.stream_dispatch.clone();
         let mesh_kv = self.mesh_kv.clone();
 
         // Log connection lifecycle: spawn
@@ -551,14 +561,27 @@ impl MeshController {
                     let shared_sequence = sequence.clone();
                     let size_validator = MessageSizeValidator::default();
                     let batch_handle = current_batch.clone();
-                    let stream_batch_handle = current_stream_batch.clone();
+                    let stream_dispatch_handle = stream_dispatch.clone();
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
                         let mut interval = tokio::time::interval(Duration::from_secs(1));
-                        // Skip re-emission of an unchanged stream batch (main
-                        // loop hasn't collected a new one since last tick).
-                        let mut last_stream_batch: Option<Arc<crate::kv::RoundBatch>> = None;
+                        // Stream-dispatch subscriptions. Broadcast cursor
+                        // starts one past the newest retained round so this
+                        // sender only emits rounds published after it
+                        // subscribed. Targeted rounds for this peer arrive
+                        // on the per-peer MPSC receiver.
+                        let mut broadcast_cursor =
+                            stream_dispatch_handle.initial_broadcast_cursor();
+                        let mut targeted_rx =
+                            stream_dispatch_handle.subscribe_targeted(&peer_name_incremental);
+                        // Stash a targeted round whose round_id is ahead
+                        // of our current broadcast cursor so we emit it
+                        // after the matching broadcast round rather than
+                        // standalone.
+                        let mut stashed_targeted: Option<
+                            Arc<crate::stream_dispatch::TargetedRound>,
+                        > = None;
 
                         loop {
                             interval.tick().await;
@@ -652,50 +675,83 @@ impl MeshController {
                                 }
                             }
 
-                            // Stream batches: drain-portion (broadcast) +
-                            // targeted entries addressed to this peer. Each
-                            // entry is chunked if oversized. On channel
-                            // full, the round's stream traffic for this
-                            // peer is dropped — no retry (at-most-once).
-                            // Application regenerates on its own retry cycle.
-                            let stream_batch = stream_batch_handle.read().clone();
-                            let fresh_batch = last_stream_batch
-                                .as_ref()
-                                .is_none_or(|last| !Arc::ptr_eq(last, &stream_batch));
-                            if fresh_batch {
-                                last_stream_batch = Some(stream_batch.clone());
-                                let mut entries = Vec::new();
-                                // Drain entries are broadcast: every peer emits.
-                                // Generation is per-value so concurrent publishes
-                                // to the same key get distinct tags.
-                                for (key, value) in &stream_batch.drain_entries {
-                                    entries.extend(chunk_value(
+                            // Stream rounds via the dispatch transport.
+                            // Each retained broadcast round emits its
+                            // drain entries first; the matching targeted
+                            // round (same round_id) follows so order is
+                            // preserved per-round. Targeted entries
+                            // whose round_id is older than our current
+                            // broadcast cursor are orphaned (their
+                            // broadcast was evicted from the ring) and
+                            // are discarded to preserve the ordering
+                            // invariant. On channel Full we break out
+                            // of this tick's emission; the retained
+                            // ring will let us resume where we left off
+                            // on the next tick. On Closed we exit the
+                            // sender task entirely.
+                            let poll = stream_dispatch_handle
+                                .poll_broadcast_rounds(broadcast_cursor);
+                            if poll.skipped > 0 {
+                                log::warn!(
+                                    peer = %peer_name_incremental,
+                                    skipped = poll.skipped,
+                                    new_cursor = poll.new_cursor,
+                                    "broadcast ring evicted rounds before this \
+                                     sender observed them"
+                                );
+                            }
+                            for bc_round in poll.rounds {
+                                // Purge any stashed / queued targeted
+                                // rounds that predate this broadcast
+                                // round — their matching broadcast was
+                                // evicted, so emitting them alone
+                                // would violate round ordering.
+                                loop {
+                                    let candidate = match stashed_targeted.take() {
+                                        Some(s) => s,
+                                        None => match targeted_rx.try_recv() {
+                                            Ok(r) => r,
+                                            Err(_) => break,
+                                        },
+                                    };
+                                    if candidate.round_id < bc_round.round_id {
+                                        log::debug!(
+                                            peer = %peer_name_incremental,
+                                            round_id = candidate.round_id,
+                                            "targeted round orphaned — matching \
+                                             broadcast already evicted"
+                                        );
+                                        continue;
+                                    }
+                                    // >= current broadcast round: stash for
+                                    // alignment below.
+                                    stashed_targeted = Some(candidate);
+                                    break;
+                                }
+
+                                // Chunk + emit broadcast entries.
+                                let mut broadcast_entries = Vec::new();
+                                for (key, value) in &bc_round.entries {
+                                    broadcast_entries.extend(chunk_value(
                                         key.clone(),
                                         next_generation(),
-                                        Bytes::from(value.clone()),
+                                        value.clone(),
                                         MAX_STREAM_CHUNK_BYTES,
                                     ));
                                 }
-                                // Targeted entries: only those addressed to this peer.
-                                for (target, key, value) in &stream_batch.targeted_entries {
-                                    if target == &peer_name_incremental {
-                                        entries.extend(chunk_value(
-                                            key.clone(),
-                                            next_generation(),
-                                            value.clone(),
-                                            MAX_STREAM_CHUNK_BYTES,
-                                        ));
-                                    }
-                                }
-                                if !entries.is_empty() {
+                                if !broadcast_entries.is_empty() {
+                                    let mut backpressured = false;
                                     for batch in build_stream_batches(
-                                        entries,
+                                        broadcast_entries,
                                         DEFAULT_MAX_CHUNKS_PER_BATCH,
                                         MAX_STREAM_CHUNK_BYTES,
                                     ) {
                                         let msg = StreamMessage {
-                                            message_type: StreamMessageType::StreamBatch as i32,
-                                            payload: Some(StreamPayload::StreamBatch(batch)),
+                                            message_type:
+                                                StreamMessageType::StreamBatch as i32,
+                                            payload: Some(StreamPayload::StreamBatch(
+                                                batch,
+                                            )),
                                             sequence: shared_sequence
                                                 .fetch_add(1, Ordering::Relaxed),
                                             peer_id: self_name_incremental.clone(),
@@ -705,22 +761,97 @@ impl MeshController {
                                             Err(mpsc::error::TrySendError::Full(_)) => {
                                                 log::debug!(
                                                     peer = %peer_name_incremental,
-                                                    "stream batch dropped on backpressure"
+                                                    round_id = bc_round.round_id,
+                                                    "broadcast batch dropped on \
+                                                     backpressure"
                                                 );
-                                                // TODO(metrics): bump
-                                                // stream_dropped_on_backpressure
+                                                backpressured = true;
                                                 break;
                                             }
-                                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                            Err(mpsc::error::TrySendError::Closed(
+                                                _,
+                                            )) => {
                                                 log::warn!(
                                                     peer = %peer_name_incremental,
-                                                    "stream sender: channel closed, stopping"
+                                                    "stream sender: channel closed, \
+                                                     stopping"
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    if backpressured {
+                                        // Don't advance cursor — retry this
+                                        // round on the next tick while the
+                                        // ring still retains it.
+                                        break;
+                                    }
+                                }
+
+                                // Emit the matching targeted round if
+                                // present (same round_id). If stashed's
+                                // round_id is strictly greater than this
+                                // broadcast round, leave it for later.
+                                let targeted_for_round = match stashed_targeted
+                                    .as_ref()
+                                    .map(|s| s.round_id)
+                                {
+                                    Some(id) if id == bc_round.round_id => {
+                                        stashed_targeted.take()
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(tr) = targeted_for_round {
+                                    let mut targeted_entries = Vec::new();
+                                    for (key, value) in &tr.entries {
+                                        targeted_entries.extend(chunk_value(
+                                            key.clone(),
+                                            next_generation(),
+                                            value.clone(),
+                                            MAX_STREAM_CHUNK_BYTES,
+                                        ));
+                                    }
+                                    for batch in build_stream_batches(
+                                        targeted_entries,
+                                        DEFAULT_MAX_CHUNKS_PER_BATCH,
+                                        MAX_STREAM_CHUNK_BYTES,
+                                    ) {
+                                        let msg = StreamMessage {
+                                            message_type:
+                                                StreamMessageType::StreamBatch as i32,
+                                            payload: Some(StreamPayload::StreamBatch(
+                                                batch,
+                                            )),
+                                            sequence: shared_sequence
+                                                .fetch_add(1, Ordering::Relaxed),
+                                            peer_id: self_name_incremental.clone(),
+                                        };
+                                        match tx_incremental.try_send(msg) {
+                                            Ok(()) => {}
+                                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                                log::debug!(
+                                                    peer = %peer_name_incremental,
+                                                    round_id = tr.round_id,
+                                                    "targeted batch dropped on \
+                                                     backpressure"
+                                                );
+                                                break;
+                                            }
+                                            Err(mpsc::error::TrySendError::Closed(
+                                                _,
+                                            )) => {
+                                                log::warn!(
+                                                    peer = %peer_name_incremental,
+                                                    "stream sender: channel closed, \
+                                                     stopping"
                                                 );
                                                 return;
                                             }
                                         }
                                     }
                                 }
+
+                                broadcast_cursor = bc_round.round_id + 1;
                             }
 
                             let round_elapsed = round_start.elapsed();
@@ -1260,7 +1391,16 @@ impl MeshController {
         let (tx, rx) = mpsc::channel::<StreamMessage>(128);
         let outgoing_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-        let response = client.sync_stream(outgoing_stream).await.map_err(|e| {
+        // Advertise our peer_id via gRPC metadata so the server learns
+        // the remote identity at stream open, before any payload frame.
+        // The server can then register this peer with StreamDispatch
+        // eagerly and emit targeted rounds on the first tick instead of
+        // waiting for the first inbound payload message.
+        let mut request = tonic::Request::new(outgoing_stream);
+        if let Ok(value) = tonic::metadata::MetadataValue::try_from(self.self_name.as_str()) {
+            request.metadata_mut().insert(MESH_PEER_ID_HEADER, value);
+        }
+        let response = client.sync_stream(request).await.map_err(|e| {
             log::error!("Failed to establish sync_stream with {}: {}", peer_name, e);
             anyhow::anyhow!("sync_stream RPC failed: {e}")
         })?;
