@@ -170,6 +170,7 @@ impl StreamDispatch {
         let dispatch_round_id = self.next_dispatch_round_id.fetch_add(1, Ordering::Relaxed);
 
         if !batch.drain_entries.is_empty() {
+            let mut rounds = self.broadcast_rounds.write();
             let broadcast_round_id = self.next_broadcast_round_id.fetch_add(1, Ordering::Relaxed);
             let round = Arc::new(BroadcastRound {
                 broadcast_round_id,
@@ -180,7 +181,6 @@ impl StreamDispatch {
                     .map(|(key, value)| (key, Bytes::from(value)))
                     .collect(),
             });
-            let mut rounds = self.broadcast_rounds.write();
             rounds.push_back(round);
             while rounds.len() > self.broadcast_round_retention {
                 rounds.pop_front();
