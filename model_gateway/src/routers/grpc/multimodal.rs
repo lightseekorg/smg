@@ -66,6 +66,13 @@ impl MultimodalConfigRegistry {
         self.configs.insert(tokenizer_id, config);
     }
 
+    /// Drop the cached config for a tokenizer. Called when a tokenizer is
+    /// removed so stale entries don't accumulate across re-registrations
+    /// (tokenizer IDs are regenerated on each registration via `Uuid::now_v7`).
+    pub(crate) fn remove(&self, tokenizer_id: &str) -> Option<Arc<MultimodalModelConfig>> {
+        self.configs.remove(tokenizer_id).map(|(_, v)| v)
+    }
+
     /// Return a cached config if present; otherwise load from `tokenizer_source`
     /// (local dir or HF cache/download via `llm_multimodal::hub`), cache under
     /// `tokenizer_id`, and return it.
@@ -1076,6 +1083,25 @@ mod tests {
             Arc::ptr_eq(&first, &second),
             "second call must hit cache and return same Arc"
         );
+    }
+
+    #[tokio::test]
+    async fn registry_remove_drops_cached_entry() {
+        let reg = MultimodalConfigRegistry::new();
+        let cfg = Arc::new(MultimodalModelConfig {
+            config: serde_json::json!({"model_type":"phi3_v"}),
+            preprocessor_config: PreProcessorConfig::from_json(
+                r#"{"image_processor_type":"Phi3VImageProcessor"}"#,
+            )
+            .unwrap(),
+        });
+        reg.insert("tok-uuid-rm".to_string(), cfg.clone());
+        assert!(reg.get("tok-uuid-rm").is_some());
+
+        let removed = reg.remove("tok-uuid-rm").expect("remove returns the entry");
+        assert!(Arc::ptr_eq(&removed, &cfg));
+        assert!(reg.get("tok-uuid-rm").is_none());
+        assert!(reg.remove("tok-uuid-rm").is_none());
     }
 
     #[tokio::test]
